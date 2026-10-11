@@ -147,15 +147,45 @@ impl Dvbs2Info {
             && 4 * self.headers_confirmed >= self.headers_seen
     }
 
-    /// True when more than one data MODCOD was seen — ACM or VCM in use.
-    pub fn variable_coding(&self) -> bool {
-        self.modcods.keys().filter(|&&m| m != 0).count() > 1
+    /// The data MODCODs taken as sent, with their frame counts. Among 16
+    /// or more frames, a MODCOD seen once (or in under 2 % of them) is a
+    /// misread header: a PLS code a bit decision or two from the one sent,
+    /// with the same frame length, so the grid still confirms it. Seen live
+    /// on a QPSK 1/4 + 1/3 outbound at the edge of a capture: nine other
+    /// QPSK codes and a 256APSK one, one to four frames each, and the
+    /// carrier named S2X for it.
+    pub fn modcods_sent(&self) -> impl Iterator<Item = (u8, usize)> + '_ {
+        let total = self.data_frames();
+        let least = if total >= 16 { (total / 50).max(2) } else { 1 };
+        self.modcods
+            .iter()
+            .filter(move |(m, n)| **m != 0 && **n >= least)
+            .map(|(m, n)| (*m, *n))
     }
 
-    /// S2X PLS codes were seen (or S2's reserved MODCODs 29–31, which no
+    /// Confirmed frames carrying data (not dummy frames).
+    fn data_frames(&self) -> usize {
+        self.modcods
+            .iter()
+            .filter(|(m, _)| **m != 0)
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    /// Frames whose MODCOD is not taken as sent (see [`Self::modcods_sent`]).
+    pub fn odd_reads(&self) -> usize {
+        self.data_frames() - self.modcods_sent().map(|(_, n)| n).sum::<usize>()
+    }
+
+    /// True when more than one data MODCOD was sent — ACM or VCM in use.
+    pub fn variable_coding(&self) -> bool {
+        self.modcods_sent().count() > 1
+    }
+
+    /// S2X PLS codes were sent (or S2's reserved MODCODs 29–31, which no
     /// S2 transmitter sends).
     pub fn is_s2x(&self) -> bool {
-        self.modcods.keys().any(|&m| m >= 29)
+        self.modcods_sent().any(|(m, _)| m >= 29)
     }
 }
 
@@ -324,11 +354,14 @@ impl Identification {
             ),
             Verdict::DvbS2(d) => {
                 let mods: Vec<String> = d
-                    .modcods
-                    .iter()
-                    .filter(|(m, _)| **m != 0)
-                    .map(|(m, n)| format!("{}×{n}", decsat_core::modcod_name(*m)))
+                    .modcods_sent()
+                    .map(|(m, n)| format!("{}×{n}", decsat_core::modcod_name(m)))
                     .collect();
+                let odd = match d.odd_reads() {
+                    0 => String::new(),
+                    1 => ", 1 header read as another MODCOD".into(),
+                    n => format!(", {n} headers read as other MODCODs"),
+                };
                 let kind = if d.is_s2x() { "DVB-S2X" } else { "DVB-S2" };
                 let mode = if d.variable_coding() {
                     "ACM/VCM"
@@ -336,7 +369,7 @@ impl Identification {
                     "CCM"
                 };
                 format!(
-                    "{kind} {mode}, {rs} {ro}, {}{}",
+                    "{kind} {mode}, {rs} {ro}, {}{}{odd}",
                     if mods.is_empty() {
                         "dummy frames only".into()
                     } else {
@@ -1240,6 +1273,34 @@ const _: () = assert!(SOF_LEN + 64 == decsat_frame::PLHEADER_LEN);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_off_modcods_among_many_frames_are_misread_headers() {
+        // A QPSK 1/4 + 1/3 outbound read at a capture's edge: a few headers
+        // decode to other codes with the same frame length, one an S2X one.
+        let mut d = Dvbs2Info::default();
+        for (m, n) in [(1u8, 34usize), (2, 29), (4, 1), (11, 1), (200, 1)] {
+            d.modcods.insert(m, n);
+        }
+        let sent: Vec<(u8, usize)> = d.modcods_sent().collect();
+        assert_eq!(sent, vec![(1, 34), (2, 29)]);
+        assert_eq!(d.odd_reads(), 3);
+        assert!(d.variable_coding());
+        assert!(!d.is_s2x(), "three one-off reads do not make it S2X");
+
+        // Few frames: every read counts (nothing to judge by yet).
+        let mut e = Dvbs2Info::default();
+        e.modcods.insert(1, 5);
+        e.modcods.insert(200, 1);
+        assert_eq!(e.odd_reads(), 0);
+        assert!(e.is_s2x());
+
+        // A genuine S2X share stays.
+        let mut f = Dvbs2Info::default();
+        f.modcods.insert(1, 40);
+        f.modcods.insert(132, 12);
+        assert!(f.is_s2x() && f.odd_reads() == 0);
+    }
     use decsat_mod::{FrameSpec, PlFramer, Shaper};
 
     /// Deterministic complex Gaussian noise.
