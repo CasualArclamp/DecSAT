@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use decsat_core::Iq;
 use decsat_io::IqSource;
 
-use crate::carriers::{Carrier, detect_carriers};
+use crate::carriers::{Carrier, detect_carriers, resolve_narrow};
 use crate::spectrum::Spectrum;
 use crate::vfo::{self, VfoHandle, VfoId, VfoSettings, VfoStatus};
 
@@ -290,6 +290,9 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     let block_for = |fft: usize| ((rate / opts.rows_per_sec).round() as usize).max(fft * 2);
     let mut block_len = block_for(opts.fft_size);
     let mut spec = Spectrum::new(opts.fft_size);
+    // A finer spectrum for the narrow lines the detector reports (see
+    // `carriers::resolve_narrow`), made only then; sized from the FFT size.
+    let mut fine: Option<Spectrum> = None;
     let mut acc: Vec<Iq> = Vec::with_capacity(block_len * 2);
     let mut tmp: Vec<Iq> = Vec::new();
     let mut avg_lin: Vec<f32> = Vec::new();
@@ -418,7 +421,22 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
 
         let carriers = (last_carriers.elapsed() >= Duration::from_millis(500)).then(|| {
             last_carriers = Instant::now();
-            detect_carriers(&avg_db, rate, opts.carrier_snr_db)
+            let mut found = detect_carriers(&avg_db, rate, opts.carrier_snr_db);
+            if found.iter().any(|c| c.narrow) {
+                // A look at the narrow lines with 16× the bins, from this
+                // block alone — as long as it holds a few segments of them
+                // (seven at 50 % overlap).
+                let cap = 1usize << (block_len / 4).max(1).ilog2();
+                let want = (spec.size() * 16).min(cap);
+                if want > spec.size() {
+                    let f = fine.get_or_insert_with(|| Spectrum::new(want));
+                    if f.size() != want {
+                        *f = Spectrum::new(want);
+                    }
+                    resolve_narrow(&mut found, &f.compute_max(&block, 64), rate);
+                }
+            }
+            found
         });
 
         {

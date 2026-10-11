@@ -322,31 +322,10 @@ pub fn detect_carriers(spectrum_db: &[f32], rate: f64, min_snr_db: f32) -> Vec<C
             .sum::<f64>()
             / total;
 
-        // Narrowest window holding 99 % of the excess power.
-        let target = 0.99 * total;
-        let (mut lo, mut acc, mut best, mut best_lo) = (0usize, 0.0f64, excess.len(), 0usize);
-        for hi in 0..excess.len() {
-            acc += excess[hi];
-            while lo < hi && acc - excess[lo] >= target {
-                acc -= excess[lo];
-                lo += 1;
-            }
-            if acc >= target && hi - lo + 1 < best {
-                best = hi - lo + 1;
-                best_lo = lo;
-            }
-        }
-
-        // Equivalent noise bandwidth over the plateau, and how flat it is.
-        let max_e = excess.iter().copied().fold(0.0, f64::max);
-        let plateau_idx: Vec<usize> = (0..excess.len())
-            .filter(|&i| excess[i] >= 0.5 * max_e)
-            .collect();
-        let mut plateau: Vec<f64> = plateau_idx.iter().map(|&i| excess[i]).collect();
-        plateau.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        let p0 =
-            plateau[plateau.len() / 2].min(crate::estimate::core_level(&excess, best_lo, best));
-        let rs = if p0 > 0.0 { total * bin_hz / p0 } else { 0.0 };
+        // Narrowest window holding 99 % of the excess power, and the
+        // equivalent noise bandwidth over the plateau.
+        let (best_lo, best) = occupied_window(&excess);
+        let rs = enbw_bins(&excess, best_lo, best) * bin_hz;
 
         // A narrow line has a short top run that also holds most of the power:
         // a CW's main lobe, even with window leakage widening its region. A
@@ -409,6 +388,125 @@ pub fn detect_carriers(spectrum_db: &[f32], rate: f64, min_snr_db: f32) -> Vec<C
         });
     }
     out
+}
+
+/// The narrowest window of `excess` (linear power above the floor, a bin
+/// each) holding 99 % of its total, as (first bin, bins).
+fn occupied_window(excess: &[f64]) -> (usize, usize) {
+    let total: f64 = excess.iter().sum();
+    let target = 0.99 * total;
+    let (mut lo, mut acc, mut best, mut best_lo) = (0usize, 0.0f64, excess.len(), 0usize);
+    for hi in 0..excess.len() {
+        acc += excess[hi];
+        while lo < hi && acc - excess[lo] >= target {
+            acc -= excess[lo];
+            lo += 1;
+        }
+        if acc >= target && hi - lo + 1 < best {
+            best = hi - lo + 1;
+            best_lo = lo;
+        }
+    }
+    (best_lo, best)
+}
+
+/// The equivalent noise bandwidth of `excess` in bins: its total over its
+/// plateau level — the median of the bins within 3 dB of the peak, or the
+/// core level of its occupied window `(lo, len)` where that is lower.
+fn enbw_bins(excess: &[f64], lo: usize, len: usize) -> f64 {
+    let total: f64 = excess.iter().sum();
+    let max_e = excess.iter().copied().fold(0.0, f64::max);
+    let mut plateau: Vec<f64> = excess
+        .iter()
+        .copied()
+        .filter(|&e| e >= 0.5 * max_e)
+        .collect();
+    if plateau.is_empty() {
+        return 0.0;
+    }
+    plateau.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let p0 = plateau[plateau.len() / 2].min(crate::estimate::core_level(excess, lo, len));
+    if p0 > 0.0 { total / p0 } else { 0.0 }
+}
+
+/// A second look at the narrow lines in a finer spectrum of the same span
+/// (`fine_db`: FFT-shifted dB like [`detect_carriers`]'s input, many more
+/// bins). A slow carrier only a few coarse bins wide — a 9.6 kS/s link is
+/// three bins at 20 MS/s and 4096 points, the same as a CW with its window
+/// leakage — resolves into a flat-topped carrier here and is reported as
+/// one, its centre, width and symbol rate measured at this resolution; a
+/// tone or a spur is a line at any resolution and stays `narrow`.
+///
+/// Seen live: the PH-ML radar link (9.6 kS/s) was a "narrow line" in the
+/// GUI at 20 MS/s, never offered as a carrier, while an 8 MS/s capture
+/// found it.
+pub fn resolve_narrow(carriers: &mut [Carrier], fine_db: &[f32], rate: f64) {
+    let n = fine_db.len();
+    if n < 64 {
+        return;
+    }
+    let bin_hz = rate / n as f64;
+    let freq = |k: usize| (k as f64 / n as f64 - 0.5) * rate;
+    for c in carriers.iter_mut().filter(|c| c.narrow) {
+        let k0 = ((c.center_hz / rate + 0.5) * n as f64).round();
+        if !(0.0..n as f64).contains(&k0) {
+            continue;
+        }
+        let k0 = k0 as usize;
+        // The line's neighbourhood: twice its coarse width either side; the
+        // floor from twice that again.
+        let half = ((2.0 * c.bandwidth_hz / bin_hz).ceil() as usize).max(8);
+        let lo = k0.saturating_sub(2 * half);
+        let hi = (k0 + 2 * half).min(n - 1);
+        let floor = quantile(&fine_db[lo..=hi], 0.2);
+        let peak = (k0.saturating_sub(half)..=(k0 + half).min(n - 1))
+            .max_by(|&x, &y| {
+                fine_db[x]
+                    .partial_cmp(&fine_db[y])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(k0);
+        if fine_db[peak] < floor + 6.0 {
+            continue;
+        }
+        // Its region: outward from the peak over everything above the
+        // floor's skirts, across gaps of up to MERGE_GAP_BINS.
+        let above = |k: usize| fine_db[k] > floor + 3.0;
+        let mut a = peak;
+        while a > lo && (a.saturating_sub(MERGE_GAP_BINS + 1).max(lo)..a).any(above) {
+            a -= 1;
+        }
+        let mut b = peak;
+        while b < hi && (b + 1..=(b + MERGE_GAP_BINS + 1).min(hi)).any(above) {
+            b += 1;
+        }
+        // A line's top run is its main lobe (three bins at most with the
+        // Hann window); a carrier's is its flat top, Rs (1 − α) wide.
+        let (_, tl) = top_run(fine_db, a, b);
+        if tl < NARROW_BINS {
+            continue;
+        }
+        let floor_lin = 10f64.powf(floor as f64 / 10.0);
+        let excess: Vec<f64> = fine_db[a..=b]
+            .iter()
+            .map(|&v| (10f64.powf(v as f64 / 10.0) - floor_lin).max(0.0))
+            .collect();
+        let total: f64 = excess.iter().sum();
+        if total <= 0.0 {
+            continue;
+        }
+        let (best_lo, best) = occupied_window(&excess);
+        c.center_hz = excess
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| p * freq(a + i))
+            .sum::<f64>()
+            / total;
+        c.bandwidth_hz = best as f64 * bin_hz;
+        c.symbol_rate_hz = enbw_bins(&excess, best_lo, best) * bin_hz;
+        c.snr_db = fine_db[peak] - floor;
+        c.narrow = false;
+    }
 }
 
 #[cfg(test)]
@@ -700,5 +798,87 @@ mod tests {
         // Touching neighbours never squeeze it below its own width.
         let tight = [c(0.0, 1.0e6), c(600e3, 400e3)];
         assert_eq!(tight[0].vfo_bandwidth_among(&tight), 1.0e6);
+    }
+    #[test]
+    fn a_slow_carrier_resolves_at_finer_resolution() {
+        // A 9.6 kS/s link at 20 MS/s: two or three bins of 4096, a narrow
+        // line like a CW — until a 65536-point look shows its flat top.
+        let rate = 20e6;
+        let carriers = [(-1.06e6, 9.6e3, 0.35, -50.0)];
+        let coarse = spectrum(4096, rate, &carriers, false);
+        let mut found = detect_carriers(&coarse, rate, 6.0);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].narrow, "{:?}", found[0]);
+
+        let mut fine = spectrum(65536, rate, &carriers, false);
+        jitter(&mut fine, 0.8, 5);
+        resolve_narrow(&mut found, &fine, rate);
+        let c = found[0];
+        assert!(c.is_clean(), "{c:?}");
+        assert!((c.center_hz + 1.06e6).abs() < 500.0, "{c:?}");
+        assert!((c.symbol_rate_hz - 9.6e3).abs() / 9.6e3 < 0.1, "{c:?}");
+        assert!((10e3..20e3).contains(&c.bandwidth_hz), "{c:?}");
+        assert!(c.snr_db > 25.0, "{c:?}");
+    }
+
+    #[test]
+    fn a_cw_stays_a_line_at_finer_resolution() {
+        let rate = 20e6;
+        let mut coarse = spectrum(4096, rate, &[], false);
+        coarse[1500] = -30.0;
+        let mut found = detect_carriers(&coarse, rate, 6.0);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].narrow, "{:?}", found[0]);
+        // The same tone at 16× the resolution: a Hann main lobe and its
+        // leakage, nothing wider.
+        let mut fine = spectrum(65536, rate, &[], false);
+        let k = 1500 * 16;
+        for (d, v) in [
+            (0usize, -30.0f32),
+            (1, -36.0),
+            (2, -50.0),
+            (3, -65.0),
+            (4, -74.0),
+        ] {
+            fine[k + d] = v;
+            fine[k - d] = v;
+        }
+        jitter(&mut fine, 0.8, 9);
+        resolve_narrow(&mut found, &fine, rate);
+        assert!(found[0].narrow, "{:?}", found[0]);
+    }
+
+    #[test]
+    fn a_resolved_carrier_keeps_its_place_among_wide_neighbours() {
+        // The slow carrier between two SCPC carriers 60 kHz away: only the
+        // line itself is re-measured, the neighbours are untouched.
+        let rate = 20e6;
+        let carriers = [
+            (-1.12e6, 43.6e3, 0.25, -50.0),
+            (-1.06e6, 9.6e3, 0.35, -52.0),
+            (-1.0e6, 43.6e3, 0.25, -50.0),
+        ];
+        let coarse = spectrum(4096, rate, &carriers, false);
+        let mut found = detect_carriers(&coarse, rate, 6.0);
+        let before = found.clone();
+        let fine = spectrum(65536, rate, &carriers, false);
+        resolve_narrow(&mut found, &fine, rate);
+        assert_eq!(found.len(), before.len());
+        for (x, y) in found.iter().zip(&before) {
+            if y.narrow {
+                assert!(
+                    !x.narrow && (x.symbol_rate_hz - 9.6e3).abs() < 1.5e3,
+                    "{x:?}"
+                );
+            } else {
+                assert_eq!(x, y);
+            }
+        }
+        assert!(
+            found
+                .iter()
+                .any(|c| !c.narrow && (c.center_hz + 1.06e6).abs() < 1e3),
+            "{found:#?}"
+        );
     }
 }

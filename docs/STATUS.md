@@ -2375,3 +2375,29 @@ TPC carriers or wide trunks now.
   descrambler hypothesis on two of these recordings (their first 0.25 s
   idle flags only) — 2 frames where the decoder had found 500. The live
   decoder is right; the re-run's search is not.
+## Slow carriers no longer dismissed as narrow lines (2026-10-12)
+
+Rory's live GUI never offered the PH-ML radar carrier (9.6 kS/s) as a
+carrier — he added its VFO by hand. At 20 MS/s with the 4096-point FFT
+(4.9 kHz bins) its 11 kHz of width is two or three bins, the same as a CW
+tone with its Hann leakage, so `detect_carriers` flagged it `narrow`:
+neither the band view's carrier marks, "claim carriers" nor Align-to-plan
+took it. The CLI's `scan` identified it only because it gives every narrow
+line a 20 kHz VFO regardless, and an 8 MS/s capture (2 kHz bins) found it
+outright.
+
+Now the front end, at each carrier-detection tick that reports narrow
+lines, takes one finer spectrum of the current block (16× the bins:
+65536 points at FFT 4096, 305 Hz bins; capped so the 40 ms block still
+holds seven segments) and `carriers::resolve_narrow` looks at each line
+again: its region above the local floor, and the longest run within 6 dB
+of its top. A tone's run is its main lobe, two or three bins at any
+resolution; a carrier's is its flat top, Rs (1 − α) wide — 30 bins for
+9.6 kS/s. A line that resolves is reported as a carrier, with its centre,
+99 % width, ENBW symbol rate and S/N measured at the fine resolution
+(`occupied_window` and `enbw_bins` now shared with `detect_carriers`).
+Tests: a 9.6 kS/s carrier at 20 MS/s resolves (rate within 10 %), a CW
+stays a line, neighbours are untouched. On a survey capture the PH-ML
+carrier reads "9.5 kS/s, 11.3 kHz wide, 13.8 dB" where it read "10.3 kS/s
+(narrow)", and the band's two spurs stay narrow lines. Cost: a few ms
+every 500 ms while narrow lines are present.
