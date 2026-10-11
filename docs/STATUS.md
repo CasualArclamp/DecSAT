@@ -1777,3 +1777,33 @@ Rory's `baseband_11662547900Hz_…_comtechs_and_idk.wav` (SDR++, cs16 10 MS/s):
   column order, or the mapping is not Gray, or the code is not TPC 2964's.
   Needs the modem's settings (Rory: "might be tpc_1630").
 
+## Transmitter (M6), DVB-S2/S2X DATV (2026-10-11)
+
+Rory's choices: DATV from an MPEG-TS, HackRF live + IQ file, cable/dummy
+load only, a GUI panel.
+
+- **Stage 1** (`6b0447f`, `decsat-mod::datv`): `TsInput` — `TsFile` (paced
+  against the channel's clock by its PCR rate, ISO/IEC 13818-1 §2.4.3.4–5;
+  no PCR: as fast as the channel), `TsUdp` (raw TS or RTP from ffmpeg/OBS,
+  newest kept), `TsTest`; `TsFeed` makes TS-mode BBFRAMEs (EN 302 307-1
+  §5.1, CCM, no NPD) with null packets for the gaps; `DatvConfig` gives the
+  channel's TS rate ((Kbch − 80) × Rs / PLFRAME length) and the sample rate;
+  `DatvModulator` = PL framer + FEC + RRC shaper.
+- **Stage 2** (`d902d1e`): `decsat tx` to `.cs8/.cs16/.cf32`. A recorded TS
+  sent as QPSK 3/4 at 500 kS/s decoded back through DecSAT's receiver: 60/60
+  BBFRAMEs good, every packet byte-identical and in order, its multicast
+  radio playing. 4 samples a symbol by default: at 2 the carrier fills the
+  band and Identify (rightly) could not analyse it.
+- **Stage 3** (`75e37bc`): `decsat-io::hackrf_tx::HackRfTx` (TX VGA 0–47,
+  amp off by default, antenna power never; the TX thread pulls cs8 from the
+  modulator as USB transfers drain, so the radio paces it; drop = off);
+  `decsat-engine::tx` (`TxPump`, `TxFileWriter` in real time, `TxStatus`).
+- **Stage 4**: the GUI's 📡 Transmit… panel (`transmit.rs`): source,
+  MODCOD (S2 and S2X data codes), frames, roll-off, symbol rate, gold;
+  what it carries; HackRF (frequency, TX gain, amp — live while
+  transmitting) or IQ file; level; Armed + Transmit; status (input, frames,
+  packets/nulls, keeping up, bytes sent, errors). Starting HackRF transmit
+  stops a HackRF receive session first. Settings except power and arming
+  are remembered (`tx.*`). Automation `--tx-panel` opens it for screenshots.
+  Not yet keyed on a real HackRF (Rory does the first transmit).
+

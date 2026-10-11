@@ -93,6 +93,22 @@ pub fn save_session(pairs: &[(String, String)]) -> std::io::Result<()> {
     write_all(&all)
 }
 
+/// The transmit panel's settings (`tx.*`; never its power or armed state).
+pub fn tx_settings() -> Vec<(String, String)> {
+    read_all()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("tx."))
+        .collect()
+}
+
+/// Replace the saved transmit settings with `pairs`.
+pub fn save_tx(pairs: &[(String, String)]) -> std::io::Result<()> {
+    let mut all = read_all();
+    all.retain(|(k, _)| !k.starts_with("tx."));
+    all.extend(pairs.iter().cloned());
+    write_all(&all)
+}
+
 /// Documents\DecSAT, or the temp dir if there is no home.
 fn fallback_dir() -> PathBuf {
     let Some(docs) = std::env::var_os("USERPROFILE")

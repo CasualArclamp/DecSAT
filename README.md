@@ -385,6 +385,36 @@ of like width, searching ±3 MHz — and **keep** repeats that every 5 s in
 small steps as the LNB drifts. The frequency bar shows the trim; it is saved
 with the session.
 
+### Transmitting (DVB-S2/S2X DATV)
+
+**📡 Transmit…** in the toolbar opens the transmit panel: an MPEG-TS on a
+DVB-S2 or S2X carrier, to the HackRF or to an IQ file.
+
+- **Source:** a `.ts` file (played at its own rate, read from its PCRs;
+  looped if you like), a UDP stream (raw TS or RTP, as ffmpeg or OBS send
+  it: `ffmpeg … -f mpegts udp://127.0.0.1:1234`), or DecSAT's test stream.
+  Whatever the input leaves of the channel goes as null packets.
+- **Carrier:** any DVB-S2 MODCOD (normal or short frames) or S2X data
+  MODCOD, pilots, roll-off 0.35–0.05, symbol rate, PL gold code. The panel
+  shows the TS rate the channel carries, the bandwidth and the sample rate
+  (4 samples a symbol where it fits, 2–20 MS/s).
+- **Output:** the HackRF at a frequency, or an IQ file (`.cs8`, `.cs16`,
+  `.cf32`) written in real time.
+
+**The HackRF transmits only when you tick Armed and press Transmit.** TX
+gain starts at 0 dB and the +14 dB amplifier off every time (neither is
+remembered); antenna power is never switched on. Stop, closing the panel or
+quitting puts the radio back to off. The HackRF cannot receive and
+transmit at once, so Transmit stops a HackRF receive session; start it
+again afterwards. Meant for a cable and attenuator into a receiver, or a
+dummy load: radiating needs a licence for the frequency and the power.
+
+From the command line, to a file:
+
+```bash
+decsat tx --ts video.ts --loop --modcod "8PSK 3/4" --symbol-rate 1000000 --out tx_4000000Sps.cs8 --seconds 30
+```
+
 ### Command line
 
 ```bash

@@ -15,6 +15,7 @@ mod prefs;
 mod radio;
 mod session;
 mod side_panel;
+mod transmit;
 mod ts_viewer;
 mod waterfall;
 
@@ -81,6 +82,7 @@ fn main() -> eframe::Result {
             };
             if app.remember {
                 app.restore_session();
+                app.tx = transmit::TxPanel::restored();
                 if let Some(p) = prefs::freqplan_path() {
                     app.load_plan(&p);
                 }
@@ -88,6 +90,7 @@ fn main() -> eframe::Result {
             if let Some(p) = &opts.plan {
                 app.load_plan(p);
             }
+            app.tx.open |= opts.tx_panel;
             // Claimed VFOs keep `VfoSettings::new`'s temp-dir output folder.
             if let Some(k) = opts.decoder {
                 app.new_decoder = k;
@@ -130,6 +133,8 @@ struct App {
     names: u32,
     paused: bool,
     ts_viewer: ts_viewer::TsViewer,
+    /// The transmit panel (DVB-S2/S2X from a TS, to the HackRF or a file).
+    tx: transmit::TxPanel,
     /// A player to open on a multicast audio stream once it is relayed.
     pending_audio: Option<(
         VfoId,
@@ -192,6 +197,7 @@ impl Default for App {
             pending_player: None,
             pending_audio: None,
             ts_viewer: Default::default(),
+            tx: Default::default(),
             note: String::new(),
             automation: automation::Automation::new(&automation::Options::default()),
             #[cfg(feature = "hackrf")]
@@ -845,6 +851,19 @@ impl App {
                     self.plan.len()
                 )
             };
+            // The transmit panel; red while transmitting.
+            let tx_label = if self.tx.transmitting() {
+                RichText::new("📡 Transmitting").color(egui::Color32::from_rgb(240, 90, 90))
+            } else {
+                RichText::new("📡 Transmit…")
+            };
+            if ui
+                .button(tx_label)
+                .on_hover_text("Send a DVB-S2/S2X carrier with an MPEG-TS: to the HackRF (armed) or an IQ file.")
+                .clicked()
+            {
+                self.tx.open = !self.tx.open;
+            }
             let r = ui.button("📋 Plan…").on_hover_text(plan_tip);
             if r.clicked()
                 && let Some(p) = rfd::FileDialog::new()
@@ -1313,6 +1332,22 @@ impl eframe::App for App {
                 };
                 actions.extend(self.band.show(ui, &inp));
             });
+
+        // The transmit panel; starting the HackRF takes it over from receive.
+        if let Some(req) = self.tx.show(ui.ctx()) {
+            match req {
+                #[cfg(feature = "hackrf")]
+                transmit::TxRequest::StartHackRf => {
+                    if self.path.is_none() && self.engine.is_some() {
+                        self.stop_source();
+                        self.note = "Receive stopped: the HackRF is transmitting \
+                                     (it cannot do both). Start it again after."
+                            .into();
+                    }
+                    self.tx.start_hackrf();
+                }
+            }
+        }
 
         // The TS analyser floats over everything, following its VFO.
         if let Some(id) = self.ts_viewer.vfo {

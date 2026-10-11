@@ -216,6 +216,7 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
 - **M4 — GSE → IP → PCAP + TS**: standard + proprietary GSE variants, reassembly, PCAP + live stats; TS-mode extraction. (Headline.)
 - **M5 — S2X framing & ACM polish**: superframe (Annex E), multistream/ISI filtering, gold-code index, ACM/VCM across changing MODCODs, SNR estimate per frame.
 - **M6 — modulator (TX)**: full encode chain → HackRF TX / IQ file; scripted ACM MODCOD schedules; end-to-end loopback test.
+  *Started 2026-10-11 with Rory's choices:* DVB-S2/S2X **DATV from an MPEG-TS** first (a file paced by its PCRs, a UDP stream from ffmpeg/OBS, or the test stream; null packets fill the channel); output to the **HackRF live** and to **IQ files**; used **into a cable/dummy load only**; controlled from a **GUI transmit panel** (`decsat tx` for files). Safety: the HackRF transmits only when the panel is armed and Transmit pressed; TX VGA starts at 0 dB and the amplifier off every time; antenna power never; the radio is put back to off on Stop, closing or quitting; a HackRF receive session is stopped first (half duplex). Claude never keys the radio itself: checks are by IQ file and loopback through DecSAT's own receiver. ACM schedules and GSE/IP payloads come later.
 - **M7 — GUI polish + release**: stream table, ACM timeline, per-MODCOD constellation, throughput; portable exe + first public release.
 
 ## 10. Testing

@@ -32,6 +32,8 @@ pub struct Options {
     pub play_audio: bool,
     /// A frequency plan to show (unattended runs do not read the saved one).
     pub plan: Option<PathBuf>,
+    /// Open the transmit panel (for screenshots: it is never armed).
+    pub tx_panel: bool,
 }
 
 impl Options {
@@ -66,6 +68,7 @@ impl Options {
                 Some("--plan") => {
                     o.plan = Some(PathBuf::from(args.next().ok_or("--plan needs a file")?));
                 }
+                Some("--tx-panel") => o.tx_panel = true,
                 Some("--select") => {
                     let v = args.next().ok_or("--select needs a VFO number")?;
                     o.select = Some(

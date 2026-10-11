@@ -25,6 +25,7 @@ decsat-ip = { path = "../../crates/decsat-ip" }
 decsat-ts = { path = "../../crates/decsat-ts" }
 decsat-io = { path = "../../crates/decsat-io" }
 decsat-engine = { path = "../../crates/decsat-engine" }
+decsat-mod = { path = "../../crates/decsat-mod" }
 decsat-audio = { path = "../../crates/decsat-audio" }
 anyhow.workspace = true
 # The glow (OpenGL) renderer instead of eframe's default wgpu: plenty for 2-D
