@@ -559,6 +559,8 @@ pub struct Framer {
     /// 40 ms blocks of the equipment's silence fill so far: G.728 is here
     /// even before anyone speaks.
     pub fill_blocks: u64,
+    /// 40 ms blocks looked at, either or neither.
+    pub blocks: u64,
 }
 
 impl Default for Framer {
@@ -576,6 +578,7 @@ impl Framer {
             talking: false,
             talk_blocks: 0,
             fill_blocks: 0,
+            blocks: 0,
         }
     }
 
@@ -674,6 +677,7 @@ impl Framer {
                 .or_else(|| (0..10).find_map(|p| self.sync_at(p).map(|s| (p, s)))),
         };
         self.talking = found.is_some();
+        self.blocks += 1;
         if let Some(p) = fill {
             self.phase = Some(p);
             self.fill_blocks += 1;

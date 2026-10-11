@@ -2133,3 +2133,25 @@ framing (0/1 bytes) for this kind of work.
   timeslot — at 1500 frames a second a 64 kbit/s timeslot is 5⅓ octets a
   frame, so its layout must span frames; and with no HDLC to start from,
   its voice is not looked for.
+
+## Calls kept through the fill restarting (2026-10-11)
+
+Rory's auto-record of an ASA211 ESP-ML call (`…-fastlink-active-1791722375.bin`)
+decoded with 0.9.1 from the fill alone: call A {1, 2, 3, 4} and call B
+{0, 1, 2, 15} chosen together, clean speech (the same audio on both), and
+1.6 s of noise-like bursts after it on both circuits alike — real sound,
+decoded right. But each talk spurt restarts the equipment's fill at a new
+phase, the channels' places are measured again one channel at a time (13.10,
+13.15, 13.75 s), and a regroup with a call's old and new places mixed left it
+out of the ways: it was dropped and found again on its next words, a 40 ms
+block late (three times in 21 s).
+
+Now (`TdmRx::regroup`) a chosen stream stays through every regroup — speech
+proved it, and a fill restart moves all of a call's channels alike — and only
+ways sharing none of its channels' halves are tried beside it. A chosen
+stream goes when it frames neither speech nor fill for `LOST_BLOCKS` (2 s;
+`g728::Framer::blocks` counts every block), and the ways are tried afresh.
+On the recording both calls now stay chosen throughout; the qflex_3 call
+decodes as before. Tests: two calls through a fill restart with channel 15
+measured late (fails on the old rule), and a stream whose channels turn to
+noise let go.

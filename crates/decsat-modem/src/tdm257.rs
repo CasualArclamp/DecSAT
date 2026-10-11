@@ -276,6 +276,9 @@ pub struct TdmRx {
 
 /// Frames (2 ms) a call keeps the voice output after it last spoke (1 s).
 const FLOOR_HOLD: u64 = 500;
+/// 40 ms blocks a chosen stream may frame neither speech nor fill before
+/// it is let go (2 s; a fill restarting costs a block or two).
+const LOST_BLOCKS: u64 = 50;
 
 impl Default for TdmRx {
     fn default() -> Self {
@@ -392,30 +395,40 @@ impl TdmRx {
             }
         }
         if changed {
-            let placed: Vec<(usize, Placement)> = (0..CHANNELS)
-                .flat_map(|c| self.placements[c].iter().map(move |&p| (c, p)))
-                .collect();
-            // A chosen stream stays (with its framer) while it is still one
-            // of the ways — the fill restarting after speech moves all its
-            // channels alike; the other ways are tried afresh, bar those
-            // sharing a channel's half with it. None worked out: keep all.
-            let ways = group(&placed);
-            if !ways.is_empty() {
-                let mut voices: Vec<VoiceStream> = std::mem::take(&mut self.voices)
-                    .into_iter()
-                    .filter(|v| v.chosen && ways.contains(&v.members))
-                    .collect();
-                for w in ways {
-                    if !voices
-                        .iter()
-                        .any(|v| v.chosen && shares_half(&v.members, &w))
-                    {
-                        voices.push(VoiceStream::new(w));
-                    }
-                }
-                self.voices = voices;
+            self.regroup();
+        }
+    }
+
+    /// The ways the placed channels make streams, tried afresh — bar those
+    /// sharing a channel's half with a chosen stream. Chosen streams stay,
+    /// with their framers: speech proved them, and the fill restarting
+    /// after speech moves all of a call's channels alike; but their places
+    /// are measured again one channel at a time (a second or so apart, on
+    /// the ASA211 site), and the ways from old and new places together
+    /// leave the call out — it was dropped, and its next words clipped. A
+    /// chosen stream goes only when it stops framing (`LOST_BLOCKS`). None
+    /// worked out: everything stays.
+    fn regroup(&mut self) {
+        let placed: Vec<(usize, Placement)> = (0..CHANNELS)
+            .flat_map(|c| self.placements[c].iter().map(move |&p| (c, p)))
+            .collect();
+        let ways = group(&placed);
+        if ways.is_empty() {
+            return;
+        }
+        let mut voices: Vec<VoiceStream> = std::mem::take(&mut self.voices)
+            .into_iter()
+            .filter(|v| v.chosen)
+            .collect();
+        for w in ways {
+            if !voices
+                .iter()
+                .any(|v| v.chosen && shares_half(&v.members, &w))
+            {
+                voices.push(VoiceStream::new(w));
             }
         }
+        self.voices = voices;
     }
 
     /// Open a call when enough proven codec channels talk at once; extend
@@ -553,6 +566,14 @@ impl TdmRx {
         }
         if let Some(v) = self.voices.iter().find(|v| v.floor) {
             self.voice_pcm.extend_from_slice(&v.pcm);
+        }
+        // A chosen stream framing neither speech nor fill for a while is no
+        // longer the call's (the multiplex realigned, say): it goes, and the
+        // ways are tried again.
+        let chosen = self.voices.iter().filter(|v| v.chosen).count();
+        self.voices.retain(|v| !(v.chosen && v.lost()));
+        if self.voices.iter().filter(|v| v.chosen).count() < chosen {
+            self.regroup();
         }
         // A way framing speech is chosen; the ways sharing a channel's half
         // with it go (the other readings of the same call).
@@ -815,6 +836,10 @@ struct VoiceStream {
     /// It has the voice output, and the frame it last spoke at.
     floor: bool,
     last_talk: u64,
+    /// Blocks of speech or fill so far, and the framer's block count at
+    /// the last of them.
+    framed: u64,
+    last_framed: u64,
     /// Its speech from the last frame.
     pcm: Vec<f32>,
 }
@@ -829,6 +854,8 @@ impl VoiceStream {
             chosen: false,
             floor: false,
             last_talk: 0,
+            framed: 0,
+            last_framed: 0,
             pcm: Vec::new(),
         }
     }
@@ -872,6 +899,16 @@ impl VoiceStream {
         if self.framer.talking {
             self.last_talk = now;
         }
+        let framed = self.framer.talk_blocks + self.framer.fill_blocks;
+        if framed != self.framed {
+            self.framed = framed;
+            self.last_framed = self.framer.blocks;
+        }
+    }
+
+    /// Neither speech nor fill for `LOST_BLOCKS`: not a call's stream.
+    fn lost(&self) -> bool {
+        self.framer.blocks > self.last_framed + LOST_BLOCKS
     }
 }
 
@@ -1288,6 +1325,166 @@ mod tests {
         // Each call's first block picks its stream; the rest are heard.
         assert!((68..=76).contains(&v.talk_blocks), "{}", v.talk_blocks);
         assert_eq!(pcm.len() as u64, (v.talk_blocks - 2) * 320);
+    }
+
+    /// Two calls (the ASA211 layout) that speak twice, their equipment's
+    /// fill restarting at other phases in between, as after every talk
+    /// spurt there, and call B's channel 15 measured a second after the
+    /// rest (busy a while longer). For a while the ways mixed call B's old places with its new
+    /// ones while call A's were complete, so call B was dropped and its
+    /// second spurt cost a block to find it again. Each call's stream is
+    /// kept through both spurts now.
+    #[test]
+    fn calls_keep_their_streams_through_a_fill_restart() {
+        // (channel, start, len, offset, call)
+        let members = [
+            (1, 0, 16, 54, 0),
+            (3, 16, 16, 54, 0),
+            (4, 0, 16, 55, 0),
+            (2, 16, 16, 55, 0),
+            (15, 0, 15, 128, 1),
+            (1, 16, 16, 126, 1),
+            (2, 0, 16, 127, 1),
+            (0, 16, 16, 127, 1),
+        ];
+        let lowest = [54, 126];
+        let spurts = [
+            3 * 16_000..3 * 16_000 + 24_000,
+            7 * 16_000..7 * 16_000 + 16_000,
+        ];
+        let mut x = 0x0BAD_F00Du32;
+        let cw: Vec<u16> = (0..4000)
+            .map(|i| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 16) as u16 & 0x1FF | u16::from(i % 32 != 31) << 9
+            })
+            .collect();
+        let stream = |call: usize, p: usize| -> u8 {
+            let i = p - lowest[call];
+            match spurts.iter().position(|s| s.contains(&i)) {
+                Some(n) => {
+                    let j = i - spurts[n].start + 12_000 * n;
+                    u8::from(cw[j / 10] >> (9 - j % 10) & 1 == 0)
+                }
+                // Each call's fill restarts after the first spurt.
+                None if i < spurts[0].end => fill_bit(p + 37 + 50 * call),
+                None => fill_bit(p + 37 + 50 * call + [80, 40][call]),
+            }
+        };
+        let place = |start, len| Placement {
+            start,
+            len,
+            off: 0,
+            alt: false,
+        };
+        let (mut bits, mut k) = (Vec::new(), 0usize);
+        let mut s = 0x1357u32;
+        for f in 0..4750 {
+            bits.push(if f % 2 == 0 { FAW[(f / 2) % 7] } else { 0 });
+            for _ in 0..WORDS {
+                for c in 0..CHANNELS {
+                    let b = members
+                        .iter()
+                        .find(|&&(ch, st, l, ..)| ch == c && place(st, l).carries(k))
+                        .map_or(1, |&(_, _, _, off, call)| {
+                            if c == 15 && (f < 500 || (2250..2750).contains(&f)) {
+                                // Busy for a second at the start and after
+                                // the first spurt: measured later than the
+                                // others (on the ASA211 site channel 15
+                                // varies on its own).
+                                s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                                (s >> 16) as u8 & 1
+                            } else {
+                                stream(call, off + 2 * k)
+                            }
+                        });
+                    bits.push(b);
+                }
+                k += 1;
+            }
+        }
+        let mut rx = TdmRx::new();
+        rx.decode_voice = true;
+        for chunk in bits.chunks(FRAME * 25) {
+            rx.push(chunk);
+            rx.voice_pcm.clear();
+        }
+        // Two streams, each having framed both spurts (1.5 s and 1 s: 37
+        // and 25 blocks, the edges' mixed).
+        let talk: Vec<u64> = rx
+            .voices
+            .iter()
+            .filter(|v| v.chosen)
+            .map(|v| v.framer.talk_blocks)
+            .collect();
+        assert_eq!(talk.len(), 2, "{talk:?}");
+        assert!(talk.iter().all(|t| (58..=64).contains(t)), "{talk:?}");
+    }
+
+    /// A chosen stream that stops framing — neither speech nor fill for
+    /// 2 s (here its channels turn to noise, as if the multiplex had been
+    /// reconfigured) — is let go, and the ways are tried afresh.
+    #[test]
+    fn a_stream_that_stops_framing_is_let_go() {
+        let place = [
+            (15, 0, 15, 76),
+            (1, 16, 16, 74),
+            (2, 0, 16, 75),
+            (0, 16, 16, 75),
+        ];
+        let talk = 3 * 16_000..3 * 16_000 + 24_000;
+        let mut x = 0x2222_7777u32;
+        let cw: Vec<u16> = (0..2400)
+            .map(|i| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (x >> 16) as u16 & 0x1FF | u16::from(i % 32 != 31) << 9
+            })
+            .collect();
+        let (mut bits, mut k) = (Vec::new(), 0usize);
+        let mut s = 0x2468u32;
+        for f in 0..4500 {
+            bits.push(if f % 2 == 0 { FAW[(f / 2) % 7] } else { 0 });
+            for _ in 0..WORDS {
+                for c in 0..CHANNELS {
+                    let b = place.iter().find(|&&(ch, ..)| ch == c).map_or(
+                        1,
+                        |&(_, start, len, off)| {
+                            let p = Placement {
+                                start,
+                                len,
+                                off: 0,
+                                alt: false,
+                            };
+                            let i = off + 2 * k - 74;
+                            match () {
+                                _ if !p.carries(k) => 1,
+                                // Noise for 3 s after the call.
+                                _ if (2500..4000).contains(&f) => {
+                                    s = s.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                                    (s >> 16) as u8 & 1
+                                }
+                                _ if talk.contains(&i) => {
+                                    let j = i - talk.start;
+                                    u8::from(cw[j / 10] >> (9 - j % 10) & 1 == 0)
+                                }
+                                _ => fill_bit(off + 2 * k + 37),
+                            }
+                        },
+                    );
+                    bits.push(b);
+                }
+                k += 1;
+            }
+        }
+        let mut rx = TdmRx::new();
+        let mut was_chosen = false;
+        for chunk in bits.chunks(FRAME * 25) {
+            rx.push(chunk);
+            was_chosen |= rx.voices.iter().any(|v| v.chosen);
+        }
+        assert!(was_chosen);
+        assert!(rx.voices.iter().all(|v| !v.chosen), "still chosen");
+        assert!(!rx.voices.is_empty(), "the ways tried afresh");
     }
 
     #[test]
