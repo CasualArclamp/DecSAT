@@ -1141,6 +1141,23 @@ impl App {
             ui.label(format!("{secs:.1} s"));
             ui.separator();
             ui.label(format!("front end {:.0}%", self.front.load * 100.0));
+            if self.front.input_dbfs > -150.0 {
+                ui.separator();
+                let level = self.front.input_dbfs;
+                let text = format!("input {level:.0} dBFS");
+                if level > decsat_engine::STRONG_INPUT_DBFS {
+                    ui.label(RichText::new(text).color(egui::Color32::from_rgb(255, 170, 60)))
+                        .on_hover_text(
+                            "Strong input: the HackRF's RF chain overloads long before its ADC \
+                             clips, and carriers then slip and lose frames (at LNA 40 a 14 dB \
+                             carrier lost most of its frames; at LNA 24 none). Lower the LNA \
+                             gain in the HackRF panel.",
+                        );
+                } else {
+                    ui.label(RichText::new(text).weak())
+                        .on_hover_text("The samples' RMS level, relative to full scale.");
+                }
+            }
             if !self.note.is_empty() {
                 ui.separator();
                 ui.label(RichText::new(&self.note).weak());

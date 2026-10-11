@@ -80,7 +80,20 @@ pub struct FrontStatus {
     pub load: f32,
     /// Rows produced so far (the sequence number of the newest).
     pub row_seq: u64,
+    /// The samples' RMS level, dB relative to a full-scale rail (as
+    /// `decsat record` reports it), smoothed over a few blocks. Above
+    /// [`STRONG_INPUT_DBFS`] the HackRF's RF chain is overloading.
+    pub input_dbfs: f32,
 }
+
+/// An input level above this is too strong for the HackRF: its LNA and
+/// mixer compress long before the ADC clips, and the products land on
+/// carriers, which then slip and lose frames. Measured on a 14 dB TPC 2964
+/// carrier in a full Ku-band slice: at LNA 40 (−15 dBFS) 19 slips in 8 s
+/// and most frames lost, at LNA 32 (−23 dBFS) 8 slips and a third lost,
+/// at LNA 24 (−31 dBFS) 2 slips and every frame decoded; the ADC never
+/// clipped (0.0001 % of samples past 120 of 127).
+pub const STRONG_INPUT_DBFS: f32 = -25.0;
 
 /// Recent waterfall rows kept for the GUI to collect. At 25 rows/s this is a
 /// few seconds' grace for a GUI that stalls.
@@ -299,6 +312,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     let mut row_seq = 0u64;
     let mut samples = 0u64;
     let mut load = 0.0f32;
+    let mut input_dbfs: Option<f32> = None;
     let mut paused = false;
     // Real-time pacing: signal time played since `clock`.
     let mut clock = Instant::now();
@@ -391,6 +405,10 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         }
         let block = Arc::new(block);
         samples += block_len as u64;
+        // The block's level, smoothed over about five blocks.
+        let power = block.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / block_len as f64;
+        let level = 10.0 * power.max(1e-20).log10() as f32;
+        input_dbfs = Some(input_dbfs.map_or(level, |v| v + 0.2 * (level - v)));
 
         // Pace files to real time so the waterfall scrolls at the true rate.
         if opts.realtime && !source.is_live() {
@@ -462,6 +480,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         f.samples = samples;
         f.load = load;
         f.row_seq = row_seq;
+        f.input_dbfs = input_dbfs.unwrap_or(-200.0);
         if f.state == SourceState::Paused {
             f.state = SourceState::Running;
         }

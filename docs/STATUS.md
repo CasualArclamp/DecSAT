@@ -2433,3 +2433,69 @@ silent), which a wrong interleave would not give; channel 2 (−14.6 dBFS)
 shows no coding the E1 stage knows. Both carriers: "E1 timeslots, Comtech
 D&I++ framing … Comtech D&I++, 2 × 64 kbit/s" now; the second has 19
 slips and 45 UW misses in 8 s (HackRF tuning, as before).
+
+## Overnight survey, 2026-10-12 (Rory: "use the HackRF and look around")
+
+Receive only, LO 10 600 MHz, Rory's LNA 40 / VGA 20 at first. The busy
+block in two 20 MS/s × 8 s slices (HackRF at 1729.146 — his saved tuning —
+and 1744 MHz), the whole IF 960–2144 MHz in 75 slices of 20 MS/s × 2 s
+(16 MHz steps), every slice through `scan --decode`. Captures stayed in
+the scratchpad.
+
+- The busy block: 61 + 58 carriers found; everything the decoders know
+  decodes — 50 TPC 2964 (D&I++ voice, HDLC timeslot packets, HDLC lines,
+  idle), 31 FastLink 95 kS/s (Paradise framing and the TDM multiplex),
+  the Viterbi K=7 links (HDLC on an inverted line, the PH-ML radar feed's
+  BSC blocks). Two 87.2 kS/s TPC carriers were the only "payload not
+  recognised": D&I++ with two timeslots (above). Nothing regressed.
+- Elsewhere: the four DVB-S2 GSE outbounds (634/635, 650/650 and 285/285
+  BBFRAMEs good; the 1 MS/s ones' 32APSK frames below threshold here, as
+  before), six 43.6 kS/s TPC voice carriers and three FastLinks around
+  12.49 GHz, a 170.7 and an 85.3 kS/s TPC link. Not decodable: the STDMA
+  bursts, the two Comtech 8PSK carriers, two 937 kS/s BPSK carriers at
+  12.50–12.52 GHz (locked at 8–9 dB, no K = 7 rate and no TPC unique word),
+  BPSK/QPSK at 0.8–5.6 MS/s with no K = 7 code, and the wide transponders.
+- Identify named the 2721.7 kS/s DVB-S2 outbound "DVB-S2X ACM/VCM" in the
+  slice where it sits at the edge: of twenty confirmed frames, nine QPSK
+  codes and a 256APSK one were read once to four times each beside the
+  QPSK 1/4 and 1/3 it sends. One-off MODCODs among 16 or more frames are
+  now misread headers (`Dvbs2Info::modcods_sent`): left out of the S2X and
+  ACM verdicts and the MODCOD list, counted as "n headers read as other
+  MODCODs".
+- Two 54 kS/s QPSK carriers in the busy block (12 333.58 and 12 334.02 GHz,
+  Es/N0 7 dB) lock but fit no K = 7 rate and carry no TPC unique word.
+  64 000 × 46/45 / (2 × 3/5) = 54 518 S/s: a rate-3/5 code (LDPC?) over a
+  64 kbit/s D&I++ stream would fit the rate. Open.
+- The live GUI with Rory's plan (unattended, 20 s): 51 carriers and
+  2 narrow lines where the same tuning gave 3 narrow lines before — the
+  PH-ML carrier is a carrier now.
+
+**LNA 40 overloads the HackRF.** The 43.6 kS/s TPC voice carrier at
+12 332.47 GHz (Rory's VFO 16, +3.324 MHz from his centre) slipped 19 times
+in 8 s with 47 unique-word misses and 85 of 235 frames decoded, at
+14.3 dB. The same carrier, same centre, 8 s each:
+
+| LNA (dB) | input RMS (dBFS) | slips | UW misses | frames decoded |
+|---|---|---|---|---|
+| 40 | −15 | 19 (then 1 and lock lost) | 47 | 85 / 235 |
+| 32 | −23 | 8 | 19 | 168 / 234 |
+| 24 | −31 | 2 | 0 | 233 / 234 |
+| 16 | −37 | 2 | 0 | 234 / 235 (BER 1.5e-4: the noise now) |
+
+The ADC never clips (0.0001 % of samples past 120 of 127 at LNA 40): the
+LNA and mixer compress first and their products land on carriers. So:
+**LNA 24** here, not 40. The GUI's status bar now shows the input level
+(`FrontStatus::input_dbfs`, smoothed) and turns it orange above
+`STRONG_INPUT_DBFS` = −25 dBFS with the advice on hover.
+
+**And some centres are still bad at any gain.** The MSO-BN FastLink
+(12 342.54 GHz) at centre 1744 MHz (−1.462 MHz offset) fails 121 of 520
+codewords at LNA 40 and at LNA 24 alike, evenly through the 8 s, with no
+slip or sync miss (BER 8e-4 where Rory's 2026-10-11 recording of it gave
+1.2e-5): at centres 1740 and 1748 (LNA 24) 5 and 4 fail. A 65536-point
+look: the carrier's top is the same in both captures, the floor beside it
+4–5 dB higher at 1744 (−32 dB against −37). Receiver noise that moves with
+the tuning, not the signal — fractional-N spurs or noise sidebands of the
+HackRF's LOs at particular IF offsets, as the 1725/1742/1743 cases before.
+The remedy is still to retune a few MHz; a map of the bad (centre, offset)
+pairs would let the GUI pick its tuning. Open.

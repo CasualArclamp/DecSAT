@@ -34,7 +34,7 @@ pub use fec::{
     BbFrame, CallVoiceView, E1View, FecDecoder, FecOutput, FecStats, GseView, MIX as VOICE_MIX,
     TsView,
 };
-pub use frontend::{Engine, EngineOptions, FrontStatus, SourceState};
+pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, SourceState};
 pub use identify::{
     ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in,
 };
