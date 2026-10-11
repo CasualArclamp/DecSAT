@@ -1971,12 +1971,24 @@ the 12.32–12.37 GHz block, whose 8 MS/s × 4 s pass the counts below are from)
   three chance 0x47s 188 bytes apart (~4 % of 4-frame looks over all the
   descramblings) plus coasted misses had out-scored D&I++ on a voice carrier.
 
-Slips: the 8 MS/s block captures show more carrier slips than the others
-(10 in 4 s on a 298.7 kS/s TPC at 8.4 dB; 2 in 15 s on another, focused);
-the same before and after these changes. They were recorded while a decode
-batch loaded the CPU, so HackRF sample drops are the first suspect — a clean
-capture would tell.
+**Slips come with the HackRF's tuning.** Some carriers slipped in the
+8 MS/s block captures (identical before and after these changes, and again
+in clean captures with the machine idle). The same carrier, retuned:
+
+| carrier | HackRF centre (MHz) | result over 4 s |
+|---|---|---|
+| FastLink 95 kS/s, 12326.49 GHz, 10.9 dB | 1720 (20 MS/s) | 248/256 codewords, 1 slip |
+| | **1725** (20 and 8 MS/s) | **170/256, 4–5 slips** |
+| | 1726, 1727.5 | 255/256, 254/256, 1 slip |
+| TPC 298.7 kS/s, 12341.28 GHz, 8.4 dB | 1740, 1744 | 803/805 frames, 2 slips |
+| | **1743** | **731/805, 18 slips** |
+| | **1742** | **no UW at all** |
+
+Not the decoders, nor the carrier's offset in the band: something in the
+HackRF's synthesisers at particular centre frequencies (its LO and IF are
+chosen per tuning). If a carrier slips, retune a few MHz. Worth a closer
+look: measure the HackRF's close-in phase noise against centre frequency.
 
 Open: the faster FastLinks' payload; the Comtech 8PSK; what the BPSK
-carriers are; a live DVB-CID (none found yet); TDMA burst demodulation; the
-slips above.
+carriers are; a live DVB-CID (none found yet); TDMA burst demodulation;
+the HackRF tunings that slip.
