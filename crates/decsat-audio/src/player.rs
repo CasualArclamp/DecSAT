@@ -14,6 +14,8 @@
 //!
 //! **Controls.** Volume and mute are app-wide ([`set_volume`],
 //! [`set_muted`]), applied in the sound card's callback so they act at once.
+//! So is the output device ([`set_output_device`]): players already running
+//! move to a newly chosen one within a tenth of a second.
 //! Pause is per player, through its [`AudioHandle`]: paused, the audio is
 //! decoded and dropped, so resuming plays live rather than from where it
 //! stopped.
@@ -61,6 +63,43 @@ pub fn muted() -> bool {
 
 fn gain() -> f32 {
     if muted() { 0.0 } else { volume().powi(3) }
+}
+
+/// The sound output chosen by name (`None`: the system's default), and a
+/// count of changes, which running players watch to move to it.
+static OUTPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
+static OUTPUT_CHANGES: AtomicU64 = AtomicU64::new(0);
+
+/// Play through the output device of this name (as [`output_devices`] lists
+/// it), or the system's default with `None`. App-wide.
+pub fn set_output_device(name: Option<String>) {
+    let mut d = OUTPUT_DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    if *d != name {
+        *d = name;
+        OUTPUT_CHANGES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn output_device() -> Option<String> {
+    OUTPUT_DEVICE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// The sound output devices there are, by name.
+pub fn output_devices() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let mut names: Vec<String> = host
+        .output_devices()
+        .map(|it| {
+            it.filter_map(|d| d.description().ok().map(|n| n.name().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.dedup();
+    names
 }
 
 /// Where the sound goes.
@@ -258,9 +297,20 @@ fn open_output(kind: OutputKind, sh: &Arc<Shared>) -> Result<(Output, String), S
         ));
     }
     let host = cpal::default_host();
-    let dev = host
-        .default_output_device()
-        .ok_or("no sound output device")?;
+    // The device chosen, by name; the default when none is (or it has gone).
+    let chosen = output_device().and_then(|want| {
+        host.output_devices().ok()?.find(|d| {
+            d.description()
+                .map(|n| n.name() == want.as_str())
+                .unwrap_or(false)
+        })
+    });
+    let dev = match chosen {
+        Some(d) => d,
+        None => host
+            .default_output_device()
+            .ok_or("no sound output device")?,
+    };
     let name = dev
         .description()
         .map(|d| d.name().to_string())
@@ -350,7 +400,8 @@ where
 
 /// The player thread.
 fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, kind: OutputKind) {
-    let out = match open_output(kind, &sh) {
+    let mut changes = OUTPUT_CHANGES.load(Ordering::Relaxed);
+    let mut out = match open_output(kind, &sh) {
         Ok((o, name)) => {
             sh.status.lock().unwrap().device = Some(name);
             o
@@ -363,7 +414,7 @@ fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, ki
         }
     };
     let null = kind == OutputKind::Null;
-    let per_ms = out.rate as f64 * 2.0 / 1000.0; // ring samples per ms
+    let mut per_ms = out.rate as f64 * 2.0 / 1000.0; // ring samples per ms
     let mut dec = Decoder::new();
     let mut units = Vec::new();
     let mut block = Block::default();
@@ -372,6 +423,34 @@ fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, ki
     let mut fill_ms = START_MS as f64;
     let mut was_paused = false;
     loop {
+        // Another output device chosen: move to it. The old stream closes
+        // first; what was buffered for it goes (it was at its rate).
+        let now = OUTPUT_CHANGES.load(Ordering::Relaxed);
+        if now != changes && !null {
+            changes = now;
+            out.stream = None;
+            match open_output(kind, &sh) {
+                Ok((o, name)) => {
+                    out = o;
+                    per_ms = out.rate as f64 * 2.0 / 1000.0;
+                    resampler = None;
+                    fill_ms = START_MS as f64;
+                    let mut ring = sh.ring.lock().unwrap();
+                    ring.buf.clear();
+                    ring.primed = false;
+                    drop(ring);
+                    let mut s = sh.status.lock().unwrap();
+                    s.device = Some(name);
+                    s.error = None;
+                }
+                Err(e) => {
+                    let mut s = sh.status.lock().unwrap();
+                    s.state = PlayState::Failed;
+                    s.error = Some(e);
+                    return;
+                }
+            }
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(p) => depay.packet(&p, &mut units),
             Err(RecvTimeoutError::Timeout) => {}
@@ -481,6 +560,21 @@ mod tests {
         drop(p);
         // The handle outlives the player.
         let _ = h.status();
+    }
+
+    #[test]
+    fn the_output_device_is_chosen_by_name() {
+        // Listing must not fail on a machine with no sound (CI).
+        let devices = output_devices();
+        eprintln!("output devices: {devices:?}");
+        let before = OUTPUT_CHANGES.load(Ordering::Relaxed);
+        set_output_device(Some("Speakers (test)".into()));
+        assert_eq!(output_device().as_deref(), Some("Speakers (test)"));
+        // The same choice again is no change for running players.
+        set_output_device(Some("Speakers (test)".into()));
+        set_output_device(None);
+        assert_eq!(output_device(), None);
+        assert_eq!(OUTPUT_CHANGES.load(Ordering::Relaxed), before + 2);
     }
 
     #[test]

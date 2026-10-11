@@ -162,6 +162,10 @@ struct App {
     plan_keep_at: std::time::Instant,
     /// The voice floor's hold, kept while it is off.
     voice_hold_s: f32,
+    /// The sound outputs there are, read when the device list is opened
+    /// (listing them is slow on Windows), and when.
+    audio_devices: Vec<String>,
+    audio_devices_at: Option<std::time::Instant>,
 }
 
 impl Default for App {
@@ -202,6 +206,8 @@ impl Default for App {
             plan_keep: false,
             plan_keep_at: std::time::Instant::now(),
             voice_hold_s: decsat_engine::floor::hold().unwrap_or(3.0),
+            audio_devices: Vec::new(),
+            audio_devices_at: None,
         }
     }
 }
@@ -765,6 +771,41 @@ impl App {
         });
     }
 
+    /// The sound output for everything played in the app: the system's
+    /// default, or a device by name (remembered).
+    fn audio_device_choice(&mut self, ui: &mut egui::Ui) {
+        const DEFAULT: &str = "Default output";
+        let current = decsat_audio::output_device();
+        let mut chosen = current.clone();
+        let shown = current.clone().unwrap_or_else(|| DEFAULT.into());
+        egui::ComboBox::from_id_salt("audio_device")
+            .width(170.0)
+            .truncate()
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                // Listed afresh when opened (a headset plugged in since).
+                if self
+                    .audio_devices_at
+                    .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                {
+                    self.audio_devices = decsat_audio::output_devices();
+                    self.audio_devices_at = Some(std::time::Instant::now());
+                }
+                ui.selectable_value(&mut chosen, None, DEFAULT);
+                for d in &self.audio_devices {
+                    ui.selectable_value(&mut chosen, Some(d.clone()), d.as_str());
+                }
+            })
+            .response
+            .on_hover_text(
+                "Where everything played in DecSAT goes (VLC and PotPlayer use their own).",
+            );
+        if chosen != current {
+            decsat_audio::set_output_device(chosen);
+            prefs::save_audio();
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             let out = prefs::output_dir();
@@ -1009,6 +1050,7 @@ impl App {
             // The master volume for everything played, voice included.
             ui.label("Volume");
             side_panel::volume_control(ui);
+            self.audio_device_choice(ui);
             // The voice floor: one talker at a time across every carrier.
             let held = decsat_engine::floor::hold();
             let mut one = held.is_some();

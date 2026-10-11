@@ -251,7 +251,10 @@ The **CDM-600 voice** preset plays every channel with G.728 by itself.
 hang time across all carriers and channels: whoever speaks first is heard,
 and the others wait until they have been quiet for the **hold** (3 s, set
 beside it); off, everyone is mixed. A channel played with ▶ is always heard.
-The toolbar's **Volume** and 🔊 mute are the master for everything played.
+The toolbar's **Volume** and 🔊 mute are the master for everything played,
+and the list beside them picks the sound output (the system's default, or
+any device by name — a headset, a virtual cable into other software);
+players already running move to it at once, and the choice is remembered.
 Offline:
 
 ```bash

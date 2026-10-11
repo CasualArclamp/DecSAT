@@ -126,6 +126,12 @@ pub fn load() {
         decsat_audio::set_volume(v);
     }
     decsat_audio::set_muted(get("muted") == Some("1"));
+    // The sound output by name; empty (or absent) for the system's default.
+    decsat_audio::set_output_device(
+        get("audio_device")
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+    );
     // One voice at a time (the hold, s), or "off": everyone at once.
     match get("voice_hold") {
         Some("off") => decsat_engine::floor::set_hold(None),
@@ -156,6 +162,10 @@ pub fn set_clock_ppm(ppm: f64) {
 pub fn save_audio() {
     let _ = write_key("volume", &format!("{:.3}", decsat_audio::volume()));
     let _ = write_key("muted", if decsat_audio::muted() { "1" } else { "0" });
+    let _ = write_key(
+        "audio_device",
+        &decsat_audio::output_device().unwrap_or_default(),
+    );
     let hold = decsat_engine::floor::hold().map_or("off".into(), |s| format!("{s:.1}"));
     let _ = write_key("voice_hold", &hold);
 }

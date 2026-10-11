@@ -24,6 +24,7 @@ pub mod resample;
 pub mod xaac;
 
 pub use player::{
-    AudioHandle, AudioPlayer, OutputKind, PlayState, Status, muted, set_muted, set_volume, volume,
+    AudioHandle, AudioPlayer, OutputKind, PlayState, Status, muted, output_device, output_devices,
+    set_muted, set_output_device, set_volume, volume,
 };
 pub use record::AudioRecorder;
