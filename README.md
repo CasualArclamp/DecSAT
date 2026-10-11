@@ -364,7 +364,8 @@ voice at a time**; ⏹ turns that off for the VFO.
 
 The faster Q-Flex links (FastLink at 2, 3 or 4 × the 95 kBd links' rate)
 carry 2–4 × 128.5 kbit/s in the same Paradise framing, and the same 257-bit
-multiplex at that many times the frame rate, laid out differently: DecSAT
+multiplex at that many times the frame rate, laid out differently (at 3 ×
+in superframes of three frames, placed by the alignment column): DecSAT
 frames it, meters its activity, and finds in it a 64 kbit/s HDLC timeslot —
 bridged Ethernet on an inverted line, the site's IP network — whose
 packets go to the IP view and the PCAP like any other IP; then, in another

@@ -2129,10 +2129,51 @@ framing (0/1 bytes) for this kind of work.
   heard; it goes through the same player and recorder as the 128.5
   kbit/s calls (`CallVoice` now takes any 8 kHz stream with its clock),
   and `decsat payload --voice-out` writes it to a `.wav`.
-- **Still open**: the 3 × link (276 kBd, weak) aligns but shows no HDLC
-  timeslot — at 1500 frames a second a 64 kbit/s timeslot is 5⅓ octets a
-  frame, so its layout must span frames; and with no HDLC to start from,
-  its voice is not looked for.
+- **Still open** (then): the 3 × link (276 kBd, weak) aligns but shows no
+  HDLC timeslot — at 1500 frames a second a 64 kbit/s timeslot is 5⅓
+  octets a frame, so its layout must span frames; and with no HDLC to
+  start from, its voice is not looked for. Cracked the same night — below.
+
+## The 3 × FastLink: superframes of three frames (2026-10-11)
+
+Rory: "crack the 3x link too". The 276 kBd link (12358.886 GHz, weak:
+channel BER 4 %, 148 TDM losses in 15 min) from the same 900 s recording.
+
+- **A 2 ms superframe.** Pairs swapped back and aligned, almost every bit
+  repeats three frames later and changes from one frame to the next: the
+  layout spans three frames — the fewest holding whole octets of a
+  64 kbit/s timeslot (16/k a frame; 16 a superframe). In it, 24 groups of
+  four octets, three kinds in turn: [V h H V], [h H h h], [h h h h] — the
+  2 × link's [V C H V], [C H C C] and a third. H: the HDLC timeslot (16
+  octets: 2668 good frames in 15 min, the same kind of site IP — SNMP to
+  the same managers, the 233.71.15.x multicast, OSPF). V: the voice
+  timeslot, two octets before each H as at 2 ×: two G.728 calls on bits
+  2–3 and 4–5, the same talker on both again (38 s of speech each, fill
+  the rest). h: idle timeslots, flags; one of them (X.b with the third
+  kind's c octets) gave 7 frames in 120 s — a second, near-silent HDLC
+  timeslot, not decoded.
+- **Placing superframes** (`tdmfast::Phaser`): the alignment column — the
+  word on even frames, and on the odd ones a 21-bit pattern with two
+  zeros — repeats every 42 frames (14 × 3). Learnt over 24 cycles, then
+  followed; after a loss of lock the frames are placed again once a cycle
+  matches it to a bit (a cycle 14 or 28 frames off differs in only 4 of
+  42 bits, so any other placement must miss 3 more).
+- **The HDLC search, superframe by superframe** (octet-aligned now): idle
+  octets here are flags too, and change rotation at every slip (all at
+  once, ~25 times in 10 s of the weak link), as much as the timeslot does
+  with traffic (23–45). Changes in more octets at once than one timeslot
+  has (and half the flag-like ones) are slips and not counted; the
+  threshold drops from 25 changes to 12. What is left goes on trial
+  together, beside groups of octets that change together, all deframed at
+  once until one gives three good FCS. (Grouping alone fails: at 2 × and
+  4 × the timeslot idles part of the time with something other than flags
+  — inverted, eleven ones and three zeros — where bit errors make most of
+  an octet's "changes", so its octets do not change together.)
+- **All three** run unattended on the 15-minute recording: 3 × 2668 HDLC
+  frames and two calls (38 s each), 2 × 2633 and two calls (40 s each),
+  4 × 2782 and its open channel (216 s) — those two as before. A
+  synthetic 3 × link with a slip of two frames and two bits at 16 s keeps
+  decoding after it (`a_3x_link_in_superframes_…`).
 
 ## Calls kept through the fill restarting (2026-10-11)
 

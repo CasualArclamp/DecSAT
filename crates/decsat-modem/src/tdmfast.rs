@@ -7,62 +7,108 @@
 //! The frames come with the two bits of every QPSK symbol in the other
 //! order from the one the multiplex was built in (the data stream's pairs
 //! swapped; which pairing is not known, so both are tried). Read straight,
-//! every 257-bit frame has the same layout. One part of it is found here:
-//! a 64 kbit/s timeslot — 8-bit runs at fixed places in the frame (eight a
-//! frame at 2 × 128.5 kbit/s, four at 4 ×) — carrying HDLC on an inverted
-//! line, whose frames are bridged Ethernet (802.1Q VLANs) with the site's
-//! IP inside: SNMP, traps, OSPF, NTP, a multicast stream (the UDP payloads
-//! are encrypted: their checksums fail while the HDLC FCS and the IP
-//! header checksums hold).
+//! the 256 bits after the alignment bit are octets, each a part of a
+//! 64 kbit/s timeslot: 16/k octets of each timeslot a frame. At 3 × that
+//! is not a whole number, and the layout spans three frames — a
+//! superframe (2 ms), always the same; elsewhere one frame is one.
+//! Superframes are placed by the alignment column: the alignment word's
+//! 14-frame cycle and the bits on the frames between make a 42-frame
+//! cycle at 3 ×, learnt, then followed through losses of lock.
+//!
+//! One timeslot carries HDLC on an inverted line, whose frames are bridged
+//! Ethernet (802.1Q VLANs) with the site's IP inside: SNMP, traps, OSPF,
+//! NTP, a multicast stream (the UDP payloads are encrypted: their checksums
+//! fail while the HDLC FCS and the IP header checksums hold). Its octets:
+//! eight a frame at 2 ×, four at 4 ×, sixteen a superframe at 3 ×.
 //!
 //! The timeslot is found blind: idle HDLC is flags, 01111110 (inverted,
-//! 10000001), so each run of it reads as a rotation of that most of the
-//! time, and the rotation changes whenever a frame has gone by. Runs that
-//! do both are taken, then confirmed by frames whose FCS checks.
+//! 10000001), so each octet of it reads as a rotation of that most of the
+//! time, and the rotation changes whenever a frame has gone by. The idle
+//! timeslots read as flags too, still — but for a slip, which turns every
+//! octet's rotation at once (more octets than one timeslot has); those
+//! changes are not counted. The octets left that change are grouped by
+//! changing together, and each group is tried as the timeslot until one
+//! gives frames whose FCS checks.
 //!
 //! The radios' voice is in another 64 kbit/s timeslot laid out the same
-//! way, the HDLC one's runs moved along by whole octets (live: 16 bits
-//! earlier at 2 × 128.5 kbit/s, 24 at 4 ×): G.728 at 16 kbit/s on a pair
-//! of bits of each octet, as on the CDM-600L's D&I timeslot
-//! ([`crate::g728::Lane`]) — bits 2–3 and 4–5 at 2 ×, two calls with the
-//! same talker in them; bits 2–3 at 4 ×, an open radio channel. The other
-//! bits change rarely (signalling, likely). Every such shift of the runs
-//! is tried, a G.728 framer on every pair of neighbouring bits, and a
-//! pair is a call once it has sent the equipment's silence fill — its
-//! count stepping a codeword, which no wrong pairing makes (speech's sync
-//! bits alone do not tell: a pair one bit off sees them too).
+//! way, the HDLC one's octets moved along by whole octets (live: two
+//! octets earlier at 2 × and 3 ×, three at 4 ×): G.728 at 16 kbit/s on a
+//! pair of bits of each octet, as on the CDM-600L's D&I timeslot
+//! ([`crate::g728::Lane`]) — bits 2–3 and 4–5 at 2 × and 3 ×, two calls
+//! with the same talker in them; bits 2–3 at 4 ×, an open radio channel.
+//! The other bits change rarely (signalling, likely). Every such move is
+//! tried, a G.728 framer on every pair of neighbouring bits, and a pair is
+//! a call once it has sent the equipment's silence fill — its count
+//! stepping a codeword, which no wrong pairing makes (speech's sync bits
+//! alone do not tell: a pair one bit off sees them too).
+
+use std::collections::VecDeque;
 
 use crate::g728;
 use crate::payload::{Fcs, Hdlc};
-use crate::tdm257::{FRAME, TdmRx};
+use crate::tdm257::{FAW, FRAME, TdmRx};
 
+/// Payload bits a frame: all but the alignment bit.
+const PAYLOAD: usize = FRAME - 1;
 /// The activity meter's time constant, frames.
 const SMOOTH_FRAMES: f64 = 250.0;
 /// Seconds of frames looked at before the timeslot is chosen: the live
 /// links' flags changed phase only a few times a second.
 const DISCOVER_SECONDS: f64 = 10.0;
-/// A run is the timeslot's when at least this share of frames show it as
-/// a flag rotation, all eight rotations turn up, and the rotation changed
-/// this many times (live: 47 and 74–97 in 10 s; a 4 × 128.5 kbit/s link's
-/// flag-like constant fields showed at most seven rotations).
+/// An octet is the timeslot's when at least this share of superframes
+/// show it as a flag rotation, all eight rotations turn up, and the
+/// rotation changed this many times, slips aside (live: 47 and 74–97 in
+/// 10 s at 2 × and 4 ×, 23–45 at 3 ×; idle octets 0–5).
 const RUN_SHARE: f64 = 0.6;
-const RUN_CHANGES: u32 = 25;
+const RUN_CHANGES: usize = 12;
+/// A slip: rotations changing at once (or in the superframes either side)
+/// in at least this share of the flag-like octets, and more than one
+/// timeslot holds by this factor.
+const SLIP_SHARE: f64 = 0.5;
+const SLIP_TIMESLOTS: f64 = 1.5;
+/// Octets belong to one timeslot when at least this share of the changes
+/// of the busier one fall with the other's (within a superframe); groups
+/// tried at once.
+const TOGETHER: f64 = 0.5;
+const GROUPS: usize = 4;
 /// Frames whose FCS checks that confirm a timeslot, and seconds to wait
 /// for them before looking again.
 const CONFIRM_GOOD: u64 = 3;
 const CONFIRM_SECONDS: f64 = 20.0;
-/// Runs start this far into the frame at most (8 bits must fit).
-const RUN_LAST: usize = FRAME - 8;
 /// 40 ms blocks of silence fill that make a pair of bits a call (live: 93
 /// in 11 s of a talked-over link, 155 in 60 s of an open channel).
 const FILL_PROOF: u64 = 3;
 /// Seconds the voice search goes on after its last find, then stops.
 const VOICE_SEARCH_SECONDS: f64 = 30.0;
+/// The alignment column's cycles learnt from; the bits of a cycle that
+/// may differ from it (placing a frame, or following), and by how many
+/// more any other placement must differ (live: a cycle 14 or 28 frames
+/// off differs in 4 of 42).
+const LEARN_CYCLES: usize = 24;
+const CYCLE_MISSES: usize = 1;
+const CYCLE_MARGIN: usize = 3;
+
+/// Frames a superframe: the fewest that hold whole octets of a 64 kbit/s
+/// timeslot (16/k octets a frame) — 1 at 2 and 4 × 128.5 kbit/s, 3 at 3 ×.
+pub fn superframe_frames(k: usize) -> usize {
+    fn gcd(a: usize, b: usize) -> usize {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let k = k.max(1);
+    k / gcd(16, k)
+}
+
+/// Where payload bit `p` of a superframe sits in its frames, counting the
+/// alignment bits (bit 0 of each frame) — as the stats give runs.
+fn place(p: usize) -> usize {
+    p / PAYLOAD * FRAME + 1 + p % PAYLOAD
+}
 
 /// A G.728 call found in the multiplex.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FastCall {
-    /// Its 64 kbit/s timeslot: where the 8-bit runs start in the frame.
+    /// Its 64 kbit/s timeslot: where its octets start in the superframe
+    /// (bit 0 of each frame the alignment bit).
     pub runs: Vec<usize>,
     /// The first of its two bits in each octet (G.704 numbering: 1 is
     /// sent first).
@@ -79,14 +125,18 @@ pub struct FastCall {
 pub struct FastStats {
     /// Multiples of 128.5 kbit/s: frames come every 2/k ms.
     pub k: usize,
+    /// Frames a superframe ([`superframe_frames`]), and whether they are
+    /// placed (always, for one).
+    pub superframe: usize,
+    pub phased: bool,
     pub aligned: bool,
     pub frames: u64,
     pub faw_errors: u64,
     pub losses: u64,
     /// Share of the bits that differ from 20 ms before, over ~250 frames.
     pub change: f32,
-    /// The HDLC timeslot: where its 8-bit runs start in the frame (bit 0
-    /// the alignment bit), once confirmed.
+    /// The HDLC timeslot: where its octets start in the superframe (bit 0
+    /// of each frame the alignment bit), once confirmed.
     pub hdlc_runs: Vec<usize>,
     /// Its frames whose FCS checked, and the rest (mostly the fragments
     /// between idle flags that share a zero).
@@ -106,32 +156,185 @@ impl FastStats {
 
     /// The timeslot's rate, bits a second.
     pub fn hdlc_bps(&self) -> f64 {
-        8.0 * self.hdlc_runs.len() as f64 / self.frame_seconds()
+        8.0 * self.hdlc_runs.len() as f64 / (self.frame_seconds() * self.superframe.max(1) as f64)
     }
 }
 
-/// One of the two pairings: the stream with its pairs swapped back, framed.
+/// Places frames in superframes of `s` by the alignment column's cycle:
+/// learnt (the column's bits, frame by frame, `len` frames a cycle), then
+/// followed, and found again after a loss of lock.
+struct Phaser {
+    s: usize,
+    len: usize,
+    /// Learning: ones and zeros seen at each place of the cycle, and the
+    /// frames counted (since the last loss).
+    counts: Vec<[u32; 2]>,
+    counted: usize,
+    pattern: Option<Vec<u8>>,
+    /// The last `len` column bits; the place of the last frame in the
+    /// cycle, once known; misses in the cycle being checked.
+    recent: VecDeque<u8>,
+    pos: Option<usize>,
+    misses: usize,
+    checked: usize,
+}
+
+impl Phaser {
+    fn new(s: usize) -> Self {
+        // The alignment word's cycle (2 × 7 frames) and the superframe's.
+        let word = 2 * FAW.len();
+        let len = (1..=s)
+            .map(|n| n * word)
+            .find(|l| l % s == 0)
+            .unwrap_or(word);
+        Phaser {
+            s,
+            len,
+            counts: vec![[0; 2]; len],
+            counted: 0,
+            pattern: None,
+            recent: VecDeque::with_capacity(len + 1),
+            pos: None,
+            misses: 0,
+            checked: 0,
+        }
+    }
+
+    /// Lock was lost: the frames that follow are not in step with these.
+    fn lost(&mut self) {
+        self.recent.clear();
+        self.pos = None;
+        if self.pattern.is_none() {
+            self.counts.fill([0; 2]);
+            self.counted = 0;
+        }
+    }
+
+    /// The next frame's alignment bit; its place in a superframe, once
+    /// known.
+    fn next(&mut self, bit: u8) -> Option<usize> {
+        if self.s == 1 {
+            return Some(0);
+        }
+        let bit = bit & 1;
+        self.recent.push_back(bit);
+        if self.recent.len() > self.len {
+            self.recent.pop_front();
+        }
+        let Some(pattern) = &self.pattern else {
+            self.counts[self.counted % self.len][bit as usize] += 1;
+            self.counted += 1;
+            if self.counted == LEARN_CYCLES * self.len {
+                self.learn();
+            }
+            return None;
+        };
+        let misses = |r: usize| {
+            // Rust note: `zip` pairs the recent bits with the pattern from
+            // place `r` on (`cycle` repeats it), stopping at the shorter.
+            self.recent
+                .iter()
+                .zip(pattern.iter().cycle().skip(r))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        match self.pos {
+            Some(p) => {
+                let p = (p + 1) % self.len;
+                self.pos = Some(p);
+                self.misses += usize::from(pattern[p] != bit);
+                self.checked += 1;
+                if self.checked == self.len {
+                    if self.misses > CYCLE_MISSES + 1 {
+                        self.pos = None;
+                    }
+                    (self.misses, self.checked) = (0, 0);
+                }
+            }
+            None if self.recent.len() == self.len => {
+                // The cycle's place for the oldest recent bit: the best,
+                // if any other superframe placement is clearly worse.
+                let m: Vec<usize> = (0..self.len).map(misses).collect();
+                let best = (0..self.len).min_by_key(|&r| m[r]).expect("a cycle");
+                let rival = (0..self.len)
+                    .filter(|r| !(r + self.len - best).is_multiple_of(self.s))
+                    .map(|r| m[r])
+                    .min()
+                    .unwrap_or(usize::MAX);
+                if m[best] <= CYCLE_MISSES && rival >= m[best] + CYCLE_MARGIN {
+                    self.pos = Some((best + self.len - 1) % self.len);
+                    (self.misses, self.checked) = (0, 0);
+                }
+            }
+            None => {}
+        }
+        self.pos.map(|p| p % self.s)
+    }
+
+    /// The column's bit at each place of the cycle, if every place is
+    /// clear and no placement but the right one fits it; else start again.
+    fn learn(&mut self) {
+        let clear = self
+            .counts
+            .iter()
+            .all(|c| c[0].max(c[1]) as f64 >= 0.9 * (c[0] + c[1]) as f64);
+        let pattern: Vec<u8> = self.counts.iter().map(|c| u8::from(c[1] > c[0])).collect();
+        let distinct = (1..self.len)
+            .filter(|r| !r.is_multiple_of(self.s))
+            .all(|r| {
+                let d = (0..self.len)
+                    .filter(|&i| pattern[i] != pattern[(i + r) % self.len])
+                    .count();
+                d >= CYCLE_MISSES + CYCLE_MARGIN
+            });
+        if clear && distinct {
+            self.pattern = Some(pattern);
+        } else {
+            self.counts.fill([0; 2]);
+            self.counted = 0;
+        }
+    }
+}
+
+/// A group of octets being tried as the HDLC timeslot.
+struct Trial {
+    runs: Vec<usize>,
+    hdlc: Hdlc,
+    frames: Vec<(Vec<u8>, Fcs)>,
+}
+
+/// One of the two pairings: the stream with its pairs swapped back, framed
+/// and put into superframes.
 struct Lane {
     /// Swap the pair starting at absolute bits of this parity.
     parity: u64,
-    /// Frames in `DISCOVER_SECONDS` and in `CONFIRM_SECONDS`.
+    /// Multiples of 128.5 kbit/s; frames a superframe.
+    k: usize,
+    s: usize,
+    /// Superframes in `DISCOVER_SECONDS` and in `CONFIRM_SECONDS`.
     discover: u64,
     confirm: u64,
     /// A bit waiting for its partner.
     pend: Option<u8>,
     tdm: TdmRx,
     swapped: Vec<u8>,
-    /// Discovery: frames counted, and per run start the frames showing a
-    /// flag rotation, the rotations seen (a bit each), the last one, and
-    /// the changes.
+    losses: u64,
+    phaser: Phaser,
+    /// The superframe's payload so far.
+    sf: Vec<u8>,
+    /// Discovery: superframes counted, and per octet the superframes
+    /// showing a flag rotation, the rotations seen (a bit each), the last
+    /// one, and the superframes it changed in.
     seen: u64,
     share: Vec<u32>,
     rots: Vec<u8>,
     last: Vec<u8>,
-    changes: Vec<u32>,
-    /// The timeslot being tried or confirmed, and since which frame.
-    runs: Vec<usize>,
+    when: Vec<Vec<u32>>,
+    /// The groups being tried, and since which superframe.
+    trials: Vec<Trial>,
     since: u64,
+    /// The timeslot (payload bits where its octets start), once confirmed.
+    runs: Vec<usize>,
     confirmed: bool,
     hdlc: Hdlc,
     good: u64,
@@ -139,8 +342,8 @@ struct Lane {
     bits: Vec<u8>,
     /// Voice, once the HDLC timeslot is confirmed: the candidate
     /// timeslots, each with a G.728 framer on every pair of neighbouring
-    /// bits; the calls found; frames since the search began or last found
-    /// one, and since how many it stops; whether it has.
+    /// bits; the calls found; superframes since the search began or last
+    /// found one, and since how many it stops; whether it has.
     search: Vec<(Vec<usize>, Vec<g728::Lane>)>,
     calls: Vec<Call>,
     searched: u64,
@@ -156,22 +359,23 @@ struct Lane {
     scratch: Vec<f32>,
 }
 
-/// A G.728 call: its timeslot's runs and the framer on its bits.
+/// A G.728 call: its timeslot's octets and the framer on its bits.
 struct Call {
     runs: Vec<usize>,
     lane: g728::Lane,
 }
 
-/// The candidate voice timeslots: the HDLC timeslot's runs moved along by
-/// whole octets, as far as the frame allows, clear of the HDLC runs.
-fn shifts(runs: &[usize]) -> Vec<Vec<usize>> {
+/// The candidate voice timeslots: the HDLC timeslot's octets moved along
+/// by whole octets, as far as the superframe's `payload` bits allow, clear
+/// of the HDLC octets.
+fn shifts(runs: &[usize], payload: usize) -> Vec<Vec<usize>> {
     let (Some(&lo), Some(&hi)) = (runs.first(), runs.last()) else {
         return Vec::new();
     };
     // Rust note: `i64` because the shifts go both ways; `step_by` counts
     // from the range's start, so start on a multiple of 8.
-    let first = -((lo as i64 - 1) / 8 * 8);
-    (first..=(RUN_LAST - hi) as i64)
+    let first = -(lo as i64 / 8 * 8);
+    (first..=(payload - 8 - hi) as i64)
         .step_by(8)
         .filter(|&d| d != 0)
         .map(|d| {
@@ -192,26 +396,47 @@ fn rotation(byte: u8) -> u8 {
         .map_or(255, |r| r as u8)
 }
 
+/// How many of the times in `a` have one in `b` within one (both sorted).
+fn together(a: &[u32], b: &[u32]) -> usize {
+    let mut j = 0;
+    a.iter()
+        .filter(|&&t| {
+            while j < b.len() && b[j] + 1 < t {
+                j += 1;
+            }
+            j < b.len() && b[j] <= t + 1
+        })
+        .count()
+}
+
 impl Lane {
     /// `k`: frames come every 2/k ms.
     fn new(parity: u64, k: usize) -> Self {
         let mut tdm = TdmRx::new();
         tdm.keep_frames = true;
-        let per_second = 500.0 * k as f64;
+        let s = superframe_frames(k);
+        let per_second = 500.0 * k as f64 / s as f64;
+        let octets = s * PAYLOAD / 8;
         Lane {
             parity,
+            k,
+            s,
             discover: (DISCOVER_SECONDS * per_second) as u64,
             confirm: (CONFIRM_SECONDS * per_second) as u64,
             pend: None,
             tdm,
             swapped: Vec::new(),
+            losses: 0,
+            phaser: Phaser::new(s),
+            sf: Vec::with_capacity(s * PAYLOAD),
             seen: 0,
-            share: vec![0; RUN_LAST + 1],
-            rots: vec![0; RUN_LAST + 1],
-            last: vec![255; RUN_LAST + 1],
-            changes: vec![0; RUN_LAST + 1],
-            runs: Vec::new(),
+            share: vec![0; octets],
+            rots: vec![0; octets],
+            last: vec![255; octets],
+            when: vec![Vec::new(); octets],
+            trials: Vec::new(),
             since: 0,
+            runs: Vec::new(),
             confirmed: false,
             hdlc: Hdlc::default(),
             good: 0,
@@ -243,27 +468,53 @@ impl Lane {
             }
         }
         self.tdm.push(&self.swapped);
+        // Lost lock: the frames since are not in step with those before
+        // (which superframe place, which flag rotation).
+        if self.tdm.stats.losses != self.losses {
+            self.losses = self.tdm.stats.losses;
+            self.phaser.lost();
+            self.sf.clear();
+            self.last.fill(255);
+        }
         let frames = std::mem::take(&mut self.tdm.frames_out);
         // Rust note: `as_chunks` views the bits as whole [u8; FRAME]
         // arrays (and a remainder, empty here).
         for f in frames.as_chunks::<FRAME>().0 {
-            self.frame(f, out);
+            match self.phaser.next(f[0]) {
+                Some(0) => {
+                    self.sf.clear();
+                    self.sf.extend_from_slice(&f[1..]);
+                }
+                Some(i) if self.sf.len() == i * PAYLOAD => self.sf.extend_from_slice(&f[1..]),
+                _ => {
+                    self.sf.clear();
+                    continue;
+                }
+            }
+            if self.sf.len() == self.s * PAYLOAD {
+                // Rust note: `take` lends the buffer out (leaving an empty
+                // one) so that `superframe` can borrow `self` mutably.
+                let sf = std::mem::take(&mut self.sf);
+                self.superframe(&sf, out);
+                self.sf = sf;
+                self.sf.clear();
+            }
         }
     }
 
-    fn frame(&mut self, f: &[u8], out: &mut Vec<Vec<u8>>) {
-        let byte = |j: usize| f[j..j + 8].iter().fold(0u8, |a, &b| (a << 1) | b);
+    fn superframe(&mut self, p: &[u8], out: &mut Vec<Vec<u8>>) {
+        let byte = |j: usize| p[j..j + 8].iter().fold(0u8, |a, &b| (a << 1) | b);
         self.seen += 1;
-        if self.runs.is_empty() {
-            for j in 1..=RUN_LAST {
-                let r = rotation(byte(j));
+        if self.runs.is_empty() && self.trials.is_empty() {
+            for o in 0..self.share.len() {
+                let r = rotation(byte(8 * o));
                 if r != 255 {
-                    self.share[j] += 1;
-                    self.rots[j] |= 1 << r;
-                    if self.last[j] != 255 && self.last[j] != r {
-                        self.changes[j] += 1;
+                    self.share[o] += 1;
+                    self.rots[o] |= 1 << r;
+                    if self.last[o] != 255 && self.last[o] != r {
+                        self.when[o].push(self.seen as u32);
                     }
-                    self.last[j] = r;
+                    self.last[o] = r;
                 }
             }
             if self.seen >= self.discover {
@@ -271,32 +522,53 @@ impl Lane {
             }
             return;
         }
+        // The groups on trial: the first whose frames check is the
+        // timeslot.
+        if !self.trials.is_empty() {
+            for t in &mut self.trials {
+                self.bits.clear();
+                for &j in &t.runs {
+                    self.bits.extend(p[j..j + 8].iter().map(|&b| 1 - b));
+                }
+                t.frames.clear();
+                t.hdlc.push(&self.bits, &mut t.frames);
+            }
+            let best = (0..self.trials.len())
+                .max_by_key(|&i| self.trials[i].hdlc.good)
+                .expect("trials");
+            self.good = self.trials[best].hdlc.good;
+            self.bad = self.trials[best].hdlc.bad;
+            if self.good >= CONFIRM_GOOD {
+                let t = self.trials.swap_remove(best);
+                self.trials.clear();
+                self.runs = t.runs;
+                self.hdlc = t.hdlc;
+                self.confirmed = true;
+                out.extend(t.frames.into_iter().map(|(fr, _)| fr));
+            } else if self.seen - self.since > self.confirm {
+                self.restart();
+            }
+            return;
+        }
         // The timeslot's bits, the line inverted, to the deframer.
         self.bits.clear();
         for &j in &self.runs {
-            self.bits.extend(f[j..j + 8].iter().map(|&b| 1 - b));
+            self.bits.extend(p[j..j + 8].iter().map(|&b| 1 - b));
         }
         let mut frames = Vec::new();
         self.hdlc.push(&self.bits, &mut frames);
         self.good = self.hdlc.good;
         self.bad = self.hdlc.bad;
-        if self.good >= CONFIRM_GOOD {
-            self.confirmed = true;
-        }
-        if self.confirmed {
-            out.extend(frames.into_iter().map(|(fr, _): (Vec<u8>, Fcs)| fr));
-            self.voice(f);
-        } else if self.seen - self.since > self.confirm {
-            self.restart();
-        }
+        out.extend(frames.into_iter().map(|(fr, _): (Vec<u8>, Fcs)| fr));
+        self.voice(p);
     }
 
     /// The voice timeslots: G.728 looked for in the candidates, the calls
     /// found decoded.
-    fn voice(&mut self, f: &[u8]) {
-        let byte = |j: usize| f[j..j + 8].iter().fold(0u8, |a, &b| (a << 1) | b);
+    fn voice(&mut self, p: &[u8]) {
+        let byte = |j: usize| p[j..j + 8].iter().fold(0u8, |a, &b| (a << 1) | b);
         if !self.search_done && self.search.is_empty() && self.calls.is_empty() {
-            self.search = shifts(&self.runs)
+            self.search = shifts(&self.runs, p.len())
                 .into_iter()
                 .map(|runs| (runs, (1..=7).map(g728::Lane::new).collect()))
                 .collect();
@@ -360,31 +632,76 @@ impl Lane {
         }
     }
 
-    /// Take the runs that look like the timeslot, the best of any that
-    /// overlap, in frame order.
+    /// The octets that look like the timeslot — flags changing rotation
+    /// other than in slips — grouped by changing together; each group goes
+    /// on trial.
     fn choose(&mut self) {
-        let mut cands: Vec<(usize, f64)> = (1..=RUN_LAST)
-            .filter(|&j| {
-                self.rots[j] == 0xFF
-                    && self.changes[j] >= RUN_CHANGES
-                    && self.share[j] as f64 >= RUN_SHARE * self.seen as f64
-            })
-            .map(|j| (j, self.share[j] as f64))
+        let n = self.seen as usize;
+        let flaglike: Vec<usize> = (0..self.share.len())
+            .filter(|&o| self.share[o] as f64 >= RUN_SHARE * n as f64)
             .collect();
-        cands.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let mut runs: Vec<usize> = Vec::new();
-        for (j, _) in cands {
-            if runs.iter().all(|&r| r.abs_diff(j) >= 8) {
-                runs.push(j);
+        // Slips: more octets turning at once than one timeslot has.
+        let mut count = vec![0u32; n + 3];
+        for &o in &flaglike {
+            for &t in &self.when[o] {
+                count[t as usize] += 1;
             }
         }
-        runs.sort_unstable();
-        if runs.is_empty() {
+        let timeslot = (16 * self.s / self.k) as f64;
+        let slip_at = (SLIP_TIMESLOTS * timeslot).max(SLIP_SHARE * flaglike.len() as f64);
+        let slip = |t: u32| {
+            let t = t as usize;
+            (count[t.saturating_sub(1)] + count[t] + count[t + 1]) as f64 >= slip_at
+        };
+        let mut cands: Vec<(usize, Vec<u32>)> = flaglike
+            .iter()
+            .filter(|&&o| self.rots[o] == 0xFF)
+            .map(|&o| {
+                (
+                    o,
+                    self.when[o].iter().copied().filter(|&t| !slip(t)).collect(),
+                )
+            })
+            .filter(|(_, w): &(usize, Vec<u32>)| w.len() >= RUN_CHANGES)
+            .collect();
+        cands.sort_by_key(|(_, w)| std::cmp::Reverse(w.len()));
+        // On trial: all of them (live, the timeslot is that, even where
+        // its octets do not change together — idling with something other
+        // than flags, bit errors make most of their changes), then groups
+        // that change together, in case others crept in.
+        let mut groups: Vec<Vec<usize>> = vec![cands.iter().map(|(o, _)| 8 * o).collect()];
+        let mut used = vec![false; cands.len()];
+        for i in 0..cands.len() {
+            if used[i] || groups.len() > GROUPS {
+                continue;
+            }
+            used[i] = true;
+            let mut runs = vec![8 * cands[i].0];
+            for j in i + 1..cands.len() {
+                let (a, b) = (&cands[i].1, &cands[j].1);
+                if !used[j] && together(b, a) as f64 >= TOGETHER * a.len().max(b.len()) as f64 {
+                    used[j] = true;
+                    runs.push(8 * cands[j].0);
+                }
+            }
+            groups.push(runs);
+        }
+        let mut trials: Vec<Trial> = Vec::new();
+        for mut runs in groups {
+            runs.sort_unstable();
+            if !runs.is_empty() && trials.iter().all(|t| t.runs != runs) {
+                trials.push(Trial {
+                    runs,
+                    hdlc: Hdlc::default(),
+                    frames: Vec::new(),
+                });
+            }
+        }
+        if trials.is_empty() {
             self.restart();
         } else {
-            self.runs = runs;
+            self.trials = trials;
             self.since = self.seen;
-            self.hdlc = Hdlc::default();
         }
     }
 
@@ -392,7 +709,8 @@ impl Lane {
         self.share.fill(0);
         self.rots.fill(0);
         self.last.fill(255);
-        self.changes.fill(0);
+        self.when.iter_mut().for_each(Vec::clear);
+        self.trials.clear();
         self.runs.clear();
         self.seen = 0;
         self.since = 0;
@@ -434,6 +752,7 @@ impl FastRx {
             change: 0.0,
             stats: FastStats {
                 k,
+                superframe: superframe_frames(k),
                 ..Default::default()
             },
             frames: Vec::new(),
@@ -479,15 +798,18 @@ impl FastRx {
         let lane = &self.lanes[li];
         self.voice_clock = lane.clock;
         let t = &lane.tdm.stats;
+        let places = |runs: &[usize]| runs.iter().map(|&p| place(p)).collect::<Vec<_>>();
         self.stats = FastStats {
             k: self.stats.k,
+            superframe: lane.s,
+            phased: lane.s == 1 || lane.phaser.pos.is_some(),
             aligned: t.locked,
             frames: t.frames,
             faw_errors: t.faw_errors,
             losses: t.losses,
             change: self.change as f32,
             hdlc_runs: if lane.confirmed {
-                lane.runs.clone()
+                places(&lane.runs)
             } else {
                 Vec::new()
             },
@@ -497,7 +819,7 @@ impl FastRx {
                 .calls
                 .iter()
                 .map(|c| FastCall {
-                    runs: c.runs.clone(),
+                    runs: places(&c.runs),
                     bit: c.lane.bits[0].leading_zeros() as u8 + 1,
                     talking: c.lane.talking(),
                     talk_blocks: c.lane.framer.talk_blocks,
@@ -512,7 +834,6 @@ impl FastRx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tdm257::FAW;
 
     /// The test frames: `payload`, then it with one to three bytes more
     /// (lengths vary, so the flags between them fall at every phase).
@@ -612,7 +933,7 @@ mod tests {
 
     #[test]
     fn finds_the_hdlc_timeslot_and_its_frames() {
-        let runs = [16, 57, 81, 121, 145, 185, 209, 249];
+        let runs = [17, 57, 81, 121, 145, 185, 209, 249];
         let frames = 14_000;
         let payload: Vec<u8> = (0..60u8).map(|i| i.wrapping_mul(37) ^ 0x5A).collect();
         let line = hdlc_line(frames * runs.len() * 8, &payload, 300);
@@ -661,8 +982,8 @@ mod tests {
 
     #[test]
     fn finds_the_calls_in_the_voice_timeslot() {
-        let runs = [16, 57, 81, 121, 145, 185, 209, 249];
-        // The voice timeslot an octet earlier: the one place it fits.
+        let runs = [17, 57, 81, 121, 145, 185, 209, 249];
+        // The voice timeslot an octet earlier (of the two places it fits).
         let vruns: Vec<usize> = runs.iter().map(|r| r - 8).collect();
         let frames = 14_000;
         let payload: Vec<u8> = (0..40u8).collect();
@@ -694,6 +1015,107 @@ mod tests {
         assert!(rx.voice_clock > 8000 && rx.voice_clock.is_multiple_of(8));
     }
 
+    /// A 3 × 128.5 kbit/s link as seen: superframes of three frames, the
+    /// alignment column a 42-frame cycle (the live one's), the payload
+    /// groups of four octets in turn [voice, idle, HDLC, voice], [idle,
+    /// HDLC, idle, idle], [idle × 4] — sixteen HDLC octets a superframe,
+    /// the `calls` on the voice ones — then every QPSK pair swapped, and
+    /// `cut.1` bits lost at bit `cut.0`.
+    fn link3(sfs: usize, line: &[u8], calls: &[(usize, Vec<u8>)], cut: (usize, usize)) -> Vec<u8> {
+        const ODD: &[u8; 21] = b"111111111111101111101";
+        let idle = [0u8, 0, 0, 1, 1, 0, 0, 0];
+        let (mut h, mut v) = (0, 0);
+        let mut out = Vec::new();
+        for sf in 0..sfs {
+            let mut p = Vec::with_capacity(3 * PAYLOAD);
+            for g in 0..24 {
+                for j in 0..4 {
+                    match (g % 3, j) {
+                        (1, 2) | (2, 1) => {
+                            p.extend_from_slice(&line[8 * h..8 * h + 8]);
+                            h += 1;
+                        }
+                        (1, 0) | (1, 3) => {
+                            let mut o = [0u8; 8];
+                            for (bit, stream) in calls {
+                                o[bit - 1] = stream[2 * v];
+                                o[*bit] = stream[2 * v + 1];
+                            }
+                            p.extend_from_slice(&o);
+                            v += 1;
+                        }
+                        _ => p.extend_from_slice(&idle),
+                    }
+                }
+            }
+            for (i, pay) in p.chunks(PAYLOAD).enumerate() {
+                let f = 3 * sf + i;
+                out.push(if f % 2 == 0 {
+                    FAW[(f / 2) % FAW.len()]
+                } else {
+                    ODD[(f / 2) % ODD.len()] - b'0'
+                });
+                out.extend_from_slice(pay);
+            }
+        }
+        out.truncate(out.len() / 2 * 2);
+        let mut out: Vec<u8> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| [p[1], p[0]])
+            .collect();
+        out.drain(cut.0..cut.0 + cut.1);
+        out
+    }
+
+    #[test]
+    fn a_3x_link_in_superframes_through_a_slip() {
+        let sfs = 11_000; // 22 s
+        let payload: Vec<u8> = (0..50u8).map(|i| i ^ 0xA5).collect();
+        let line = hdlc_line(sfs * 16 * 8, &payload, 300);
+        // Speech on bits 2–3 from 12 s to 14 s, fill on 4–5; 32 bits a
+        // superframe each.
+        let n = sfs * 32;
+        let calls = [(2, call(n, 19_200..22_400, 9)), (4, call(n, 0..0, 0))];
+        // At 16 s two frames and two bits go: lock lost, and the
+        // superframes out of step until placed again.
+        let at = 8_000 * 3 * FRAME + 100;
+        let bits = link3(sfs, &line, &calls, (at, 2 * FRAME + 2));
+        let mut rx = FastRx::new(3);
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        for (i, chunk) in bits.chunks(4096).enumerate() {
+            rx.push(chunk);
+            if i * 4096 < at {
+                before.append(&mut rx.frames);
+            } else {
+                after.append(&mut rx.frames);
+            }
+        }
+        let s = &rx.stats;
+        assert_eq!((s.superframe, s.phased), (3, true), "{s:?}");
+        assert!(s.losses >= 1, "the slip lost lock: {s:?}");
+        assert_eq!(s.hdlc_runs.len(), 16, "{s:?}");
+        assert_eq!(s.hdlc_bps(), 64_000.0);
+        let sent = payloads(&payload);
+        assert!(
+            before.len() >= 5 && after.len() >= 50,
+            "{} {}",
+            before.len(),
+            after.len()
+        );
+        assert!(before.iter().chain(&after).all(|f| sent.contains(f)));
+        let mut found: Vec<(u8, bool)> =
+            s.calls.iter().map(|c| (c.bit, c.talk_blocks > 0)).collect();
+        found.sort_unstable();
+        assert_eq!(found, [(2, true), (4, false)], "{:?}", s.calls);
+        assert!(
+            s.calls
+                .iter()
+                .all(|c| c.runs.len() == 16 && c.fill_blocks > 0)
+        );
+    }
+
     #[test]
     fn no_timeslot_in_random_frames() {
         let frames = 14_000;
@@ -710,7 +1132,7 @@ mod tests {
         };
         let bits = link(
             frames,
-            &[16, 57, 81, 121, 145, 185, 209, 249],
+            &[17, 57, 81, 121, 145, 185, 209, 249],
             &line,
             (&[], &[]),
         );

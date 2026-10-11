@@ -698,8 +698,20 @@ pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
 
 /// A k × 128.5 kbit/s link's multiplex.
 pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
+    // Where octets are: in the frame, or (when a timeslot spans frames) in
+    // the superframe, frame after frame.
+    let (sf, at) = match s.superframe {
+        0 | 1 => (String::new(), "frame bits"),
+        n => (
+            format!(
+                " · {n}-frame superframes{}",
+                if s.phased { "" } else { " (placing)" }
+            ),
+            "superframe bits",
+        ),
+    };
     println!(
-        "tdm 257 at {} × 128.5 kbit/s: {} · {} frames ({:.2} ms) · {} alignment-bit errors · \
+        "tdm 257 at {} × 128.5 kbit/s: {} · {} frames ({:.2} ms){sf} · {} alignment-bit errors · \
          {} losses · bits changed from 20 ms before {:.2} %",
         s.k,
         if s.aligned { "aligned" } else { "searching" },
@@ -711,7 +723,7 @@ pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
     );
     if !s.hdlc_runs.is_empty() {
         println!(
-            "  HDLC timeslot: {:.0} kbit/s in 8-bit runs at frame bits {:?}, inverted line \
+            "  HDLC timeslot: {:.0} kbit/s in octets at {at} {:?}, inverted line \
              · {} frames with a good FCS ({} fragments between flags or bad FCS)",
             s.hdlc_bps() / 1e3,
             s.hdlc_runs,
@@ -721,7 +733,7 @@ pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
     }
     for c in &s.calls {
         println!(
-            "  G.728 call on bits {}–{} of the 64 kbit/s timeslot at frame bits {:?} · \
+            "  G.728 call on bits {}–{} of the 64 kbit/s timeslot at {at} {:?} · \
              {:.1} s of speech, {:.1} s of silence fill",
             c.bit,
             c.bit + 1,

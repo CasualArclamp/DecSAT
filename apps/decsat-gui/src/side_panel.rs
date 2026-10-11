@@ -2166,9 +2166,14 @@ fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
+    let superframes = if t.superframe > 1 {
+        format!(", in {}s", t.superframe)
+    } else {
+        String::new()
+    };
     ui.label(
         RichText::new(format!(
-            "TDM multiplex ({} × 128.5 kbit/s: 257-bit frames, {:.2} ms)",
+            "TDM multiplex ({} × 128.5 kbit/s: 257-bit frames, {:.2} ms{superframes})",
             t.k,
             1e3 * t.frame_seconds()
         ))
@@ -2177,10 +2182,14 @@ fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
     egui::Grid::new("tdmfast").num_columns(2).show(ui, |ui| {
         ui.label("Alignment");
         ui.colored_label(
-            if t.aligned { good } else { wait },
+            if t.aligned && t.phased { good } else { wait },
             format!(
                 "{} · {} frames · {} word-bit errors{}",
-                if t.aligned { "aligned" } else { "searching" },
+                match (t.aligned, t.phased) {
+                    (false, _) => "searching",
+                    (true, false) => "aligned, placing superframes",
+                    (true, true) => "aligned",
+                },
                 t.frames,
                 t.faw_errors,
                 if t.losses > 0 {
@@ -2216,8 +2225,13 @@ fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
                 ),
             )
             .on_hover_text(format!(
-                "A 64 kbit/s timeslot in 8-bit runs at frame bits {:?}; \
+                "A 64 kbit/s timeslot in octets at {} bits {:?}; \
                  the call is on two bits of each octet.",
+                if t.superframe > 1 {
+                    "superframe"
+                } else {
+                    "frame"
+                },
                 c.runs
             ));
             ui.end_row();
