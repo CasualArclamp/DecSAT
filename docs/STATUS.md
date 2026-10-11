@@ -1992,3 +1992,42 @@ look: measure the HackRF's close-in phase noise against centre frequency.
 Open: the faster FastLinks' payload; the Comtech 8PSK; what the BPSK
 carriers are; a live DVB-CID (none found yet); TDMA burst demodulation;
 the HackRF tunings that slip.
+
+## Two Q-Flex calls sharing channels: the "monster" voice (2026-10-11)
+
+Rory, live on ASA211 ESP-ML (12327.868 MHz, rails skewed) and ASA197
+TMR-ML: the call voice "sounded like a monster". The GUI had built the
+stream from channels 0, 1, 2, 3 and was decoding noise with speech's sync.
+
+- **Two calls, not one.** At both sites channels 1 and 2 carry fill (and
+  speech) in *both* halves of their 4 ms subframes, each half at its own
+  offset; 0, 3, 4 and 15 in one half, as on qflex_3. Read from the TMR-ML
+  fill: call A = 1 (positions 0–15, offset 54) and 3 (16–31, 54) for the even
+  bits, 4 (0–15, 55) and 2 (16–31, 55) for the odd; call B = 15 (0–14, 128)
+  and 1 (16–31, 126) even, 2 (0–15, 127) and 0 (16–31, 127) odd — two 16 kbit/s
+  G.728 streams in the same layout as qflex_3's (odd members one bit after
+  the even, a spread of 2). On Rory's 2 s ESP-ML recording both carry speech
+  at once (voicing 0.56 and 0.57 against 0.38 for the confirmed qflex_3 call;
+  same talker on both, cross-correlation 0.68).
+- **Why the growl.** `calibrate` kept one run per channel, so call B's
+  halves of 1 and 2 were never placed and call B could not be built; and an
+  odd-bit channel sees only the fill count's bits 2 and 0, which repeat every
+  8 codewords, so its offset is known only modulo 80 — channel 2's call-B
+  half (127) read 47 and channel 0 (127) read 47, within `group`'s ±40 of call
+  A's 54. The GUI's {0, 1, 2, 3} was call A's even bits with call B's odd
+  bits: sync bits right (so "speech"), codewords wrong (voicing 0.35).
+- **Fix** (`tdm257`): `calibrate` returns every run of 14–20 fill bits per
+  channel (runs sharing most bits are one half at two offsets); `group`
+  wants a stream's offsets within `SPREAD` = 4 (every call seen spans 2), so
+  an 80-ambiguous member cannot join the other call; a stream that frames
+  speech is chosen and only the ways sharing a channel's half with it go,
+  so the second call is chosen too; the voice output is one call at a time
+  (`FLOOR_HOLD`, 1 s), `stats.voice` the chosen calls together. TMR-ML's
+  fill now groups into exactly the two calls (with their 15/16-bit window
+  variants) and no mix; Rory's ESP-ML call through the receiver with those
+  placements gives both calls, speech out (voicing 0.57); the qflex_3 call
+  decodes as before (248 blocks). Test: two calls on the ASA211 layout,
+  found from silence, each chosen from its own halves.
+- Decoded: `tests\qflex-voice\esp-ml-call-A-ch1234.wav`,
+  `esp-ml-call-B-ch0-1-2-15.wav`, and the 0.9.0 mix
+  (`esp-ml-monster-as-0.9.0-mixed.wav`) for comparison.
