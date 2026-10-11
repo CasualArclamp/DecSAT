@@ -8,7 +8,8 @@
 //! decoder hands its data over in blocks of 4096 bits — 0.43 s, four
 //! sectors at a time — so the beam is drawn turning at the measured scan
 //! rate from the latest sector message, on the feed's own clock (see
-//! [`Sweep`]), and eased onto each new message rather than jumping to it.
+//! [`Sweep`]), and eased onto each new message rather than jumping to it
+//! (a fading glow behind it is a switch, off by default).
 //! On the PH-ML recording it turns at 95–103°/s in 90 % of frames (the
 //! scan's 97.6°/s); jumping sector to sector it moved 45° every 0.43 s.
 
@@ -36,6 +37,8 @@ pub struct RadarScope {
     trails: bool,
     /// Show tracks in decline (status 83n0: no plot this scan).
     declining: bool,
+    /// A fading glow behind the beam (off: the beam's line alone).
+    glow: bool,
     sweep: Option<Sweep>,
 }
 
@@ -135,6 +138,7 @@ impl Default for RadarScope {
             labels: true,
             trails: true,
             declining: true,
+            glow: false,
             sweep: None,
         }
     }
@@ -236,6 +240,8 @@ impl RadarScope {
             ui.checkbox(&mut self.trails, "Trails");
             ui.checkbox(&mut self.declining, "Tracks in decline")
                 .on_hover_text("Tracks reported with status 83n0h: no plot on this scan");
+            ui.checkbox(&mut self.glow, "Beam glow")
+                .on_hover_text("A fading glow behind the beam; off, the beam's line alone");
             ui.separator();
             ui.label("Range");
             for nm in [25.0, 50.0, 100.0, 250.0] {
@@ -336,7 +342,7 @@ impl RadarScope {
                 );
             }
         }
-        // The beam, turning, with a fading glow behind it.
+        // The beam, turning; a fading glow behind it if asked.
         if let Some(beam) = Sweep::update(&mut self.sweep, v) {
             let r = reach * px_per_nm;
             let at = |deg: f32| {
@@ -345,7 +351,7 @@ impl RadarScope {
             };
             const GLOW_DEG: f32 = 40.0;
             const SLICES: usize = 24;
-            for k in 0..SLICES {
+            for k in (0..SLICES).filter(|_| self.glow) {
                 let a0 = beam - GLOW_DEG * k as f32 / SLICES as f32;
                 let a1 = beam - GLOW_DEG * (k + 1) as f32 / SLICES as f32;
                 let alpha = (48.0 * (1.0 - k as f32 / SLICES as f32)) as u8;
