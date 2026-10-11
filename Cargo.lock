@@ -689,6 +689,7 @@ dependencies = [
  "decsat-gse",
  "decsat-io",
  "decsat-ip",
+ "decsat-mod",
  "decsat-ts",
  "eframe",
  "egui_plot",
