@@ -2401,3 +2401,35 @@ stays a line, neighbours are untouched. On a survey capture the PH-ML
 carrier reads "9.5 kS/s, 11.3 kHz wide, 13.8 dB" where it read "10.3 kS/s
 (narrow)", and the band's two spurs stay narrow lines. Cost: a few ms
 every 500 ms while narrow lines are present.
+
+## D&I++ with two timeslots: the 87.2 kS/s TPC carriers (2026-10-12)
+
+Two TPC 2964 carriers at 87.2 kS/s (12345.46 and 12345.82 GHz, not in
+Rory's plan by name) decoded (470 frames in 8 s, BER 2.5e-3 and 3.5e-3)
+but "payload not recognised". Their data rate, 87 228 × 2 × 2223/2964 =
+130 850 bit/s, is 2 × 64 kbit/s × 46/45: D&I++ with two timeslots. Under
+the V.35 descrambler (taps 3, 20) the D&I++ header turns up every
+**5888** bits — two 2944-bit blocks — not every 2944, so `DiPlusRx`,
+which wanted three consecutive 2944-bit frames, never aligned. Folding
+the descrambled bits at 5888 on the header (177 frames, both carriers):
+
+| bits        | first block                  | second block (2944 on)       |
+|-------------|------------------------------|------------------------------|
+| 0–23        | `000001010111101000111 000`  | `000001010111101000111 111`  |
+| 600, 1186, 1772 | `0111111111` (constancy ≥ 0.99) | the same               |
+| 2358        | one or two bits varying      | the same                     |
+
+So the header is a 21-bit sync and three bits that are `000` in a
+frame's first block and `111` in its second (what they say with more
+timeslots is not known: a counter, flags…), and a frame of n timeslots
+is n blocks in the same 45 ms. The deframer now matches the 21 sync bits
+only, counts the blocks between first blocks (`DiPlusStats::timeslots`,
+with `frame_n` to make such frames for tests), and the engine takes that
+count over the one it derives from the data rate. The timeslots' bytes
+are taken to alternate (the engine's `dandi_bytes` already split them
+so): read that way, channel 1 of both carriers carries the G.728 silence
+fill in bits 2–3 like the one-timeslot CDM-600L carriers (−15 dBFS,
+silent), which a wrong interleave would not give; channel 2 (−14.6 dBFS)
+shows no coding the E1 stage knows. Both carriers: "E1 timeslots, Comtech
+D&I++ framing … Comtech D&I++, 2 × 64 kbit/s" now; the second has 19
+slips and 45 UW misses in 8 s (HackRF tuning, as before).

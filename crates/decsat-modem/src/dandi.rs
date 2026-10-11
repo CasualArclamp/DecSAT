@@ -7,7 +7,8 @@
 //!
 //! | bits      | what                                   |
 //! |-----------|----------------------------------------|
-//! | 0–23      | header `000001010111101000111000`      |
+//! | 0–20      | sync `000001010111101000111`           |
+//! | 21–23     | `000` in a frame's first block         |
 //! | 24–599    | data: 72 bytes                         |
 //! | 600–609   | overhead `0111111111`                  |
 //! | 610–1185  | data                                   |
@@ -18,18 +19,26 @@
 //! | 2358–2367 | overhead, one bit varying (status)     |
 //! | 2368–2943 | data                                   |
 //!
-//! The data are the timeslots' bytes, MSB first, in order: 360 a frame
-//! (45 ms of one 64 kbit/s channel). With several timeslots the bytes are
-//! taken to alternate between them, which is not yet confirmed on a carrier.
+//! The data are the timeslots' bytes, MSB first, in order: 360 a block
+//! (45 ms of one 64 kbit/s channel). With n timeslots a frame is n such
+//! blocks in the same 45 ms, the first ending its header `000` and the
+//! others `111` (seen on two 2-timeslot carriers, 87.2 kS/s; what the
+//! three bits say with more timeslots is not known), and the bytes
+//! alternate between the timeslots (the engine splits them).
 
-/// Bits per frame.
+/// Bits per block (a frame of one timeslot).
 pub const FRAME: usize = 2944;
-/// Data bytes per frame.
+/// Data bytes per block.
 pub const DATA_BYTES: usize = 360;
-/// The frame header, bit 0 first.
+/// The block header, bit 0 first: the 21-bit sync, then `000` (a frame's
+/// first block).
 const HEADER: [u8; 24] = [
     0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0,
 ];
+/// The header's sync bits.
+const SYNC: usize = 21;
+/// At most this many blocks (timeslots) a frame are counted.
+const MAX_TIMESLOTS: u32 = 31;
 /// The overhead between data blocks 1–4, bit 0 first.
 const MIDDLE: [u8; 10] = [0, 1, 1, 1, 1, 1, 1, 1, 1, 1];
 /// Where the data blocks start; each is 576 bits.
@@ -42,11 +51,17 @@ const ALIGN: usize = 3;
 const LOSE: u32 = 3;
 
 fn header_errors(bits: &[u8], at: usize) -> usize {
-    HEADER
+    HEADER[..SYNC]
         .iter()
-        .zip(&bits[at..at + 24])
+        .zip(&bits[at..at + SYNC])
         .filter(|(a, b)| a != b)
         .count()
+}
+
+/// The header's last three bits read `000`: a frame's first block (two of
+/// the three suffice, against bit errors).
+fn first_block(bits: &[u8], at: usize) -> bool {
+    bits[at + SYNC..at + 24].iter().filter(|&&b| b == 0).count() >= 2
 }
 
 /// Whether a frame starting at `at` looks right: the header and the three
@@ -75,15 +90,20 @@ pub struct DiPlusStats {
     /// alignments lost.
     pub bad_frames: u64,
     pub losses: u64,
+    /// Blocks a frame — timeslots — as counted between frames' first
+    /// blocks, once two have been seen.
+    pub timeslots: Option<u8>,
 }
 
 /// D&I++ deframing: bits in, the timeslots' bytes out.
 #[derive(Default)]
 pub struct DiPlusRx {
     bits: Vec<u8>,
-    /// Aligned: where the next frame starts in `bits`.
+    /// Aligned: where the next block starts in `bits`.
     at: Option<usize>,
     misses: u32,
+    /// Blocks since (and including) a frame's first block, while aligned.
+    since_first: Option<u32>,
     pub stats: DiPlusStats,
 }
 
@@ -105,11 +125,23 @@ impl DiPlusRx {
             }
             if frame_ok(&self.bits, at) {
                 self.misses = 0;
+                // Count the blocks from one frame's first to the next's.
+                if first_block(&self.bits, at) {
+                    if let Some(n) = self.since_first
+                        && n <= MAX_TIMESLOTS
+                    {
+                        self.stats.timeslots = Some(n as u8);
+                    }
+                    self.since_first = Some(1);
+                } else if let Some(n) = &mut self.since_first {
+                    *n += 1;
+                }
             } else {
                 self.misses += 1;
                 self.stats.bad_frames += 1;
                 if self.misses >= LOSE {
                     self.at = None;
+                    self.since_first = None;
                     self.stats.locked = false;
                     self.stats.losses += 1;
                     used = at;
@@ -138,7 +170,7 @@ impl DiPlusRx {
         }
     }
 
-    /// Look for frames `ALIGN` in a row at any offset.
+    /// Look for blocks `ALIGN` in a row at any offset.
     fn align(&mut self) -> bool {
         let need = ALIGN * FRAME + FRAME;
         if self.bits.len() < need {
@@ -150,6 +182,7 @@ impl DiPlusRx {
                 self.bits.drain(..p);
                 self.at = Some(0);
                 self.misses = 0;
+                self.since_first = None;
                 self.stats.locked = true;
                 true
             }
@@ -163,10 +196,26 @@ impl DiPlusRx {
 }
 
 /// D&I++ framing (for tests and test signals): 360 data bytes in, 2944 bits
-/// out, the varying overhead bit held at 0.
+/// out, the varying overhead bit held at 0 — a frame of one timeslot.
 pub fn frame(data: &[u8; DATA_BYTES], out: &mut Vec<u8>) {
+    block(data, true, out);
+}
+
+/// A frame of `n` timeslots: `n` × 360 data bytes in, `n` blocks out, the
+/// first block's header ending `000`, the others' `111`.
+pub fn frame_n(data: &[u8], n: usize, out: &mut Vec<u8>) {
+    assert_eq!(data.len(), n * DATA_BYTES);
+    for (k, d) in data.as_chunks::<DATA_BYTES>().0.iter().enumerate() {
+        block(d, k == 0, out);
+    }
+}
+
+fn block(data: &[u8; DATA_BYTES], first: bool, out: &mut Vec<u8>) {
     let mut f = vec![0u8; FRAME];
     f[..24].copy_from_slice(&HEADER);
+    if !first {
+        f[SYNC..24].fill(1);
+    }
     for o in [600, 1186, 1772] {
         f[o..o + 10].copy_from_slice(&MIDDLE);
     }
@@ -208,6 +257,44 @@ mod tests {
         // Five stray bits, then every frame whole.
         assert_eq!(out[..], sent[..out.len()]);
         assert_eq!(rx.stats.bad_frames, 0);
+    }
+
+    #[test]
+    fn two_timeslot_frames_align_and_are_counted() {
+        // As the 87.2 kS/s carriers send them: blocks whose header ends
+        // 000 then 111, the bytes of both timeslots in order.
+        let mut bits = vec![0, 1, 1];
+        let mut sent = Vec::new();
+        for k in 0..10u32 {
+            let d: Vec<u8> = (0..2 * DATA_BYTES)
+                .map(|i| (i as u32 * 5 + k * 11) as u8)
+                .collect();
+            frame_n(&d, 2, &mut bits);
+            sent.extend_from_slice(&d);
+        }
+        let mut rx = DiPlusRx::new();
+        let mut out = Vec::new();
+        for c in bits.chunks(2223) {
+            rx.push(c, &mut out);
+        }
+        assert!(rx.stats.locked, "{:?}", rx.stats);
+        assert_eq!(rx.stats.timeslots, Some(2), "{:?}", rx.stats);
+        assert_eq!(rx.stats.bad_frames, 0);
+        assert!(out.len() >= 16 * DATA_BYTES, "{}", out.len());
+        assert_eq!(out[..], sent[..out.len()]);
+    }
+
+    #[test]
+    fn one_timeslot_frames_are_counted_as_one() {
+        let mut bits = Vec::new();
+        for _ in 0..6 {
+            frame(&[0x55; DATA_BYTES], &mut bits);
+        }
+        let mut rx = DiPlusRx::new();
+        let mut out = Vec::new();
+        rx.push(&bits, &mut out);
+        assert!(rx.stats.locked);
+        assert_eq!(rx.stats.timeslots, Some(1), "{:?}", rx.stats);
     }
 
     #[test]

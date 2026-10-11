@@ -2229,10 +2229,18 @@ fn run(
                         stage.slot_packets(&payload_out.slots, channels);
                     }
                     if !payload_out.dandi.is_empty() {
-                        // Timeslots carried: the data rate — the symbol rate
-                        // through the code — is n × 64 kbit/s × 46/45 (the
-                        // D&I++ overhead).
-                        let n = (data_bps * 45.0 / 46.0 / 64e3).round().clamp(1.0, 31.0) as u8;
+                        // Timeslots carried: the blocks a frame as the
+                        // deframer counts them, or, until it has, from the
+                        // data rate — the symbol rate through the code —
+                        // which is n × 64 kbit/s × 46/45 (the D&I++ overhead).
+                        let n = pay
+                            .stats
+                            .dandi
+                            .as_ref()
+                            .and_then(|d| d.timeslots)
+                            .unwrap_or(
+                                (data_bps * 45.0 / 46.0 / 64e3).round().clamp(1.0, 31.0) as u8
+                            );
                         let stage = e1.get_or_insert_with(E1Stage::new);
                         stage.follow(&o);
                         stage.dandi_bytes(n, &payload_out.dandi);
