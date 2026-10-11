@@ -60,15 +60,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             }
         });
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("New VFOs run");
-        egui::ComboBox::from_id_salt("new_decoder")
-            .selected_text(new_decoder.label())
-            .show_ui(ui, |ui| {
-                for k in DecoderKind::ALL {
-                    ui.selectable_value(new_decoder, k, k.label());
-                }
-            });
+        decoder_menu(ui, "new_decoder", new_decoder);
+        if new_decoder.is_cdm() {
+            cdm_model_menu(ui, "new_cdm_model", new_decoder);
+        }
     });
     ui.add_space(4.0);
 
@@ -183,14 +180,13 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             ui.end_row();
 
             ui.label("Decoder");
-            egui::ComboBox::from_id_salt("vfo_decoder")
-                .selected_text(s.decoder.label())
-                .show_ui(ui, |ui| {
-                    for k in DecoderKind::ALL {
-                        ui.selectable_value(&mut s.decoder, k, k.label());
-                    }
-                });
+            decoder_menu(ui, "vfo_decoder", &mut s.decoder);
             ui.end_row();
+            if s.decoder.is_cdm() {
+                ui.label("CDM model");
+                cdm_model_menu(ui, "vfo_cdm_model", &mut s.decoder);
+                ui.end_row();
+            }
 
             ui.label("Centre");
             let mut abs_mhz = (inp.rf_center + s.offset_hz) / 1e6;
@@ -738,11 +734,14 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     {
         match v.settings.decoder.chain() {
             DecoderKind::FastLink => fastlink_card(ui, c, &st),
-            DecoderKind::Viterbi => viterbi_card(ui, c, &st),
+            DecoderKind::Viterbi => viterbi_card(ui, c, &st, v.settings.decoder),
             _ => tpc_card(ui, c, &st),
         }
         if let Some(e) = st.fec.as_ref().and_then(|f| f.e1.as_ref()) {
             e1_card(ui, e, v, &mut actions);
+        }
+        if let Some(r) = st.fec.as_ref().and_then(|f| f.radar.as_ref()) {
+            radar_card(ui, r, v.id, &mut actions);
         }
         if let Some(f) = &st.fec
             && let Some(voice) = f.tdm.as_ref().and_then(|t| t.voice)
@@ -1371,6 +1370,20 @@ fn payload_rows(ui: &mut Ui, f: Option<&FecStats>) {
                  120 data bits), the overhead in a four-frame cycle; the service bits \
                  are those seen to change (ESC, alarms).",
             );
+            ui.end_row();
+        }
+        if let Some(b) = &p.bsc {
+            ui.label("BSC");
+            ui.label(format!(
+                "{} blocks · {} bad BCC{}",
+                b.blocks,
+                b.bad,
+                if b.inverted { " · line inverted" } else { "" }
+            ))
+            .on_hover_text(format!(
+                "IBM bisync: SYN SYN, SOH heading, DLE STX text DLE ETX, a 16-bit BCC                  ({}). Differential decoding plus an inverted line = NRZI.",
+                b.bcc.map_or("none yet", |c| c.describe())
+            ));
             ui.end_row();
         }
         if p.hdlc_good + p.hdlc_bad > 0 {
@@ -2035,11 +2048,18 @@ fn cid_chips() -> f64 {
 
 /// A K = 7 convolutional-code VFO: the carrier, the rate found, and what the
 /// data carry.
-fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
+fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
-    ui.label(RichText::new("Viterbi K=7 (IESS-308/309)").strong());
+    ui.label(
+        RichText::new(if kind == DecoderKind::Cdm570 {
+            "Comtech CDM-570L · Viterbi K=7"
+        } else {
+            "Viterbi K=7 (IESS-308/309)"
+        })
+        .strong(),
+    );
     let f = st.fec.as_ref();
     let v = f.and_then(|f| f.viterbi.as_ref());
     egui::Grid::new("viterbi").num_columns(2).show(ui, |ui| {
@@ -2878,6 +2898,117 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
         .clicked()
     {
         actions.push(Action::OpenTsViewer(id));
+    }
+}
+
+/// The decoder menu: every kind, the Comtech CDM presets folded into one
+/// entry whose model [`cdm_model_menu`] chooses.
+fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
+    let shown = if decoder.is_cdm() {
+        DecoderKind::CDM_MENU
+    } else {
+        decoder.label()
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for k in DecoderKind::ALL {
+                if !k.is_cdm() {
+                    ui.selectable_value(decoder, k, k.label());
+                } else if k == DecoderKind::CDM[0] {
+                    // The group's one entry, where its first member sits.
+                    let r = ui
+                        .selectable_label(decoder.is_cdm(), DecoderKind::CDM_MENU)
+                        .on_hover_text(
+                            "TPC 2964 data, CDM-600L voice, CDM-570L: the model is chosen next",
+                        );
+                    if r.clicked() && !decoder.is_cdm() {
+                        *decoder = DecoderKind::CDM[0];
+                    }
+                }
+            }
+        });
+}
+
+/// Which Comtech CDM: the model menu under [`decoder_menu`]'s CDM entry.
+fn cdm_model_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(decoder.cdm_model())
+        .show_ui(ui, |ui| {
+            for k in DecoderKind::CDM {
+                ui.selectable_value(decoder, k, k.cdm_model());
+            }
+        });
+}
+
+/// A radar track feed (BSC blocks, the PH-ML carrier): the feed's state,
+/// the CSV log, and the scope.
+fn radar_card(
+    ui: &mut Ui,
+    r: &decsat_engine::RadarStageView,
+    id: VfoId,
+    actions: &mut Vec<Action>,
+) {
+    use decsat_engine::radar::tod_string;
+    let v = &r.radar;
+    ui.add_space(6.0);
+    ui.label(RichText::new("Radar feed").strong());
+    egui::Grid::new("radar").num_columns(2).show(ui, |ui| {
+        ui.label("Messages");
+        ui.label(format!(
+            "{} · {} track reports{}",
+            v.messages,
+            v.reports,
+            v.tod
+                .map_or(String::new(), |t| format!(" · {} UTC", tod_string(t)))
+        ))
+        .on_hover_text(
+            "A message a sector (32 a scan), each with the tracks the beam has just              passed: 24-octet reports (x/y in 1/64 NM, Mode A, Mode C, ground speed).",
+        );
+        ui.end_row();
+        ui.label("Scan");
+        ui.label(match v.scan_secs {
+            Some(s) => format!("{s:.3} s ({:.1} rpm) · {} scans", 60.0 / s, v.scans),
+            None => format!("{} scans", v.scans),
+        });
+        ui.end_row();
+        ui.label("Tracks");
+        let high = v
+            .tracks
+            .iter()
+            .filter(|t| t.last.flight_level.is_some_and(|f| f >= 250))
+            .count();
+        ui.label(format!("{} · {high} at FL250 and above", v.tracks.len()));
+        ui.end_row();
+        if v.sector_jumps > 0 {
+            ui.label("Lost");
+            ui.label(format!("{} sector messages skipped", v.sector_jumps));
+            ui.end_row();
+        }
+        if let Some((path, n)) = &r.log {
+            ui.label("Log");
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let txt = format!("{} ({n} reports)", name.unwrap_or_default());
+            if r.logging {
+                ui.colored_label(Color32::from_rgb(230, 90, 90), format!("● {txt}"));
+            } else {
+                ui.label(format!("{txt}, stopped"));
+            }
+            ui.end_row();
+        }
+        if let Some(e) = &r.error {
+            ui.label("Log");
+            ui.colored_label(Color32::from_rgb(230, 90, 90), e);
+            ui.end_row();
+        }
+    });
+    ui.add_space(4.0);
+    if ui
+        .button(format!("📡 Radar scope ({} tracks)", v.tracks.len()))
+        .on_hover_text("The tracks on a PPI, north up, the radar at the centre; Record logs every report to CSV")
+        .clicked()
+    {
+        actions.push(Action::OpenRadarScope(id));
     }
 }
 

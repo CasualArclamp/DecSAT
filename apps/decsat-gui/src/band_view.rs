@@ -41,6 +41,8 @@ pub enum Action {
     Play(VfoId, crate::player::Player),
     /// Open the TS analyser window on a VFO.
     OpenTsViewer(VfoId),
+    /// Open the radar scope on a VFO's radar feed.
+    OpenRadarScope(VfoId),
     /// Play a VFO's multicast audio stream (group:port): in the app, or in
     /// an external player.
     PlayAudio(VfoId, std::net::SocketAddr, Option<crate::player::Player>),
@@ -260,7 +262,7 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
                 (None, _) => format!("acq {:.0} %", st.progress * 100.0),
             }
         }
-        DecoderKind::Viterbi => {
+        DecoderKind::Viterbi | DecoderKind::Cdm570 => {
             let v = st
                 .fec
                 .as_ref()

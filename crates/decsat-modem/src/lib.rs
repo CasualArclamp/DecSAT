@@ -13,7 +13,10 @@
 //! - [`text`]: live text search in any bit stream, every reading at once.
 //! - [`g728`]: ITU-T G.728 LD-CELP 16 kbit/s voice, and finding it in two
 //!   bits of a timeslot (the CDM-600L's Drop & Insert voice).
+//! - [`bsc`]: IBM bisync (BSC) blocks; [`radar`]: the radar track feed
+//!   they carry on PH-ML.
 
+pub mod bsc;
 pub mod cid;
 pub mod conv;
 pub mod dandi;
@@ -25,6 +28,7 @@ pub mod ibs;
 pub mod interleave;
 pub mod paradise;
 pub mod payload;
+pub mod radar;
 pub mod rs;
 pub mod slotpkt;
 pub mod tdm257;

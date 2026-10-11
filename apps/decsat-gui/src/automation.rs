@@ -28,6 +28,8 @@ pub struct Options {
     pub decoder: Option<decsat_engine::DecoderKind>,
     /// Open the TS analyser on the selected VFO.
     pub ts_viewer: bool,
+    /// Open the radar scope on the selected VFO.
+    pub radar_scope: bool,
     /// Play the selected VFO's first multicast audio stream in the app.
     pub play_audio: bool,
     /// A frequency plan to show (unattended runs do not read the saved one).
@@ -56,13 +58,14 @@ impl Options {
                 }
                 Some("--claim-carriers") => o.claim_carriers = true,
                 Some("--ts-viewer") => o.ts_viewer = true,
+                Some("--radar-scope") => o.radar_scope = true,
                 Some("--play-audio") => o.play_audio = true,
                 Some("--decoder") => {
                     let v = args.next().ok_or("--decoder needs a name")?;
                     let v = v.to_str().unwrap_or_default().to_ascii_lowercase();
                     o.decoder = Some(
                         decoder_by_name(&v)
-                            .ok_or("--decoder takes id, ip, ts, dvbs, tpc, cdm600, fastlink, viterbi, cid, psk, rec or spec")?,
+                            .ok_or("--decoder takes id, ip, ts, dvbs, tpc, cdm600, cdm570, fastlink, viterbi, cid, psk, rec or spec")?,
                     );
                 }
                 Some("--plan") => {
@@ -110,6 +113,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "cdm600" | "cdm600-voice" | "cdm" => Cdm600Voice,
         "fastlink" | "fl" => FastLink,
         "viterbi" | "vit" => Viterbi,
+        "cdm570" | "570" => Cdm570,
         "cid" | "carrier-id" => CarrierId,
         "psk" => PskSymbols,
         "rec" | "iq" => IqRecord,
@@ -128,6 +132,7 @@ pub struct Automation {
     pub claimed: bool,
     pub select: Option<usize>,
     pub ts_viewer: bool,
+    pub radar_scope: bool,
     pub play_audio: bool,
     pub audio_started: bool,
 }
@@ -143,6 +148,7 @@ impl Automation {
             claimed: false,
             select: o.select,
             ts_viewer: o.ts_viewer,
+            radar_scope: o.radar_scope,
             play_audio: o.play_audio,
             audio_started: false,
         }

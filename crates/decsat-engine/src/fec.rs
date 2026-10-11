@@ -360,6 +360,8 @@ pub struct FecStats {
     pub e1: Option<E1View>,
     /// A TDM multiplex's call voice being played or recorded.
     pub call_voice: Option<CallVoiceView>,
+    /// A radar track feed in BSC blocks (the PH-ML carrier).
+    pub radar: Option<crate::radar::RadarStageView>,
 }
 
 /// A call's voice out of the TDM multiplex, for display.
@@ -2072,6 +2074,7 @@ fn run(
     let mut raw = RawFile::default();
     let mut tpc_text: Option<decsat_modem::text::TextFinder> = None;
     let mut e1: Option<E1Stage> = None;
+    let mut radar: Option<crate::radar::RadarStage> = None;
     while let Ok(input) = rx.recv() {
         let _done = pending.guard();
         if quit.load(Ordering::Relaxed) {
@@ -2234,6 +2237,11 @@ fn run(
                         stage.follow(&o);
                         stage.dandi_bytes(n, &payload_out.dandi);
                     }
+                    if !payload_out.bsc.is_empty() {
+                        let stage = radar.get_or_insert_with(crate::radar::RadarStage::new);
+                        stage.follow(&o);
+                        stage.blocks(&payload_out.bsc);
+                    }
                     for (frame, fcs) in &payload_out.frames {
                         if let Some((pkt, info)) = hdlc_ip(frame) {
                             let ipst = ip.get_or_insert_with(IpStage::new);
@@ -2276,6 +2284,11 @@ fn run(
                 s.viterbi = viterbi.as_ref().map(|r| r.stats.clone());
                 s.payload = Some(pay.stats.clone());
                 s.text = tpc_text.as_ref().map(|t| t.view());
+                if let Some(stage) = &mut radar {
+                    // Record toggles take effect between blocks too.
+                    stage.follow(&o);
+                    s.radar = Some(stage.view());
+                }
                 if let Some(stage) = &mut e1 {
                     stage.follow(&o);
                     let st = match (&pay.stats.dandi, &pay.stats.slots) {

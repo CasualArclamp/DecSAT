@@ -6,7 +6,8 @@
 //! check out: HDLC frames whose FCS is right, TS packets whose sync bytes
 //! recur every 188 bytes, E1 frames whose alignment signal recurs every 512
 //! bits (an E1 carried transparently, see [`crate::e1`]), or Comtech
-//! Drop & Insert++ frames (see [`crate::dandi`]). A format that frames the
+//! Drop & Insert++ frames (see [`crate::dandi`]), or BSC blocks whose BCC
+//! checks (see [`crate::bsc`]). A format that frames the
 //! whole stream (TS, E1, D&I++) must account for at least half of it: three
 //! TS sync bytes in a row turn up by chance in a long enough listen.
 //!
@@ -30,6 +31,7 @@
 
 use std::collections::VecDeque;
 
+use crate::bsc::BscRx;
 use crate::dandi::{DiPlusRx, DiPlusStats};
 use crate::e1::{E1Rx, TIMESLOTS};
 use crate::ibs::IbsRx;
@@ -425,6 +427,8 @@ pub enum Format {
     /// 64 kbit/s timeslots in HDLC packets, on an inverted line (the
     /// multi-radio Comtech sites; see [`crate::slotpkt`]).
     Slots,
+    /// IBM bisync blocks (see [`crate::bsc`]): the PH-ML radar feed.
+    Bsc,
     /// No framing known, but the descrambled data are mostly an idle fill
     /// (constant, 1010… or a repeated byte): the scrambler is found even
     /// though what the data carry is not.
@@ -443,6 +447,8 @@ pub struct PayloadOut {
     pub dandi: Vec<u8>,
     /// Timeslots from HDLC packets: (timeslot, its octets), in order.
     pub slots: Vec<(u8, Vec<u8>)>,
+    /// BSC blocks whose BCC checked.
+    pub bsc: Vec<crate::bsc::Block>,
     /// Paradise closed network plus ESC: the data bits and the ESC bits
     /// (0/1) with the overhead taken out.
     pub inner: Vec<u8>,
@@ -459,6 +465,7 @@ impl PayloadOut {
         self.e1.clear();
         self.dandi.clear();
         self.slots.clear();
+        self.bsc.clear();
         self.inner.clear();
         self.esc.clear();
         self.raw.clear();
@@ -485,6 +492,8 @@ pub struct PayloadStats {
     pub ibs: Option<crate::ibs::IbsStats>,
     /// Timeslots in HDLC packets, likewise.
     pub slots: Option<crate::slotpkt::SlotStats>,
+    /// BSC blocks, likewise.
+    pub bsc: Option<crate::bsc::BscStats>,
     /// Frames of data looked at before deciding (or so far).
     pub probed: u64,
 }
@@ -515,6 +524,7 @@ pub struct PayloadRx {
     paradise: EscRx,
     ibs: IbsRx,
     slots: SlotRx,
+    bsc: BscRx,
     /// Also try the unscrambled data with its rails skewed.
     rail_skews: bool,
     /// Modem frames in a row the chosen framing has been lost (Paradise).
@@ -541,6 +551,7 @@ impl PayloadRx {
             paradise: EscRx::new(),
             ibs: IbsRx::new(),
             slots: SlotRx::new(),
+            bsc: BscRx::new(),
             raw_bits: Vec::new(),
             stats: PayloadStats::default(),
         }
@@ -610,6 +621,8 @@ impl PayloadRx {
                 .collect();
             let mut sl = SlotRx::new();
             let mut slo = Vec::new();
+            let mut bs = BscRx::new();
+            let mut bso = Vec::new();
             let (mut frames, mut pkts, mut e1f, mut dib, mut ped, mut pee) = (
                 Vec::new(),
                 Vec::new(),
@@ -636,6 +649,8 @@ impl PayloadRx {
                 ib.push(&bits, &mut ped, &mut pee);
                 sl.push(&bits, &mut slo);
                 slo.clear();
+                bs.push(&bits, &mut bso);
+                bso.clear();
                 ped.clear();
                 pee.clear();
                 prev.extend_from_slice(&bits);
@@ -694,6 +709,12 @@ impl PayloadRx {
                         .filter(|_| sl.good() >= crate::slotpkt::FOUND || sl.flags() >= 512),
                     Format::Slots,
                 ),
+                // Blocks whose BCC checked, scored as HDLC frames are: the
+                // line idles between them.
+                (
+                    (bs.stats.blocks >= crate::bsc::FOUND).then_some(bs.stats.blocks * 1500),
+                    Format::Bsc,
+                ),
             ];
             for (score, fmt) in candidates {
                 if let Some(n) = score
@@ -734,6 +755,7 @@ impl PayloadRx {
                 .into(),
                 (Format::Ibs, _) => "IBS/SMS framing (IESS-309, 16/15)".into(),
                 (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
+                (Format::Bsc, _) => "IBM bisync (BSC) blocks".into(),
                 (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
                 (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)".into(),
                 (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
@@ -804,6 +826,10 @@ impl PayloadRx {
             Format::Slots => {
                 self.slots.push(&bits, &mut out.slots);
                 self.stats.slots = Some(self.slots.stats.clone());
+            }
+            Format::Bsc => {
+                self.bsc.push(&bits, &mut out.bsc);
+                self.stats.bsc = Some(self.bsc.stats.clone());
             }
             // Descrambled, for the text finder and the data file.
             Format::Idle => out.inner.extend_from_slice(&bits),
@@ -1255,5 +1281,50 @@ mod tests {
         }
         assert_eq!(rx.format(), None);
         assert_eq!(out.raw.len(), 40 * 2223 / 8);
+    }
+
+    #[test]
+    fn bsc_blocks_on_an_nrzi_line_under_v35() {
+        // The PH-ML radar feed: BSC blocks every ~110 ms on a marking line,
+        // NRZI-coded (a 0 changes the level), then V.35-scrambled — found
+        // as differential decoding (which reads the line inverted) and
+        // V.35.
+        const L: usize = crate::dvbs::VITERBI_BLOCK;
+        let mut next = rng(17);
+        let mut d = Vec::new();
+        let mut sent = Vec::new();
+        for n in 0..60u8 {
+            d.extend(std::iter::repeat_n(1, 700 + (next() % 400) as usize));
+            let reports = (next() % 3) as usize * 24;
+            let text: Vec<u8> = [0xFD, n % 32, 0x59, 0x2C, 0, n]
+                .into_iter()
+                .chain((0..reports).map(|_| next() as u8))
+                .collect();
+            crate::bsc::block_bits(&[0x0C, 0x40], &text, &mut d);
+            sent.push(text);
+        }
+        let mut level = 0u8;
+        let line: Vec<u8> = d
+            .iter()
+            .map(|&b| {
+                level ^= 1 - b;
+                level
+            })
+            .collect();
+        let tx = scramble(Descrambler::SelfSync(&[3, 20]), L, &line);
+        let mut rx = PayloadRx::new(L);
+        let mut out = PayloadOut::default();
+        let mut got = Vec::new();
+        for f in tx.as_chunks::<L>().0 {
+            rx.push(f, &mut out);
+            got.extend(out.bsc.drain(..).map(|b| b.text));
+        }
+        assert_eq!(rx.format(), Some(Format::Bsc), "{:?}", rx.stats);
+        let found = rx.stats.found.as_ref().unwrap();
+        assert!(found.contains("taps 3, 20") && found.contains("differential"));
+        assert!(rx.stats.bsc.as_ref().unwrap().inverted);
+        assert_eq!(got[..], sent[..got.len()]);
+        // All but the blocks in the last, partial modem frame.
+        assert!(got.len() + 5 >= sent.len(), "{}", got.len());
     }
 }

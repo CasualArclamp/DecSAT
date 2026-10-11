@@ -12,6 +12,7 @@ mod freq_display;
 mod freqplan;
 mod player;
 mod prefs;
+mod radar_scope;
 mod radio;
 mod session;
 mod side_panel;
@@ -133,6 +134,7 @@ struct App {
     names: u32,
     paused: bool,
     ts_viewer: ts_viewer::TsViewer,
+    radar_scope: radar_scope::RadarScope,
     /// The transmit panel (DVB-S2/S2X from a TS, to the HackRF or a file).
     tx: transmit::TxPanel,
     /// A player to open on a multicast audio stream once it is relayed.
@@ -197,6 +199,7 @@ impl Default for App {
             pending_player: None,
             pending_audio: None,
             ts_viewer: Default::default(),
+            radar_scope: Default::default(),
             tx: Default::default(),
             note: String::new(),
             automation: automation::Automation::new(&automation::Options::default()),
@@ -597,6 +600,7 @@ impl App {
                 }
             }
             Action::OpenTsViewer(id) => self.ts_viewer.open(id),
+            Action::OpenRadarScope(id) => self.radar_scope.open(id),
             Action::PlayAudio(id, key, p) => {
                 if let Some(v) = self.vfos.iter().find(|v| v.id == id) {
                     let mut s = v.settings.clone();
@@ -1250,6 +1254,11 @@ impl eframe::App for App {
             {
                 self.ts_viewer.open(id);
             }
+            if self.automation.radar_scope
+                && let Some(id) = self.selected
+            {
+                self.radar_scope.open(id);
+            }
         }
         if self.automation.play_audio
             && !self.automation.audio_started
@@ -1346,6 +1355,26 @@ impl eframe::App for App {
                     }
                     self.tx.start_hackrf();
                 }
+            }
+        }
+
+        // The radar scope likewise.
+        if let Some(id) = self.radar_scope.vfo {
+            let name = self
+                .vfos
+                .iter()
+                .find(|v| v.id == id)
+                .map(|v| v.settings.name.clone());
+            match name {
+                Some(name) => {
+                    let radar = self
+                        .statuses
+                        .get(&id)
+                        .and_then(|st| st.fec.as_ref())
+                        .and_then(|f| f.radar.as_ref());
+                    self.radar_scope.show(ui.ctx(), &name, radar);
+                }
+                None => self.radar_scope.vfo = None, // the VFO was deleted
             }
         }
 

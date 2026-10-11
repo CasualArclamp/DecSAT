@@ -14,6 +14,7 @@ pub mod frontend;
 pub mod identify;
 pub mod period;
 pub mod psk;
+pub mod radar;
 pub mod rf;
 pub mod spectrum;
 pub mod tx;
@@ -38,6 +39,7 @@ pub use identify::{
     ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in,
 };
 pub use psk::PskDemod;
+pub use radar::RadarStageView;
 pub use spectrum::Spectrum;
 pub use vfo::{CarrierState, DecoderKind, VfoId, VfoSettings, VfoStatus};
 

@@ -45,6 +45,10 @@ pub enum DecoderKind {
     /// Insert (or E1) timeslots, with the G.728 voice found in them played
     /// as soon as it is found.
     Cdm600Voice,
+    /// A Comtech CDM-570L at the rates seen (9.6 kbit/s, K = 7 rate ½): the
+    /// Viterbi chain, then the payload search — on PH-ML, BSC blocks
+    /// carrying a radar track feed.
+    Cdm570,
     /// Teledyne Paradise Q-Flex FastLink (QPSK, rate 0.710): sync word,
     /// LDPC decoding and descrambling as measured on a live carrier; the
     /// data go to the same payload search as TPC 2964's.
@@ -67,13 +71,14 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 12] = [
+    pub const ALL: [DecoderKind; 13] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
         DecoderKind::DvbsTs,
         DecoderKind::Tpc2964,
         DecoderKind::Cdm600Voice,
+        DecoderKind::Cdm570,
         DecoderKind::FastLink,
         DecoderKind::Viterbi,
         DecoderKind::CarrierId,
@@ -90,6 +95,7 @@ impl DecoderKind {
             DecoderKind::DvbsTs => "DVB-S → MPEG-TS",
             DecoderKind::Tpc2964 => "TPC 2964 (IESS-315) → IP / TS",
             DecoderKind::Cdm600Voice => "Comtech CDM-600 voice (TPC → D&I → G.728)",
+            DecoderKind::Cdm570 => "Comtech CDM-570L (Viterbi K=7 → data)",
             DecoderKind::FastLink => "Q-Flex FastLink (QPSK 0.710) → data",
             DecoderKind::Viterbi => "Viterbi K=7 (IESS-308/309 SCPC) → data",
             DecoderKind::CarrierId => "Carrier ID (DVB-CID)",
@@ -109,6 +115,7 @@ impl DecoderKind {
             DecoderKind::DvbsTs => "dvbs-ts",
             DecoderKind::Tpc2964 => "tpc2964",
             DecoderKind::Cdm600Voice => "cdm600-voice",
+            DecoderKind::Cdm570 => "cdm570",
             DecoderKind::FastLink => "fastlink",
             DecoderKind::Viterbi => "viterbi",
             DecoderKind::CarrierId => "carrier-id",
@@ -124,11 +131,36 @@ impl DecoderKind {
     }
 
     /// The decoder chain a preset runs: the CDM-600 voice preset is TPC
-    /// 2964's; every other kind its own.
+    /// 2964's, the CDM-570L's the Viterbi; every other kind its own.
     pub fn chain(self) -> DecoderKind {
         match self {
             DecoderKind::Cdm600Voice => DecoderKind::Tpc2964,
+            DecoderKind::Cdm570 => DecoderKind::Viterbi,
             k => k,
+        }
+    }
+
+    /// The Comtech CDM modems: one entry in the decoder menu
+    /// ([`DecoderKind::CDM_MENU`]), the model chosen in a second menu.
+    /// The first is what choosing the entry gives.
+    pub const CDM: [DecoderKind; 3] = [
+        DecoderKind::Tpc2964,
+        DecoderKind::Cdm600Voice,
+        DecoderKind::Cdm570,
+    ];
+    pub const CDM_MENU: &str = "Comtech CDM modem";
+
+    pub fn is_cdm(self) -> bool {
+        DecoderKind::CDM.contains(&self)
+    }
+
+    /// A CDM preset's name in the model menu (else the label).
+    pub fn cdm_model(self) -> &'static str {
+        match self {
+            DecoderKind::Tpc2964 => "CDM-600 / 600L data (TPC 2964 → IP / TS)",
+            DecoderKind::Cdm600Voice => "CDM-600L voice (TPC 2964 → D&I++ → G.728)",
+            DecoderKind::Cdm570 => "CDM-570L (Viterbi K=7 → data, e.g. BSC radar)",
+            k => k.label(),
         }
     }
 
@@ -168,6 +200,7 @@ impl DecoderKind {
             DecoderKind::DvbsTs => "S→TS",
             DecoderKind::Tpc2964 => "TPC",
             DecoderKind::Cdm600Voice => "CDM",
+            DecoderKind::Cdm570 => "570",
             DecoderKind::FastLink => "FL",
             DecoderKind::Viterbi => "VIT",
             DecoderKind::CarrierId => "CID",
@@ -771,10 +804,11 @@ impl Worker {
                 demod: None,
                 fec: None,
             },
-            // (The CDM-600 voice preset arrives here as TPC 2964.)
+            // (The CDM presets arrive here as TPC 2964 or the Viterbi.)
             DecoderKind::DvbsTs
             | DecoderKind::Tpc2964
             | DecoderKind::Cdm600Voice
+            | DecoderKind::Cdm570
             | DecoderKind::FastLink
             | DecoderKind::Viterbi => Decoder::Modem {
                 kind: s.decoder.chain(),

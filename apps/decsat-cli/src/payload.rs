@@ -4,7 +4,9 @@
 //! TDM multiplex inside it — with every aligned 2 ms frame written out for
 //! analysis if asked (`--tdm-out`: 257 bytes of 0/1 a frame, the alignment
 //! bit first, then the sixteen 16-bit words). Timeslots in HDLC packets are
-//! looked through for G.728: speech, or the equipment's silence fill.
+//! looked through for G.728: speech, or the equipment's silence fill. BSC
+//! blocks are read as the PH-ML radar feed (`--radar-out`: a CSV, one line
+//! a track report).
 
 use std::path::PathBuf;
 
@@ -36,6 +38,10 @@ pub struct PayloadArgs {
     /// silence between its speech.
     #[arg(long)]
     pub voice_out: Option<PathBuf>,
+    /// Write the radar feed's track reports here (.csv), when the data
+    /// are BSC blocks carrying one.
+    #[arg(long)]
+    pub radar_out: Option<PathBuf>,
 }
 
 pub fn run(a: &PayloadArgs) -> Result<()> {
@@ -68,9 +74,20 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     // Modem frames during which each TDM channel read as active.
     let mut active = [0usize; decsat_modem::tdm257::CHANNELS];
     let mut metered = 0usize;
+    let mut radar = decsat_modem::radar::RadarRx::new();
+    let mut radar_csv = vec![decsat_modem::radar::CSV_HEADER.to_string()];
     for frame in bits.chunks_exact(a.frame_bits) {
         out.clear();
         pay.push(frame, &mut out);
+        for b in &out.bsc {
+            if let Some(m) = radar.block(&b.heading, &b.text) {
+                radar_csv.extend(
+                    m.reports
+                        .iter()
+                        .map(|r| decsat_modem::radar::csv_line(&m, r)),
+                );
+            }
+        }
         esc.extend_from_slice(&out.esc);
         if a.inner_out.is_some() {
             inner.extend_from_slice(&out.inner);
@@ -114,6 +131,25 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         bits.len() as f64 / 128e3
     );
     crate::decode::print_payload(&pay.stats);
+    if pay.stats.bsc.is_some() {
+        crate::decode::print_radar(&radar.view());
+        if let Some(p) = &a.radar_out {
+            std::fs::write(
+                p,
+                radar_csv.join(
+                    "
+",
+                ) + "
+",
+            )
+            .with_context(|| format!("writing {}", p.display()))?;
+            println!(
+                "wrote {} track reports to {}",
+                radar_csv.len() - 1,
+                p.display()
+            );
+        }
+    }
     if !esc.is_empty() {
         let ones = esc.iter().filter(|&&b| b == 1).count();
         println!("  ESC: {} bits, {ones} ones", esc.len());

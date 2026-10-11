@@ -61,10 +61,11 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "cdm600" | "cdm600-voice" | "cdm" => DecoderKind::Cdm600Voice,
         "fastlink" | "fl" => DecoderKind::FastLink,
         "viterbi" | "vit" => DecoderKind::Viterbi,
+        "cdm570" | "570" => DecoderKind::Cdm570,
         "cid" | "carrier-id" => DecoderKind::CarrierId,
         "psk" => DecoderKind::PskSymbols,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, fastlink, viterbi, cid, psk)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, fastlink, viterbi, cid, psk)"
         ),
     })
 }
@@ -467,6 +468,15 @@ pub(crate) fn report(st: &VfoStatus) {
     if let Some(p) = &f.payload {
         print_payload(p);
     }
+    if let Some(r) = &f.radar {
+        print_radar(&r.radar);
+        if let Some((p, n)) = &r.log {
+            println!("  logged {n} track reports to {}", p.display());
+        }
+        if let Some(e) = &r.error {
+            println!("  log: {e}");
+        }
+    }
     if let Some(t) = &f.fast_tdm {
         print_fast_tdm(t);
     }
@@ -619,6 +629,15 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
             hex(&e.varying)
         );
     }
+    if let Some(b) = &p.bsc {
+        println!(
+            "  bsc: {} blocks with a good BCC ({}), {} bad, line {}",
+            b.blocks,
+            b.bcc.map_or("-", |c| c.describe()),
+            b.bad,
+            if b.inverted { "inverted" } else { "upright" }
+        );
+    }
     if let Some(s) = &p.slots {
         let ch: Vec<String> = (1..16)
             .filter(|c| s.channels >> c & 1 == 1)
@@ -634,6 +653,45 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
             } else {
                 ch.join(", ")
             }
+        );
+    }
+}
+
+/// A radar track feed: its counts, then the tracks, nearest first.
+pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
+    use decsat_modem::radar::tod_string;
+    println!(
+        "radar: {} messages · {} track reports · {} scans{} · {} sector jumps · {} other texts{}",
+        v.messages,
+        v.reports,
+        v.scans,
+        v.scan_secs.map_or(String::new(), |s| format!(
+            " of {s:.3} s ({:.1} rpm)",
+            60.0 / s
+        )),
+        v.sector_jumps,
+        v.unknown,
+        v.tod.map_or(String::new(), |t| format!(
+            " · last at {} UTC",
+            tod_string(t)
+        ))
+    );
+    let mut tracks: Vec<_> = v.tracks.iter().collect();
+    tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
+    for t in tracks {
+        let r = &t.last;
+        println!(
+            "  track {:04X} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
+            r.number,
+            r.squawk.map_or("----".into(), |s| format!("{s:04}")),
+            r.flight_level
+                .map_or("no Mode C".into(), |f| format!("FL{f:03}")),
+            r.ground_speed.map_or("-".into(), |g| g.to_string()),
+            r.range(),
+            r.bearing(),
+            r.track(),
+            t.reports,
+            if r.updated() { "" } else { " (in decline)" }
         );
     }
 }

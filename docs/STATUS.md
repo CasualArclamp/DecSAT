@@ -2155,3 +2155,53 @@ On the recording both calls now stay chosen throughout; the qflex_3 call
 decodes as before. Tests: two calls through a fill restart with channel 15
 measured late (fails on the old rule), and a stream whose channels turn to
 noise let go.
+
+## The PH-ML radar feed: BSC blocks of track reports (2026-10-11)
+
+Rory: "PH-ML 570 radar feed decoding", 9.6k (a CDM-570L, 12328.083 MHz;
+his 37 s VFO recording `decsat-PH-ML-…-118343Sps-…cf32`, 12:40:54 UTC).
+
+- **Modem:** QPSK 9.6 kS/s, K = 7 rate ½ (channel BER 5e-4 at Es/N0
+  11 dB), V.35 (taps 3, 20) — the existing Viterbi chain. The payload
+  search had called it "idle fill between bursts": bursts every ~110 ms on
+  a line that sat at 1 or 0 between them, flipping level after each burst.
+- **NRZI**, then **IBM bisync (BSC)**: NRZI-decoded (a 0 changes the
+  level) the bursts are `SYN SYN SYN` (32h, EBCDIC), `SOH 0C 40`, `DLE
+  STX`, text, `DLE ETX`, a 16-bit BCC, `PAD`, sent LSB first. The search's
+  differential decoding is NRZI read inverted, so `bsc::BscRx` takes either
+  polarity from the SYNs. **BCC** = CCITT CRC preset 0 (CRC-16/KERMIT) over
+  heading + `DLE STX` + text (stuffed `DLE`s once) + `ETX`, found by
+  brute force over polynomials, presets and spans: 295/296 blocks, the
+  other cut off by the file's end; 25 texts had `DLE DLE` and checked.
+  Classic BSC's CRC-16 and its span are tried too. New `Format::Bsc`.
+- **The messages** (`modem::radar`, fields documented there with the
+  evidence): one a sector, 32 a scan, header `FD`, sector, time of day in
+  1/128 s (12:40:57.1 = the file's time + 3 s); then 24-byte track
+  reports `FF 18`: status, track number, x/y signed 1/64 NM (bearing falls
+  in the message's sector; displacement against ground speed fits 64.1
+  units a NM), velocity ≈ 11.25 kt a unit, Mode C as BCD with a flag digit
+  (`3380` = FL380, counting down through a descent), Mode A octal in 12
+  bits, ground speed BCD kt, a field falling with range (amplitude?), and
+  the plot's time after north in 1/128 s (472 a scan: 3.6875 s, 16.3 rpm).
+  Once a scan a `19 40` message to another address. Ranges to 247 NM; an
+  arrival on a 3° final at 7.7 NM north is at FL023, so the radar is near
+  a threshold. Not ASTERIX; the format's name is not known.
+- **Result:** 321 blocks, 145 track reports, 15 tracks (FL008–FL390,
+  98–514 kt), 1 bad block (a real error burst: sector 24 missing, the one
+  "sector jump"). `decode --decoder viterbi|cdm570` prints the tracks;
+  with `--out`/Record a CSV, one line a report (`…-radar-….csv`);
+  `decsat payload x.bin --frame-bits 4096 --radar-out f.csv`.
+- **GUI:** a Radar feed card and **📡 Radar scope** — a PPI (north up,
+  rings, the last sector, trails, 1-minute leaders, Mode A/FL/GS labels,
+  hover details, wheel zoom, drag pan) and a track table.
+  `--radar-scope` opens it in unattended runs.
+
+**CDM menu** (Rory): the decoder menu has one "Comtech CDM modem" entry
+and a "CDM model" menu under it: CDM-600/600L data (TPC 2964 → IP/TS),
+CDM-600L voice (the D&I++ G.728 preset), and the new **CDM-570L** preset
+(`DecoderKind::Cdm570`, key `cdm570`: the Viterbi chain, as the voice
+preset runs TPC 2964's). Generic Viterbi and FastLink stay top-level.
+
+Open: the PH-ML carrier was not found by carrier detection live (Rory
+added the VFO by hand); some Q-Flex sites may carry radar, audio and
+ADS-B too (Rory).
