@@ -28,6 +28,10 @@ pub struct PayloadArgs {
     /// order the deframer takes them).
     #[arg(long)]
     pub esc_out: Option<PathBuf>,
+    /// Write the data inside the Paradise framing here (0/1 bytes): the
+    /// multiplex, or multiplexes, as they come.
+    #[arg(long)]
+    pub inner_out: Option<PathBuf>,
 }
 
 pub fn run(a: &PayloadArgs) -> Result<()> {
@@ -44,8 +48,10 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     };
     let mut out = PayloadOut::default();
     let mut tdm = TdmRx::new();
+    let mut fast: Option<decsat_modem::tdmfast::FastRx> = None;
     tdm.keep_frames = a.tdm_out.is_some();
     let mut esc = Vec::new();
+    let mut inner = Vec::new();
     // Timeslots in packets: each channel's octets, and a G.728 finder on
     // every pair of neighbouring bits.
     let mut slots: Vec<Option<(usize, decsat_modem::g728::Voice)>> =
@@ -58,6 +64,9 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         out.clear();
         pay.push(frame, &mut out);
         esc.extend_from_slice(&out.esc);
+        if a.inner_out.is_some() {
+            inner.extend_from_slice(&out.inner);
+        }
         for (ts, octets) in &out.slots {
             let (n, v) = slots[*ts as usize & 15]
                 .get_or_insert_with(|| (0, decsat_modem::g728::Voice::new(0xFE)));
@@ -65,7 +74,12 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
             pcm.clear();
             v.push(octets, false, &mut pcm);
         }
-        if matches!(pay.format(), Some(Format::ParadiseEsc)) && !out.inner.is_empty() {
+        // k × 128.5 kbit/s: k multiplexes interleaved bit by bit.
+        let k = pay.stats.paradise.as_ref().map_or(1, |p| p.octets / 20);
+        if k > 1 && !out.inner.is_empty() {
+            fast.get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k))
+                .push(&out.inner);
+        } else if matches!(pay.format(), Some(Format::ParadiseEsc)) && !out.inner.is_empty() {
             tdm.push(&out.inner);
             metered += 1;
             for (n, c) in active.iter_mut().zip(&tdm.stats.channels) {
@@ -105,9 +119,16 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
             *n as f64 / 8000.0
         );
     }
+    if let Some(p) = &a.inner_out {
+        std::fs::write(p, &inner).with_context(|| format!("writing {}", p.display()))?;
+        println!("wrote {} data bits to {}", inner.len(), p.display());
+    }
     if let Some(p) = &a.esc_out {
         std::fs::write(p, &esc).with_context(|| format!("writing {}", p.display()))?;
         println!("wrote {} ESC bits to {}", esc.len(), p.display());
+    }
+    if let Some(s) = &fast {
+        crate::decode::print_fast_tdm(&s.stats);
     }
     if tdm.stats.frames > 0 || tdm.stats.locked {
         crate::decode::print_tdm(&tdm.stats);

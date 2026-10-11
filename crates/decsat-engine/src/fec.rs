@@ -341,6 +341,9 @@ pub struct FecStats {
     /// The 257-bit TDM multiplex inside a Paradise-framed payload, once
     /// its alignment word was found.
     pub tdm: Option<decsat_modem::tdm257::TdmStats>,
+    /// A faster Q-Flex's multiplex (k × 128.5 kbit/s): its frames and
+    /// activity, the layout inside not known.
+    pub fast_tdm: Option<decsat_modem::tdmfast::FastStats>,
     /// A K = 7 convolutional code: the rate and orientation found.
     pub viterbi: Option<decsat_modem::dvbs::ViterbiStats>,
     /// What a modem's data carry (TPC 2964).
@@ -2052,6 +2055,7 @@ fn run(
     let mut tpc: Option<decsat_modem::tpc2964::TpcRx> = None;
     let mut fastlink: Option<decsat_modem::fastlink::FastLinkRx> = None;
     let mut tdm: Option<decsat_modem::tdm257::TdmRx> = None;
+    let mut fast_tdm: Option<decsat_modem::tdmfast::FastRx> = None;
     let mut call_voice: Option<CallVoice> = None;
     let mut tdm_active_until = 0u64;
     let mut viterbi: Option<decsat_modem::dvbs::ViterbiRx> = None;
@@ -2147,12 +2151,18 @@ fn run(
                     } else {
                         (!payload_out.inner.is_empty()).then_some(payload_out.inner.as_slice())
                     };
-                    // Paradise's data: look for the 257-bit multiplex in it.
-                    if matches!(
+                    // Paradise's data: look for the 257-bit multiplex in it —
+                    // at k × 128.5 kbit/s, frames k times as often.
+                    let k = pay.stats.paradise.as_ref().map_or(1, |p| p.octets / 20);
+                    let paradise = matches!(
                         pay.format(),
                         Some(decsat_modem::payload::Format::ParadiseEsc)
-                    ) && !payload_out.inner.is_empty()
-                    {
+                    ) && !payload_out.inner.is_empty();
+                    if paradise && k > 1 {
+                        fast_tdm
+                            .get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k))
+                            .push(&payload_out.inner);
+                    } else if paradise {
                         let rx = tdm.get_or_insert_with(decsat_modem::tdm257::TdmRx::new);
                         rx.push(&payload_out.inner);
                         let cv = call_voice.get_or_insert_with(CallVoice::new);
@@ -2233,6 +2243,7 @@ fn run(
                     .as_ref()
                     .filter(|t| t.stats.frames > 0)
                     .map(|t| t.stats.clone());
+                s.fast_tdm = fast_tdm.as_ref().map(|t| t.stats.clone());
                 s.call_voice = call_voice.as_ref().map(|c| c.view());
                 s.viterbi = viterbi.as_ref().map(|r| r.stats.clone());
                 s.payload = Some(pay.stats.clone());

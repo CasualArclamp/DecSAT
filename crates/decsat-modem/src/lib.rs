@@ -28,6 +28,7 @@ pub mod payload;
 pub mod rs;
 pub mod slotpkt;
 pub mod tdm257;
+pub mod tdmfast;
 pub mod text;
 pub mod tpc;
 pub mod tpc2964;

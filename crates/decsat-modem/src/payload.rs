@@ -478,6 +478,9 @@ pub struct PayloadStats {
     pub dandi: Option<DiPlusStats>,
     /// Paradise closed network plus ESC framing, likewise.
     pub paradise: Option<crate::paradise::EscStats>,
+    /// Times the format was searched for again after its framing was
+    /// lost for good (a slip that changed how the rails line up).
+    pub reprobes: u64,
     /// IBS framing, likewise.
     pub ibs: Option<crate::ibs::IbsStats>,
     /// Timeslots in HDLC packets, likewise.
@@ -489,6 +492,10 @@ pub struct PayloadStats {
 /// Frames of data gathered before probing, and the most kept.
 const PROBE_MIN: usize = 4;
 const PROBE_MAX: usize = 32;
+/// Modem frames the chosen Paradise framing may stay lost before the format
+/// is searched for again (it realigns itself within a few groups when the
+/// rails still line up as they did).
+const REPROBE_AFTER: usize = 2;
 /// Checked units (HDLC frames, TS packets) needed to decide.
 const PROBE_UNITS: u64 = 3;
 /// Share of descrambled bits repeating the bit 1, 2 or 8 places before
@@ -510,6 +517,8 @@ pub struct PayloadRx {
     slots: SlotRx,
     /// Also try the unscrambled data with its rails skewed.
     rail_skews: bool,
+    /// Modem frames in a row the chosen framing has been lost (Paradise).
+    lost_frames: usize,
     /// Bits not yet packed into `raw` bytes.
     raw_bits: Vec<u8>,
     pub stats: PayloadStats,
@@ -522,6 +531,7 @@ impl PayloadRx {
         PayloadRx {
             frame_len,
             rail_skews: false,
+            lost_frames: 0,
             held: Vec::new(),
             chosen: None,
             hdlc: Hdlc::default(),
@@ -547,6 +557,15 @@ impl PayloadRx {
     pub fn push(&mut self, frame: &[u8], out: &mut PayloadOut) {
         if self.chosen.is_some() {
             self.follow(frame.to_vec(), out, true);
+            // Framing lost for whole modem frames: the rails may line up
+            // differently since a slip (a weak 276 kBd Q-Flex went from
+            // straight to one pair skewed and back): search again.
+            if self.lost_frames >= REPROBE_AFTER {
+                self.chosen = None;
+                self.held.clear();
+                self.lost_frames = 0;
+                self.stats.reprobes += 1;
+            }
             return;
         }
         self.held.push(frame.to_vec());
@@ -561,7 +580,9 @@ impl PayloadRx {
         }
         // Score: bits a format accounts for (HDLC: a nominal frame's worth
         // per good frame, so a few good frames win over nothing).
-        let mut best: Option<(u64, Descrambler, bool, i8, Format, Fcs)> = None;
+        // (score, descrambler, differential, rail skew, format, FCS,
+        // Paradise data octets an overhead octet)
+        let mut best: Option<(u64, Descrambler, bool, i8, Format, Fcs, usize)> = None;
         let held_bits: u64 = self.held.iter().map(|f| f.len() as u64).sum();
         // The most idle-looking descrambling, should nothing frame.
         let mut idle: Option<(f64, Descrambler, bool)> = None;
@@ -574,14 +595,19 @@ impl PayloadRx {
             .chain(skews.iter().map(|&s| (Descrambler::None, false, s)));
         for (kind, diff, skew) in readings {
             let mut d = Running::new(kind, diff, skew, self.frame_len);
-            let (mut hdlc, mut ts, mut e1, mut di, mut pe, mut ib) = (
+            let (mut hdlc, mut ts, mut e1, mut di, mut ib) = (
                 Hdlc::default(),
                 TsAlign::default(),
                 E1Rx::new(),
                 DiPlusRx::new(),
-                EscRx::new(),
                 IbsRx::new(),
             );
+            // Paradise at every rate seen (k × 20 data octets an overhead
+            // octet).
+            let mut pes: Vec<EscRx> = crate::paradise::OCTETS
+                .iter()
+                .map(|&n| EscRx::with_octets(n))
+                .collect();
             let mut sl = SlotRx::new();
             let mut slo = Vec::new();
             let (mut frames, mut pkts, mut e1f, mut dib, mut ped, mut pee) = (
@@ -602,7 +628,11 @@ impl PayloadRx {
                 ts.push(&bits, &mut pkts);
                 e1.push(&bits, &mut e1f);
                 di.push(&bits, &mut dib);
-                pe.push(&bits, &mut ped, &mut pee);
+                for pe in &mut pes {
+                    pe.push(&bits, &mut ped, &mut pee);
+                    ped.clear();
+                    pee.clear();
+                }
                 ib.push(&bits, &mut ped, &mut pee);
                 sl.push(&bits, &mut slo);
                 slo.clear();
@@ -624,6 +654,16 @@ impl PayloadRx {
             }
             let fcs = frames.first().map_or(Fcs::Crc16, |f| f.1);
             let framed = |covered: u64| (2 * covered >= held_bits).then_some(covered);
+            // The Paradise rate that framed most.
+            let (pe_covered, pe_octets) = pes
+                .iter()
+                .map(|pe| {
+                    let good = pe.stats.groups.saturating_sub(pe.stats.faw_errors);
+                    let octets = pe.stats.octets;
+                    (good * crate::paradise::group_bits(octets) as u64, octets)
+                })
+                .max()
+                .unwrap_or((0, 20));
             let candidates = [
                 (
                     (hdlc.good >= PROBE_UNITS).then_some(hdlc.good * 1500),
@@ -640,13 +680,7 @@ impl PayloadRx {
                 ),
                 // Groups whose fixed bits checked: a skewed reading still
                 // shows half the FAW's bits and coasts through the misses.
-                (
-                    framed(
-                        pe.stats.groups.saturating_sub(pe.stats.faw_errors)
-                            * crate::paradise::GROUP as u64,
-                    ),
-                    Format::ParadiseEsc,
-                ),
+                (framed(pe_covered), Format::ParadiseEsc),
                 // Its data bits only: an E1's alignment octets (every 512
                 // bits) also make a four-frame cycle, and E1 must win that.
                 (
@@ -665,7 +699,7 @@ impl PayloadRx {
                 if let Some(n) = score
                     && best.is_none_or(|b| n > b.0)
                 {
-                    best = Some((n, kind, diff, skew, fmt, fcs));
+                    best = Some((n, kind, diff, skew, fmt, fcs, pe_octets));
                 }
             }
         }
@@ -677,22 +711,36 @@ impl PayloadRx {
             && let Some((share, kind, diff)) = idle
             && share >= IDLE_SHARE
         {
-            best = Some((0, kind, diff, 0, Format::Idle, Fcs::Crc16));
+            best = Some((0, kind, diff, 0, Format::Idle, Fcs::Crc16, 0));
         }
-        if let Some((_, kind, diff, skew, fmt, fcs)) = best {
+        if let Some((_, kind, diff, skew, fmt, fcs, octets)) = best {
+            if fmt == Format::ParadiseEsc {
+                self.paradise = EscRx::with_octets(octets);
+            }
+            // Rust note: `Cow` holds either a borrowed `&'static str` or an
+            // owned `String`, so the arms can mix the two.
+            let what: std::borrow::Cow<'static, str> = match (fmt, fcs) {
+                (Format::Ts, _) => "MPEG-TS".into(),
+                (Format::E1, _) => "E1 (G.704 framing)".into(),
+                (Format::DiPlus, _) => "E1 timeslots, Comtech D&I++ framing".into(),
+                (Format::ParadiseEsc, _) if octets == 20 => {
+                    "Paradise closed network + ESC framing".into()
+                }
+                (Format::ParadiseEsc, _) => format!(
+                    "Paradise closed network + ESC framing, {octets} data octets an overhead \
+                     octet ({} × 128.5 kbit/s)",
+                    octets / 20
+                )
+                .into(),
+                (Format::Ibs, _) => "IBS/SMS framing (IESS-309, 16/15)".into(),
+                (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
+                (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
+                (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)".into(),
+                (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
+            };
             self.stats.found = Some(format!(
                 "{}, {}{}{}",
-                match (fmt, fcs) {
-                    (Format::Ts, _) => "MPEG-TS",
-                    (Format::E1, _) => "E1 (G.704 framing)",
-                    (Format::DiPlus, _) => "E1 timeslots, Comtech D&I++ framing",
-                    (Format::ParadiseEsc, _) => "Paradise closed network + ESC framing",
-                    (Format::Ibs, _) => "IBS/SMS framing (IESS-309, 16/15)",
-                    (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)",
-                    (Format::Idle, _) => "idle fill between bursts (format not known)",
-                    (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)",
-                    (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)",
-                },
+                what,
                 if diff { "differential decoding, " } else { "" },
                 kind.describe(),
                 match skew {
@@ -743,6 +791,11 @@ impl PayloadRx {
             Format::ParadiseEsc => {
                 self.paradise.push(&bits, &mut out.inner, &mut out.esc);
                 self.stats.paradise = Some(self.paradise.stats.clone());
+                self.lost_frames = if self.paradise.stats.locked {
+                    0
+                } else {
+                    self.lost_frames + 1
+                };
             }
             Format::Ibs => {
                 self.ibs.push(&bits, &mut out.inner, &mut out.esc);
@@ -1097,7 +1150,7 @@ mod tests {
             .map(|_| u8::from(next().is_multiple_of(3)))
             .collect();
         let mut bits = Vec::new();
-        frame(&data, &vec![0; groups * GROUP_ESC], &mut 0, &mut bits);
+        frame(20, &data, &vec![0; groups * GROUP_ESC], &mut 0, &mut bits);
         for (skew, says) in [
             (2i8, "odd bits 2 pairs late"),
             (-1, "odd bits 1 pair early"),
@@ -1136,6 +1189,58 @@ mod tests {
             // Without the skew search the half-aligned FAW may still frame,
             // but the data come out sheared.
             assert!(!plain_inner.windows(t.len()).any(|w| w == t), "{skew}");
+        }
+    }
+
+    #[test]
+    fn paradise_framing_at_every_rate_and_after_a_rail_shift() {
+        // The faster Q-Flex links: 40, 60 and 80 data octets to an overhead
+        // octet. Half way, the odd rail falls a pair behind (as on the live
+        // 276 kBd link after a slip): the search runs again and follows.
+        use crate::paradise::{GROUP_ESC, frame};
+        const L: usize = 16_384;
+        for octets in [40, 60, 80] {
+            let mut next = rng(octets as u64);
+            let groups = 200;
+            let data: Vec<u8> = (0..groups * 32 * octets)
+                .map(|_| u8::from(next().is_multiple_of(3)))
+                .collect();
+            let mut bits = Vec::new();
+            frame(
+                octets,
+                &data,
+                &vec![0; groups * GROUP_ESC],
+                &mut 0,
+                &mut bits,
+            );
+            let half = bits.len() / L / 2 * L;
+            let sent: Vec<u8> = (0..bits.len())
+                .map(|j| match j >= half && j % 2 == 1 {
+                    true => bits[j - 2],
+                    false => bits[j],
+                })
+                .collect();
+            let mut rx = PayloadRx::new(L).with_rail_skews();
+            let mut out = PayloadOut::default();
+            let mut inner = Vec::new();
+            for f in sent.as_chunks::<L>().0 {
+                rx.push(f, &mut out);
+                inner.append(&mut out.inner);
+            }
+            assert_eq!(rx.format(), Some(Format::ParadiseEsc), "{octets}");
+            let p = rx.stats.paradise.as_ref().unwrap();
+            assert_eq!(p.octets, octets);
+            assert!(p.locked, "{octets}: {:?}", rx.stats);
+            assert!(rx.stats.reprobes >= 1, "{octets}: {:?}", rx.stats);
+            assert!(
+                rx.stats.found.as_deref().unwrap().contains("1 pair late"),
+                "{octets}: {:?}",
+                rx.stats.found
+            );
+            // Data from the second half came out whole.
+            let at = data.len() * 3 / 4;
+            let t = &data[at..at + 2000];
+            assert!(inner.windows(t.len()).any(|w| w == t), "{octets}");
         }
     }
 

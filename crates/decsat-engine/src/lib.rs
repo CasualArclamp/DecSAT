@@ -25,6 +25,7 @@ pub use decsat_modem::e1::Coding as E1Coding;
 pub use decsat_modem::tdm257::{
     ChannelState as TdmChannelState, TdmStats, VoiceView as TdmVoiceView,
 };
+pub use decsat_modem::tdmfast::FastStats as FastTdmStats;
 pub use decsat_modem::text::{ByteTextView, TextView};
 pub use demod::{Demod, LockState, PlFrame};
 pub use estimate::{BandEstimate, estimate_band};

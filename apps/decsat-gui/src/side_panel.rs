@@ -2100,6 +2100,54 @@ fn fastlink_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
     if let Some(m) = f.and_then(|f| f.tdm.as_ref()) {
         tdm_card(ui, m, f.map(|f| f.raw_triggered));
     }
+    if let Some(t) = f.and_then(|f| f.fast_tdm.as_ref()) {
+        fast_tdm_card(ui, t);
+    }
+}
+
+/// A faster Q-Flex's multiplex (k × 128.5 kbit/s): its frames and how much
+/// of it is changing. What fills it is not known yet.
+fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
+    let good = Color32::from_rgb(110, 220, 110);
+    let wait = Color32::from_rgb(240, 200, 80);
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!(
+            "TDM multiplex ({} × 128.5 kbit/s: 257-bit frames, {:.2} ms)",
+            t.k,
+            1e3 * t.frame_seconds()
+        ))
+        .strong(),
+    );
+    egui::Grid::new("tdmfast").num_columns(2).show(ui, |ui| {
+        ui.label("Alignment");
+        ui.colored_label(
+            if t.aligned { good } else { wait },
+            format!(
+                "{} · {} frames · {} word-bit errors{}",
+                if t.aligned { "aligned" } else { "searching" },
+                t.frames,
+                t.faw_errors,
+                if t.losses > 0 {
+                    format!(" · {} losses", t.losses)
+                } else {
+                    String::new()
+                }
+            ),
+        );
+        ui.end_row();
+        ui.label("Activity");
+        ui.label(format!(
+            "{:.2} % of bits changed since 20 ms before",
+            100.0 * t.change
+        ))
+        .on_hover_text(
+            "Idle, these links repeat every 2–10 ms; traffic changes them. \
+                 The channels inside are laid out differently from the 128.5 kbit/s \
+                 sites' and are not decoded yet.",
+        );
+        ui.end_row();
+    });
 }
 
 /// The 257-bit TDM multiplex inside the Paradise framing: its alignment,

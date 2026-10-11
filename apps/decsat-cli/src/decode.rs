@@ -467,6 +467,9 @@ pub(crate) fn report(st: &VfoStatus) {
     if let Some(p) = &f.payload {
         print_payload(p);
     }
+    if let Some(t) = &f.fast_tdm {
+        print_fast_tdm(t);
+    }
     if let Some(t) = &f.tdm {
         print_tdm(t);
     }
@@ -633,6 +636,21 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
             }
         );
     }
+}
+
+/// A k × 128.5 kbit/s link's multiplex.
+pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
+    println!(
+        "tdm 257 at {} × 128.5 kbit/s: {} · {} frames ({:.2} ms) · {} alignment-bit errors · \
+         {} losses · bits changed from 20 ms before {:.2} % (layout inside not known yet)",
+        s.k,
+        if s.aligned { "aligned" } else { "searching" },
+        s.frames,
+        1e3 * s.frame_seconds(),
+        s.faw_errors,
+        s.losses,
+        100.0 * s.change
+    );
 }
 
 /// The 257-bit TDM multiplex's report.

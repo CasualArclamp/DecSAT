@@ -2031,3 +2031,50 @@ stream from channels 0, 1, 2, 3 and was decoding noise with speech's sync.
 - Decoded: `tests\qflex-voice\esp-ml-call-A-ch1234.wav`,
   `esp-ml-call-B-ch0-1-2-15.wav`, and the 0.9.0 mix
   (`esp-ml-monster-as-0.9.0-mixed.wav`) for comparison.
+
+## The faster FastLinks: framing cracked, the voice inside not yet (2026-10-11)
+
+Rory: "crack the faster fastlink payloads". Three Q-Flex FastLinks on the
+CAP sites, recorded together (HackRF at 1760.6 MHz, 4 MS/s, 60 s — a
+tuning that does not slip): 12359.750 GHz at 185.5 kBd (strong, BER
+6e-5), 12358.886 at 276.0 kBd and 12361.004 at 366.5 kBd (both weak,
+channel BER 3–4 %, yet 99.9 % of codewords decode).
+
+- **Rates.** FastLink carries 16 384 data bits a frame of 11 538 symbols:
+  263.4, 391.9 and 520.4 kbit/s — exactly 41, 61 and 81 × 6.425 kbit/s,
+  as the 95 kBd links' 134.925 kbit/s is 21 ×. So: k × 128.5 kbit/s of
+  data (k = 2, 3, 4) plus the same 6.425 kbit/s of overhead.
+- **Paradise framing at every rate** (`paradise.rs`): the same four
+  overhead octets (FAW 98h/D8h, ESC, CTRL 10h/30h with the multiframe bit,
+  ESC), but 40, 60 and 80 data octets to an overhead octet — groups of
+  1312, 1952 and 2592 bits (the fold of the 185.5 kBd link's data showed
+  exactly nine fixed bits a 1312-bit period). `EscRx::with_octets`, the
+  stats say which; the payload search tries 20/40/60/80 and reports
+  "40 data octets an overhead octet (2 × 128.5 kbit/s)".
+- **Re-probing** (`payload.rs`): the 276 kBd link's rails line up
+  differently from one stretch to the next (straight, then the odd bit a
+  pair early, after its slips — the FAW is perfect within each). The
+  search ran once and kept the first answer: 474 groups, 21 losses. Now
+  the chosen Paradise framing lost for two modem frames sends the payload
+  back to the search: 11 654 groups, 8 losses.
+- **The multiplex** (`tdmfast.rs`): the same 257-bit frames as the 128.5
+  kbit/s links, the alignment word on alternate frames, at k times the
+  frame rate — a frame every 1.00, 0.67 and 0.50 ms. All three align
+  (59 910, 87 954 and 119 881 frames). `FastRx` finds the frames and meters
+  activity (bits changed from 20 ms before); CLI and GUI show both.
+- **Inside: not cracked.** The frames are not the 128.5 kbit/s sites'
+  sixteen 8 kbit/s channels. Idle, they are mostly constant bits with a few
+  changing fields, repeating every 10 ms (k = 2), 4 ms (k = 3) or 2 ms
+  (k = 4); on the 2 × link, 64-bit blocks of two 4-bit fields, a marker
+  that steps at mid-frame (1000 → 0100) and ones. The G.728 silence fill
+  of the other sites is nowhere (searched: every channel split and stride,
+  inverted and bit-reversed). On the 2 × link the even and the odd bits
+  each look like a 128.5 kbit/s multiplex half a frame apart (identical
+  per-position statistics after a 129-bit shift), but bit-splitting the
+  3 × link gives nothing, so that is not taken as the rule. The 60 s held
+  no traffic (0.2–0.4 % of bits changing on the two clean links), so which
+  fields carry voice, and in what code, cannot be told yet. A recording
+  while a CAP site talks would — and the make of its voice equipment.
+
+`decsat payload … --inner-out f` writes the data inside the Paradise
+framing (0/1 bytes) for this kind of work.
