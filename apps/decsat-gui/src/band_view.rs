@@ -71,8 +71,15 @@ pub struct BandInput<'a> {
     pub plan: &'a [crate::freqplan::Bookmark],
 }
 
-/// The colour of the frequency plan's marks.
+/// The colour of the frequency plan's marks (a carrier may bring its own).
 const PLAN: Color32 = Color32::from_rgb(235, 205, 120);
+
+/// The colour of a plan carrier's marks.
+fn plan_colour(b: &crate::freqplan::Bookmark) -> Color32 {
+    // `map_or(default, f)`: `PLAN` when there is no colour, else `f` of it.
+    b.color
+        .map_or(PLAN, |[r, g, bl]| Color32::from_rgb(r, g, bl))
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 enum Drag {
@@ -481,16 +488,17 @@ impl BandView {
                     continue;
                 }
                 let x = x_of(off);
+                let colour = plan_colour(b);
                 painter.line_segment(
                     [pos2(x, spec.bottom() - 6.0), pos2(x, spec.bottom())],
-                    Stroke::new(1.0, PLAN),
+                    Stroke::new(1.0, colour),
                 );
-                let galley = painter.layout_no_wrap(b.name.clone(), font.clone(), PLAN);
+                let galley = painter.layout_no_wrap(b.name.clone(), font.clone(), colour);
                 let size = galley.size();
                 let left = x - size.x / 2.0;
                 if left > free_from + 6.0 && left >= rect.left() && left + size.x <= rect.right() {
                     let r = Rect::from_min_size(pos2(left, spec.bottom() - 7.0 - size.y), size);
-                    painter.galley(r.min, galley, PLAN);
+                    painter.galley(r.min, galley, colour);
                     plan_boxes.push((i, r));
                     free_from = r.right();
                 }
@@ -518,7 +526,7 @@ impl BandView {
                         (p.y + 14.0).min(spec.bottom() - g.size().y - 6.0),
                     );
                     let r = Rect::from_min_size(at, g.size()).expand(4.0);
-                    painter.rect_filled(r, CornerRadius::same(4), PLAN);
+                    painter.rect_filled(r, CornerRadius::same(4), plan_colour(b));
                     painter.galley(at, g, Color32::BLACK);
                 }
             }

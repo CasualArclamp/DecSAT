@@ -1647,6 +1647,13 @@ automation takes `--plan FILE` (unattended runs do not read the saved one).
 Rory's Horizons 3e plan (Comtech and Q-Flex sites; 58 837 Hz is
 1.35 × 43.6 kS/s, the CDM-600s) stays local.
 
+2026-10-11: an optional per-carrier `"color": "#rrggbb"` (DecSAT's own
+field; a malformed one is ignored) colours its tick, label and hover card.
+The H3e plan was rebuilt from the Satellite SOC v9 (98 → 233 carriers:
+inbound RF = hub Rx IF + 12 210 MHz, outbound = remote Rx IF + 11 300 MHz)
+and coloured by modem from the SOC hostnames: Q-Flex `#5aa0ff`, Comtech
+CDM-570/600 `#6ed76e`.
+
 ## LO trim; multi-radio trunks; one voice at a time (2026-10-10)
 
 - **LO trim** (`main.rs`): the LNB's error added to the RF scale — axis,

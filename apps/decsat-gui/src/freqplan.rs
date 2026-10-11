@@ -1,8 +1,10 @@
 //! A frequency plan: named carriers at RF frequencies, read from an SDR++
 //! frequency-manager bookmark list —
 //! `{"bookmarks": {"name": {"frequency": Hz, "bandwidth": Hz, "mode": n}}}`.
-//! The waterfall labels the carriers it shows, and a VFO made on one takes
-//! its name (and, made from the label, its width). The plan file is the
+//! A carrier may also carry `"color": "#rrggbb"`, DecSAT's own field for the
+//! colour of its label (SDR++ ignores it, and drops it if it rewrites the
+//! list). The waterfall labels the carriers it shows, and a VFO made on one
+//! takes its name (and, made from the label, its width). The plan file is the
 //! user's own: its path is remembered in the prefs, nothing of it is kept
 //! anywhere else.
 
@@ -15,6 +17,8 @@ pub struct Bookmark {
     /// RF centre, Hz.
     pub freq_hz: f64,
     pub bandwidth_hz: f64,
+    /// Label colour (RGB); `None` draws it in the plan's own colour.
+    pub color: Option<[u8; 3]>,
 }
 
 /// The plan in `path`, sorted by frequency.
@@ -38,11 +42,25 @@ pub fn parse(text: &str) -> Result<Vec<Bookmark>, String> {
                 name: name.trim().to_string(),
                 freq_hz: m.get("frequency")?.as_f64()?,
                 bandwidth_hz: m.get("bandwidth").and_then(|b| b.as_f64()).unwrap_or(0.0),
+                // A colour that is missing or malformed is no colour, not an
+                // error: the carrier still belongs in the plan.
+                color: m.get("color").and_then(|c| c.as_str()).and_then(rgb),
             })
         })
         .collect();
     out.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
     Ok(out)
+}
+
+/// `"#rrggbb"` (the `#` optional) as RGB.
+fn rgb(s: &str) -> Option<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    // `from_str_radix` alone would also take a sign, so check the digits.
+    if h.len() != 6 || !h.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
 /// The plan's carrier a VFO centred at `rf_hz`, `bw_hz` wide, sits on: the
@@ -108,6 +126,7 @@ mod tests {
             name: String::new(),
             freq_hz: f,
             bandwidth_hz: w,
+            color: None,
         };
         // A plan of CDM-600-like carriers 59 kHz apart and a wider Q-Flex.
         let plan = vec![
@@ -144,14 +163,18 @@ mod tests {
     #[test]
     fn reads_an_sdrpp_bookmark_list() {
         let plan = parse(
-            r#"{"bookmarks":{"Site B":{"bandwidth":58837.25,"frequency":12352038770.0,"mode":1},
-                "Site A ":{"bandwidth":15000.0,"frequency":12351836670.0,"mode":2},
-                "no frequency":{"bandwidth":1.0}}}"#,
+            r##"{"bookmarks":{"Site B":{"bandwidth":58837.25,"frequency":12352038770.0,"mode":1,"color":"#5aa0ff"},
+                "Site A ":{"bandwidth":15000.0,"frequency":12351836670.0,"mode":2,"color":"+12345"},
+                "no frequency":{"bandwidth":1.0}}}"##,
         )
         .unwrap();
         assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].name, "Site A");
         assert_eq!(plan[1].freq_hz, 12_352_038_770.0);
+        // A colour where given; a malformed one is none.
+        assert_eq!(plan[1].color, Some([0x5a, 0xa0, 0xff]));
+        assert_eq!(plan[0].color, None);
+        assert_eq!(rgb("6ED76E"), Some([0x6e, 0xd7, 0x6e]));
         // A VFO near Site B's centre is on it; one between them on neither.
         assert_eq!(
             at(&plan, 12_352_040_000.0, 40_000.0).unwrap().name,

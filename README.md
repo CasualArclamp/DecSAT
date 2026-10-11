@@ -373,8 +373,10 @@ list (`.json`: name, RF frequency, bandwidth per carrier). Its carriers are
 marked along the foot of the spectrum and named where there is room (zoom in
 for more); hovering names the one under the pointer, clicking a name makes a
 VFO on that carrier with its name and width, and a VFO drawn or claimed on a
-plan carrier takes its name. The plan stays your own file: only its path is
-remembered (right-click the button to stop using it).
+plan carrier takes its name. A carrier given `"color": "#rrggbb"` in the
+file is marked in that colour (to tell modem types apart, say); SDR++ ignores
+the field. The plan stays your own file: only its path is remembered
+(right-click the button to stop using it).
 
 An LNB's oscillator is rarely exactly on 10600 MHz and drifts as it warms,
 so the carriers sit a few kHz off their plan frequencies. **LO trim** in the
