@@ -200,6 +200,13 @@ impl RadarScope {
                 ui.label(RichText::new(format!("{} UTC", tod_string(t))).monospace());
                 ui.separator();
             }
+            if let Some(s) = v.source_label() {
+                ui.label(s).on_hover_text(
+                    "The radar (ASTERIX): its System Area and Identification Codes, and \
+                     where it says it is (WGS-84)",
+                );
+                ui.separator();
+            }
             ui.label(format!("{} tracks", v.tracks.len()));
             ui.separator();
             ui.label(match v.scan_secs {
@@ -387,7 +394,11 @@ impl RadarScope {
             }
             if self.labels {
                 let r = &t.last;
-                let line1 = r.squawk.map_or("----".into(), |s| format!("{s:04}"));
+                // The callsign when Mode S gives one, else the squawk.
+                let line1 = match &r.callsign {
+                    Some(c) => c.clone(),
+                    None => r.squawk.map_or("----".into(), |s| format!("{s:04}")),
+                };
                 let line2 = format!(
                     "{} {}",
                     r.flight_level.map_or("---".into(), |f| format!("{f:03}")),
@@ -440,6 +451,12 @@ fn track_tip(ui: &mut Ui, t: &Track) {
             ui.label(v);
             ui.end_row();
         };
+        if let Some(c) = &r.callsign {
+            row(ui, "Callsign", c.clone());
+        }
+        if let Some(a) = r.address {
+            row(ui, "Mode S", format!("{a:06X}"));
+        }
         row(
             ui,
             "Mode A",
@@ -449,7 +466,7 @@ fn track_tip(ui: &mut Ui, t: &Track) {
             ui,
             "Mode C",
             r.flight_level.map_or("none".into(), |f| {
-                format!("FL{f:03} ({} ft)", u32::from(f) * 100)
+                format!("FL{f:03} ({} ft)", i32::from(f) * 100)
             }),
         );
         row(

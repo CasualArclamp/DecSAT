@@ -16,6 +16,7 @@
 //! - [`bsc`]: IBM bisync (BSC) blocks; [`radar`]: the radar track feed
 //!   they carry on PH-ML.
 
+pub mod asterix;
 pub mod bsc;
 pub mod cid;
 pub mod conv;

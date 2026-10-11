@@ -1,5 +1,6 @@
 //! The radar track feed in a modem's BSC blocks (see
-//! `decsat_modem::radar`): its track table for the GUI's scope and the
+//! `decsat_modem::radar`) or its HDLC frames of ASTERIX (see
+//! `decsat_modem::asterix`): its track table for the GUI's scope and the
 //! command line, and while recording a CSV log, one line a track report.
 
 use std::io::Write;
@@ -7,9 +8,9 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use decsat_modem::bsc::Block;
-use decsat_modem::radar::{CSV_HEADER, RadarRx, csv_line};
+use decsat_modem::radar::{CSV_HEADER, Message, RadarRx, csv_line};
 // For the GUI, which reaches the modem crate through the engine.
-pub use decsat_modem::radar::{RadarView, Report, SECTORS, Track, tod_string};
+pub use decsat_modem::radar::{RadarView, Report, SECTORS, Site, Track, tod_string};
 
 use crate::fec::FecOutput;
 
@@ -77,21 +78,38 @@ impl RadarStage {
 
     pub(crate) fn blocks(&mut self, blocks: &[Block]) {
         for b in blocks {
-            let Some(m) = self.rx.block(&b.heading, &b.text) else {
-                continue;
-            };
-            if let Some(f) = &mut self.file {
-                for r in &m.reports {
-                    if let Err(e) = writeln!(f, "{}", csv_line(&m, r)) {
-                        self.error = Some(e.to_string());
-                        self.file = None;
-                        break;
-                    }
-                    self.lines += 1;
-                }
+            if let Some(m) = self.rx.block(&b.heading, &b.text) {
+                self.log(&m);
             }
         }
-        // Lines reach the disk a block at a time (a few a second at most).
+        self.flush();
+    }
+
+    /// An HDLC frame's ASTERIX messages (`decsat_modem::asterix::messages`).
+    pub(crate) fn messages(&mut self, ms: &[Message]) {
+        for m in ms {
+            self.rx.message(m);
+            self.log(m);
+        }
+        self.flush();
+    }
+
+    /// A message's reports to the CSV log, while recording.
+    fn log(&mut self, m: &Message) {
+        let Some(f) = &mut self.file else { return };
+        for r in &m.reports {
+            if let Err(e) = writeln!(f, "{}", csv_line(m, r)) {
+                self.error = Some(e.to_string());
+                self.file = None;
+                return;
+            }
+            self.lines += 1;
+        }
+    }
+
+    /// Lines reach the disk a block or frame at a time (a few a second at
+    /// most).
+    fn flush(&mut self) {
         if let Some(f) = &mut self.file {
             let _ = f.flush();
         }

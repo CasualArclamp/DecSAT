@@ -2323,3 +2323,55 @@ so `sync_at` passed.
   stray bits in 64 is not speech (fails without the veto). A synthetic
   two-call idle site did not reproduce the askew runs (the chance matches
   depend on the real status octets and fill phases), so no TDM-level test.
+
+## The other radar feeds: ASTERIX in HDLC (2026-10-12)
+
+Rory's older (2025) carrier plan names the band's radar carriers; he
+asked for them recorded, warning the plan is old (its rates are: ASA251
+and PH-ML were 64k there, 9.6k now). Surveyed at 20 MS/s, then 60 s at
+8 MS/s on each group. Of the plan's radar slots, five carry a 64 kS/s
+CDM-570 carrier now: CB-BN (12335.22), MTBB-BN (12346.63), the slot the
+current plan calls ASA119 AD-BN (12346.72), and two the current plan
+lacks, 12355.08 and 12359.44. SY-ML (12346.46) is empty; the others are
+TPC carriers or wide trunks now.
+
+- **Modem**: the `cdm570` chain as it was — K = 7 ½, V.35, differential —
+  and HDLC on an inverted line (FCS-16), 7–9 frames a second.
+- **Frames**: UI frames (address `02h`/`03h`, control `03h`) of
+  **ASTERIX** data blocks: category 034 service messages (a sector
+  crossing every 11.25°, sent in pairs every 0.25 s; a north marker once a
+  scan, sent ~0.5 s before the beam gets there with the time it will)
+  and category 048 target reports (polar and Cartesian position, Mode
+  3/A, flight level, Mode S address and MB data, track number, velocity,
+  track status). Over 1496 frames every block parses to its exact length
+  under the standard UAPs. Times of day agree with the clock (13:56 UTC).
+- **Radars** (SAC 4; I034/120 in the north marker): SIC 20 Adelaide
+  Airport (34.9524°S 138.5320°E, 30 m), SIC 19 near Canberra (903 m), SIC
+  18 Cairns Airport (on the 12355.08 carrier), SIC 63 Darwin (12359.44),
+  SIC 48 (MTBB, no position sent). Scan 3.95–3.97 s (I034/041). Each
+  shows a few fixed Mode S transponders (squawks 77xx, FL −10, ≤ 10 kt,
+  addresses 7CF7xx) — test or monitoring transponders — and, past
+  midnight local, little traffic: FL351/FL380 jets at 475 kt.
+- `decsat-modem::asterix`: a UAP-driven reader (fixed, extended,
+  repetitive, compound, explicit items) for categories 034 and 048; a
+  block is taken only if its records end exactly at its end. Its messages
+  are `radar::Message`s, so the BSC feed's track table, CSV log and scope
+  serve both: `Report` gains Mode S address and callsign (I048/240, none
+  seen yet), `coasting` (I048/020 TYP 0; BSC from its status), signed
+  flight levels and a variable `raw`; `Message` gains the radar's SAC/SIC,
+  site and rotation period and the tracks ended (I048/170 TRE, which drop
+  from the table); `RadarRx::message`/`asterix` take them. CAT 034 sector
+  crossings map onto the scope's 32 sectors (the beam at azimuth A at the
+  message's time); the north marker sets no sector (its early time would
+  count as a jump). Track ages are taken round midnight the short way
+  (a slightly older message no longer drops a track as a day stale).
+- Engine: HDLC frames that are not IP go to the radar stage when they are
+  ASTERIX; the radar card and scope show the radar's SAC/SIC and place,
+  the scope's labels a callsign when there is one. CSV gains `mode_s` and
+  `callsign` columns at the end. `decsat payload` reads ASTERIX too and
+  writes the frames that check as hex (`--hdlc-out`, `--bit-rate`).
+- PH-ML (BSC) decodes as before (321 blocks, 145 reports, 15 tracks).
+- Open: the `payload` re-run of a Viterbi `.bin` picked the wrong
+  descrambler hypothesis on two of these recordings (their first 0.25 s
+  idle flags only) — 2 frames where the decoder had found 500. The live
+  decoder is right; the re-run's search is not.

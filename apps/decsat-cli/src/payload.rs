@@ -5,8 +5,10 @@
 //! analysis if asked (`--tdm-out`: 257 bytes of 0/1 a frame, the alignment
 //! bit first, then the sixteen 16-bit words). Timeslots in HDLC packets are
 //! looked through for G.728: speech, or the equipment's silence fill. BSC
-//! blocks are read as the PH-ML radar feed (`--radar-out`: a CSV, one line
-//! a track report).
+//! blocks are read as the PH-ML radar feed, HDLC frames of ASTERIX as the
+//! other radar feeds (`--radar-out`: a CSV, one line a track report). HDLC
+//! frames that check can be written out as hex (`--hdlc-out`), for links
+//! whose content is not yet known.
 
 use std::path::PathBuf;
 
@@ -42,6 +44,14 @@ pub struct PayloadArgs {
     /// are BSC blocks carrying one.
     #[arg(long)]
     pub radar_out: Option<PathBuf>,
+    /// Write every HDLC frame whose FCS checks here, one a line: its time
+    /// (s at the recording's bit rate, from --bit-rate), its length, its
+    /// bytes in hex (without the FCS).
+    #[arg(long)]
+    pub hdlc_out: Option<PathBuf>,
+    /// The recording's bit rate, for --hdlc-out's times (bit/s).
+    #[arg(long, default_value_t = 128_000.0)]
+    pub bit_rate: f64,
 }
 
 pub fn run(a: &PayloadArgs) -> Result<()> {
@@ -76,11 +86,31 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     let mut metered = 0usize;
     let mut radar = decsat_modem::radar::RadarRx::new();
     let mut radar_csv = vec![decsat_modem::radar::CSV_HEADER.to_string()];
-    for frame in bits.chunks_exact(a.frame_bits) {
+    let mut hdlc_lines: Vec<String> = Vec::new();
+    for (k, frame) in bits.chunks_exact(a.frame_bits).enumerate() {
         out.clear();
         pay.push(frame, &mut out);
+        if a.hdlc_out.is_some() {
+            // The frames only say which modem frame they ended in, so the
+            // time is that frame's end — good to a frame.
+            let t = ((k + 1) * a.frame_bits) as f64 / a.bit_rate;
+            hdlc_lines.extend(out.frames.iter().map(|(f, _)| {
+                let hex: String = f.iter().map(|b| format!("{b:02x}")).collect();
+                format!("{t:.3} {} {hex}", f.len())
+            }));
+        }
         for b in &out.bsc {
             if let Some(m) = radar.block(&b.heading, &b.text) {
+                radar_csv.extend(
+                    m.reports
+                        .iter()
+                        .map(|r| decsat_modem::radar::csv_line(&m, r)),
+                );
+            }
+        }
+        // ASTERIX radar data in the HDLC frames.
+        for (f, _) in &out.frames {
+            for m in radar.asterix(f).unwrap_or_default() {
                 radar_csv.extend(
                     m.reports
                         .iter()
@@ -131,24 +161,23 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         bits.len() as f64 / 128e3
     );
     crate::decode::print_payload(&pay.stats);
-    if pay.stats.bsc.is_some() {
+    if pay.stats.bsc.is_some() || radar.view().messages > 0 {
         crate::decode::print_radar(&radar.view());
         if let Some(p) = &a.radar_out {
-            std::fs::write(
-                p,
-                radar_csv.join(
-                    "
-",
-                ) + "
-",
-            )
-            .with_context(|| format!("writing {}", p.display()))?;
+            std::fs::write(p, radar_csv.join("\n") + "\n")
+                .with_context(|| format!("writing {}", p.display()))?;
             println!(
                 "wrote {} track reports to {}",
                 radar_csv.len() - 1,
                 p.display()
             );
         }
+    }
+    if let Some(p) = &a.hdlc_out {
+        // A line a frame, each ended by a newline (an empty file for none).
+        let text: String = hdlc_lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(p, text).with_context(|| format!("writing {}", p.display()))?;
+        println!("wrote {} HDLC frames to {}", hdlc_lines.len(), p.display());
     }
     if !esc.is_empty() {
         let ones = esc.iter().filter(|&&b| b == 1).count();

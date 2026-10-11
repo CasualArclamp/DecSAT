@@ -2249,6 +2249,12 @@ fn run(
                             let n = ipst.hdlc.map_or(0, |h| h.0);
                             ipst.hdlc = Some((n + 1, *fcs));
                             ipst.ip(pkt, &info);
+                        } else if let Some(ms) = decsat_modem::asterix::messages(frame) {
+                            // A radar feed in ASTERIX (the CDM-570 radar
+                            // carriers).
+                            let stage = radar.get_or_insert_with(crate::radar::RadarStage::new);
+                            stage.follow(&o);
+                            stage.messages(&ms);
                         }
                     }
                 }

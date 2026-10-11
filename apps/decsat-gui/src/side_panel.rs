@@ -2964,8 +2964,9 @@ fn cdm_model_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
         });
 }
 
-/// A radar track feed (BSC blocks, the PH-ML carrier): the feed's state,
-/// the CSV log, and the scope.
+/// A radar track feed (BSC blocks, the PH-ML carrier; or ASTERIX in HDLC
+/// frames, the other CDM-570 radar carriers): the feed's state, the CSV
+/// log, and the scope.
 fn radar_card(
     ui: &mut Ui,
     r: &decsat_engine::RadarStageView,
@@ -2977,6 +2978,14 @@ fn radar_card(
     ui.add_space(6.0);
     ui.label(RichText::new("Radar feed").strong());
     egui::Grid::new("radar").num_columns(2).show(ui, |ui| {
+        if let Some(s) = v.source_label() {
+            ui.label("Radar");
+            ui.label(s).on_hover_text(
+                "ASTERIX: the radar's System Area and Identification Codes, and where its \
+                 north marker says it is (WGS-84)",
+            );
+            ui.end_row();
+        }
         ui.label("Messages");
         ui.label(format!(
             "{} · {} track reports{}",
@@ -2985,9 +2994,15 @@ fn radar_card(
             v.tod
                 .map_or(String::new(), |t| format!(" · {} UTC", tod_string(t)))
         ))
-        .on_hover_text(
-            "A message a sector (32 a scan), each with the tracks the beam has just              passed: 24-octet reports (x/y in 1/64 NM, Mode A, Mode C, ground speed).",
-        );
+        .on_hover_text(if v.source.is_some() {
+            "ASTERIX in HDLC frames: category 034 service messages (north marker, a \
+             sector crossing every 11.25°) and category 048 target reports (position, \
+             Mode A, Mode C, Mode S address, velocity)."
+        } else {
+            "BSC blocks: a message a sector (32 a scan), each with the tracks the beam \
+             has just passed: 24-octet reports (x/y in 1/64 NM, Mode A, Mode C, ground \
+             speed)."
+        });
         ui.end_row();
         ui.label("Scan");
         ui.label(match v.scan_secs {

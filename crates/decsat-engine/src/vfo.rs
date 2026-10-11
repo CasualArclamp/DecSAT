@@ -159,7 +159,7 @@ impl DecoderKind {
         match self {
             DecoderKind::Tpc2964 => "CDM-600 / 600L data (TPC 2964 → IP / TS)",
             DecoderKind::Cdm600Voice => "CDM-600L voice (TPC 2964 → D&I++ → G.728)",
-            DecoderKind::Cdm570 => "CDM-570L (Viterbi K=7 → data, e.g. BSC radar)",
+            DecoderKind::Cdm570 => "CDM-570L (Viterbi K=7 → data, e.g. radar: BSC or ASTERIX)",
             k => k.label(),
         }
     }

@@ -676,12 +676,22 @@ pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
             tod_string(t)
         ))
     );
+    if let Some(s) = v.source_label() {
+        println!("  radar: {s} (ASTERIX)");
+    }
     let mut tracks: Vec<_> = v.tracks.iter().collect();
     tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
     for t in tracks {
         let r = &t.last;
+        // Mode S, when the feed gives it: the callsign and the address.
+        let mode_s = match (&r.callsign, r.address) {
+            (Some(c), Some(a)) => format!(" · {c} ({a:06X})"),
+            (None, Some(a)) => format!(" · Mode S {a:06X}"),
+            (Some(c), None) => format!(" · {c}"),
+            (None, None) => String::new(),
+        };
         println!(
-            "  track {:03X} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
+            "  track {:03X}{mode_s} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
             r.number,
             r.squawk.map_or("----".into(), |s| format!("{s:04}")),
             r.flight_level

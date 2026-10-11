@@ -35,6 +35,10 @@
 //! Ranges reach 247 NM (a co-mounted MSSR's coverage); an aircraft on a
 //! 3° final at 7.7 NM north of the radar is at FL023, so the radar sits
 //! near a runway threshold.
+//!
+//! The other radar feeds on the band are ASTERIX in HDLC frames
+//! ([`crate::asterix`]); they come here as the same [`Message`]s, so one
+//! track table and one scope serve both.
 
 use std::collections::BTreeMap;
 
@@ -56,30 +60,41 @@ const TRAIL: usize = 12;
 /// One track report.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
+    /// The BSC report's status word; for ASTERIX, I048/020's first octet
+    /// (high) and I048/170's (low).
     pub status: u16,
-    /// The track number (octets 4–5's low 10 bits), and the bits above it
-    /// (flags: 400h seen, meaning not known).
+    /// The track number (BSC: octets 4–5's low 10 bits; ASTERIX: I048/161),
+    /// and the bits above it (BSC flags: 400h seen, meaning not known).
     pub number: u16,
     pub number_flags: u16,
+    /// Not updated this scan: a track in decline (BSC) or coasted, with no
+    /// plot (ASTERIX).
+    pub coasting: bool,
     /// East and north of the radar, NM.
     pub x: f32,
     pub y: f32,
     /// Velocity east and north, kt.
     pub vx: f32,
     pub vy: f32,
-    /// Flight level (hundreds of feet), when Mode C was given.
-    pub flight_level: Option<u16>,
+    /// Flight level (hundreds of feet), when Mode C was given (ASTERIX's
+    /// may be below zero).
+    pub flight_level: Option<i16>,
     /// Mode A code as its four octal digits (4304 for code 4304).
     pub squawk: Option<u16>,
     /// Ground speed, kt.
     pub ground_speed: Option<u16>,
-    /// The field not understood (octets 20–21).
+    /// Mode S: the aircraft's 24-bit address and its identification
+    /// (callsign), when the feed gives them (ASTERIX).
+    pub address: Option<u32>,
+    pub callsign: Option<String>,
+    /// The field not understood (BSC octets 20–21).
     pub other: u16,
-    /// When the plot was seen, 1/128 s after north; and the flag bits.
+    /// When the plot was seen, 1/128 s after north; and the flag bits
+    /// (BSC).
     pub north_ticks: u16,
     pub tick_flags: u16,
-    /// The 24 octets as sent.
-    pub raw: [u8; REPORT],
+    /// The report as sent (BSC: the 24 octets; ASTERIX: the record).
+    pub raw: Vec<u8>,
 }
 
 impl Report {
@@ -97,21 +112,42 @@ impl Report {
         self.vx.atan2(self.vy).to_degrees().rem_euclid(360.0)
     }
 
-    /// Updated this scan (status 8270h); others are in decline.
+    /// Updated this scan (BSC status 8270h; ASTERIX: a plot); others are
+    /// in decline or coasted.
     pub fn updated(&self) -> bool {
-        self.status & 0xFF0F == 0x8200
+        !self.coasting
     }
+}
+
+/// Where the radar is (WGS-84; ASTERIX I034/120).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Site {
+    pub lat: f64,
+    pub lon: f64,
+    pub height_m: i16,
 }
 
 /// One message: a sector's header and its reports.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
+    /// What the message is keyed by: the BSC heading; for ASTERIX, the
+    /// SAC, SIC and category.
     pub heading: Vec<u8>,
+    /// BSC: the text's first octet; ASTERIX: the category (34, 48).
     pub kind: u8,
+    /// The sector just passed, 0–31 (the beam at its trailing edge); 32 or
+    /// above for none.
     pub sector: u8,
     /// Time of day, seconds since midnight UTC.
     pub tod: f64,
     pub reports: Vec<Report>,
+    /// Track numbers the radar says are ended (ASTERIX I048/170's TRE).
+    pub ended: Vec<u16>,
+    /// ASTERIX: the radar's SAC and SIC, its place, its antenna's
+    /// rotation period (s).
+    pub source: Option<(u8, u8)>,
+    pub site: Option<Site>,
+    pub rotation_secs: Option<f64>,
 }
 
 fn bcd(b: u8) -> Option<u16> {
@@ -130,7 +166,7 @@ impl Report {
         }
         // Mode C: four BCD digits, the first a flag.
         let flight_level = match (bcd(r[12]), bcd(r[13])) {
-            (Some(a), Some(b)) => Some((a % 10) * 100 + b),
+            (Some(a), Some(b)) => Some(((a % 10) * 100 + b) as i16),
             _ => None,
         };
         // Mode A: bit 12 says it is there, the low 12 bits the code.
@@ -142,12 +178,13 @@ impl Report {
             _ => None,
         };
         let ticks = u16::from_be_bytes([r[22], r[23]]);
-        let mut raw = [0u8; REPORT];
-        raw.copy_from_slice(&r[..REPORT]);
+        let status = u16::from_be_bytes([r[2], r[3]]);
         Some(Report {
-            status: u16::from_be_bytes([r[2], r[3]]),
+            status,
             number: u16::from_be_bytes([r[4], r[5]]) & NUMBER_MASK,
             number_flags: u16::from_be_bytes([r[4], r[5]]) & !NUMBER_MASK,
+            // Updated: 8270h (8260h once); 83n0 in decline.
+            coasting: status & 0xFF0F != 0x8200,
             x: f32::from(s16(&r[6..])) * NM_PER_UNIT,
             y: f32::from(s16(&r[8..])) * NM_PER_UNIT,
             vx: f32::from(r[10] as i8) * KT_PER_UNIT,
@@ -155,10 +192,12 @@ impl Report {
             flight_level,
             squawk,
             ground_speed,
+            address: None,
+            callsign: None,
             other: u16::from_be_bytes([r[20], r[21]]),
             north_ticks: ticks & 0x1FF,
             tick_flags: ticks & !0x1FF,
-            raw,
+            raw: r[..REPORT].to_vec(),
         })
     }
 }
@@ -187,6 +226,10 @@ impl Message {
             sector: text[1],
             tod,
             reports,
+            ended: Vec::new(),
+            source: None,
+            site: None,
+            rotation_secs: None,
         })
     }
 }
@@ -224,6 +267,28 @@ pub struct RadarView {
     pub sector_tod: Option<f64>,
     /// Live tracks, by number.
     pub tracks: Vec<Track>,
+    /// ASTERIX: the radar's SAC and SIC, and its place when it says.
+    pub source: Option<(u8, u8)>,
+    pub site: Option<Site>,
+}
+
+impl RadarView {
+    /// Which radar, for display: `SAC 4 SIC 20 · 34.9524°S 138.5320°E,
+    /// 30 m` (ASTERIX feeds; `None` for the BSC one, which does not say).
+    pub fn source_label(&self) -> Option<String> {
+        let (sac, sic) = self.source?;
+        let at = self.site.map_or(String::new(), |s| {
+            format!(
+                " · {:.4}°{} {:.4}°{}, {} m",
+                s.lat.abs(),
+                if s.lat < 0.0 { 'S' } else { 'N' },
+                s.lon.abs(),
+                if s.lon < 0.0 { 'W' } else { 'E' },
+                s.height_m
+            )
+        });
+        Some(format!("SAC {sac} SIC {sic}{at}"))
+    }
 }
 
 /// Follows a radar feed's messages: counts and a track table.
@@ -257,8 +322,36 @@ impl RadarRx {
             self.view.unknown += 1;
             return None;
         };
+        self.message(&m);
+        Some(m)
+    }
+
+    /// An HDLC frame in: ASTERIX radar data (see [`crate::asterix`]); its
+    /// messages, or `None` if it was not that.
+    pub fn asterix(&mut self, frame: &[u8]) -> Option<Vec<Message>> {
+        let ms = crate::asterix::messages(frame)?;
+        for m in &ms {
+            self.message(m);
+        }
+        Some(ms)
+    }
+
+    /// A message, from either kind of feed.
+    pub fn message(&mut self, m: &Message) {
         self.view.messages += 1;
+        // A north marker's time may run ahead of the sector messages (it
+        // is sent before the beam gets there): the latest time is the
+        // latest message's, whatever it is.
         self.view.tod = Some(m.tod);
+        if m.source.is_some() {
+            self.view.source = m.source;
+        }
+        if m.site.is_some() {
+            self.view.site = m.site;
+        }
+        if let Some(r) = m.rotation_secs {
+            self.view.scan_secs = Some(r);
+        }
         if m.sector < SECTORS {
             // Rust note: `entry(..).or_insert(..)` gives a `&mut` to the
             // heading's slot, made on first sight.
@@ -309,12 +402,17 @@ impl RadarRx {
                 t.trail.remove(0);
             }
         }
-        // Drop tracks not heard of for a few scans.
+        for n in &m.ended {
+            self.tracks.remove(n);
+        }
+        // Drop tracks not heard of for a few scans. The age is taken round
+        // midnight the short way: a message a little older than a track's
+        // last report (ASTERIX sends some out of time order) is not a day
+        // later.
         let keep = KEEP_SCANS * self.view.scan_secs.unwrap_or(5.0);
         let now = m.tod;
         self.tracks
-            .retain(|_, t| (now - t.seen).rem_euclid(86_400.0) <= keep);
-        Some(m)
+            .retain(|_, t| (now - t.seen + 43_200.0).rem_euclid(86_400.0) - 43_200.0 <= keep);
     }
 
     pub fn view(&self) -> RadarView {
@@ -339,14 +437,19 @@ pub fn tod_string(tod: f64) -> String {
 /// The CSV log's header line, and a report as a line of it.
 pub const CSV_HEADER: &str = "time_utc,sector,track,track_flags,status,x_nm,y_nm,range_nm,bearing_deg,\
                               flight_level,squawk,ground_speed_kt,track_deg,vx_kt,vy_kt,other,\
-                              north_ticks,raw";
+                              north_ticks,raw,mode_s,callsign";
 
 pub fn csv_line(m: &Message, r: &Report) -> String {
     let opt = |v: Option<u16>| v.map_or(String::new(), |v| v.to_string());
     format!(
-        "{},{},{:03X},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{}",
+        "{},{},{:03X},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{},{},{}",
         tod_string(m.tod),
-        m.sector,
+        // ASTERIX target reports belong to no sector message.
+        if m.sector < SECTORS {
+            m.sector.to_string()
+        } else {
+            String::new()
+        },
         r.number,
         r.number_flags,
         r.status,
@@ -354,7 +457,7 @@ pub fn csv_line(m: &Message, r: &Report) -> String {
         r.y,
         r.range(),
         r.bearing(),
-        opt(r.flight_level),
+        r.flight_level.map_or(String::new(), |f| f.to_string()),
         r.squawk.map_or(String::new(), |s| format!("{s:04}")),
         opt(r.ground_speed),
         r.track(),
@@ -362,7 +465,9 @@ pub fn csv_line(m: &Message, r: &Report) -> String {
         r.vy,
         r.other,
         r.north_ticks,
-        r.raw.iter().map(|b| format!("{b:02X}")).collect::<String>()
+        r.raw.iter().map(|b| format!("{b:02X}")).collect::<String>(),
+        r.address.map_or(String::new(), |a| format!("{a:06X}")),
+        r.callsign.as_deref().unwrap_or("")
     )
 }
 
