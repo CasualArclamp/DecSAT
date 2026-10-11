@@ -6,7 +6,8 @@
 //! `winusb.inf` the official tools install).
 //!
 //! **Receive only, antenna power always off.** This module never puts the
-//! radio into transmit, and forces the antenna-port bias tee off on every
+//! radio into transmit (that is `hackrf_tx`, used only by the GUI's armed
+//! transmit panel), and forces the antenna-port bias tee off on every
 //! configuration: switching DC onto the antenna port of whatever is connected
 //! (an LNB on an inserter, a filter, a preamp) can damage it, so DecSAT will not
 //! do it. An LNB needs 13/18 V from an external inserter anyway.

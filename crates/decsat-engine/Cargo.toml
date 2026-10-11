@@ -18,11 +18,8 @@ decsat-ts = { path = "../decsat-ts" }
 decsat-ip = { path = "../decsat-ip" }
 decsat-audio = { path = "../decsat-audio" }
 decsat-modem = { path = "../decsat-modem" }
+decsat-mod = { path = "../decsat-mod" }
 num-complex.workspace = true
 rustfft.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-# Test signals: real DVB-S2 PLFRAMEs, pulse-shaped.
-decsat-mod = { path = "../decsat-mod" }

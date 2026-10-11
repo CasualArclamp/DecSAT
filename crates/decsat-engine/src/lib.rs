@@ -16,6 +16,7 @@ pub mod period;
 pub mod psk;
 pub mod rf;
 pub mod spectrum;
+pub mod tx;
 pub mod vfo;
 
 pub use carriers::{Carrier, detect_carriers};
