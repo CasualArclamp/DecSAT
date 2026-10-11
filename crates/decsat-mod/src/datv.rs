@@ -457,10 +457,13 @@ pub struct DatvConfig {
     pub symbol_rate: f64,
     /// The PL scrambling sequence (EN 302 307-1 §5.5.4); 0 is the default.
     pub gold_code: u32,
-    /// The lowest sample rate wanted (a HackRF's 2 MS/s); the rate is the
-    /// symbol rate times the smallest whole number of samples a symbol (2
-    /// or more) that reaches it.
+    /// The lowest and highest sample rates the output may use (a HackRF:
+    /// 2 and 20 MS/s). Within them it is the symbol rate times a whole
+    /// number of samples a symbol: 4 where that fits — at 2 the carrier
+    /// fills the band, hard on a receiver and on the DAC's images — more to
+    /// reach the lowest, down to 2 to stay under the highest.
     pub min_sample_rate: f64,
+    pub max_sample_rate: f64,
 }
 
 impl Default for DatvConfig {
@@ -473,6 +476,7 @@ impl Default for DatvConfig {
             symbol_rate: 1e6,
             gold_code: 0,
             min_sample_rate: 2e6,
+            max_sample_rate: 20e6,
         }
     }
 }
@@ -498,7 +502,9 @@ impl DatvConfig {
 
     /// Samples a symbol.
     pub fn sps(&self) -> usize {
-        ((self.min_sample_rate / self.symbol_rate).ceil() as usize).max(2)
+        let want = ((self.min_sample_rate / self.symbol_rate).ceil() as usize).max(4);
+        let most = (self.max_sample_rate / self.symbol_rate).floor() as usize;
+        want.min(most).max(2)
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -520,6 +526,43 @@ impl DatvConfig {
                 .modcod()
                 .is_some_and(|m| m.frame != FecFrame::Medium)
     }
+}
+
+/// The MODCODs that carry a TS here, by number and name: DVB-S2's 1–28,
+/// then the S2X codes with data frames (EN 302 307-2 Table 17a), in PLS
+/// order.
+pub fn data_modcods() -> Vec<(u8, String)> {
+    (1..=255u8)
+        .filter(|&m| m <= 28 || m >= 128)
+        .filter(|&m| m < 128 || m % 2 == 0)
+        .filter(|&m| {
+            DatvConfig {
+                modcod: m,
+                ..DatvConfig::default()
+            }
+            .carries_data()
+        })
+        .map(|m| (m, decsat_core::modcod_name(m)))
+        .collect()
+}
+
+/// A MODCOD by number ("4", "138") or name ("QPSK 1/2", "qpsk-1/2",
+/// "8psk 23/36"): DVB-S2's first where S2X has the same name.
+pub fn modcod_by_name(s: &str) -> Option<u8> {
+    if let Ok(n) = s.trim().parse::<u8>() {
+        return Some(n);
+    }
+    let norm = |x: &str| {
+        x.chars()
+            .filter(|c| !matches!(c, ' ' | '-' | '_'))
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let want = norm(s);
+    data_modcods()
+        .into_iter()
+        .find(|(_, name)| norm(name) == want)
+        .map(|(m, _)| m)
 }
 
 /// The modulator: TS in, baseband samples at [`DatvConfig::sample_rate`] out,
@@ -656,22 +699,28 @@ mod tests {
         };
         let r = c.ts_rate().unwrap();
         assert!((r - 32_128.0 / 32_490.0 * 1e6).abs() < 1.0, "{r}");
-        // 8PSK 3/4 with pilots at 2 MS/s, a HackRF's 2 MS/s minimum: 2 a
-        // symbol; (48 408 − 80) bits a frame of 90 + 21 600 + 14 × 36.
+        // 8PSK 3/4 with pilots at 2 MS/s: 4 a symbol; (48 408 − 80) bits a
+        // frame of 90 + 21 600 + 14 × 36.
         let c = DatvConfig {
             modcod: 14,
             symbol_rate: 2e6,
             ..DatvConfig::default()
         };
-        assert_eq!(c.sps(), 2);
+        assert_eq!(c.sps(), 4);
         let r = c.ts_rate().unwrap();
         assert!((r - 48_328.0 / 22_194.0 * 2e6).abs() < 1.0, "{r}");
-        // A slow carrier gets more samples a symbol to reach 2 MS/s.
+        // A slow carrier gets more samples a symbol to reach 2 MS/s, a fast
+        // one fewer to stay under 20.
         let c = DatvConfig {
             symbol_rate: 333_000.0,
             ..DatvConfig::default()
         };
         assert_eq!(c.sps(), 7);
+        let c = DatvConfig {
+            symbol_rate: 8e6,
+            ..DatvConfig::default()
+        };
+        assert_eq!(c.sps(), 2);
     }
 
     /// A TS with a PCR every 40 packets at 2 Mbit/s.
@@ -720,6 +769,19 @@ mod tests {
         );
         assert!((p / (p + n) - 0.5).abs() < 0.02, "{p} packets, {n} nulls");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modcods_by_name_and_number() {
+        assert_eq!(modcod_by_name("QPSK 1/2"), Some(4));
+        assert_eq!(modcod_by_name("qpsk-1/2"), Some(4));
+        assert_eq!(modcod_by_name("8psk 3/4"), Some(14));
+        assert_eq!(modcod_by_name("17"), Some(17));
+        assert_eq!(modcod_by_name("QPSK 13/45"), Some(132));
+        assert_eq!(modcod_by_name("nonsense"), None);
+        let all = data_modcods();
+        assert_eq!(all.iter().filter(|(m, _)| *m <= 28).count(), 28);
+        assert!(all.len() > 60, "{}", all.len());
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod decode;
 mod mcast;
 mod payload;
 mod scene;
+mod tx;
 
 use std::path::PathBuf;
 
@@ -92,6 +93,9 @@ enum Command {
     /// Write a test capture of a DVB-S2 carrier with a DVB-CID (carrier ID,
     /// ETSI TS 103 129) under it: identifier, position, telephone and text.
     Cid(cidgen::CidArgs),
+    /// Modulate an MPEG-TS (a file, a UDP stream, or the test stream) onto a
+    /// DVB-S2/S2X carrier, to an IQ file.
+    Tx(tx::TxArgs),
     /// Write every test signal (the scene and the CID capture) into a
     /// folder.
     TestSignals {
@@ -266,6 +270,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Tx(a) => tx::run(&a),
         Command::Cid(a) => {
             let cycle = cidgen::write(&a)?;
             println!("{}", cidgen::summary(&a, cycle));

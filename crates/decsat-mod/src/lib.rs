@@ -10,7 +10,9 @@ pub mod fec;
 pub mod framer;
 pub mod shaper;
 
-pub use datv::{DatvConfig, DatvModulator, TsFile, TsInput, TsTest, TsUdp};
+pub use datv::{
+    DatvConfig, DatvModulator, TsFile, TsInput, TsTest, TsUdp, data_modcods, modcod_by_name,
+};
 pub use fec::{BbFrameSource, FecEncoder, GseBbFramer, TsBbFramer};
 pub use framer::{FrameSpec, PlFramer};
 pub use shaper::Shaper;
