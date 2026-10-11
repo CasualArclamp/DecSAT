@@ -681,7 +681,7 @@ pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
     for t in tracks {
         let r = &t.last;
         println!(
-            "  track {:04X} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
+            "  track {:03X} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
             r.number,
             r.squawk.map_or("----".into(), |s| format!("{s:04}")),
             r.flight_level

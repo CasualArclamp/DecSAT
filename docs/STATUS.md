@@ -2246,3 +2246,12 @@ preset runs TPC 2964's). Generic Viterbi and FastLink stay top-level.
 Open: the PH-ML carrier was not found by carrier detection live (Rory
 added the VFO by hand); some Q-Flex sites may carry radar, audio and
 ADS-B too (Rory).
+
+**Doubled tracks** (Rory, live at 13:26 UTC, HackRF 20 MS/s): the scope
+showed pairs 008A/048A, 011D/051D, 0071/0471 — each pair one aircraft
+(same squawk, level within 200 ft, speed, place; their reports summing to
+one a scan). Bit 10 of the track number comes and goes scan to scan: a
+flag, not part of the number (also set on the recording's 247 NM track in
+decline, 05CE). Tracks are now keyed by the low 10 bits; the flag bits are
+kept (`Report::number_flags`, CSV `track_flags`, the tooltip counts the
+flagged reports). Its meaning is open.

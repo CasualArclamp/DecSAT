@@ -433,7 +433,7 @@ impl RadarScope {
 
 fn track_tip(ui: &mut Ui, t: &Track) {
     let r = &t.last;
-    ui.label(RichText::new(format!("Track {:04X}", r.number)).strong());
+    ui.label(RichText::new(format!("Track {:03X}", r.number)).strong());
     egui::Grid::new("radar_tip").num_columns(2).show(ui, |ui| {
         let row = |ui: &mut Ui, k: &str, v: String| {
             ui.label(k);
@@ -472,6 +472,16 @@ fn track_tip(ui: &mut Ui, t: &Track) {
                 if r.updated() { "" } else { " (in decline)" }
             ),
         );
+        if t.flagged > 0 {
+            row(
+                ui,
+                "Number flag",
+                format!(
+                    "{:04X}h now · set in {} of {} reports (meaning not known)",
+                    r.number_flags, t.flagged, t.reports
+                ),
+            );
+        }
         row(
             ui,
             "Seen",
@@ -509,7 +519,7 @@ fn table(ui: &mut Ui, v: &RadarView) {
                 let cell = |ui: &mut Ui, s: String| {
                     ui.label(RichText::new(s).monospace().color(col));
                 };
-                cell(ui, format!("{:04X}", r.number));
+                cell(ui, format!("{:03X}", r.number));
                 cell(ui, r.squawk.map_or("----".into(), |s| format!("{s:04}")));
                 cell(
                     ui,

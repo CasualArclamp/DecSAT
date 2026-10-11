@@ -22,7 +22,7 @@
 //! |--------|---------------------------------------------------------------|
 //! | 0–1    | `FF 18` (18h = 24, the length)                                |
 //! | 2–3    | status: `8270` updated; `8260` once; `83n0` a track in decline (n counts 1–4, its speed falling, x/y jittering) |
-//! | 4–5    | track number                                                  |
+//! | 4–5    | track number in the low 10 bits; bit 10 (400h) a flag that comes and goes scan to scan on one aircraft (seen live: 008A/048A, 011D/051D, 0071/0471 — same squawk, level, speed and place, one report a scan between them), also set on a track in decline; its meaning not known |
 //! | 6–9    | x (east), y (north): signed, 1/64 NM, the radar at the origin — the bearing falls in the message's sector, and displacement / time against the ground speed below fits 64.1 units a NM |
 //! | 10–11  | velocity east, north: signed, ≈ 11.25 kt (fits 11.2–11.35 against the ground speed) |
 //! | 12–13  | Mode C: BCD, a flag digit then the flight level (`3380` = FL380, counting down `3363 … 3356` in a descent); `1F DA`-like when there is none |
@@ -46,6 +46,8 @@ pub const SECTORS: u8 = 32;
 /// Position and velocity units.
 pub const NM_PER_UNIT: f32 = 1.0 / 64.0;
 pub const KT_PER_UNIT: f32 = 11.25;
+/// The track number's bits in octets 4–5; the rest are flags.
+pub const NUMBER_MASK: u16 = 0x03FF;
 /// Scans a track is kept without an update before it is dropped.
 const KEEP_SCANS: f64 = 4.0;
 /// Positions kept a track, for its trail.
@@ -55,7 +57,10 @@ const TRAIL: usize = 12;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
     pub status: u16,
+    /// The track number (octets 4–5's low 10 bits), and the bits above it
+    /// (flags: 400h seen, meaning not known).
     pub number: u16,
+    pub number_flags: u16,
     /// East and north of the radar, NM.
     pub x: f32,
     pub y: f32,
@@ -141,7 +146,8 @@ impl Report {
         raw.copy_from_slice(&r[..REPORT]);
         Some(Report {
             status: u16::from_be_bytes([r[2], r[3]]),
-            number: u16::from_be_bytes([r[4], r[5]]),
+            number: u16::from_be_bytes([r[4], r[5]]) & NUMBER_MASK,
+            number_flags: u16::from_be_bytes([r[4], r[5]]) & !NUMBER_MASK,
             x: f32::from(s16(&r[6..])) * NM_PER_UNIT,
             y: f32::from(s16(&r[8..])) * NM_PER_UNIT,
             vx: f32::from(r[10] as i8) * KT_PER_UNIT,
@@ -193,6 +199,8 @@ pub struct Track {
     pub seen: f64,
     pub first: f64,
     pub reports: u64,
+    /// Reports with flag bits above the track number set.
+    pub flagged: u64,
     /// Positions, oldest first (the last one included).
     pub trail: Vec<(f32, f32)>,
 }
@@ -289,11 +297,13 @@ impl RadarRx {
                 seen: m.tod,
                 first: m.tod,
                 reports: 0,
+                flagged: 0,
                 trail: Vec::new(),
             });
             t.last = r.clone();
             t.seen = m.tod;
             t.reports += 1;
+            t.flagged += u64::from(r.number_flags != 0);
             t.trail.push((r.x, r.y));
             if t.trail.len() > TRAIL {
                 t.trail.remove(0);
@@ -327,17 +337,18 @@ pub fn tod_string(tod: f64) -> String {
 }
 
 /// The CSV log's header line, and a report as a line of it.
-pub const CSV_HEADER: &str = "time_utc,sector,track,status,x_nm,y_nm,range_nm,bearing_deg,\
+pub const CSV_HEADER: &str = "time_utc,sector,track,track_flags,status,x_nm,y_nm,range_nm,bearing_deg,\
                               flight_level,squawk,ground_speed_kt,track_deg,vx_kt,vy_kt,other,\
                               north_ticks,raw";
 
 pub fn csv_line(m: &Message, r: &Report) -> String {
     let opt = |v: Option<u16>| v.map_or(String::new(), |v| v.to_string());
     format!(
-        "{},{},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{}",
+        "{},{},{:03X},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{}",
         tod_string(m.tod),
         m.sector,
         r.number,
+        r.number_flags,
         r.status,
         r.x,
         r.y,
@@ -427,6 +438,28 @@ mod tests {
         assert_eq!(v.tracks.len(), 1);
         assert_eq!(v.tracks[0].reports, 3);
         assert_eq!(v.reports, 3);
+    }
+
+    #[test]
+    fn the_number_flag_does_not_split_a_track() {
+        // Live (2026-10-11): one aircraft's reports alternated between
+        // 008A and 048A, scan to scan.
+        let mut rx = RadarRx::new();
+        for (n, hi) in [0x00u8, 0x04, 0x00, 0x04, 0x04].into_iter().enumerate() {
+            let mut t = SECTOR_5;
+            t[HEADER + 4] = hi;
+            t[HEADER + 5] = 0x8A;
+            let ticks = ((45_000.0 + n as f64 * 3.6875) * 128.0) as u32;
+            t[2] = (ticks >> 16) as u8;
+            t[3] = (ticks >> 8) as u8;
+            t[5] = ticks as u8;
+            let m = rx.block(&[0x0C, 0x40], &t).unwrap();
+            assert_eq!(m.reports[0].number, 0x08A);
+            assert_eq!(m.reports[0].number_flags, u16::from(hi) << 8);
+        }
+        let v = rx.view();
+        assert_eq!(v.tracks.len(), 1);
+        assert_eq!((v.tracks[0].reports, v.tracks[0].flagged), (5, 3));
     }
 
     #[test]
