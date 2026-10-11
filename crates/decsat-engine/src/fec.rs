@@ -2049,7 +2049,12 @@ fn run(
                     }
                     _ => unreachable!("matched above"),
                 };
-                let pay = payload.get_or_insert_with(|| PayloadRx::new(block));
+                // FastLink's data pairs are QPSK symbols, and one Q-Flex
+                // sends its Q rail late: look for that too.
+                let pay = payload.get_or_insert_with(|| match tag {
+                    "fastlink" => PayloadRx::new(block).with_rail_skews(),
+                    _ => PayloadRx::new(block),
+                });
                 let o = output.lock().unwrap().clone();
                 // Activity in the TDM multiplex (any channel changing from
                 // one 20 ms frame to the next), held 10 s (5000 frames).

@@ -37,7 +37,11 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         .iter()
         .flat_map(|&b| (0..8).rev().map(move |k| (b >> k) & 1))
         .collect();
-    let mut pay = PayloadRx::new(a.frame_bits);
+    // A FastLink recording: its rails may be skewed (as the decoder allows).
+    let mut pay = match a.frame_bits {
+        decsat_modem::fastlink::FRAME_DATA => PayloadRx::new(a.frame_bits).with_rail_skews(),
+        n => PayloadRx::new(n),
+    };
     let mut out = PayloadOut::default();
     let mut tdm = TdmRx::new();
     tdm.keep_frames = a.tdm_out.is_some();

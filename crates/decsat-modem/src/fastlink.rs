@@ -26,9 +26,12 @@
 //!   `s[i] = s[i−2] ⊕ s[i−16] ⊕ s[i−18] ⊕ s[i−30] ⊕ s[i−32]`
 //!   — two interleaved `x¹⁵ + x⁸ + 1` sequences, the even one inverted.
 //!
-//! What the data carry (the closed-network framing, its ESC and the
-//! drop-and-insert timeslot) is not worked out yet: the decoder hands the
-//! data bits to the payload search like the TPC 2964 decoder does.
+//! The decoder hands the data bits to the payload search like the TPC 2964
+//! decoder does (Paradise closed network + ESC framing: [`crate::paradise`]).
+//! Not every Q-Flex hands them over in the same order: the ASA192 MSO-BN
+//! site sends each data pair's odd bit two pairs late — a skew between the
+//! rails that the FEC cannot see, which the payload search undoes
+//! ([`crate::payload::PayloadRx::with_rail_skews`]).
 
 use std::sync::OnceLock;
 
@@ -336,20 +339,18 @@ fn uw_at(symbols: &[Iq], p: usize, o: Orientation) -> bool {
 }
 
 /// The first place where the sync word recurs `min_frames` times running,
-/// under whichever orientation shows it.
+/// under whichever orientation shows it. The run may start anywhere: a
+/// carrier phase slip ends one orientation's run and starts another's
+/// (Identify's one look at the ASA192 MSO-BN Q-Flex: two frames, a half
+/// turn, five frames).
 fn locate(symbols: &[Iq], min_frames: usize) -> Option<(Orientation, usize)> {
     if symbols.len() < FRAME_SYMBOLS * min_frames + UW_SYMBOLS {
         return None;
     }
     let last_start = symbols.len() - (min_frames - 1) * FRAME_SYMBOLS - UW_SYMBOLS;
-    for o in ORIENTATIONS {
-        if let Some(p) = (0..last_start.min(FRAME_SYMBOLS))
-            .find(|&p| (0..min_frames).all(|m| uw_at(symbols, p + m * FRAME_SYMBOLS, o)))
-        {
-            return Some((o, p));
-        }
-    }
-    None
+    (0..last_start)
+        .flat_map(|p| ORIENTATIONS.map(|o| (o, p)))
+        .find(|&(o, p)| (0..min_frames).all(|m| uw_at(symbols, p + m * FRAME_SYMBOLS, o)))
 }
 
 /// Where the sync word appears in carrier-locked QPSK `symbols`, under
@@ -588,6 +589,18 @@ mod tests {
             assert_eq!(hits[0], 1234);
             assert_eq!(hits.len(), 5);
         }
+    }
+
+    /// Two frames, then a half-turn carrier slip, then five: what Identify
+    /// saw of the ASA192 MSO-BN Q-Flex. The framing is the second run.
+    #[test]
+    fn finds_the_framing_after_a_phase_slip() {
+        let mut x = frames(2, 2, false, 5);
+        x.extend(frames(5, 0, false, 6));
+        assert!(detect(&x));
+        let hits = find_frames(&x, 3).expect("not found");
+        assert_eq!(hits.len(), 5);
+        assert_eq!(hits[0], 1234 + 2 * FRAME_SYMBOLS + 1234);
     }
 
     #[test]

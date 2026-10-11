@@ -303,6 +303,26 @@ fn strongest_line(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64) -> Option<(f64,
 /// symbols has its line at DC when the carrier sits exactly on frequency,
 /// and taking the mean out would take the line out with it.
 fn line_in(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64, keep_dc: bool) -> Option<(f64, f32)> {
+    line_at(seq, rate, lo_hz, hi_hz, keep_dc).map(|l| (l.hz, l.db))
+}
+
+/// A spectral line: where, how far over the band's median (dB), and how
+/// wide — the contiguous span, on the spectrum smoothed over
+/// [`WIDTH_SMOOTH`] bins, down to a quarter (−6 dB) of the smoothed power
+/// at the peak. A carrier wandering through the listen (LNB phase noise:
+/// ±30 Hz in under a second on the qflex_3 Q-Flex) smears its line into a
+/// hump whose tallest bin can sit anywhere in it; a comb of separate lines
+/// stops the span at the first gap.
+#[derive(Debug, Clone, Copy)]
+struct Line {
+    hz: f64,
+    db: f32,
+    width_hz: f64,
+}
+
+const WIDTH_SMOOTH: i64 = 9;
+
+fn line_at(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64, keep_dc: bool) -> Option<Line> {
     let n = pow2_floor(seq.len(), 1 << 20);
     if n < 256 {
         return None;
@@ -354,7 +374,25 @@ fn line_in(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64, keep_dc: bool) -> Opti
         0.0
     };
     let freq = (best_b as f64 + delta.clamp(-0.5, 0.5) as f64) * bin_hz;
-    Some((freq, 10.0 * (best / median).log10()))
+
+    // The line's width: walk out from the peak, on the smoothed spectrum,
+    // while it stays above a quarter of the smoothed peak (within the band).
+    let half = WIDTH_SMOOTH / 2;
+    let smooth = |b: i64| -> f32 { (b - half..=b + half).map(|k| pw[idx(k)]).sum::<f32>() };
+    let floor = smooth(best_b) / 4.0;
+    let mut left = best_b;
+    while left > b_lo && smooth(left - 1) >= floor {
+        left -= 1;
+    }
+    let mut right = best_b;
+    while right < b_hi && smooth(right + 1) >= floor {
+        right += 1;
+    }
+    Some(Line {
+        hz: freq,
+        db: 10.0 * (best / median).log10(),
+        width_hz: (right - left) as f64 * bin_hz,
+    })
 }
 
 /// Refine a symbol-rate guess from the cyclic feature of the squared envelope.
@@ -605,23 +643,35 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
     let p2: Vec<Iq> = sym.iter().map(|s| (s / rms) * (s / rms)).collect();
     let p4: Vec<Iq> = p2.iter().map(|s| s * s).collect();
     let p8: Vec<Iq> = p4.iter().map(|s| s * s).collect();
-    let line = |p: &[Iq]| line_in(p, rs, -half, half, true).filter(|&(_, st)| st > 20.0);
+    let line = |p: &[Iq]| line_at(p, rs, -half, half, true).filter(|l| l.db > 20.0);
     let (l2, l4, l8) = (line(&p2), line(&p4), line(&p8));
     // Rust note: `rem_euclid` is a modulo that is never negative; the lines'
     // frequencies wrap at ±rs/2, so twice one is compared round the circle.
     let tol = 8.0 * rs / sym.len() as f64;
-    let twice = |a: Option<(f64, f32)>, b: Option<(f64, f32)>| match (a, b) {
-        (Some((fa, _)), Some((fb, _))) => {
-            let d = (fb - 2.0 * fa + half).rem_euclid(rs) - half;
-            d.abs() <= tol
+    let twice = |a: Option<Line>, b: Option<Line>| match (a, b) {
+        (Some(a), Some(b)) => {
+            let d = (b.hz - 2.0 * a.hz + half).rem_euclid(rs) - half;
+            // A wandering carrier smears both lines, the higher power's
+            // twice as wide, with each peak anywhere in its hump (qflex_3:
+            // an s⁴ hump 220 Hz wide, the s⁸ peak 11 Hz off twice the s⁴
+            // one — read as 8PSK with the fixed tolerance alone).
+            d.abs() <= tol.max(2.0 * a.width_hz)
         }
         (Some(_), None) => true,
         _ => false,
     };
+    // Nor does a weaker s⁸ line veto QPSK, wherever it peaks: a QPSK's s⁸
+    // line is its s⁴ line squared, always the weaker (11–16 dB on live
+    // carriers), while 8PSK's own line is in s⁸, far stronger than any its
+    // data make in s⁴ (19–23 dB on the live Comtech 8PSK). No such margin
+    // for BPSK: that 8PSK's data lines in s² and s⁴ differ by 3–7 dB.
+    let weaker = |a: Option<Line>, b: Option<Line>| a.zip(b).is_some_and(|(a, b)| b.db < a.db);
     match (l2, l4, l8) {
-        (Some((f, _)), _, _) if twice(l2, l4) => (ConstellationGuess::Bpsk, Some(f / 2.0)),
-        (_, Some((f, _)), _) if twice(l4, l8) => (ConstellationGuess::Qpsk, Some(f / 4.0)),
-        (_, _, Some((f, _))) => (ConstellationGuess::Psk8, Some(f / 8.0)),
+        (Some(l), _, _) if twice(l2, l4) => (ConstellationGuess::Bpsk, Some(l.hz / 2.0)),
+        (_, Some(l), _) if twice(l4, l8) || weaker(l4, l8) => {
+            (ConstellationGuess::Qpsk, Some(l.hz / 4.0))
+        }
+        (_, _, Some(l)) => (ConstellationGuess::Psk8, Some(l.hz / 8.0)),
         _ if sse1 < 0.05 => (ConstellationGuess::PskUnclear, None),
         _ => (ConstellationGuess::Unclear, None),
     }
@@ -1052,15 +1102,53 @@ mod tests {
         assert!((moved - 1.0).abs() < 0.01, "{moved}");
     }
 
-    /// 8PSK whose frames (988 symbols) repeat a third of their content with
-    /// the sign flipped each frame, as a Comtech 8PSK TPC carrier's idle
-    /// data do: the repetition puts lines into s² and s⁴ that are not the
-    /// carrier's, and the classifier took it for BPSK.
     /// QPSK centred almost exactly (a live carrier read −23 Hz off at
     /// 64 kS/s): its s⁴ line sits at DC. Taking the mean out before looking
     /// for lines took that line out too, and the carrier read as 8PSK.
     #[test]
     fn centred_qpsk_is_not_8psk() {
+        for (df, esn0_db) in [(0.0, 10.0), (-23.0 / 64_000.0, 10.0), (1e-6, 7.0)] {
+            let sym = noisy_qpsk(60_000, esn0_db, |n| df * n as f64);
+            let (guess, _) = classify_constellation(&sym, 1.0);
+            assert_eq!(
+                guess,
+                ConstellationGuess::Qpsk,
+                "offset {df}, Es/N0 {esn0_db} dB"
+            );
+        }
+    }
+
+    /// QPSK on a wandering carrier, as the qflex_3 Q-Flex (95 kS/s, LNB
+    /// phase noise: ±30 Hz in under a second) read as 8PSK: the s⁴ and s⁸
+    /// lines smear into humps whose peaks need not sit at one frequency and
+    /// twice it.
+    #[test]
+    fn wandering_qpsk_is_not_8psk() {
+        let rs = 95_017.0;
+        let tau = std::f64::consts::TAU;
+        // Carrier frequency (Hz) wandering about −365 Hz: a sine of ±35 Hz,
+        // and a smoother sum of three slow ones.
+        let wanders: [&dyn Fn(f64) -> f64; 2] = [&|n| 35.0 * (tau * n / 20_000.0).sin(), &|n| {
+            15.0 * ((tau * n / 20_000.0 + 1.0).sin()
+                + (tau * n / 33_000.0 + 4.0).sin()
+                + (tau * n / 70_000.0 + 2.5).sin())
+        }];
+        for (k, wander) in wanders.iter().enumerate() {
+            // The phase, in cycles: the frequency summed symbol by symbol.
+            let mut phase = Vec::with_capacity(83_413);
+            let mut acc = 0.0;
+            for n in 0..83_413 {
+                acc += (-365.0 + wander(n as f64)) / rs;
+                phase.push(acc);
+            }
+            let sym = noisy_qpsk(phase.len(), 13.0, |n| phase[n]);
+            let (guess, _) = classify_constellation(&sym, rs);
+            assert_eq!(guess, ConstellationGuess::Qpsk, "wander {k}");
+        }
+    }
+
+    /// Random QPSK at `esn0_db`, its carrier phase (cycles) `phase(n)`.
+    fn noisy_qpsk(len: usize, esn0_db: f64, phase: impl Fn(usize) -> f64) -> Vec<Iq> {
         let mut x = 0x2545_F491u32;
         let mut next = move || {
             x ^= x << 13;
@@ -1075,25 +1163,21 @@ mod tests {
             let t = std::f64::consts::TAU * u2;
             (r * t.cos(), r * t.sin())
         };
-        for (df, esn0_db) in [(0.0, 10.0), (-23.0 / 64_000.0, 10.0), (1e-6, 7.0)] {
-            let sigma = (0.5 * 10f64.powf(-esn0_db / 10.0)).sqrt();
-            let sym: Vec<Iq> = (0..60_000)
-                .map(|n| {
-                    let (a, b) = gauss();
-                    let k = (gauss().0 > 0.0) as u32 * 2 + (gauss().0 > 0.0) as u32;
-                    let ph = std::f64::consts::TAU * (0.125 + k as f64 / 4.0 + df * n as f64);
-                    Iq::new((ph.cos() + sigma * a) as f32, (ph.sin() + sigma * b) as f32)
-                })
-                .collect();
-            let (guess, _) = classify_constellation(&sym, 1.0);
-            assert_eq!(
-                guess,
-                ConstellationGuess::Qpsk,
-                "offset {df}, Es/N0 {esn0_db} dB"
-            );
-        }
+        let sigma = (0.5 * 10f64.powf(-esn0_db / 10.0)).sqrt();
+        (0..len)
+            .map(|n| {
+                let (a, b) = gauss();
+                let k = (gauss().0 > 0.0) as u32 * 2 + (gauss().0 > 0.0) as u32;
+                let ph = std::f64::consts::TAU * (0.125 + k as f64 / 4.0 + phase(n));
+                Iq::new((ph.cos() + sigma * a) as f32, (ph.sin() + sigma * b) as f32)
+            })
+            .collect()
     }
 
+    /// 8PSK whose frames (988 symbols) repeat a third of their content with
+    /// the sign flipped each frame, as a Comtech 8PSK TPC carrier's idle
+    /// data do: the repetition puts lines into s² and s⁴ that are not the
+    /// carrier's, and the classifier took it for BPSK.
     #[test]
     fn eight_psk_with_repeating_frames_is_not_bpsk() {
         let mut x = 0x9E37_79B9u32;

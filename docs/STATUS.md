@@ -1814,3 +1814,45 @@ load only, a GUI panel.
   are remembered (`tx.*`). Automation `--tx-panel` opens it for screenshots.
   Not yet keyed on a real HackRF (Rory does the first transmit).
 
+
+## A Q-Flex with skewed data rails; Identify through a slip and a wander (2026-10-11)
+
+Rory's ASA192 MSO-BN (`decsat-ASA192_MSO-BN-12342.5165MHz-303030Sps-….cf32`,
+12 s, FastLink QPSK 95.0 kS/s) "not decoding as the Q-Flex":
+
+- **Payload not recognised**, though the FastLink FEC was fine (805 of 816
+  codewords, channel BER 1.3e-5, turned 90°). The Paradise 672-bit group was
+  there (nine fixed bits a group, FAW and CTRL 336 bits apart), but each
+  overhead octet came out spread over ten bits, fixed bits at offsets
+  0, 2–7, 9 and data at 1 and 8: every pair's odd bit (the Q bit of a QPSK
+  data symbol) is sent two pairs after its even bit, across codeword and
+  frame boundaries alike. Only that skew fits (FAW 100 %; every other skew
+  from −4 to 4 pairs under 26 %). Not the decoder: qflex_3 turned 90° by hand
+  decodes as before, unskewed. A setting or firmware difference in that
+  modem, presumably.
+- `PayloadRx::with_rail_skews`: the search also tries the unscrambled data
+  with either rail held back 1–3 pairs; the FastLink decoder and `decsat
+  payload` (16 384-bit frames) opt in. A skewed reading still half-frames
+  (four of the nine fixed bits come from the wrong place, the deframer allows
+  one wrong and coasts through misses), so Paradise now scores the groups
+  whose fixed bits checked. Result: "Paradise closed network + ESC framing,
+  not scrambled, rails skewed (odd bits 2 pairs late)", 2454 groups, TDM
+  aligned, G.728 call voice found on channels 0, 1, 2 and 15 (silent in these
+  12 s). Channels 8–13 change for 4.4 s of it — not known what.
+- **Identify said "possibly DVB-S"**: a half-turn carrier slip after the
+  second frame of its listen, and `fastlink::locate` only took runs of sync
+  words starting in the first frame. It now takes the earliest run anywhere,
+  under any orientation.
+- **qflex_3 identified as 8PSK** (since 0.8.2's line-agreement rule): LNB
+  wander smears the s⁴ line into a 220 Hz hump and the s⁸ line into one twice
+  as wide; their tallest bins were 11 Hz off one frequency and twice it,
+  against a 9 Hz tolerance, and the s⁸ line vetoed QPSK. Now (a) the
+  tolerance grows to twice the line's width (`identify::Line`: the contiguous
+  −6 dB span of the 9-bin-smoothed spectrum, so a comb of separate lines does
+  not count), and (b) a weaker s⁸ line never vetoes QPSK — QPSK's s⁸ line is
+  its s⁴ line squared (11–16 dB weaker on every live QPSK capture), 8PSK's is
+  its own (19–23 dB *stronger* than the data-made s⁴ lines of the live
+  Comtech 8PSK). BPSK keeps the strict test: that 8PSK's data lines in s² and
+  s⁴ are only 3–7 dB apart. The Comtech recording's scan is unchanged.
+  Tests: QPSK under sine and smooth ±35 Hz wander (fails on the old rules),
+  FastLink framing after a phase slip, Paradise on skewed rails both ways.

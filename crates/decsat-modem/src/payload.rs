@@ -18,6 +18,17 @@
 //! differentially encode ahead of the convolutional encoder to resolve its
 //! phase ambiguity; differential decoding and a self-synchronising
 //! descrambler commute, so the order does not matter).
+//!
+//! **Rail skew** (opt-in, [`PayloadRx::with_rail_skews`]): one Q-Flex
+//! FastLink site (ASA192 MSO-BN, 2026-10-11) sends its data with the odd
+//! bits of each pair — the Q rail of a QPSK data symbol — two pairs later
+//! than the even bits they belong with, across codeword and frame
+//! boundaries alike; another Q-Flex (qflex_3) sends them together. Nothing
+//! in the FEC shows it: the code bits are right, the data stream is merely
+//! sheared. So the search also tries the unscrambled data with either rail
+//! held back by up to [`RAIL_SKEWS`] pairs, and a framing must confirm it.
+
+use std::collections::VecDeque;
 
 use crate::dandi::{DiPlusRx, DiPlusStats};
 use crate::e1::{E1Rx, TIMESLOTS};
@@ -73,8 +84,12 @@ impl Descrambler {
     }
 }
 
+/// Rail skews tried, in bit pairs: the odd bits sent this many pairs after
+/// the even ones (before, if negative). Seen live: +2.
+const RAIL_SKEWS: [i8; 6] = [2, -2, 1, -1, 3, -3];
+
 /// A [`Descrambler`] with its state, after an optional differential
-/// decoder.
+/// decoder, after undoing an optional rail skew.
 #[derive(Clone)]
 struct Running {
     kind: Descrambler,
@@ -85,10 +100,16 @@ struct Running {
     history: u32,
     /// Additive: the per-frame sequence.
     seq: Vec<u8>,
+    /// Rail skew to undo (see [`RAIL_SKEWS`]); 0 for none.
+    skew: i8,
+    /// The early rail's bits, held back `|skew|` pairs (oldest first).
+    held_rail: VecDeque<u8>,
+    /// The next bit is the odd one of its pair (frames may be odd in length).
+    odd: bool,
 }
 
 impl Running {
-    fn new(kind: Descrambler, diff: bool, frame_len: usize) -> Self {
+    fn new(kind: Descrambler, diff: bool, skew: i8, frame_len: usize) -> Self {
         let seq = match kind {
             Descrambler::Additive { last, reversed } => {
                 additive_sequence(last, reversed, frame_len)
@@ -101,11 +122,29 @@ impl Running {
             last: 0,
             history: 0,
             seq,
+            skew,
+            // `VecDeque::from(vec)` makes a ring buffer from a Vec: here
+            // |skew| zeros stand in until the early rail's first bits are
+            // due.
+            held_rail: VecDeque::from(vec![0; skew.unsigned_abs() as usize]),
+            odd: false,
         }
     }
 
     /// Descramble one frame's bits in place.
     fn frame(&mut self, bits: &mut [u8]) {
+        if self.skew != 0 {
+            // Odd bits late (skew > 0): hold each even bit back to meet its
+            // partner; odd bits early: hold the odd ones.
+            let hold_odd = self.skew < 0;
+            for b in bits.iter_mut() {
+                if self.odd == hold_odd {
+                    self.held_rail.push_back(*b);
+                    *b = self.held_rail.pop_front().unwrap_or(0);
+                }
+                self.odd = !self.odd;
+            }
+        }
         if self.diff {
             for b in bits.iter_mut() {
                 let x = *b;
@@ -459,6 +498,8 @@ pub struct PayloadRx {
     paradise: EscRx,
     ibs: IbsRx,
     slots: SlotRx,
+    /// Also try the unscrambled data with its rails skewed.
+    rail_skews: bool,
     /// Bits not yet packed into `raw` bytes.
     raw_bits: Vec<u8>,
     pub stats: PayloadStats,
@@ -470,6 +511,7 @@ impl PayloadRx {
     pub fn new(frame_len: usize) -> Self {
         PayloadRx {
             frame_len,
+            rail_skews: false,
             held: Vec::new(),
             chosen: None,
             hdlc: Hdlc::default(),
@@ -482,6 +524,14 @@ impl PayloadRx {
             raw_bits: Vec::new(),
             stats: PayloadStats::default(),
         }
+    }
+
+    /// Also look for the data with its odd and even bits skewed (see the
+    /// module notes): for FastLink, whose data pairs are QPSK symbols.
+    /// Builder style: `PayloadRx::new(n).with_rail_skews()`.
+    pub fn with_rail_skews(mut self) -> Self {
+        self.rail_skews = true;
+        self
     }
 
     pub fn push(&mut self, frame: &[u8], out: &mut PayloadOut) {
@@ -501,17 +551,19 @@ impl PayloadRx {
         }
         // Score: bits a format accounts for (HDLC: a nominal frame's worth
         // per good frame, so a few good frames win over nothing).
-        let mut best: Option<(u64, Descrambler, bool, Format, Fcs)> = None;
+        let mut best: Option<(u64, Descrambler, bool, i8, Format, Fcs)> = None;
         let held_bits: u64 = self.held.iter().map(|f| f.len() as u64).sum();
         // The most idle-looking descrambling, should nothing frame.
         let mut idle: Option<(f64, Descrambler, bool)> = None;
         // Plain first: with differential decoding it must do strictly
-        // better to win.
+        // better to win; skewed rails (unscrambled only) last of all.
+        let skews: &[i8] = if self.rail_skews { &RAIL_SKEWS } else { &[] };
         let readings = [false, true]
             .into_iter()
-            .flat_map(|diff| Descrambler::all().into_iter().map(move |k| (k, diff)));
-        for (kind, diff) in readings {
-            let mut d = Running::new(kind, diff, self.frame_len);
+            .flat_map(|diff| Descrambler::all().into_iter().map(move |k| (k, diff, 0)))
+            .chain(skews.iter().map(|&s| (Descrambler::None, false, s)));
+        for (kind, diff, skew) in readings {
+            let mut d = Running::new(kind, diff, skew, self.frame_len);
             let (mut hdlc, mut ts, mut e1, mut di, mut pe, mut ib) = (
                 Hdlc::default(),
                 TsAlign::default(),
@@ -556,7 +608,8 @@ impl PayloadRx {
                 prev.drain(..keep);
             }
             let share = same.iter().copied().max().unwrap_or(0) as f64 / held_bits.max(1) as f64;
-            if idle.is_none_or(|(s, ..)| share > s) {
+            // A skew is only ever taken on a framing's word.
+            if skew == 0 && idle.is_none_or(|(s, ..)| share > s) {
                 idle = Some((share, kind, diff));
             }
             let fcs = frames.first().map_or(Fcs::Crc16, |f| f.1);
@@ -572,8 +625,13 @@ impl PayloadRx {
                     framed(di.stats.frames * crate::dandi::FRAME as u64),
                     Format::DiPlus,
                 ),
+                // Groups whose fixed bits checked: a skewed reading still
+                // shows half the FAW's bits and coasts through the misses.
                 (
-                    framed(pe.stats.groups * crate::paradise::GROUP as u64),
+                    framed(
+                        pe.stats.groups.saturating_sub(pe.stats.faw_errors)
+                            * crate::paradise::GROUP as u64,
+                    ),
                     Format::ParadiseEsc,
                 ),
                 // Its data bits only: an E1's alignment octets (every 512
@@ -594,7 +652,7 @@ impl PayloadRx {
                 if let Some(n) = score
                     && best.is_none_or(|b| n > b.0)
                 {
-                    best = Some((n, kind, diff, fmt, fcs));
+                    best = Some((n, kind, diff, skew, fmt, fcs));
                 }
             }
         }
@@ -606,11 +664,11 @@ impl PayloadRx {
             && let Some((share, kind, diff)) = idle
             && share >= IDLE_SHARE
         {
-            best = Some((0, kind, diff, Format::Idle, Fcs::Crc16));
+            best = Some((0, kind, diff, 0, Format::Idle, Fcs::Crc16));
         }
-        if let Some((_, kind, diff, fmt, fcs)) = best {
+        if let Some((_, kind, diff, skew, fmt, fcs)) = best {
             self.stats.found = Some(format!(
-                "{}, {}{}",
+                "{}, {}{}{}",
                 match (fmt, fcs) {
                     (Format::Ts, _) => "MPEG-TS",
                     (Format::E1, _) => "E1 (G.704 framing)",
@@ -623,9 +681,18 @@ impl PayloadRx {
                     (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)",
                 },
                 if diff { "differential decoding, " } else { "" },
-                kind.describe()
+                kind.describe(),
+                match skew {
+                    0 => String::new(),
+                    s => format!(
+                        ", rails skewed (odd bits {} pair{} {})",
+                        s.unsigned_abs(),
+                        if s.unsigned_abs() == 1 { "" } else { "s" },
+                        if s > 0 { "late" } else { "early" }
+                    ),
+                }
             ));
-            self.chosen = Some((Running::new(kind, diff, self.frame_len), fmt));
+            self.chosen = Some((Running::new(kind, diff, skew, self.frame_len), fmt));
             // Replay what was held so no frame or packet is lost; only the
             // newest frame's data go to `raw` again (the rest went out
             // already), descrambled this time.
@@ -981,6 +1048,60 @@ mod tests {
         // The traffic stretch comes through intact.
         let t = &data[120 * 150..120 * 220];
         assert!(inner.windows(t.len()).any(|w| w == t));
+    }
+
+    #[test]
+    fn paradise_framing_on_skewed_rails() {
+        // As on the live ASA192 MSO-BN Q-Flex: closed network + ESC framing,
+        // unscrambled, the odd bits sent two pairs late; and the other way.
+        use crate::paradise::{GROUP_DATA, GROUP_ESC, frame};
+        const L: usize = 16_384;
+        let mut next = rng(21);
+        let groups = 300;
+        let data: Vec<u8> = (0..groups * GROUP_DATA)
+            .map(|_| u8::from(next().is_multiple_of(3)))
+            .collect();
+        let mut bits = Vec::new();
+        frame(&data, &vec![0; groups * GROUP_ESC], &mut 0, &mut bits);
+        for (skew, says) in [
+            (2i8, "odd bits 2 pairs late"),
+            (-1, "odd bits 1 pair early"),
+        ] {
+            // The late rail sent `skew` pairs behind its partner.
+            let k = 2 * skew.unsigned_abs() as usize;
+            let late_odd = skew > 0;
+            let sent: Vec<u8> = (0..bits.len())
+                .map(|j| match (j % 2 == 1) == late_odd {
+                    true if j >= k => bits[j - k],
+                    true => 0,
+                    false => bits[j],
+                })
+                .collect();
+            let mut plain = PayloadRx::new(L);
+            let mut rx = PayloadRx::new(L).with_rail_skews();
+            let (mut out, mut plain_out) = (PayloadOut::default(), PayloadOut::default());
+            let (mut inner, mut plain_inner) = (Vec::new(), Vec::new());
+            for f in sent.as_chunks::<L>().0 {
+                plain.push(f, &mut plain_out);
+                rx.push(f, &mut out);
+                inner.append(&mut out.inner);
+                plain_inner.append(&mut plain_out.inner);
+            }
+            assert_eq!(
+                rx.format(),
+                Some(Format::ParadiseEsc),
+                "{skew}: {:?}",
+                rx.stats
+            );
+            let found = rx.stats.found.clone().unwrap();
+            assert!(found.contains(says), "{found}");
+            assert_eq!(rx.stats.paradise.as_ref().unwrap().faw_errors, 0);
+            let t = &data[GROUP_DATA * 100..GROUP_DATA * 110];
+            assert!(inner.windows(t.len()).any(|w| w == t), "{skew}");
+            // Without the skew search the half-aligned FAW may still frame,
+            // but the data come out sheared.
+            assert!(!plain_inner.windows(t.len()).any(|w| w == t), "{skew}");
+        }
     }
 
     #[test]
