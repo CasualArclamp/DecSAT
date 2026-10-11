@@ -1756,3 +1756,24 @@ Rory's `baseband_11662547900Hz_…_comtechs_and_idk.wav` (SDR++, cs16 10 MS/s):
   sparse candidates. The test scene's CCM and ACM carriers still read as
   DVB-S2; the two now read "2-ring amplitude/phase, no DVB-S2 PLHEADER".
 
+## Centred QPSK read as 8PSK (0.8.2 regression); the 8PSK TPC still open (2026-10-11)
+
+- **QPSK as 8PSK** (`daaa9a6`): Rory's live ASA253 MAL-BN (QPSK, clear four
+  clusters, −23 Hz off at 64 kS/s) read "8PSK (estimate)". `strongest_line`
+  takes the mean out first; with the carrier on frequency the s⁴ line is
+  at DC and went with it, the s⁸ line survived, and 0.8.2's agreement rule
+  fell through to 8PSK. The constellation lines are now found with the mean
+  left in (`line_in(…, keep_dc)`), and a QPSK/BPSK line stands when the next
+  power has no line at all (a weak QPSK's s⁸ drowns in noise⁸); a line
+  elsewhere still vetoes it. Test: centred and nearly centred QPSK at 7–10
+  dB stay QPSK.
+- **8PSK TPC carriers** (711.111 kS/s, frames of 988 symbols = 2964 bits,
+  7-symbol word flipping 180° each frame): searched further, with nothing
+  found — no (64,57)/(46,39) row or column checks, nor any rank deficit in
+  64- or 46-bit windows at any alignment, under every Gray mapping and
+  natural binary, plain, frame-XORed (2 and 8 apart: removes a
+  frame-synchronous scrambler) or after the V.35, IESS-308, differential
+  and RCV-20x descramblers. Either the bit layout on 8PSK is not row or
+  column order, or the mapping is not Gray, or the code is not TPC 2964's.
+  Needs the modem's settings (Rory: "might be tpc_1630").
+
