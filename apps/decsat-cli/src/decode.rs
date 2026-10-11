@@ -47,6 +47,8 @@ pub struct DecodeArgs {
     pub clock_ppm: f64,
     /// psk: bits rather than symbol bytes.
     pub bits: bool,
+    /// DVB-S2: append the good BBFRAMEs here.
+    pub bbframes: Option<PathBuf>,
 }
 
 fn decoder_by_name(name: &str) -> Result<DecoderKind> {
@@ -157,6 +159,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     s.cid_low_snr = a.low_snr;
     s.clock_ppm = a.clock_ppm;
     s.psk_bits = a.bits;
+    s.bbframes = a.bbframes.clone();
     if let Some(dir) = &a.out {
         // Record throughout, or (--record-on-activity) only while a channel
         // of a FastLink's multiplex is active.
@@ -208,18 +211,64 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
         if a.seconds.is_some_and(|s| t0.elapsed().as_secs_f64() >= s) && ended_at.is_none() {
             ended_at = Some(Instant::now());
         }
-        // After the end, give the FEC thread a moment to drain.
-        if ended_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(3)) {
-            match st {
+        // A file that ended: wait until the decoder has worked through
+        // everything it was given. Live (or stopped by --seconds): give the
+        // FEC thread a moment.
+        let file_ended = matches!(front.state, SourceState::Ended);
+        if ended_at.is_some_and(|t| file_ended || t.elapsed() >= Duration::from_secs(3)) {
+            if file_ended && !wait_settled(&eng, SETTLE_CAP) {
+                println!(
+                    "(stopped waiting after {} s: the decoder is still {} blocks or frames behind)",
+                    SETTLE_CAP.as_secs(),
+                    eng.pending_work()
+                );
+            }
+            match eng.vfo_status(id) {
                 Some(st) => report(&st),
                 None => println!("no status from the VFO"),
             }
+            // Whatever is still queued is not wanted now: leave at once.
+            eng.discard_vfos();
             return Ok(());
         }
     }
 }
 
-fn report(st: &VfoStatus) {
+/// Longest wait, after a file ends, for the decoders to catch up.
+pub(crate) const SETTLE_CAP: Duration = Duration::from_secs(120);
+
+/// After a file's end, wait until every VFO has worked through what it was
+/// given, then a status tick more so the reports show the last of it.
+/// `false` when `cap` ran out first. Notes progress every 10 s.
+pub(crate) fn wait_settled(eng: &Engine, cap: Duration) -> bool {
+    let t0 = Instant::now();
+    let mut note = Instant::now();
+    let mut since: Option<Instant> = None;
+    loop {
+        if eng.settled() {
+            // Rust note: `get_or_insert_with` fills the Option the first
+            // time and returns what is there after.
+            if since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(600) {
+                return true;
+            }
+        } else {
+            since = None;
+        }
+        if t0.elapsed() >= cap {
+            return false;
+        }
+        if note.elapsed() >= Duration::from_secs(10) {
+            println!(
+                "… still decoding ({} blocks or frames queued)",
+                eng.pending_work()
+            );
+            note = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+pub(crate) fn report(st: &VfoStatus) {
     println!("\n== {}", st.message);
     if let Some(c) = &st.carrier {
         println!(
@@ -284,6 +333,96 @@ fn report(st: &VfoStatus) {
         }
     }
     let Some(f) = &st.fec else { return };
+    // DVB-S2: what the FEC made of the frames, and the latest BBHEADER.
+    if f.frames > 0 || f.last_header.is_some() {
+        println!(
+            "s2 fec: {} frames, {} good, {} BCH failed, {} header CRC failed, {} dropped, \
+             LDPC {:.1} iterations a frame{}",
+            f.frames,
+            f.ok,
+            f.bch_failed,
+            f.crc_failed,
+            f.dropped,
+            f.iterations as f64 / f.frames.max(1) as f64,
+            f.es_n0_db
+                .map(|e| format!(", Es/N0 {e:.1} dB from the known symbols"))
+                .unwrap_or_default()
+        );
+        let mc: Vec<String> = f
+            .per_modcod
+            .iter()
+            .map(|(&m, &(good, total))| format!("{} {good}/{total}", decsat_core::modcod_name(m)))
+            .collect();
+        if !mc.is_empty() {
+            println!("  by MODCOD: {}", mc.join(" · "));
+        }
+        if let Some(h) = &f.last_header {
+            println!(
+                "  BBHEADER: {}, {}, {}{}{}, ISI {}, UPL {} bits, DFL {} bits, SYNC {:02x}h, \
+                 SYNCD {}{}",
+                h.format.label(),
+                if h.single_stream {
+                    "single stream"
+                } else {
+                    "multiple streams"
+                },
+                if h.ccm { "CCM" } else { "ACM/VCM" },
+                if h.issyi { ", ISSY" } else { "" },
+                if h.npd { ", NPD" } else { "" },
+                h.isi,
+                h.upl,
+                h.dfl,
+                h.sync,
+                h.syncd,
+                if h.high_efficiency {
+                    ", high-efficiency mode"
+                } else {
+                    ""
+                }
+            );
+        }
+        if f.streams.len() > 1 {
+            let s: Vec<String> = f.streams.iter().map(|(i, n)| format!("{i}: {n}")).collect();
+            println!("  streams (ISI: good frames): {}", s.join(", "));
+        }
+        if f.ts_frames > 0 {
+            println!("  {} TS-mode frames", f.ts_frames);
+        }
+        if f.payload_bps > 0.0 {
+            println!("  payload {:.1} kbit/s (DFL)", f.payload_bps / 1e3);
+        }
+        if let Some(g) = &f.gse {
+            for v in &g.variants {
+                let s = &v.stats;
+                if s.packets + s.errors > 0 {
+                    println!(
+                        "  gse {:?}: {} packets ({} whole, {} start, {} middle, {} end, {} padding), \
+                         {} errors, {} reassembled, CRC {} ok / {} bad, {} IP",
+                        v.variant,
+                        s.packets,
+                        s.whole,
+                        s.start,
+                        s.middle,
+                        s.end,
+                        s.padding,
+                        s.errors,
+                        s.reassembled,
+                        s.crc_ok,
+                        s.crc_bad,
+                        v.ip_packets
+                    );
+                }
+            }
+            if !g.other_protocols.is_empty() {
+                let p: Vec<String> = g
+                    .other_protocols
+                    .iter()
+                    .map(|(t, n)| format!("{t:04x}h ×{n}"))
+                    .collect();
+                println!("  non-IP PDUs by protocol type: {}", p.join(", "));
+            }
+        }
+    }
     if let Some(t) = &f.tpc {
         println!(
             "tpc: UW {}, {}, structure {}, fit {:.0} %, {} frames ({} decoded, {} failed), BER {:.2e}, {} slips, {} UW misses",

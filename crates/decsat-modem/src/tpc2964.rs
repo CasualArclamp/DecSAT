@@ -466,6 +466,10 @@ impl TpcStats {
 /// Frames gathered before the structure search, and the most kept.
 const IDENTIFY_MIN: usize = 4;
 const IDENTIFY_MAX: usize = 16;
+// The structure search (every structure over every frame held) runs each
+// IDENTIFY_MIN frames while the window fills, then once a full window:
+// run on every frame, a weak 685 kS/s carrier that never fitted (~460
+// frames a second) left its FEC thread minutes behind.
 /// The best structure must fit at least this well (wrong ones fit ~1/128);
 /// those within this factor of it are told apart by decoding.
 const FIT_MIN: f32 = 0.03;
@@ -506,6 +510,8 @@ pub struct TpcRx {
     layout: Option<Layout>,
     /// Hard and soft frames gathered for the structure search.
     ident: Vec<(Vec<u8>, Vec<f32>)>,
+    /// Frames taken for identification so far (paces the search).
+    ident_seen: usize,
     misses: u32,
     pub stats: TpcStats,
 }
@@ -539,6 +545,7 @@ impl TpcRx {
             lock: None,
             layout: None,
             ident: Vec::new(),
+            ident_seen: 0,
             misses: 0,
             stats: TpcStats::default(),
         }
@@ -716,11 +723,20 @@ impl TpcRx {
         }
         let hard = block.iter().map(|&v| (v < 0.0) as u8).collect();
         self.ident.push((hard, block));
+        self.ident_seen += 1;
         if self.ident.len() < IDENTIFY_MIN {
             return;
         }
         if self.ident.len() > IDENTIFY_MAX {
             self.ident.remove(0);
+        }
+        let every = if self.ident_seen < IDENTIFY_MAX {
+            IDENTIFY_MIN
+        } else {
+            IDENTIFY_MAX
+        };
+        if !self.ident_seen.is_multiple_of(every) {
+            return;
         }
         let all = Structure::all();
         let hard: Vec<Vec<u8>> = self.ident.iter().map(|f| f.0.clone()).collect();

@@ -64,6 +64,8 @@ pub(crate) struct CidWorker {
     clock_ppm: Arc<AtomicU64>,
     /// Set to stop without working through the queue.
     quit: Arc<AtomicBool>,
+    /// Blocks queued and not yet despread (the VFO's count).
+    pending: crate::fec::Pending,
 }
 
 impl CidWorker {
@@ -77,6 +79,7 @@ impl CidWorker {
         span_hz: f64,
         symbol_rate: f64,
         lossless: bool,
+        pending: crate::fec::Pending,
     ) -> Self {
         let rc = chip_rate(symbol_rate);
         let view = Arc::new(Mutex::new(CidView {
@@ -94,6 +97,7 @@ impl CidWorker {
         let quit = Arc::new(AtomicBool::new(false));
         let q = Arc::clone(&quit);
         let v = view.clone();
+        let p = pending.clone();
         let join = std::thread::Builder::new()
             .name("decsat-cid".into())
             .spawn(move || {
@@ -110,6 +114,7 @@ impl CidWorker {
                 let (mut mixed, mut at4, mut frames) = (Vec::new(), Vec::new(), Vec::new());
                 let mut to_chips = rate_for(ppm_now) / in_rate;
                 while let Ok(msg) = rx.recv() {
+                    let _done = p.guard();
                     if q.load(Ordering::Relaxed) {
                         break;
                     }
@@ -150,6 +155,7 @@ impl CidWorker {
             low_snr,
             clock_ppm,
             quit,
+            pending,
         }
     }
 
@@ -173,20 +179,31 @@ impl CidWorker {
     pub fn offer(&self, block: Vec<Iq>) {
         let Some(tx) = &self.tx else { return };
         if self.lossless {
-            let _ = tx.send(Msg::Block(block));
+            self.pending.add();
+            if tx.send(Msg::Block(block)).is_err() {
+                self.pending.done();
+            }
             return;
         }
-        let pending = self.gap.swap(0, Ordering::Relaxed);
-        if pending > 0 && tx.try_send(Msg::Gap(pending)).is_err() {
-            self.gap
-                .fetch_add(pending + block.len() as u64, Ordering::Relaxed);
-            self.view.lock().unwrap().dropped += 1;
-            return;
+        let missed = self.gap.swap(0, Ordering::Relaxed);
+        if missed > 0 {
+            self.pending.add();
+            if tx.try_send(Msg::Gap(missed)).is_err() {
+                self.pending.done();
+                self.gap
+                    .fetch_add(missed + block.len() as u64, Ordering::Relaxed);
+                self.view.lock().unwrap().dropped += 1;
+                return;
+            }
         }
         let n = block.len() as u64;
-        if let Err(TrySendError::Full(_)) = tx.try_send(Msg::Block(block)) {
-            self.gap.fetch_add(n, Ordering::Relaxed);
-            self.view.lock().unwrap().dropped += 1;
+        self.pending.add();
+        if let Err(e) = tx.try_send(Msg::Block(block)) {
+            self.pending.done();
+            if let TrySendError::Full(_) = e {
+                self.gap.fetch_add(n, Ordering::Relaxed);
+                self.view.lock().unwrap().dropped += 1;
+            }
         }
     }
 

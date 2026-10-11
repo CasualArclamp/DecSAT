@@ -20,6 +20,8 @@ use decsat_modem::text::{TextFinder, TextView};
 
 /// Locked symbols kept for display.
 const RECENT: usize = 3000;
+/// The MER and lock readouts' smoothing, symbols.
+const SMOOTH_SYMBOLS: f32 = 2000.0;
 
 /// The carrier loop's noise bandwidth (Bn·T) for a symbol rate. 0.008 suits
 /// carriers of ~40 kBd and up; slower ones need the loop at least ~250 Hz
@@ -237,12 +239,24 @@ impl PskDemod {
         if !new.is_empty() {
             let soft: Vec<Iq> = new.iter().map(|&(_, y)| y).collect();
             let (mer, coh) = decsat_dsp::quality(&soft, |_| &self.cst.points);
-            // Smooth over blocks so the readout does not flicker.
-            self.mer += 0.3 * (mer - self.mer);
-            self.coherence += 0.3 * (coh - self.coherence);
+            // Smooth so the readout does not flicker: over ~SMOOTH_SYMBOLS
+            // symbols whatever the block size, from the first block's own
+            // values. (A fixed 0.3 a block from zero read 0.3 × the MER and
+            // coherence when a short capture's first look came as one
+            // block: 2.8 dB and "not locked" for a 9.3 dB carrier.)
+            let first = self.symbols == new.len() as u64;
+            let k = if first {
+                1.0
+            } else {
+                1.0 - (-(new.len() as f32) / SMOOTH_SYMBOLS).exp()
+            };
+            self.mer += k * (mer - self.mer);
+            self.coherence += k * (coh - self.coherence);
             // Full decisions only once truly locked — a 16QAM false lock
             // still scores ~0.45 — and back to the outer ring if it fades.
-            if !self.full && self.coherence > 0.7 {
+            // Not on the first block: its coherence includes the pull-in,
+            // and full decisions from there false-lock.
+            if !self.full && !first && self.coherence > 0.7 {
                 self.full = true;
             } else if self.full && self.coherence < 0.4 {
                 self.full = false;
@@ -459,6 +473,31 @@ mod tests {
                 d.mer_db()
             );
         }
+    }
+
+    #[test]
+    fn one_big_first_block_reads_its_full_mer() {
+        // A 2 s capture's first look reaches the demodulator as one block;
+        // the readout must be that block's MER and lock, not 0.3 of them.
+        let cst = Constellation::generic(Modulation::Qpsk);
+        let mut s = 0x9e37u64;
+        let mut next = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let syms: Vec<Iq> = (0..30_000)
+            .map(|_| cst.map((next() >> 62) as usize))
+            .collect();
+        let mut sh = Shaper::new(4, 0.25, 16);
+        let mut x = Vec::new();
+        sh.process(&syms, &mut x);
+        let mut d = PskDemod::new(4.0, 1.0, 0.25, Modulation::Qpsk, 0.0);
+        let mut out = Vec::new();
+        d.process(&x, &mut out);
+        assert!(d.locked(), "coherence {}", d.coherence());
+        assert!(d.mer_db() > 20.0, "MER {}", d.mer_db());
     }
 
     #[test]

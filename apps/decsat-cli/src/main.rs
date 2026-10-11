@@ -8,6 +8,7 @@ mod cidgen;
 mod decode;
 mod mcast;
 mod payload;
+mod record;
 mod scene;
 mod tx;
 
@@ -108,6 +109,9 @@ enum Command {
     /// List the multicast radio in a recorded transport stream (IP from MPE):
     /// what each stream is, now-playing messages; decode or record them.
     Mcast(mcast::McastArgs),
+    /// Capture raw IQ from the HackRF to .cs8 files — one frequency or a
+    /// sweep — named so `scan` and `decode` read them straight back.
+    Record(record::RecordArgs),
     /// Survey a capture: find every carrier and identify each one blind.
     Scan {
         file: PathBuf,
@@ -119,6 +123,11 @@ enum Command {
         /// Give up waiting for results after this many seconds.
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
+        /// Then decode: run each identified carrier's decoder (TPC 2964,
+        /// FastLink, DVB-S2, DVB-S, Viterbi) over the whole capture and
+        /// report what each one found.
+        #[arg(long)]
+        decode: bool,
     },
     /// Run one decoder over a capture — or live from the HackRF — and report
     /// what it finds.
@@ -155,7 +164,7 @@ enum Command {
         #[arg(long, default_value = "id")]
         decoder: String,
         /// VFO centre relative to the capture's centre, Hz.
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         offset: f64,
         /// VFO width, Hz (default 90 % of the sample rate).
         #[arg(long)]
@@ -194,6 +203,10 @@ enum Command {
         /// byte a symbol.
         #[arg(long)]
         bits: bool,
+        /// ip/ts: append every good BBFRAME to this file (each as: length,
+        /// u16 little-endian; PLS MODCOD, one byte; the BBFRAME).
+        #[arg(long)]
+        bbframes: Option<PathBuf>,
     },
 }
 
@@ -292,12 +305,14 @@ fn main() -> Result<()> {
         }
         Command::Mcast(a) => mcast::run(&a),
         Command::Payload(a) => payload::run(&a),
+        Command::Record(a) => record::run(&a),
         Command::Scan {
             file,
             format,
             rate,
             timeout,
-        } => scan(file, format, rate, timeout),
+            decode,
+        } => scan(file, format, rate, timeout, decode),
         Command::Decode {
             file,
             hackrf,
@@ -321,6 +336,7 @@ fn main() -> Result<()> {
             low_snr,
             clock_ppm,
             bits,
+            bbframes,
         } => decode::decode(decode::DecodeArgs {
             file,
             hackrf,
@@ -344,6 +360,7 @@ fn main() -> Result<()> {
             low_snr,
             clock_ppm,
             bits,
+            bbframes,
         }),
     }
 }
@@ -367,6 +384,7 @@ fn scan(
     format: Option<SampleFormat>,
     rate: Option<f64>,
     timeout: f64,
+    decode: bool,
 ) -> Result<()> {
     use decsat_engine::{DecoderKind, Engine, EngineOptions, VfoSettings};
     use std::time::{Duration, Instant};
@@ -419,24 +437,138 @@ fn scan(
     }
 
     println!("\nidentifying…");
-    let mut done = vec![false; ids.len()];
-    while done.iter().any(|d| !d) && t0.elapsed().as_secs_f64() < timeout {
+    let mut found = vec![None; ids.len()];
+    while found.iter().any(Option::is_none) && t0.elapsed().as_secs_f64() < timeout {
         for (i, &id) in ids.iter().enumerate() {
-            if !done[i]
+            if found[i].is_none()
                 && let Some(ident) = eng.vfo_status(id).and_then(|s| s.identification)
             {
                 println!("  #{i}  {}", ident.summary());
-                done[i] = true;
+                found[i] = Some(ident);
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    for (i, d) in done.iter().enumerate() {
-        if !d {
+    for (i, f) in found.iter().enumerate() {
+        if f.is_none() {
             println!("  #{i}  (no result within {timeout:.0} s)");
         }
     }
+    drop(eng);
+    if !decode {
+        return Ok(());
+    }
+
+    // The decode pass: the capture once more from the start, not looped
+    // (a decoder would take the loop's seam for a fault) and lossless (the
+    // file waits for slow decoders), a VFO on each carrier Identify named.
+    let reader = IqFileReader::open(&file, fmt, rate, 1 << 16)?;
+    let mut eng = Engine::start(
+        Box::new(reader),
+        EngineOptions {
+            realtime: false,
+            loop_file: false,
+            ..Default::default()
+        },
+    );
+    let mut runs = Vec::new();
+    for (i, (c, ident)) in carriers.iter().zip(&found).enumerate() {
+        let Some(ident) = ident else { continue };
+        let bw = if c.narrow {
+            c.fit_among(20e3, &carriers)
+        } else {
+            c.vfo_bandwidth_among(&carriers)
+        };
+        for kind in decoders_for(ident) {
+            // Centred on the carrier as Identify measured it.
+            let mut s = VfoSettings::new(
+                format!("#{i}"),
+                c.center_hz + ident.center_offset_hz,
+                bw,
+                kind,
+            );
+            s.symbol_rate = ident.symbol_rate;
+            s.voice_auto = false;
+            runs.push((i, kind, eng.add_vfo(s)));
+        }
+    }
+    if runs.is_empty() {
+        println!("\nnothing to decode: no carrier has a decoder");
+        return Ok(());
+    }
+    println!("\ndecoding {} carriers over the whole capture…", runs.len());
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let front = eng.front();
+        if let decsat_engine::SourceState::Failed(e) = &front.state {
+            bail!("source failed: {e}");
+        }
+        if matches!(front.state, decsat_engine::SourceState::Ended) {
+            break;
+        }
+    }
+    // Every decoder through all it was given, before the reports.
+    if !decode::wait_settled(&eng, decode::SETTLE_CAP) {
+        println!(
+            "(stopped waiting after {} s: the decoders are still {} blocks or frames behind)",
+            decode::SETTLE_CAP.as_secs(),
+            eng.pending_work()
+        );
+    }
+    for (i, kind, id) in runs {
+        let c = &carriers[i];
+        println!(
+            "\n#### #{i}  {:+.1} kHz  {} ({})",
+            c.center_hz / 1e3,
+            kind.label(),
+            found[i]
+                .as_ref()
+                .and_then(|f| f.symbol_rate)
+                .map_or("?".into(), |r| format!("{:.1} kS/s", r / 1e3))
+        );
+        match eng.vfo_status(id) {
+            Some(st) => decode::report(&st),
+            None => println!("no status from the VFO"),
+        }
+    }
+    // Whatever is still queued is not wanted now: leave at once.
+    eng.discard_vfos();
     Ok(())
+}
+
+/// The decoders to try on what Identify found: DVB-S2 and the modems it
+/// names by their framing; for a plain BPSK/QPSK carrier with no framing
+/// found, the K = 7 Viterbi decoder (it finds a convolutional code's rate
+/// blind, or says there is none); nothing for the rest.
+fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::DecoderKind> {
+    use decsat_engine::identify::ConstellationGuess;
+    use decsat_engine::{DecoderKind, Verdict};
+    match &ident.verdict {
+        Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => vec![DecoderKind::Dvbs2Ip],
+        // A TDMA carrier's bursts: no continuous decoder reads them.
+        _ if ident.bursts.is_some() => Vec::new(),
+        Verdict::NotDvbS2 { hint } => {
+            // Rust note: the hint is a sentence for people; these are the
+            // names Identify puts in it when a decoder can read the carrier.
+            if hint.contains("TPC 2964") {
+                vec![DecoderKind::Tpc2964]
+            } else if hint.contains("FastLink") {
+                vec![DecoderKind::FastLink]
+            } else if hint.contains("DVB-S (") {
+                // "Possibly": DVB-S's inner code is the same K = 7 code as
+                // many SCPC modems', so try both.
+                vec![DecoderKind::DvbsTs, DecoderKind::Viterbi]
+            } else if matches!(
+                ident.constellation,
+                Some(ConstellationGuess::Bpsk | ConstellationGuess::Qpsk)
+            ) {
+                vec![DecoderKind::Viterbi]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 struct SynthArgs {

@@ -247,6 +247,9 @@ pub struct VfoSettings {
     pub voice_auto: bool,
     /// Where the IQ recorder and the symbol writer write.
     pub record_dir: PathBuf,
+    /// DVB-S2: append every good BBFRAME to this file, for working out
+    /// what an unknown stream carries (see [`crate::fec::FecOutput`]).
+    pub bbframes: Option<PathBuf>,
 }
 
 impl VfoSettings {
@@ -289,6 +292,7 @@ impl VfoSettings {
             tdm_record: false,
             voice_auto: true,
             record_dir: std::env::temp_dir(),
+            bbframes: None,
         }
     }
 }
@@ -414,6 +418,9 @@ pub(crate) struct VfoHandle {
     /// Stop without working through what is queued (here and on the FEC
     /// and CID threads).
     quit: Arc<AtomicBool>,
+    /// Blocks queued to the worker, and frames or blocks to its FEC or CID
+    /// thread, not yet done.
+    pub(crate) pending: crate::fec::Pending,
     join: Option<JoinHandle<()>>,
 }
 
@@ -424,13 +431,17 @@ impl VfoHandle {
         if !self.settings.enabled {
             return;
         }
+        self.pending.add();
         if self.lossless {
-            let _ = self.tx.send(VfoMsg::Block(Arc::clone(block)));
-        } else if let Err(TrySendError::Full(_)) =
-            self.tx.try_send(VfoMsg::Block(Arc::clone(block)))
-        {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-            self.lost.fetch_add(block.len() as u64, Ordering::Relaxed);
+            if self.tx.send(VfoMsg::Block(Arc::clone(block))).is_err() {
+                self.pending.done();
+            }
+        } else if let Err(e) = self.tx.try_send(VfoMsg::Block(Arc::clone(block))) {
+            self.pending.done();
+            if let TrySendError::Full(_) = e {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.lost.fetch_add(block.len() as u64, Ordering::Relaxed);
+            }
         }
     }
 
@@ -490,6 +501,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
     let mailbox = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false));
+    let pending = crate::fec::Pending::default();
     let join = {
         let status = Arc::clone(&status);
         let dropped = Arc::clone(&dropped);
@@ -497,6 +509,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
         let mailbox = Arc::clone(&mailbox);
         let stop = Arc::clone(&stop);
         let quit = Arc::clone(&quit);
+        let pending = pending.clone();
         let settings = settings.clone();
         std::thread::Builder::new()
             .name(format!("vfo-{}", settings.name))
@@ -504,6 +517,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
                 let mut w = Worker::new(in_rate, settings, status, dropped);
                 w.lossless = lossless;
                 w.lost = lost;
+                w.pending = pending;
                 // `run` takes the worker by value: it is dropped when the
                 // loop ends, which joins its FEC or CID thread.
                 w.run(rx, mailbox, stop, quit)
@@ -520,6 +534,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
         mailbox,
         stop,
         quit,
+        pending,
         join: Some(join),
     }
 }
@@ -651,6 +666,8 @@ struct Worker {
     /// them have been passed on.
     lost: Arc<AtomicU64>,
     lost_seen: u64,
+    /// The handle's count of work not yet done (see [`crate::fec::Pending`]).
+    pending: crate::fec::Pending,
     /// Carrier drift followed (Hz) not yet taken into the settings' offset,
     /// and baseband samples since the last look.
     followed: f64,
@@ -704,6 +721,7 @@ impl Worker {
             dropped,
             lost: Arc::new(AtomicU64::new(0)),
             lost_seen: 0,
+            pending: Default::default(),
             load: 0.0,
             bb: Vec::new(),
             frames: Vec::new(),
@@ -926,6 +944,8 @@ impl Worker {
             match msg {
                 VfoMsg::Wake => {}
                 VfoMsg::Block(block) => {
+                    let pending = self.pending.clone();
+                    let _done = pending.guard();
                     // Blocks dropped since the last one: tell the CID
                     // decoder how much baseband never came.
                     let lost = self.lost.load(Ordering::Relaxed);
@@ -1119,8 +1139,12 @@ impl Worker {
                                 .set_offset(self.settings.offset_hz + id.center_offset_hz);
                             self.frames.clear();
                             d.process(&shifted, &mut self.frames);
-                            let w = FecWorker::spawn(rs, fec_output(&self.settings, &self.ddc))
-                                .lossless(self.lossless);
+                            let w = FecWorker::spawn(
+                                rs,
+                                fec_output(&self.settings, &self.ddc),
+                                self.pending.clone(),
+                            )
+                            .lossless(self.lossless);
                             for f in self.frames.drain(..) {
                                 w.offer(f);
                             }
@@ -1177,8 +1201,12 @@ impl Worker {
                             shift(&mut shifted, out_rate, id.center_offset_hz);
                             self.ddc
                                 .set_offset(self.settings.offset_hz + id.center_offset_hz);
-                            let w = FecWorker::spawn(rs, fec_output(&self.settings, &self.ddc))
-                                .lossless(self.lossless);
+                            let w = FecWorker::spawn(
+                                rs,
+                                fec_output(&self.settings, &self.ddc),
+                                self.pending.clone(),
+                            )
+                            .lossless(self.lossless);
                             self.syms.clear();
                             d.process(&shifted, &mut self.syms);
                             offer_symbols(&w, *kind, modulation, &self.syms);
@@ -1232,6 +1260,7 @@ impl Worker {
                                     span,
                                     rs,
                                     self.lossless,
+                                    self.pending.clone(),
                                 );
                                 w.offer(std::mem::take(buf));
                                 *worker = Some(w);
@@ -1473,7 +1502,7 @@ impl Worker {
                             .map(|mc| mc.rate.as_f64() as f32);
                         st.carrier = Some(CarrierState {
                             locked: d.carrier_locked(),
-                            mer_db: d.mer_db(),
+                            mer_db: d.es_n0_db(),
                             offset_hz: d.carrier_offset_hz(),
                             modulation: m,
                             info_bits: rate.map(|r| r * f32::from(m.bits_per_symbol())),
@@ -1487,7 +1516,13 @@ impl Worker {
                         (LockState::Locked, Some(f)) if f.frames > 0 => {
                             let what = match (&f.gse, &f.ts, self.settings.decoder) {
                                 (Some(g), _, DecoderKind::Dvbs2Ip) => {
-                                    format!("{} IP packets", g.packets)
+                                    // No IP: name what the GSE carries.
+                                    match g.other_protocols.iter().max_by_key(|e| *e.1) {
+                                        Some((t, n)) if g.packets == 0 => format!(
+                                            "0 IP packets · GSE protocol type {t:04x}h ×{n}"
+                                        ),
+                                        _ => format!("{} IP packets", g.packets),
+                                    }
                                 }
                                 (_, Some(t), DecoderKind::Dvbs2Ts) => {
                                     match t.report.programmes.iter().find_map(|p| p.name.clone()) {
@@ -1808,6 +1843,7 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
         tdm_record: s.tdm_record,
         voice_auto: s.voice_auto
             && matches!(s.decoder, DecoderKind::Cdm600Voice | DecoderKind::FastLink),
+        bbframes: s.bbframes.clone(),
     }
 }
 

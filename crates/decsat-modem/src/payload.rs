@@ -348,7 +348,16 @@ pub struct TsAlign {
     locked: bool,
     misses: u32,
     pub packets: u64,
+    /// Packets whose sync byte was there (the rest were passed through a
+    /// miss or two).
+    pub synced: u64,
 }
+
+/// Synced packets the payload search wants before it calls the data a
+/// transport stream: three lock the aligner, and three chance sync bytes
+/// 188 bytes apart turn up in ~4 % of a search's 4-frame looks over all
+/// its descramblings — a live D&I++ voice carrier was once read as TS so.
+const TS_FOUND: u64 = 6;
 
 const TS_BITS: usize = 188 * 8;
 
@@ -367,6 +376,7 @@ impl TsAlign {
                 }
                 if byte_at(&self.bits, at) == 0x47 {
                     self.misses = 0;
+                    self.synced += 1;
                 } else {
                     self.misses += 1;
                     if self.misses >= 3 {
@@ -619,7 +629,10 @@ impl PayloadRx {
                     (hdlc.good >= PROBE_UNITS).then_some(hdlc.good * 1500),
                     Format::Hdlc,
                 ),
-                (framed(ts.packets * 1504), Format::Ts),
+                (
+                    framed(ts.synced * 1504).filter(|_| ts.synced >= TS_FOUND),
+                    Format::Ts,
+                ),
                 (framed(e1.stats.frames * 256), Format::E1),
                 (
                     framed(di.stats.frames * crate::dandi::FRAME as u64),
@@ -871,6 +884,28 @@ mod tests {
                 assert_eq!(w[1][1], w[0][1] + 1);
             }
         }
+    }
+
+    #[test]
+    fn three_chance_sync_bytes_are_not_a_transport_stream() {
+        // Random data with 0x47 at three places 188 bytes apart, as chance
+        // put them in a live D&I++ carrier's first frames: the aligner locks
+        // and coasts through the next misses, but that is no TS.
+        const L: usize = 2223;
+        let mut next = rng(21);
+        let mut bits: Vec<u8> = (0..4 * L).map(|_| (next() & 1) as u8).collect();
+        for k in 0..3 {
+            let at = 101 + k * 1504;
+            for (i, b) in (0..8).rev().map(|i| (0x47u8 >> i) & 1).enumerate() {
+                bits[at + i] = b;
+            }
+        }
+        let mut rx = PayloadRx::new(L);
+        let mut out = PayloadOut::default();
+        for f in bits.as_chunks::<L>().0 {
+            rx.push(f, &mut out);
+        }
+        assert_ne!(rx.format(), Some(Format::Ts), "{:?}", rx.stats);
     }
 
     #[test]

@@ -421,6 +421,8 @@ decsat tx --ts video.ts --loop --modcod "8PSK 3/4" --symbol-rate 1000000 --out t
 
 ```bash
 decsat scan capture_8Msps.cs8     # find every carrier and identify each
+decsat scan capture_8Msps.cs8 --decode   # …then run each one's decoder over the capture and report
+decsat record --hackrf 1720:1780:14 --rate 20 --seconds 2 --out caps   # raw IQ from the HackRF: one slice or a sweep (receive only)
 decsat scene                      # write the 8 MS/s test scene above
 decsat cid                        # a DVB-S2 carrier with a DVB-CID under it
 decsat test-signals tests         # both, into tests/ (see tests/README.md)
@@ -428,6 +430,7 @@ decsat mcast recording.ts --decode --record out   # the radio in a .ts (MPE)
 decsat payload fastlink.bin --tdm-out frames.bin  # a modem .bin through the payload stage
 decsat decode --hackrf 1635.0 --decoder fastlink --offset 640e3 --bandwidth 200e3   --out dir --record-on-activity     # watch a FastLink live, record when a channel speaks
 decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   # a Q-Flex's call voice to a .wav
+decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf   # a DVB-S2 carrier, its good BBFRAMEs kept
 decsat modcods                    # the DVB-S2 MODCOD table
 ```
 

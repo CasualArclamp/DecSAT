@@ -1856,3 +1856,127 @@ Rory's ASA192 MSO-BN (`decsat-ASA192_MSO-BN-12342.5165MHz-303030Sps-….cf32`,
   s⁴ are only 3–7 dB apart. The Comtech recording's scan is unchanged.
   Tests: QPSK under sine and smooth ±35 Hz wander (fails on the old rules),
   FastLink framing after a phase slip, Paradise on skewed rails both ways.
+
+## A live survey: every decoder on the satellite's carriers (2026-10-11)
+
+Rory: "go around decoding carriers and check they work". Receive only, his
+HackRF (LNA 40, VGA 20) behind the LNB (LO 10 600 MHz): the whole IF,
+950–2150 MHz, in 86 slices of 20 MS/s × 2 s; the busy 12.32–12.37 GHz block
+again in 9 slices of 8 MS/s × 4 s; the DVB-S2 carriers and some others
+recorded on their own. Every slice through `decsat scan --decode`, then the
+failures one by one. Captures stayed in the scratchpad.
+
+**New in the CLI**: `decsat record` (raw IQ from the HackRF to `.cs8`, one
+frequency or `from:to:step`, named for `scan`/`decode` to read back);
+`decsat scan --decode` (after Identify, a lossless second pass runs each
+carrier's decoder over the capture — TPC 2964, FastLink, DVB-S2 → IP; DVB-S
+and the K = 7 Viterbi for "possibly DVB-S"; the Viterbi as a probe on any
+other plain BPSK/QPSK; TDMA bursts skipped — and prints every report);
+`decode --bbframes file` (good BBFRAMEs kept: u16 LE length, PLS MODCOD,
+the frame); the report's DVB-S2 lines (FEC counts, per MODCOD, the BBHEADER,
+the GSE variants, non-IP protocol types); `--offset -1.2e6` now parses.
+
+**What is there, and what decoded** (215 carriers in the wide sweep; 145 in
+the 12.32–12.37 GHz block, whose 8 MS/s × 4 s pass the counts below are from):
+
+- **TPC 2964**, QPSK, 43.6–682.7 kS/s, 66: 60 decode cleanly. Of the other
+  six, the two ~700 kS/s MEL trunks are below threshold at this dish (raw
+  BER 5 %, ≈4.3 dB; the decoder clears every frame at 5 dB in AWGN), one at
+  6.2 dB loses 30 % (marginal), one at 16 dB loses frames in bursts
+  (something overlaps it), one loses frames to slips, and a 785 kHz-wide
+  signal Identify named TPC never shows the decoder its UW (earlier passes
+  called it plain QPSK at 160–200 kS/s: unresolved). Payloads: Comtech D&I++ with G.728 voice (the
+  43.6 kS/s family), 64 kbit/s timeslots in HDLC packets (85–682 kS/s),
+  idle fill. A 298.7 kS/s one, focused at 2 MS/s: 3019 of 3021 frames in 15 s.
+- **Q-Flex FastLink**, 95 kS/s, 38: all lock and decode (one lost 72 of 256
+  codewords after a slip), Paradise framing and the TDM multiplex, several
+  with skewed rails. The faster FastLinks (about 121, 190 and 285 kS/s — the
+  plan's "CAP" links) decode at the LDPC (e.g. 336 codewords, BER 1.9e-5)
+  but their payload is not recognised yet.
+- **Q-Flex Viterbi K = 7, rate 1/2**: 7 links, 64 kS/s and 9.6 kS/s, decode
+  (timeslot HDLC or idle fill). The DVB-S decoder on them finds rate 1/2 but
+  no TS — right: they are not DVB-S.
+- **DVB-S2**, four ACM carriers, all GSE, multiple-stream flagged (ISI 0):
+  - 2721.7 and 1200.6 kS/s: every BBFRAME good (3251/3251 in 10 s), QPSK 1/4
+    and 1/3 short frames; each holds one GSE PDU of type 0005h — a mandatory
+    extension header with no registered meaning (TS 102 606-1 §4.2, RFC 4326
+    §5) — and an encrypted-looking body. A proprietary VSAT outbound: "0 IP"
+    is the right answer, and the report now says what the GSE carries.
+  - 1000 kS/s (×2): the QPSK 1/4 frames all good (DFL 128 bits: a 12-byte
+    type-0001h PDU with a running counter — hub timing), the 32APSK 3/4
+    frames none: Es/N0 is 6–9 dB here (spectral plateau; the FEC's pilot
+    estimate agrees), below that MODCOD's ~10.2 dB. The dish, not the
+    decoder.
+  - No DVB-CID under the two strong ones (10 s, both search modes).
+- **Not decodable here**: the plan's STDMA groups (~100 kS/s TDMA bursts,
+  gaps of ~20 ms), the Comtech 8PSK at 477.9/238.9 kS/s (still open),
+  BPSK at 0.13–1.5 MS/s with no K = 7 code, transponders wider than the
+  HackRF's 20 MHz (no noise floor in a capture: 11.6, 12.39, 12.53,
+  12.61 GHz…), and receiver artefacts: spurs at whole-MHz and 1.875 MHz
+  steps of IF, and 400–650 kS/s "carriers" around 12.13–12.32 GHz whose IF
+  offset steps with the tuning.
+
+**Fixed** (each from a live carrier):
+
+- **PSK demodulator readouts from zero** (`psk.rs`): MER and lock coherence
+  were smoothed 0.3 a block starting at 0, so a first look arriving as one
+  block (any short capture) read 0.3 × the truth: 43.6 kS/s TPC carriers at
+  9.3 dB showed 2.8 dB and "not locked" — and the same carriers 6–9 dB lower
+  than their BER implied all through the first survey. Now seeded from the
+  first block and smoothed over ~2000 symbols whatever the block size.
+  Full multi-ring decisions wait for the second block (from the first, a
+  16QAM test false-locked).
+- **DVB-S2 Es/N0** (`demod.rs`): the VFO showed decision-directed MER, which
+  read 12.2 dB on 32APSK frames at 6–9 dB; it now shows the pilots' known-
+  symbol estimate when there are pilots.
+- **Identify**:
+  - a HackRF spur in a narrow VFO was "VFO too narrow … 596 kS/s" (its 99 %
+    band is mostly noise, its noise-bandwidth rate divides by a plateau a
+    tone has not got): half the above-floor power within ±8 bins of the
+    peak is now a tone, centred on the peak;
+  - "2-ring" on QPSK at 6–9 dB: two clusters cut a single noisy ring's
+    spread 2.75–4×, past the 3× bar; a ring structure now also needs a dip
+    between the rings (midpoint density under half the sparser ring's);
+  - narrow carriers whose s⁴ line LNB phase noise smears under the bar
+    ("modulated"): a QPSK lock seeded from the s⁴ peak that holds
+    (coherence ≥ 0.3; 8PSK scores ~0 against QPSK points) names QPSK, and
+    TPC/FastLink detection then runs — a 16 dB TPC carrier and a FastLink
+    called "2-ring" are named again;
+  - **TDMA bursts**: in-band power in 64-symbol blocks, ≥ 2 runs of blocks
+    3 dB under the median: "QPSK in bursts — a TDMA carrier (on 91 % of the
+    time, gaps of ~18 ms, 9 dB deep)" instead of "possibly DVB-S";
+  - DVB-S2 needs a quarter of its header candidates confirmed: a TPC's UW
+    every 1482 symbols gave 2–3 chance confirmations among dozens, read as
+    ACM with a different MODCOD each;
+  - proprietary-S2 header spacing at least 1000 symbols (an STDMA group's
+    burst preambles recurred at 59–72, "PLHEADERs every 72 symbols").
+- **Carrier list cap** 48 → 128: two 20 MHz Ku slices held more SCPC
+  carriers than that and lost real ones.
+- **GSE**: with no IP from any variant, the standard reading's protocol
+  types are counted (they were only once IP had been seen), and the S2
+  status names the commonest ("0 IP packets · GSE protocol type 0005h").
+- **Reports before the decoders had finished, and a 3½-minute exit**:
+  `decode` and `scan --decode` printed 3 s after a file ended, while a slow
+  FEC thread still had a queue; the exit then waited for it (lossless VFOs
+  work their queues through). Each VFO now counts the blocks and frames
+  handed to it and its FEC/CID thread and not yet done
+  (`fec::Pending`); `Engine::settled()` is "file ended, nothing pending",
+  the CLI waits for it (capped at 2 min, with progress notes) and then
+  discards the VFOs. The slow one: the **TPC 2964 structure search** ran
+  over all 432 structures × its 16-frame window on every frame until
+  something fitted — on a weak 685 kS/s trunk that never fits, ~460
+  searches a second. It now searches every 4 frames while the window
+  fills, then once a window.
+- **Payload search**: MPEG-TS needs six packets whose sync byte checked —
+  three chance 0x47s 188 bytes apart (~4 % of 4-frame looks over all the
+  descramblings) plus coasted misses had out-scored D&I++ on a voice carrier.
+
+Slips: the 8 MS/s block captures show more carrier slips than the others
+(10 in 4 s on a 298.7 kS/s TPC at 8.4 dB; 2 in 15 s on another, focused);
+the same before and after these changes. They were recorded while a decode
+batch loaded the CPU, so HackRF sample drops are the first suspect — a clean
+capture would tell.
+
+Open: the faster FastLinks' payload; the Comtech 8PSK; what the BPSK
+carriers are; a live DVB-CID (none found yet); TDMA burst demodulation; the
+slips above.

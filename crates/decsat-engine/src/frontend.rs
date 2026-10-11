@@ -227,6 +227,36 @@ impl Engine {
             .map(|h| h.settings.clone())
     }
 
+    /// A file played losslessly (not in real time) has ended and every VFO
+    /// has worked through what it was given — its own blocks and its FEC
+    /// or CID thread's queue. Wait for this before reading final results;
+    /// give the VFOs one more status tick (~0.3 s) after it turns true.
+    pub fn settled(&self) -> bool {
+        matches!(self.front().state, SourceState::Ended) && self.pending_work() == 0
+    }
+
+    /// Blocks and frames handed to the VFOs and their threads and not yet
+    /// worked through, all VFOs together.
+    pub fn pending_work(&self) -> u64 {
+        self.shared
+            .vfos
+            .lock()
+            .unwrap()
+            .values()
+            .map(|h| h.pending.get())
+            .sum()
+    }
+
+    /// Stop every VFO without waiting for its queues: what is left is
+    /// dropped (for leaving after a report, when a decoder is still far
+    /// behind).
+    pub fn discard_vfos(&self) {
+        let vfos = std::mem::take(&mut *self.shared.vfos.lock().unwrap());
+        for (_, h) in vfos {
+            h.discard();
+        }
+    }
+
     pub fn vfo_status(&self, id: VfoId) -> Option<VfoStatus> {
         let st = self
             .shared

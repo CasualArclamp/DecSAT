@@ -1169,6 +1169,53 @@ pub struct FecOutput {
     /// Play an E1's G.728 voice as soon as it is found, when no timeslot
     /// is chosen (the CDM-600 voice preset).
     pub voice_auto: bool,
+    /// DVB-S2: append each good BBFRAME here as a record — its length in
+    /// bytes (u16, little-endian), the PLS MODCOD (u8), then the BBFRAME,
+    /// BBHEADER first.
+    pub bbframes: Option<PathBuf>,
+}
+
+/// Work handed to a VFO's threads (its blocks, its FEC frames or CID
+/// blocks) and not yet done. A file played losslessly has caught up when
+/// every VFO's count is zero: the command line waits for that before it
+/// reports, instead of guessing (a slow TPC structure search was minutes
+/// behind when a report was printed, and the exit then waited for it).
+///
+/// Rust note: `Arc<AtomicU64>` is a counter several threads can bump
+/// without a lock; `Clone` shares the one count.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct Pending(Arc<std::sync::atomic::AtomicU64>);
+
+impl Pending {
+    /// One more item queued. Counted before it is sent, so the worker can
+    /// never finish it (and count it off) first.
+    pub fn add(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// An item counted with [`Self::add`] is done, or was not sent after
+    /// all.
+    pub fn done(&self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Counts one item off when dropped: held while an item is worked on,
+    /// so every way out of the work (a `continue`, a `break`) counts it.
+    pub fn guard(&self) -> PendingGuard<'_> {
+        PendingGuard(self)
+    }
+}
+
+pub(crate) struct PendingGuard<'a>(&'a Pending);
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.done();
+    }
 }
 
 /// Runs a [`FecDecoder`] on its own thread.
@@ -1183,20 +1230,29 @@ pub(crate) struct FecWorker {
     quit: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
     lossless: bool,
+    /// Frames queued and not yet decoded (the VFO's count).
+    pending: Pending,
 }
 
 impl FecWorker {
-    /// `symbol_rate` turns frame lengths into signal time for the rates.
-    pub fn spawn(symbol_rate: f64, output: FecOutput) -> Self {
+    /// `symbol_rate` turns frame lengths into signal time for the rates;
+    /// queued frames are counted into `pending` (the VFO's).
+    pub(crate) fn spawn(symbol_rate: f64, output: FecOutput, pending: Pending) -> Self {
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let stats = Arc::new(Mutex::new(FecStats::default()));
         let output = Arc::new(Mutex::new(output));
         let gap = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
-        let (s, o, g, q) = (stats.clone(), output.clone(), gap.clone(), quit.clone());
+        let (s, o, g, q, p) = (
+            stats.clone(),
+            output.clone(),
+            gap.clone(),
+            quit.clone(),
+            pending.clone(),
+        );
         let join = std::thread::Builder::new()
             .name("decsat-fec".into())
-            .spawn(move || run(rx, s, o, g, q, symbol_rate))
+            .spawn(move || run(rx, s, o, g, q, p, symbol_rate))
             .expect("spawn FEC thread");
         FecWorker {
             tx: Some(tx),
@@ -1206,6 +1262,7 @@ impl FecWorker {
             quit,
             join: Some(join),
             lossless: false,
+            pending,
         }
     }
 
@@ -1248,17 +1305,22 @@ impl FecWorker {
     }
 
     fn send(&self, input: FecInput) {
+        let Some(tx) = &self.tx else { return };
+        self.pending.add();
         if self.lossless {
-            if let Some(tx) = &self.tx {
-                let _ = tx.send(input);
+            if tx.send(input).is_err() {
+                self.pending.done();
             }
             return;
         }
-        if let Some(tx) = &self.tx
-            && let Err(TrySendError::Full(_)) = tx.try_send(input)
-        {
-            self.stats.lock().unwrap().dropped += 1;
-            self.gap.store(true, Ordering::Relaxed);
+        match tx.try_send(input) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.pending.done();
+                self.stats.lock().unwrap().dropped += 1;
+                self.gap.store(true, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => self.pending.done(),
         }
     }
 
@@ -1976,6 +2038,7 @@ fn run(
     output: Arc<Mutex<FecOutput>>,
     gap: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
+    pending: Pending,
     symbol_rate: f64,
 ) {
     let mut dec = FecDecoder::new();
@@ -1999,6 +2062,7 @@ fn run(
     let mut tpc_text: Option<decsat_modem::text::TextFinder> = None;
     let mut e1: Option<E1Stage> = None;
     while let Ok(input) = rx.recv() {
+        let _done = pending.guard();
         if quit.load(Ordering::Relaxed) {
             break;
         }
@@ -2254,6 +2318,25 @@ fn run(
         if broken && let Some(t) = &mut ts {
             t.deframer.discontinuity();
         }
+        if let Some(b) = &out
+            && b.ok()
+            && let Some(path) = output.lock().unwrap().bbframes.clone()
+        {
+            use std::io::Write;
+            // Rust note: the file is opened per frame (a few hundred a
+            // second at most), so nothing has to be kept open or flushed.
+            if let Ok(mut fh) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let mut rec = Vec::with_capacity(3 + b.bytes.len());
+                rec.extend_from_slice(&(b.bytes.len() as u16).to_le_bytes());
+                rec.push(f.pls.modcod);
+                rec.extend_from_slice(&b.bytes);
+                let _ = fh.write_all(&rec);
+            }
+        }
         let wants_ts = output.lock().unwrap().ts;
         if let Some(b) = &out
             && let Ok(h) = &b.header
@@ -2408,7 +2491,7 @@ mod tests {
             })
             .collect();
         for quit in [false, true] {
-            let w = FecWorker::spawn(100e3, FecOutput::default());
+            let w = FecWorker::spawn(100e3, FecOutput::default(), Pending::default());
             if quit {
                 w.quit();
             }

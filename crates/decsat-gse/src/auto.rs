@@ -162,7 +162,16 @@ impl GseIp {
                     None => *self.other_protocols.entry(p.protocol).or_default() += 1,
                 }
             }
-        } else if self.fields_since_ip >= BLIND_AFTER {
+        } else {
+            // No IP from any variant yet: say what standard GSE carries
+            // instead — a link may carry none (seen live: every PDU of a
+            // 2.7 MS/s ACM outbound had type 0005h, an unregistered
+            // mandatory extension header, TS 102 606-1 §4.2 / RFC 4326 §5).
+            for p in &self.pdus[0] {
+                *self.other_protocols.entry(p.protocol).or_default() += 1;
+            }
+        }
+        if self.chosen().is_none() && self.fields_since_ip >= BLIND_AFTER {
             for (at, info) in blind_ipv4_search(field) {
                 self.blind_packets += 1;
                 out.push(IpPacket {
@@ -224,6 +233,27 @@ mod tests {
                 written.label()
             );
         }
+    }
+
+    #[test]
+    fn a_link_with_no_ip_says_what_it_carries() {
+        // A live outbound: one unregistered type-0005h PDU a frame, no IP.
+        let mut enc = GseEncapsulator::new(Variant::STANDARD);
+        for k in 0..40u8 {
+            enc.push(0x0005, Label::None, vec![0x81 ^ k; 627]);
+        }
+        let mut g = GseIp::new();
+        let mut got = Vec::new();
+        while enc.queued() > 0 {
+            g.data_field(&enc.fill(633), &mut got);
+        }
+        assert!(got.is_empty());
+        assert_eq!(g.chosen(), None);
+        assert!(
+            g.other_protocols.get(&0x0005).is_some_and(|&n| n >= 30),
+            "{:?}",
+            g.other_protocols
+        );
     }
 
     #[test]

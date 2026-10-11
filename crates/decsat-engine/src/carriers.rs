@@ -93,8 +93,10 @@ const MERGE_TROUGH_DB: f32 = 6.0;
 /// sits around 0.2 dB, ±0.5 dB transponder ripple ~0.35; a comb of ±2 dB
 /// ripple ~1.4.
 const ROUGH_DB: f32 = 1.0;
-/// Most carriers reported; beyond this the weakest are dropped.
-const MAX_CARRIERS: usize = 48;
+/// Most carriers reported; beyond this the weakest are dropped. (48 was
+/// too few: a live 20 MHz slice of Ku-band SCPC held more — 43.6 kS/s
+/// carriers 58.8 kHz apart — and lost real ones to the cap.)
+const MAX_CARRIERS: usize = 128;
 
 /// `q`-quantile of `xs` (0..1), by sorting a copy.
 fn quantile(xs: &[f32], q: f64) -> f32 {
@@ -565,20 +567,20 @@ mod tests {
 
     #[test]
     fn too_many_keeps_the_strongest() {
-        // 80 well-separated tones of rising strength: only MAX_CARRIERS come
-        // back, the strongest ones, in frequency order.
+        // 160 well-separated tones of rising strength: only MAX_CARRIERS
+        // come back, the strongest ones, in frequency order.
         let rate = 20e6;
         let n = 8192;
         let mut s = spectrum(n, rate, &[], false);
-        for i in 0..80usize {
-            s[200 + i * 95] = -60.0 + i as f32 * 0.2;
+        for i in 0..160usize {
+            s[200 + i * 48] = -60.0 + i as f32 * 0.1;
         }
         let found = detect_carriers(&s, rate, 6.0);
         assert_eq!(found.len(), MAX_CARRIERS);
         assert!(found.windows(2).all(|w| w[0].center_hz < w[1].center_hz));
         let weakest = found.iter().map(|c| c.snr_db).fold(f32::MAX, f32::min);
         assert!(
-            weakest > 20.0 + (80 - MAX_CARRIERS) as f32 * 0.2 - 0.3,
+            weakest > 20.0 + (160 - MAX_CARRIERS) as f32 * 0.1 - 0.3,
             "{weakest}"
         );
     }
@@ -642,13 +644,13 @@ mod tests {
 
     #[test]
     fn a_comb_of_spurs_cannot_crowd_out_a_real_carrier() {
-        // 90 strong narrow spurs plus one weaker clean carrier: the carrier
-        // must survive the cap.
+        // 170 strong narrow spurs plus one weaker clean carrier: the
+        // carrier must survive the cap.
         let rate = 20e6;
         let n = 8192;
         let mut s = spectrum(n, rate, &[(6.0e6, 500e3, 0.2, -66.0)], false);
-        for i in 0..90usize {
-            s[100 + i * 60] = -40.0;
+        for i in 0..170usize {
+            s[100 + i * 37] = -40.0;
         }
         let found = detect_carriers(&s, rate, 6.0);
         assert_eq!(found.len(), MAX_CARRIERS);

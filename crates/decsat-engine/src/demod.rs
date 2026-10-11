@@ -295,6 +295,19 @@ impl Demod {
         self.mer
     }
 
+    /// Es/N0 for display, dB: from the pilots' known symbols once there
+    /// have been any, else the data MER. Decision-directed MER overstates a
+    /// dense constellation near threshold — a noisy point snaps to the wrong
+    /// neighbour and its error looks small: a live 1 MS/s ACM carrier read
+    /// 12.2 dB on its 32APSK frames while its spectrum and pilots said 6–9.
+    pub fn es_n0_db(&self) -> f32 {
+        if self.level_fresh {
+            self.mer
+        } else {
+            10.0 * (self.amp * self.amp / self.noise.max(1e-12)).log10()
+        }
+    }
+
     /// Residual carrier offset the loop is tracking, Hz.
     pub fn carrier_offset_hz(&self) -> f64 {
         self.pll.freq_cycles() * self.symbol_rate()

@@ -38,6 +38,13 @@ const PLHEADER_THRESHOLD: f32 = 0.5;
 /// How far a confirming header may sit from where it was predicted, in
 /// symbols — allows for a timing slip without admitting coincidences.
 const GRID_TOLERANCE: usize = 2;
+/// The shortest header spacing taken for frames, in symbols. No DVB-S2/S2X
+/// PLFRAME is shorter than 3330 symbols (the dummy frame, and a short
+/// FECFRAME on 32APSK: EN 302 307-1 §5.5.1); a third of that leaves room for
+/// a vendor's shorter frames, while a burst carrier's preambles (an STDMA
+/// group seen live) put header-like peaks only 59–72 symbols apart — closer
+/// than a 90-symbol header could ever repeat.
+const MIN_FRAME_SPACING: usize = 1000;
 
 /// Where a symbol-rate figure came from, best last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,9 +136,15 @@ impl Dvbs2Info {
     /// thick and fast, and as many land on a predicted spot by chance — on
     /// a live 590 kS/s carrier, 10 489 candidates in 347 000 symbols gave
     /// 3 285 "confirmations" spread over every MODCOD, reserved ones too.
+    /// Nor may most of the candidates go unconfirmed: a frame-periodic
+    /// word that is not a PLHEADER (a TPC 2964 carrier's UW every 1482
+    /// symbols, seen live) makes candidates that are sparse but regular,
+    /// and a few land where some PLS reading predicts — 2 or 3 of dozens,
+    /// read as "ACM" with a different MODCOD each.
     pub fn confirmed(&self) -> bool {
         self.headers_confirmed >= 1
             && self.headers_confirmed as f64 > 4.0 * self.chance_confirmations
+            && 4 * self.headers_confirmed >= self.headers_seen
     }
 
     /// True when more than one data MODCOD was seen — ACM or VCM in use.
@@ -191,6 +204,83 @@ pub struct Identification {
     /// The spectrum's skirts fit a 2 % roll-off better than DVB-S2X's
     /// sharpest, 5 % (`roll_off` then reads 5 %).
     pub roll_off_2pct: bool,
+    /// The carrier comes and goes: a TDMA carrier's bursts.
+    pub bursts: Option<Bursts>,
+}
+
+/// A carrier keyed on and off, as TDMA terminals share one (the STDMA
+/// groups in a live Ku band: 20–30 ms gaps, 12–21 dB deep, where a
+/// continuous carrier's power held within 1 dB).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bursts {
+    /// Share of the time the carrier is on.
+    pub duty: f32,
+    /// Gaps seen in the look.
+    pub gaps: usize,
+    /// Their mean length, seconds.
+    pub mean_gap_s: f64,
+    /// How far the power falls in a gap, dB.
+    pub depth_db: f32,
+}
+
+/// Power is averaged over blocks of this many symbols.
+const BURST_BLOCK_SYMBOLS: f64 = 64.0;
+/// A block this far below the median is off. A continuous carrier's
+/// 64-symbol blocks keep within ±1 dB (live TPC and FastLink); a weak
+/// TDMA group's gaps fall only 4–7 dB, to the noise.
+const BURST_DEPTH_DB: f32 = 3.0;
+
+/// Gaps in `x` (a carrier of `rs` symbols a second through its matched
+/// filter, at `rate`): blocks well below the median power, in at least two
+/// separate runs, with the carrier on some of the time.
+pub fn find_bursts(x: &[Iq], rate: f64, rs: f64) -> Option<Bursts> {
+    let len = ((rate / rs * BURST_BLOCK_SYMBOLS).round() as usize).max(32);
+    let db: Vec<f32> = x
+        .chunks_exact(len)
+        .map(|c| {
+            10.0 * (c.iter().map(|s| s.norm_sqr()).sum::<f32>() / len as f32)
+                .max(1e-20)
+                .log10()
+        })
+        .collect();
+    if db.len() < 20 {
+        return None;
+    }
+    let mut sorted = db.clone();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+    let off: Vec<bool> = db.iter().map(|&d| d < median - BURST_DEPTH_DB).collect();
+    let n_off = off.iter().filter(|&&o| o).count();
+    // Runs of off blocks; a lone block is noise.
+    let mut gaps = 0;
+    let mut run = 0;
+    for &o in off.iter().chain(std::iter::once(&false)) {
+        if o {
+            run += 1;
+        } else {
+            if run >= 2 {
+                gaps += 1;
+            }
+            run = 0;
+        }
+    }
+    let duty = 1.0 - n_off as f32 / db.len() as f32;
+    if gaps < 2 || duty < 0.1 {
+        return None;
+    }
+    let low: Vec<f32> = db
+        .iter()
+        .zip(&off)
+        .filter(|(_, o)| **o)
+        .map(|(&d, _)| d)
+        .collect();
+    let depth = median - low.iter().sum::<f32>() / low.len() as f32;
+    Some(Bursts {
+        duty,
+        gaps,
+        mean_gap_s: n_off as f64 * len as f64 / rate / gaps as f64,
+        depth_db: depth,
+    })
 }
 
 impl Identification {
@@ -211,6 +301,7 @@ impl Identification {
             carrier_locked: false,
             frame_structure: None,
             roll_off_2pct: false,
+            bursts: None,
         }
     }
 
@@ -529,6 +620,24 @@ fn roll_off_error(
     }
 }
 
+/// Rings are separate when the amplitudes midway between two ring centres
+/// are at most this share of those at the sparser centre.
+const MAX_RING_DIP: f32 = 0.5;
+
+/// How many amplitudes lie near the midpoint of rings at `lo` and `hi`,
+/// over how many lie as near the sparser of the two (windows an eighth of
+/// the gap either side).
+fn ring_dip(amp: &[f32], lo: f32, hi: f32) -> f32 {
+    let w = (hi - lo).abs() / 8.0;
+    let near = |c: f32| amp.iter().filter(|&&a| (a - c).abs() <= w).count() as f32;
+    near(0.5 * (lo + hi)) / near(lo).min(near(hi)).max(1.0)
+}
+
+/// A QPSK carrier lock this coherent (the 4th-power phase agreement of its
+/// decisions) means QPSK (or BPSK) symbols: 8PSK scores ~0 against QPSK's
+/// points, and a constellation without rings that this is not about.
+const QPSK_BY_LOCK: f32 = 0.3;
+
 /// Classify the constellation from timing-recovered (not carrier-recovered)
 /// symbols, and estimate the residual carrier offset from the power line.
 pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Option<f64>) {
@@ -625,7 +734,12 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
                 inner_offset((c2[0] + c2[1]) / 2.0),
             );
         }
-        if gain2 > 3.0 {
+        // Any other ring structure must show as rings: fewer amplitudes
+        // between the two than at either. Two clusters cut a single noisy
+        // ring's spread by 2.75× (a Gaussian's 1 − 2/π) and a flat-topped
+        // one's by 4×, so the gain alone called live QPSK at 6–9 dB, its
+        // neighbours' skirts close by, "2-ring".
+        if gain2 > 3.0 && ring_dip(&amp, c2[0], c2[1]) < MAX_RING_DIP {
             let rings = if gain3 > 2.5 { 3 } else { 2 };
             return (ConstellationGuess::MultiRing(rings), None);
         }
@@ -675,6 +789,21 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
         _ if sse1 < 0.05 => (ConstellationGuess::PskUnclear, None),
         _ => (ConstellationGuess::Unclear, None),
     }
+}
+
+/// The carrier offset, Hz, from the strongest line in the symbols' 4th
+/// power, with no bar on its strength (a seed for a QPSK lock).
+fn weak_s4_offset(sym: &[Iq], rs: f64) -> Option<f64> {
+    let rms = (sym.iter().map(|s| s.norm_sqr()).sum::<f32>() / sym.len().max(1) as f32).sqrt();
+    let p4: Vec<Iq> = sym
+        .iter()
+        .map(|s| {
+            let u = s / rms.max(1e-12);
+            let u2 = u * u;
+            u2 * u2
+        })
+        .collect();
+    line_at(&p4, rs, -rs / 2.0, rs / 2.0, true).map(|l| l.hz / 4.0)
 }
 
 /// Search recovered symbols for DVB-S2 PLHEADERs and confirm them on the frame
@@ -737,20 +866,56 @@ pub fn detect_dvbs2(sym: &[Iq]) -> Dvbs2Info {
     // by chance too.)
     if info.headers_confirmed == 0 && peaks.len() >= 3 && info.chance_confirmations < 0.5 {
         // The shortest spacing that recurs (a missed header makes a
-        // multiple of it).
+        // multiple of it), and long enough to be a frame.
         let d: Vec<usize> = peaks.windows(2).map(|w| w[1] - w[0]).collect();
         info.unconfirmed_spacing = d
             .iter()
             .copied()
             .filter(|&x| {
-                d.iter()
-                    .filter(|&&y| y.abs_diff(x) <= GRID_TOLERANCE)
-                    .count()
-                    >= 2
+                x >= MIN_FRAME_SPACING
+                    && d.iter()
+                        .filter(|&&y| y.abs_diff(x) <= GRID_TOLERANCE)
+                        .count()
+                        >= 2
             })
             .min();
     }
     info
+}
+
+/// Half-width, in bins, of the peak a tone's power is looked for in.
+const TONE_BINS: usize = 8;
+/// A carrier with this much of its above-floor power within [`TONE_BINS`]
+/// of its peak is a tone. A HackRF spur in a 20 kHz VFO, 18–47 dB up, held
+/// most of its power there, yet its 99 % band (mostly noise) was 10 kHz and
+/// its noise-bandwidth rate (power over a plateau a tone does not have)
+/// 596 kS/s: Identify said "VFO too narrow". A modulated carrier puts a few
+/// per cent there.
+const TONE_FRACTION: f64 = 0.5;
+
+/// The highest bin of an fftshifted spectrum.
+fn peak_bin(db: &[f32]) -> usize {
+    db.iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map_or(0, |(k, _)| k)
+}
+
+/// The share of the spectrum's power above `floor_db` (both dB) that lies
+/// within `half` bins of its highest bin.
+fn tone_fraction(db: &[f32], floor_db: f32, half: usize) -> f64 {
+    let floor = 10f64.powf(floor_db as f64 / 10.0);
+    let excess = |d: f32| (10f64.powf(d as f64 / 10.0) - floor).max(0.0);
+    let total: f64 = db.iter().map(|&d| excess(d)).sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let k0 = peak_bin(db);
+    let near: f64 = db[k0.saturating_sub(half)..(k0 + half + 1).min(db.len())]
+        .iter()
+        .map(|&d| excess(d))
+        .sum();
+    near / total
 }
 
 /// Identify the carrier in `x`, a VFO's baseband at `rate`, using the whole
@@ -798,13 +963,15 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // "narrow" has to allow for that. Anything this narrow is either an
     // unmodulated carrier or a carrier far too narrow for this VFO.
     let bin_hz = rate / FFT_SIZE as f64;
-    if band.bandwidth_hz <= 8.0 * bin_hz || band.symbol_rate_hz <= 4.0 * bin_hz {
-        return Identification::bare(
-            Verdict::Carrier,
-            band.center_hz,
-            band.snr_db,
-            band.bandwidth_hz,
-        );
+    if band.bandwidth_hz <= 8.0 * bin_hz
+        || band.symbol_rate_hz <= 4.0 * bin_hz
+        || tone_fraction(&db, band.floor_db, TONE_BINS) >= TONE_FRACTION
+    {
+        // Centred on the peak, not on the power-weighted middle of a band
+        // that is mostly noise.
+        let k0 = peak_bin(&db);
+        let center = (k0 as f64 - (db.len() / 2) as f64) * bin_hz;
+        return Identification::bare(Verdict::Carrier, center, band.snr_db, band.bandwidth_hz);
     }
 
     let mut id = Identification::bare(
@@ -846,6 +1013,9 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     let mut mf = Fir::new(rrc_taps(sps, alpha, 12));
     let mut filtered = Vec::with_capacity(bb.len());
     mf.process(&bb, &mut filtered);
+    // On and off? Measured in the matched filter's band, so the gaps fall
+    // to the noise there (over the whole VFO they show less deep).
+    id.bursts = find_bursts(&filtered, rate, rs);
     let mut agc = Agc::new(1.0, 1.0);
     agc.process(&mut filtered);
 
@@ -867,7 +1037,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     }
 
     // 5. Constellation (a guess unless DVB-S2 overrides it below).
-    let (cst, cfo) = classify_constellation(&sym, rs);
+    let (mut cst, cfo) = classify_constellation(&sym, rs);
     id.constellation = Some(cst);
 
     // 6. DVB-S2? One confirmation means two headers exactly one PLS-predicted
@@ -879,7 +1049,30 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     let is_s2 = s2.confirmed();
 
     // 7. Carrier lock, so the constellation shows points rather than a ring.
-    let lock = lock_carrier(&sym, cst, cfo.map(|hz| hz / rs), is_s2.then_some(&s2));
+    let mut lock = lock_carrier(&sym, cst, cfo.map(|hz| hz / rs), is_s2.then_some(&s2));
+    // No power line stood out — a narrow carrier's LNB phase noise smears
+    // its s⁴ line under the bar (live 43.6 kS/s TPC carriers at 9 dB read
+    // "modulated") — yet a QPSK lock, seeded from the s⁴ spectrum's peak
+    // however weak, may hold: then it is QPSK.
+    if !is_s2
+        && matches!(
+            cst,
+            ConstellationGuess::Unclear | ConstellationGuess::PskUnclear
+        )
+    {
+        let seed = weak_s4_offset(&sym, rs).map(|hz| hz / rs);
+        let q = lock_carrier(&sym, ConstellationGuess::Qpsk, seed, None);
+        let best = if q.coherence > lock.coherence {
+            q
+        } else {
+            lock
+        };
+        if best.coherence >= QPSK_BY_LOCK {
+            cst = ConstellationGuess::Qpsk;
+            id.constellation = Some(cst);
+        }
+        lock = best;
+    }
     id.carrier_offset_hz = Some(lock.freq_cycles * rs);
     let tail = lock.symbols.len().saturating_sub(DISPLAY_SYMBOLS);
     id.symbols = lock.symbols[tail..].to_vec();
@@ -903,6 +1096,16 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     if !is_s2 && !tpc && !fastlink && id.carrier_locked {
         id.frame_structure = crate::period::find_period(&lock.symbols, 16, 200_000);
     }
+    let burst_text = id.bursts.map_or_else(String::new, |b| {
+        format!(
+            "{} in bursts — a TDMA carrier (on {:.0} % of the time, gaps of ~{:.0} ms, \
+             {:.0} dB deep), no DVB-S2 PLHEADER",
+            cst.label(),
+            100.0 * b.duty,
+            1e3 * b.mean_gap_s,
+            b.depth_db
+        )
+    });
     id.verdict = if is_s2 {
         Verdict::DvbS2(s2)
     } else {
@@ -934,6 +1137,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                     "{}, TPC 2964 unique word every 2964 bits — Intelsat IESS-315 turbo code",
                     cst.label()
                 ),
+                _ if id.bursts.is_some() => burst_text.clone(),
                 ConstellationGuess::Qpsk => {
                     "QPSK, no DVB-S2 PLHEADER — possibly DVB-S (not verified)".into()
                 }
@@ -1533,6 +1737,38 @@ mod tests {
             v => panic!("expected not-DVB-S2, got {v:?}"),
         }
         assert_eq!(id.constellation, Some(ConstellationGuess::Qpsk));
+        assert_eq!(id.bursts, None);
+    }
+
+    #[test]
+    fn tdma_bursts_are_named() {
+        // QPSK keyed off for 2000 symbols in every 12 000, as the live STDMA
+        // groups were (gaps a fifth of a burst long).
+        let k = std::f32::consts::FRAC_1_SQRT_2;
+        let mut nz = Noise(78);
+        let syms: Vec<Iq> = (0..80_000)
+            .map(|n| {
+                if n % 12_000 >= 10_000 {
+                    return Iq::new(0.0, 0.0);
+                }
+                let r = nz.uniform();
+                match (r * 4.0) as u32 {
+                    0 => Iq::new(k, k),
+                    1 => Iq::new(-k, k),
+                    2 => Iq::new(-k, -k),
+                    _ => Iq::new(k, -k),
+                }
+            })
+            .collect();
+        let mut sh = Shaper::new(4, 0.35, 16);
+        let mut x = Vec::new();
+        sh.process(&syms, &mut x);
+        let x: Vec<Iq> = x.iter().map(|&s| s + nz.gauss() * 0.1).collect();
+        let id = identify(&x, 4.0);
+        let b = id.bursts.expect("bursts");
+        assert!(b.gaps >= 5, "{b:?}");
+        assert!((b.duty - 0.83).abs() < 0.05, "{b:?}");
+        assert!(id.summary().contains("in bursts"), "{}", id.summary());
     }
 
     /// Random QPSK symbols.
@@ -1617,6 +1853,27 @@ mod tests {
             })
             .collect();
         assert_eq!(identify(&x, 1.0).verdict, Verdict::Carrier);
+    }
+
+    #[test]
+    fn a_weak_wandering_spur_is_a_carrier() {
+        // A receiver spur as seen live: a tone with some phase noise, off
+        // centre, in a VFO whose noise holds most of the 99 % band.
+        let mut nz = Noise(8);
+        let mut ph = 0.0f64;
+        let x: Vec<Iq> = (0..200_000)
+            .map(|_| {
+                ph += std::f64::consts::TAU * 0.013 + 0.02 * nz.gauss().re as f64;
+                Iq::new(ph.cos() as f32, ph.sin() as f32) * 0.3 + nz.gauss() * 0.5
+            })
+            .collect();
+        let id = identify(&x, 1.0);
+        assert_eq!(id.verdict, Verdict::Carrier, "{}", id.summary());
+        assert!(
+            (id.center_offset_hz - 0.013).abs() < 0.001,
+            "{}",
+            id.center_offset_hz
+        );
     }
 
     #[test]
