@@ -30,6 +30,13 @@
 //! changing together, and each group is tried as the timeslot until one
 //! gives frames whose FCS checks.
 //!
+//! Other timeslots are laid out the same way, moved along by whole octets
+//! (round the superframe). Once the HDLC one is known, every such move is
+//! deframed as well, and taken as another HDLC timeslot when it gives
+//! frames whose FCS checks. Live, the idle timeslots beside it held flags
+//! and nothing else for 15 minutes (at 3 ×, four octets earlier, flags
+//! that change phase — a second data channel configured, unused then).
+//!
 //! The radios' voice is in another 64 kbit/s timeslot laid out the same
 //! way, the HDLC one's octets moved along by whole octets (live: two
 //! octets earlier at 2 × and 3 ×, three at 4 ×): G.728 at 16 kbit/s on a
@@ -80,6 +87,13 @@ const CONFIRM_SECONDS: f64 = 20.0;
 const FILL_PROOF: u64 = 3;
 /// Seconds the voice search goes on after its last find, then stops.
 const VOICE_SEARCH_SECONDS: f64 = 30.0;
+/// Another HDLC timeslot: frames whose FCS checks (of at least an Ethernet
+/// header's length) within this many seconds that make it one. Random
+/// bits pass an FCS-16 once in 65 536 tries: a busy voice timeslot gives
+/// one every hour or so, and three in two minutes almost never.
+const MORE_GOOD: usize = 3;
+const MORE_LEN: usize = 14;
+const MORE_SECONDS: f64 = 120.0;
 /// The alignment column's cycles learnt from; the bits of a cycle that
 /// may differ from it (placing a frame, or following), and by how many
 /// more any other placement must differ (live: a cycle 14 or 28 frames
@@ -120,6 +134,14 @@ pub struct FastCall {
     pub fill_blocks: u64,
 }
 
+/// Another HDLC timeslot: where its octets start in the superframe, and its
+/// frames whose FCS checked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FastHdlc {
+    pub runs: Vec<usize>,
+    pub good: u64,
+}
+
 /// What the receiver has found.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FastStats {
@@ -142,6 +164,8 @@ pub struct FastStats {
     /// between idle flags that share a zero).
     pub hdlc_good: u64,
     pub hdlc_bad: u64,
+    /// More HDLC timeslots, found beside the first.
+    pub more_hdlc: Vec<FastHdlc>,
     /// G.728 calls found in the timeslots beside it, and the one whose
     /// speech is given out ([`FastRx::voice_pcm`]).
     pub calls: Vec<FastCall>,
@@ -349,6 +373,11 @@ struct Lane {
     searched: u64,
     voice_search: u64,
     search_done: bool,
+    /// More HDLC timeslots: the moves of the first, each deframed (found
+    /// or not), set up once it is confirmed; superframes in `MORE_SECONDS`.
+    more: Vec<More>,
+    more_set: bool,
+    more_window: u64,
     /// Decode the calls' speech; the call heard, and its speech since the
     /// caller took it; octets a voice timeslot has carried (8000 a second).
     decode: bool,
@@ -359,32 +388,36 @@ struct Lane {
     scratch: Vec<f32>,
 }
 
+/// A move of the HDLC timeslot, deframed: its frames that check are held
+/// until there are enough of them in a window, then given out.
+struct More {
+    runs: Vec<usize>,
+    hdlc: Hdlc,
+    held: Vec<Vec<u8>>,
+    found: bool,
+    good: u64,
+}
+
 /// A G.728 call: its timeslot's octets and the framer on its bits.
 struct Call {
     runs: Vec<usize>,
     lane: g728::Lane,
 }
 
-/// The candidate voice timeslots: the HDLC timeslot's octets moved along
-/// by whole octets, as far as the superframe's `payload` bits allow, clear
-/// of the HDLC octets.
+/// The other timeslots laid out like the HDLC one: its octets moved along
+/// by whole octets, round the superframe's `payload` bits (every
+/// superframe is laid out alike, so an octet moved past the end is the
+/// next one's start), clear of the HDLC octets; each set once.
 fn shifts(runs: &[usize], payload: usize) -> Vec<Vec<usize>> {
-    let (Some(&lo), Some(&hi)) = (runs.first(), runs.last()) else {
-        return Vec::new();
-    };
-    // Rust note: `i64` because the shifts go both ways; `step_by` counts
-    // from the range's start, so start on a multiple of 8.
-    let first = -(lo as i64 / 8 * 8);
-    (first..=(payload - 8 - hi) as i64)
-        .step_by(8)
-        .filter(|&d| d != 0)
-        .map(|d| {
-            runs.iter()
-                .map(|&r| (r as i64 + d) as usize)
-                .collect::<Vec<_>>()
-        })
-        .filter(|c: &Vec<usize>| c.iter().all(|&s| runs.iter().all(|&r| s.abs_diff(r) >= 8)))
-        .collect()
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for d in (8..payload).step_by(8) {
+        let mut c: Vec<usize> = runs.iter().map(|&r| (r + d) % payload).collect();
+        c.sort_unstable();
+        if c.iter().all(|&s| runs.iter().all(|&r| s.abs_diff(r) >= 8)) && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// An inverted flag's eight rotations, as the byte they read MSB first,
@@ -447,6 +480,9 @@ impl Lane {
             searched: 0,
             voice_search: (VOICE_SEARCH_SECONDS * per_second) as u64,
             search_done: false,
+            more: Vec::new(),
+            more_set: false,
+            more_window: (MORE_SECONDS * per_second) as u64,
             decode: false,
             heard: None,
             pcm: Vec::new(),
@@ -561,6 +597,50 @@ impl Lane {
         self.bad = self.hdlc.bad;
         out.extend(frames.into_iter().map(|(fr, _): (Vec<u8>, Fcs)| fr));
         self.voice(p);
+        self.more_hdlc(p, out);
+    }
+
+    /// The HDLC timeslot's moves: deframed, and given out once found.
+    fn more_hdlc(&mut self, p: &[u8], out: &mut Vec<Vec<u8>>) {
+        if !self.more_set {
+            self.more_set = true;
+            self.more = shifts(&self.runs, p.len())
+                .into_iter()
+                .map(|runs| More {
+                    runs,
+                    hdlc: Hdlc::default(),
+                    held: Vec::new(),
+                    found: false,
+                    good: 0,
+                })
+                .collect();
+        }
+        // A window over: what is held is too little, too spread out.
+        let window_over = self.seen.is_multiple_of(self.more_window.max(1));
+        let mut frames = Vec::new();
+        for m in &mut self.more {
+            self.bits.clear();
+            for &j in &m.runs {
+                self.bits.extend(p[j..j + 8].iter().map(|&b| 1 - b));
+            }
+            frames.clear();
+            m.hdlc.push(&self.bits, &mut frames);
+            for (f, _) in frames.drain(..) {
+                if m.found {
+                    m.good += 1;
+                    out.push(f);
+                } else if f.len() >= MORE_LEN {
+                    m.held.push(f);
+                }
+            }
+            if !m.found && m.held.len() >= MORE_GOOD {
+                m.found = true;
+                m.good = m.held.len() as u64;
+                out.append(&mut m.held);
+            } else if !m.found && window_over {
+                m.held.clear();
+            }
+        }
     }
 
     /// The voice timeslots: G.728 looked for in the candidates, the calls
@@ -815,6 +895,15 @@ impl FastRx {
             },
             hdlc_good: lane.good,
             hdlc_bad: lane.bad,
+            more_hdlc: lane
+                .more
+                .iter()
+                .filter(|m| m.found)
+                .map(|m| FastHdlc {
+                    runs: places(&m.runs),
+                    good: m.good,
+                })
+                .collect(),
             calls: lane
                 .calls
                 .iter()
@@ -952,8 +1041,10 @@ mod tests {
             let sent = payloads(&payload);
             assert!(got.iter().all(|f| sent.contains(f)), "{start}");
             assert_eq!(rx.stats.hdlc_bps(), 64_000.0);
-            // The idle cycle repeats as the silence fill does, but is not it.
+            // The idle cycle repeats as the silence fill does, but is not it;
+            // nor is it HDLC.
             assert!(rx.stats.calls.is_empty(), "{start}: {:?}", rx.stats.calls);
+            assert!(rx.stats.more_hdlc.is_empty(), "{start}");
         }
     }
 
@@ -983,7 +1074,7 @@ mod tests {
     #[test]
     fn finds_the_calls_in_the_voice_timeslot() {
         let runs = [17, 57, 81, 121, 145, 185, 209, 249];
-        // The voice timeslot an octet earlier (of the two places it fits).
+        // The voice timeslot an octet earlier.
         let vruns: Vec<usize> = runs.iter().map(|r| r - 8).collect();
         let frames = 14_000;
         let payload: Vec<u8> = (0..40u8).collect();
@@ -1019,12 +1110,18 @@ mod tests {
     /// alignment column a 42-frame cycle (the live one's), the payload
     /// groups of four octets in turn [voice, idle, HDLC, voice], [idle,
     /// HDLC, idle, idle], [idle × 4] — sixteen HDLC octets a superframe,
-    /// the `calls` on the voice ones — then every QPSK pair swapped, and
-    /// `cut.1` bits lost at bit `cut.0`.
-    fn link3(sfs: usize, line: &[u8], calls: &[(usize, Vec<u8>)], cut: (usize, usize)) -> Vec<u8> {
+    /// `line2` in a second HDLC timeslot four octets before it (where the
+    /// live link idles), the `calls` on the voice ones — then every QPSK
+    /// pair swapped, and `cut.1` bits lost at bit `cut.0`.
+    fn link3(
+        sfs: usize,
+        (line, line2): (&[u8], &[u8]),
+        calls: &[(usize, Vec<u8>)],
+        cut: (usize, usize),
+    ) -> Vec<u8> {
         const ODD: &[u8; 21] = b"111111111111101111101";
         let idle = [0u8, 0, 0, 1, 1, 0, 0, 0];
-        let (mut h, mut v) = (0, 0);
+        let (mut h, mut h2, mut v) = (0, 0, 0);
         let mut out = Vec::new();
         for sf in 0..sfs {
             let mut p = Vec::with_capacity(3 * PAYLOAD);
@@ -1034,6 +1131,10 @@ mod tests {
                         (1, 2) | (2, 1) => {
                             p.extend_from_slice(&line[8 * h..8 * h + 8]);
                             h += 1;
+                        }
+                        (0, 2) | (1, 1) => {
+                            p.extend_from_slice(&line2[8 * h2..8 * h2 + 8]);
+                            h2 += 1;
                         }
                         (1, 0) | (1, 3) => {
                             let mut o = [0u8; 8];
@@ -1074,6 +1175,9 @@ mod tests {
         let sfs = 11_000; // 22 s
         let payload: Vec<u8> = (0..50u8).map(|i| i ^ 0xA5).collect();
         let line = hdlc_line(sfs * 16 * 8, &payload, 300);
+        // The second timeslot: a frame every 0.75 s or so.
+        let payload2: Vec<u8> = (0..30u8).map(|i| i.wrapping_mul(11)).collect();
+        let line2 = hdlc_line(sfs * 16 * 8, &payload2, 6000);
         // Speech on bits 2–3 from 12 s to 14 s, fill on 4–5; 32 bits a
         // superframe each.
         let n = sfs * 32;
@@ -1081,7 +1185,7 @@ mod tests {
         // At 16 s two frames and two bits go: lock lost, and the
         // superframes out of step until placed again.
         let at = 8_000 * 3 * FRAME + 100;
-        let bits = link3(sfs, &line, &calls, (at, 2 * FRAME + 2));
+        let bits = link3(sfs, (&line, &line2), &calls, (at, 2 * FRAME + 2));
         let mut rx = FastRx::new(3);
         let (mut before, mut after) = (Vec::new(), Vec::new());
         for (i, chunk) in bits.chunks(4096).enumerate() {
@@ -1097,14 +1201,24 @@ mod tests {
         assert!(s.losses >= 1, "the slip lost lock: {s:?}");
         assert_eq!(s.hdlc_runs.len(), 16, "{s:?}");
         assert_eq!(s.hdlc_bps(), 64_000.0);
-        let sent = payloads(&payload);
+        let (sent, sent2) = (payloads(&payload), payloads(&payload2));
         assert!(
             before.len() >= 5 && after.len() >= 50,
             "{} {}",
             before.len(),
             after.len()
         );
-        assert!(before.iter().chain(&after).all(|f| sent.contains(f)));
+        let all: Vec<&Vec<u8>> = before.iter().chain(&after).collect();
+        assert!(all.iter().all(|f| sent.contains(f) || sent2.contains(f)));
+        // The second timeslot: found, and its frames given out.
+        assert_eq!(s.more_hdlc.len(), 1, "{:?}", s.more_hdlc);
+        assert_eq!(s.more_hdlc[0].runs.len(), 16);
+        let second = all.iter().filter(|f| sent2.contains(f)).count();
+        assert!(
+            second >= 5 && s.more_hdlc[0].good as usize == second,
+            "{second} {:?}",
+            s.more_hdlc
+        );
         let mut found: Vec<(u8, bool)> =
             s.calls.iter().map(|c| (c.bit, c.talk_blocks > 0)).collect();
         found.sort_unstable();

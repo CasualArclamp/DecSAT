@@ -731,6 +731,15 @@ pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
             s.hdlc_bad
         );
     }
+    for (i, m) in s.more_hdlc.iter().enumerate() {
+        println!(
+            "  HDLC timeslot {}: 64 kbit/s in octets at {at} {:?}, inverted line · {} frames \
+             with a good FCS",
+            i + 2,
+            m.runs,
+            m.good
+        );
+    }
     for c in &s.calls {
         println!(
             "  G.728 call on bits {}–{} of the 64 kbit/s timeslot at {at} {:?} · \

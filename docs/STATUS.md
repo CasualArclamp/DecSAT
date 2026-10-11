@@ -2151,7 +2151,8 @@ channel BER 4 %, 148 TDM losses in 15 min) from the same 900 s recording.
   2–3 and 4–5, the same talker on both again (38 s of speech each, fill
   the rest). h: idle timeslots, flags; one of them (X.b with the third
   kind's c octets) gave 7 frames in 120 s — a second, near-silent HDLC
-  timeslot, not decoded.
+  timeslot, not decoded. (Wrong — see the next entry: an artefact of the
+  analysis.)
 - **Placing superframes** (`tdmfast::Phaser`): the alignment column — the
   word on even frames, and on the odd ones a 21-bit pattern with two
   zeros — repeats every 42 frames (14 × 3). Learnt over 24 cycles, then
@@ -2174,6 +2175,35 @@ channel BER 4 %, 148 TDM losses in 15 min) from the same 900 s recording.
   4 × 2782 and its open channel (216 s) — those two as before. A
   synthetic 3 × link with a slip of two frames and two bits at 16 s keeps
   decoding after it (`a_3x_link_in_superframes_…`).
+
+## The 3 × link's "second HDLC timeslot": none (2026-10-11)
+
+Rory: "decode the second HDLC timeslot on the 3x link too". It is the
+first one's octets moved four earlier (as the voice timeslot is two
+earlier) — X.b with the third kind's c — and in the analysis superframes
+it gave 24 frames with a good FCS in 234 s: the same bridged Ethernet,
+VLAN 3155 SNMP and the 233.71.15.1 multicast, and NTP on VLAN 1118.
+
+All 24 sat at the very ends of the analysis' 2 s segments (superframes
+965–999 of each thousand; times all ending .2–.3 s), where the segments,
+re-aligned one by one, were stitched: most likely a slip late in a kept
+segment moved the real timeslot's octets onto the second's places for a
+frame or two (none of the 24 is a frame the first timeslot gave). In the
+receiver's own continuous, placed superframes — dumped and deframed in
+Python too — the second timeslot gives no frame in 15 minutes, nor does
+any other move of the HDLC timeslot (nine sets): inverted flags,
+changing phase now and then, and nothing between them. A second data
+channel configured and unused while recorded.
+
+So it is decoded the only way it can be — watched: `tdmfast` now deframes
+every move of the HDLC timeslot round the superframe (which also lets the
+voice search find a timeslot past the superframe's end) and takes one as
+"HDLC timeslot 2" (3, …) once it gives three frames of at least an
+Ethernet header's length with a good FCS within two minutes, holding them
+until then so none is lost; its frames join the first's in the IP view and
+the PCAP. CLI and GUI list it. On the recordings none is found at 2 ×, 3 ×
+or 4 ×; a synthetic 3 × link with a frame every 0.75 s in that timeslot
+has it found and every frame given out, through the slip.
 
 ## Calls kept through the fill restarting (2026-10-11)
 

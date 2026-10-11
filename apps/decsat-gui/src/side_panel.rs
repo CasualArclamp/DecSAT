@@ -2212,6 +2212,15 @@ fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
             );
             ui.end_row();
         }
+        for (i, m) in t.more_hdlc.iter().enumerate() {
+            ui.label(format!("HDLC timeslot {}", i + 2));
+            ui.colored_label(good, format!("64 kbit/s · {} frames", m.good))
+                .on_hover_text(
+                    "Another timeslot laid out like the first, moved along by whole octets; \
+                     its packets join the first's in the IP view.",
+                );
+            ui.end_row();
+        }
         for (i, c) in t.calls.iter().enumerate() {
             ui.label(format!("Call {}", i + 1));
             ui.colored_label(
