@@ -576,11 +576,25 @@ impl TdmRx {
             self.regroup();
         }
         // A way framing speech is chosen; the ways sharing a channel's half
-        // with it go (the other readings of the same call).
+        // with it go (the other readings of the same call). Of several
+        // talking at once — readings of one call whose windows differ by a
+        // bit all frame its speech — the one that framed the most fill
+        // before (a reading a bit askew breaks the fill's pattern now and
+        // then), then the one carrying the most bits; else the first.
         while let Some(i) = self
             .voices
             .iter()
-            .position(|v| !v.chosen && v.framer.talk_blocks > 0)
+            .enumerate()
+            .filter(|(_, v)| !v.chosen && v.framer.talk_blocks > 0)
+            .min_by_key(|&(i, v)| {
+                let carried: usize = v.members.iter().map(|m| m.1.len).sum();
+                (
+                    std::cmp::Reverse(v.framer.fill_blocks),
+                    std::cmp::Reverse(carried),
+                    i,
+                )
+            })
+            .map(|(i, _)| i)
         {
             self.voices[i].chosen = true;
             let m = self.voices[i].members.clone();

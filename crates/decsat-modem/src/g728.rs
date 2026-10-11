@@ -543,6 +543,10 @@ const MAX_UNKNOWN_SYNC: usize = 3;
 /// `Framer::fill_at`).
 const FILL_BROKEN: usize = 8;
 
+/// Share of a block's bits equal to those 20 ms (32 codewords) on beyond
+/// which it is not speech (see `Framer::repeats`).
+const REPEATS: f32 = 0.9;
+
 /// G.728 codewords out of a bit stream framed by a sync bit in place of
 /// every codeword's bit 9 (see the module notes), decoded. Bits in (0, 1
 /// or [`UNCARRIED`]); speech out 40 ms at a time, five samples a codeword
@@ -661,6 +665,27 @@ impl Framer {
         steps >= BLOCK / 2 && ok * 4 >= steps * 3
     }
 
+    /// Does this block repeat itself 20 ms on? Then it is the silence fill
+    /// however it reads — its 16-codeword count cycles twice in 20 ms — and
+    /// never speech, whose codewords do not repeat. A Q-Flex stream put
+    /// together a bit askew (the ASA204 ML-NBK site: two stray bits in every
+    /// 64, from the channels' other halves) breaks the fill's pattern, and
+    /// its stray bits, recurring every 320, land on one sync place in 32 —
+    /// just as speech's sync marker does: it passed for speech, and was
+    /// played as full-scale noise.
+    fn repeats(&self) -> bool {
+        let half = BLOCK * 10 / 2;
+        let (mut known, mut same) = (0u32, 0u32);
+        for i in 0..half {
+            let (a, b) = (self.raw[i], self.raw[i + half]);
+            if a != UNCARRIED && b != UNCARRIED {
+                known += 1;
+                same += u32::from(a == b);
+            }
+        }
+        known > 0 && same as f32 >= REPEATS * known as f32
+    }
+
     fn block(&mut self, decode: bool, out: &mut Vec<f32>) {
         // The silence fill first: read a bit off its phase, the Q-Flex's
         // fill (which keeps its sync marker) passes for speech's sync, and
@@ -671,6 +696,7 @@ impl Framer {
         // locked one fails.
         let found = match fill {
             Some(_) => None,
+            None if self.repeats() => None,
             None => self
                 .phase
                 .and_then(|p| self.sync_at(p).map(|s| (p, s)))
@@ -831,6 +857,44 @@ mod tests {
             .enumerate()
             .map(|(i, b)| (b[0] << 6 | b[1] << 5) | (i as u8 & 0x9F))
             .collect()
+    }
+
+    /// The silence fill read a bit askew, as from a Q-Flex stream put
+    /// together with a window one position off (the ASA204 ML-NBK site):
+    /// two stray bits in every 64, recurring every 320 — so on one sync
+    /// place in 32, as speech's sync marker is. It broke the fill's pattern
+    /// and passed for speech; it repeats every 20 ms, so it is not.
+    #[test]
+    fn fill_read_askew_is_not_speech() {
+        // Fill as the line carries it (inverted): 111111, then a count
+        // stepping down a codeword.
+        let mut bits: Vec<u8> = (0..BLOCK * 30)
+            .flat_map(|u| {
+                let c = 15 - (u % 16) as u8;
+                [1, 1, 1, 1, 1, 1, c >> 3 & 1, c >> 2 & 1, c >> 1 & 1, c & 1]
+            })
+            .collect();
+        let mut askew = bits.clone();
+        for (i, b) in askew.iter_mut().enumerate() {
+            if i % 64 == 0 || i % 64 == 37 {
+                *b ^= 1;
+            }
+        }
+        let run = |bits: &[u8]| {
+            let mut f = Framer::new();
+            for &b in bits {
+                f.push(b, false, &mut Vec::new());
+            }
+            (f.talk_blocks, f.fill_blocks)
+        };
+        assert_eq!(run(&askew).0, 0, "askew fill taken for speech");
+        // The fill read right is fill; speech is still speech.
+        assert!(run(&bits).1 > 20);
+        bits = codewords(BLOCK * 30, 3)
+            .iter()
+            .flat_map(|&w| (0..10).rev().map(move |k| u8::from(w >> k & 1 == 0)))
+            .collect();
+        assert!(run(&bits).0 > 25);
     }
 
     #[test]

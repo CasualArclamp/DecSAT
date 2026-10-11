@@ -2296,3 +2296,30 @@ candidate too, and the label says "HDLC on an inverted line: idle flags
 only so far" until timeslot packets come; frames with a good FCS on such
 a line go to the HDLC stats and the IP stage. Test: HDLC frames on an
 NRZI line under V.35.
+
+## The fill read askew passed for speech: "blowing out my ears" (2026-10-11)
+
+Rory's ASA204 ML-NBK (12344.3695 MHz, `…-fastlink-1791725778.bin`, 12 s): the
+two-call layout again (call A on 1, 2, 3, 4 at offsets 16/17, call B on 0, 1,
+2, 15 at 64–66), both calls idle throughout — yet 3.9 s of "speech" on call A,
+played as full-scale noise. The way chosen was call A read one subframe
+position askew (windows 31+16, 15+16 from runs of 17: a neighbouring bit
+matching the fill by chance): two stray bits in every 64 stream bits. They
+break the fill's pattern, so `fill_at` fails; and recurring every 320 bits
+they land on one sync place in 32 codewords — exactly speech's sync marker —
+so `sync_at` passed.
+
+- `g728::Framer::repeats`: a block whose second 20 ms repeats its first
+  (≥ 90 % of its bits) is never speech. The fill, however it is put
+  together, repeats (≥ 98 % on ML-NBK, askew or not); speech never does
+  (≤ 62 %, mean 55 %, on the ESP-ML call).
+- `TdmRx`: of ways that start talking together (readings of one call whose
+  windows differ by a bit), the one that framed the most fill is chosen,
+  then the one carrying the most bits. The ESP-ML and qflex_3 calls now take
+  the full 16-bit windows where 15-bit ones had won by list order (one bit a
+  subframe left unknown): voicing 0.44 → 0.46 and 0.54 → 0.58 (voiced frames
+  20 → 23 % and 37 → 47 %).
+- ML-NBK now decodes no speech, nothing played. Test: the fill with two
+  stray bits in 64 is not speech (fails without the veto). A synthetic
+  two-call idle site did not reproduce the askew runs (the chance matches
+  depend on the real status octets and fill phases), so no TDM-level test.
