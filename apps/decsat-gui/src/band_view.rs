@@ -523,7 +523,10 @@ impl BandView {
                         painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::BLACK);
                     let at = pos2(
                         (p.x + 12.0).min(rect.right() - g.size().x - 8.0),
-                        (p.y + 14.0).min(spec.bottom() - g.size().y - 6.0),
+                        // Below the cursor readout along the top.
+                        (p.y + 14.0)
+                            .max(spec.top() + 22.0)
+                            .min(spec.bottom() - g.size().y - 6.0),
                     );
                     let r = Rect::from_min_size(at, g.size()).expand(4.0);
                     painter.rect_filled(r, CornerRadius::same(4), plan_colour(b));
@@ -904,14 +907,24 @@ impl BandView {
                     )
                 };
             }
-            let pos = pos2((p.x + 10.0).min(rect.right() - 4.0), spec.bottom() - 4.0);
-            painter.text(
-                pos,
-                Align2::LEFT_BOTTOM,
-                text,
-                FontId::monospace(11.0),
-                Color32::from_gray(230),
+            // At the top of the spectrum, clear of the plan names along its
+            // foot; backed, as it may cross a VFO pill. Right of the cursor,
+            // or left of it where the right edge would cut it off.
+            let fg = Color32::from_gray(230);
+            let g = painter.layout_no_wrap(text, FontId::monospace(11.0), fg);
+            let size = g.size();
+            let x = if p.x + 10.0 + size.x <= rect.right() - 4.0 {
+                p.x + 10.0
+            } else {
+                (p.x - 10.0 - size.x).max(rect.left() + 4.0)
+            };
+            let at = pos2(x, spec.top() + 3.0);
+            painter.rect_filled(
+                Rect::from_min_size(at, size).expand(2.0),
+                CornerRadius::same(3),
+                Color32::from_black_alpha(170),
             );
+            painter.galley(at, g, fg);
         }
 
         // ---- interaction
