@@ -209,9 +209,11 @@ pub struct RadarView {
     /// Scans begun (sector 0), and the scan time measured between them.
     pub scans: u64,
     pub scan_secs: Option<f64>,
-    /// The latest message's time of day, and its sector.
+    /// The latest message's time of day; the latest sector reported (the
+    /// busiest heading's) and its message's time of day.
     pub tod: Option<f64>,
     pub sector: Option<u8>,
+    pub sector_tod: Option<f64>,
     /// Live tracks, by number.
     pub tracks: Vec<Track>,
 }
@@ -229,6 +231,8 @@ pub struct RadarRx {
 /// One heading's sector count.
 struct Sectors {
     last: u8,
+    /// Time of day of the last message.
+    tod: f64,
     /// Time of day the current scan began.
     start: Option<f64>,
     messages: u64,
@@ -252,6 +256,7 @@ impl RadarRx {
             // heading's slot, made on first sight.
             let s = self.sectors.entry(m.heading.clone()).or_insert(Sectors {
                 last: m.sector,
+                tod: m.tod,
                 start: None,
                 messages: 0,
             });
@@ -270,13 +275,12 @@ impl RadarRx {
                 s.start = Some(m.tod);
             }
             s.last = m.sector;
+            s.tod = m.tod;
             s.messages += 1;
             // The sector shown: the busiest heading's.
-            self.view.sector = self
-                .sectors
-                .values()
-                .max_by_key(|s| s.messages)
-                .map(|s| s.last);
+            let busiest = self.sectors.values().max_by_key(|s| s.messages);
+            self.view.sector = busiest.map(|s| s.last);
+            self.view.sector_tod = busiest.map(|s| s.tod);
         }
         for r in &m.reports {
             self.view.reports += 1;

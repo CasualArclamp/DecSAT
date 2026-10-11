@@ -1212,15 +1212,23 @@ impl eframe::App for App {
 
         // Unattended: claim the carriers once the detector has settled — the
         // eight strongest that are not rough lumps, in frequency order.
-        if self.automation.claim_carriers && !self.automation.claimed && self.front.row_seq > 40 {
+        // (`--vfo-at` drops one VFO where asked instead.)
+        if (self.automation.claim_carriers || self.automation.vfo_at.is_some())
+            && !self.automation.claimed
+            && self.front.row_seq > 40
+        {
             self.automation.claimed = true;
             let mut picks: Vec<_> = self
                 .front
                 .carriers
                 .iter()
                 .copied()
-                .filter(|c| c.is_clean())
+                .filter(|c| c.is_clean() && self.automation.vfo_at.is_none())
                 .collect();
+            if let Some((at, bw)) = self.automation.vfo_at {
+                let s = decsat_engine::VfoSettings::new(self.next_name(), at, bw, self.new_decoder);
+                self.apply(Action::Create(s));
+            }
             picks.sort_by(|a, b| {
                 b.snr_db
                     .partial_cmp(&a.snr_db)

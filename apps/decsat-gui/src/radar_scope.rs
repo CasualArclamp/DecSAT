@@ -1,8 +1,18 @@
 //! The radar scope window: a VFO's radar track feed (the PH-ML carrier's
 //! BSC blocks) drawn as a PPI — north up, the radar at the centre, range
-//! rings, the sector the feed last reported, each track with its trail, a
-//! one-minute leader and a label (Mode A, flight level, ground speed) —
-//! and the tracks as a table.
+//! rings, the beam turning, each track with its trail, a one-minute leader
+//! and a label (Mode A, flight level, ground speed) — and the tracks as a
+//! table.
+//!
+//! The feed says where the beam is only once a sector (32 a scan), and the
+//! decoder hands its data over in blocks of 4096 bits — 0.43 s, four
+//! sectors at a time — so the beam is drawn turning at the measured scan
+//! rate from the latest sector message, on the feed's own clock (see
+//! [`Sweep`]), and eased onto each new message rather than jumping to it.
+//! On the PH-ML recording it turns at 95–103°/s in 90 % of frames (the
+//! scan's 97.6°/s); jumping sector to sector it moved 45° every 0.43 s.
+
+use std::time::Instant;
 
 use decsat_engine::radar::{RadarView, SECTORS, Track, tod_string};
 use decsat_engine::{RadarStageView, VfoId};
@@ -26,6 +36,94 @@ pub struct RadarScope {
     trails: bool,
     /// Show tracks in decline (status 83n0: no plot this scan).
     declining: bool,
+    sweep: Option<Sweep>,
+}
+
+/// The beam as drawn. The feed's time of day is mapped onto the scope's
+/// clock by the smallest delay a sector message has arrived with (one at
+/// the end of a decoder block comes straight through; the others in the
+/// block waited up to a block), and the beam is put where the latest
+/// message says it was, turned on by the time since.
+struct Sweep {
+    /// The scope's clock.
+    epoch: Instant,
+    /// The sector message followed, by its time of day, and the beam's
+    /// angle then (the sector's trailing edge: the message goes once the
+    /// beam has passed it), degrees.
+    tod: f64,
+    angle: f32,
+    /// Scope clock − feed time of day for the quickest message, s.
+    lag: f64,
+    /// The angle shown, and the scope clock when it was last drawn.
+    shown: f32,
+    drawn: f64,
+}
+
+/// Scan time assumed until one is measured: 472/128 s (PH-ML).
+const SCAN_SECS: f64 = 3.6875;
+/// The beam turns on this long past the latest sector message, then waits
+/// (a paused file, a lost carrier): a decoder block and some.
+const COAST_SECS: f64 = 0.7;
+/// The delay estimate creeps up this much a second, so a feed arriving
+/// later than before (a busy machine) is followed; s/s.
+const LAG_CREEP: f64 = 0.01;
+/// A delay this far from the estimate starts it afresh (a file looping, a
+/// new feed), s.
+const LAG_RESET: f64 = 2.0;
+/// Time constant the shown beam closes on its predicted angle with, s.
+const EASE_SECS: f32 = 0.12;
+
+/// An angle difference, degrees, brought into (−180°, 180°].
+fn wrap(d: f32) -> f32 {
+    let d = d.rem_euclid(360.0);
+    if d > 180.0 { d - 360.0 } else { d }
+}
+
+impl Sweep {
+    /// The beam's angle now, following `v`'s latest sector message.
+    fn update(sweep: &mut Option<Sweep>, v: &RadarView) -> Option<f32> {
+        let (sector, tod) = (v.sector?, v.sector_tod?);
+        let angle = (f32::from(sector) + 1.0) * 360.0 / f32::from(SECTORS);
+        let scan = v.scan_secs.unwrap_or(SCAN_SECS);
+        // Rust note: `get_or_insert_with` makes the value on first use and
+        // hands back a `&mut` to it either way.
+        let s = sweep.get_or_insert_with(|| Sweep {
+            epoch: Instant::now(),
+            tod,
+            angle,
+            // Its clock starts now, at this message.
+            lag: -tod,
+            shown: angle,
+            drawn: 0.0,
+        });
+        let now = s.epoch.elapsed().as_secs_f64();
+        let dt = now - s.drawn;
+        s.drawn = now;
+        s.lag += LAG_CREEP * dt;
+        if s.tod != tod {
+            let lag = now - tod;
+            s.lag = if (lag - s.lag).abs() > LAG_RESET {
+                lag
+            } else {
+                s.lag.min(lag)
+            };
+            s.tod = tod;
+            s.angle = angle;
+        }
+        // The feed's time of day now, as far as the scope can tell.
+        let ahead = (now - s.lag - s.tod).clamp(0.0, COAST_SECS);
+        let target = s.angle + (ahead / scan * 360.0) as f32;
+        // Ease towards it; a jump of more than a quarter turn (a restart,
+        // a long gap) is taken at once.
+        let err = wrap(target - s.shown);
+        s.shown = if err.abs() > 90.0 {
+            target
+        } else {
+            s.shown + err * (1.0 - (-dt as f32 / EASE_SECS).exp())
+        }
+        .rem_euclid(360.0);
+        Some(s.shown)
+    }
 }
 
 impl Default for RadarScope {
@@ -37,6 +135,7 @@ impl Default for RadarScope {
             labels: true,
             trails: true,
             declining: true,
+            sweep: None,
         }
     }
 }
@@ -61,6 +160,9 @@ fn colour(t: &Track) -> Color32 {
 
 impl RadarScope {
     pub fn open(&mut self, vfo: VfoId) {
+        if self.vfo != Some(vfo) {
+            self.sweep = None;
+        }
         self.vfo = Some(vfo);
     }
 
@@ -87,8 +189,8 @@ impl RadarScope {
         if !open {
             self.vfo = None;
         }
-        // The sweep moves a sector every ~115 ms.
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // The beam turns smoothly: ~30 frames a second while open.
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
     fn contents(&mut self, ui: &mut Ui, r: &RadarStageView) {
@@ -227,15 +329,28 @@ impl RadarScope {
                 );
             }
         }
-        // The sweep: the end of the sector last reported (its message goes
-        // out once the beam has passed it).
-        if let Some(sec) = v.sector {
-            let a = ((f32::from(sec) + 1.0) * 360.0 / f32::from(SECTORS)).to_radians();
-            let (s, c) = a.sin_cos();
-            let end = origin + vec2(s, -c) * reach * px_per_nm;
+        // The beam, turning, with a fading glow behind it.
+        if let Some(beam) = Sweep::update(&mut self.sweep, v) {
+            let r = reach * px_per_nm;
+            let at = |deg: f32| {
+                let (s, c) = deg.to_radians().sin_cos();
+                origin + vec2(s, -c) * r
+            };
+            const GLOW_DEG: f32 = 40.0;
+            const SLICES: usize = 24;
+            for k in 0..SLICES {
+                let a0 = beam - GLOW_DEG * k as f32 / SLICES as f32;
+                let a1 = beam - GLOW_DEG * (k + 1) as f32 / SLICES as f32;
+                let alpha = (48.0 * (1.0 - k as f32 / SLICES as f32)) as u8;
+                painter.add(egui::Shape::convex_polygon(
+                    vec![origin, at(a0), at(a1)],
+                    Color32::from_rgba_unmultiplied(60, 220, 110, alpha),
+                    Stroke::NONE,
+                ));
+            }
             painter.line_segment(
-                [origin, end],
-                Stroke::new(1.5, Color32::from_rgba_unmultiplied(90, 255, 140, 90)),
+                [origin, at(beam)],
+                Stroke::new(1.5, Color32::from_rgba_unmultiplied(110, 255, 150, 170)),
             );
         }
         painter.circle_filled(origin, 3.0, grid_text);
@@ -416,6 +531,14 @@ fn table(ui: &mut Ui, v: &RadarView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn angles_wrap_the_short_way() {
+        assert_eq!(wrap(10.0 - 350.0), 20.0);
+        assert_eq!(wrap(350.0 - 10.0), -20.0);
+        assert_eq!(wrap(180.0), 180.0);
+        assert_eq!(wrap(-180.0), 180.0);
+    }
 
     #[test]
     fn rings_are_four_to_six() {

@@ -30,6 +30,8 @@ pub struct Options {
     pub ts_viewer: bool,
     /// Open the radar scope on the selected VFO.
     pub radar_scope: bool,
+    /// Drop a VFO here (offset from the centre, Hz; and its width, Hz).
+    pub vfo_at: Option<(f64, f64)>,
     /// Play the selected VFO's first multicast audio stream in the app.
     pub play_audio: bool,
     /// A frequency plan to show (unattended runs do not read the saved one).
@@ -59,6 +61,17 @@ impl Options {
                 Some("--claim-carriers") => o.claim_carriers = true,
                 Some("--ts-viewer") => o.ts_viewer = true,
                 Some("--radar-scope") => o.radar_scope = true,
+                Some("--vfo-at") => {
+                    let v = args.next().ok_or("--vfo-at needs OFFSET_HZ[:BW_HZ]")?;
+                    let v = v.to_str().unwrap_or_default();
+                    let mut it = v.split(':').map(|x| x.trim().parse::<f64>().ok());
+                    let at = it
+                        .next()
+                        .flatten()
+                        .ok_or("--vfo-at needs OFFSET_HZ[:BW_HZ]")?;
+                    let bw = it.next().flatten().unwrap_or(20e3);
+                    o.vfo_at = Some((at, bw));
+                }
                 Some("--play-audio") => o.play_audio = true,
                 Some("--decoder") => {
                     let v = args.next().ok_or("--decoder needs a name")?;
@@ -133,6 +146,7 @@ pub struct Automation {
     pub select: Option<usize>,
     pub ts_viewer: bool,
     pub radar_scope: bool,
+    pub vfo_at: Option<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
 }
@@ -149,6 +163,7 @@ impl Automation {
             select: o.select,
             ts_viewer: o.ts_viewer,
             radar_scope: o.radar_scope,
+            vfo_at: o.vfo_at,
             play_audio: o.play_audio,
             audio_started: false,
         }
