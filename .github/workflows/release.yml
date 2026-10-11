@@ -97,7 +97,7 @@ jobs:
           | File | What |
           |---|---|
           | `decsat-gui.exe` | Desktop app: wideband waterfall with VFOs (DVB-S2/S2X → GSE/IP or MPEG-TS, DVB-S, satellite modems, DVB-CID, generic PSK/QAM, IQ record), IQ files or a HackRF One; a DVB-S2/S2X transmitter (MPEG-TS to the HackRF or a file) |
-          | `decsat.exe` | Command line: `decsat scan`, `decsat decode`, `decsat analyse`, `decsat scene`, `decsat cid`, `decsat test-signals`, `decsat tx`, `decsat modcods` |
+          | `decsat.exe` | Command line: `decsat scan`, `decsat decode`, `decsat analyse`, `decsat scene`, `decsat cid`, `decsat test-signals`, `decsat tx`, `decsat record`, `decsat modcods` |
           | `decsat-scene_8Msps.cs8` | Test signal, 8 MS/s, 4 s: DVB-S2 (IP over GSE, and an S2X ACM carrier with MPEG-TS), DVB-S, a TPC 2964 modem carrier and a CW tone |
           | `decsat-cid_3360000sps.cs8` | Test signal, 3.36 MS/s, 30 s: DVB-S2 QPSK 1/2 at +700 kHz with a DVB-CID under it (identifier and position decode) |
 
