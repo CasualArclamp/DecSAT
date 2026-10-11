@@ -594,6 +594,11 @@ impl PayloadRx {
         // (score, descrambler, differential, rail skew, format, FCS,
         // Paradise data octets an overhead octet)
         let mut best: Option<(u64, Descrambler, bool, i8, Format, Fcs, usize)> = None;
+        // The timeslot-packet format chosen without its packets — on plain
+        // HDLC frames on the inverted line, or its flags alone (a line with
+        // nothing on it yet, whatever it will carry) — and the frames that
+        // checked on it.
+        let mut slots_plain: Option<u64> = None;
         let held_bits: u64 = self.held.iter().map(|f| f.len() as u64).sum();
         // The most idle-looking descrambling, should nothing frame.
         let mut idle: Option<(f64, Descrambler, bool)> = None;
@@ -623,6 +628,10 @@ impl PayloadRx {
             let mut slo = Vec::new();
             let mut bs = BscRx::new();
             let mut bso = Vec::new();
+            // HDLC on the inverted line: differential decoding reads an
+            // NRZI line inverted.
+            let mut hi = Hdlc::default();
+            let mut hio = Vec::new();
             let (mut frames, mut pkts, mut e1f, mut dib, mut ped, mut pee) = (
                 Vec::new(),
                 Vec::new(),
@@ -651,6 +660,9 @@ impl PayloadRx {
                 slo.clear();
                 bs.push(&bits, &mut bso);
                 bso.clear();
+                let inverted: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
+                hi.push(&inverted, &mut hio);
+                hio.clear();
                 ped.clear();
                 pee.clear();
                 prev.extend_from_slice(&bits);
@@ -709,6 +721,12 @@ impl PayloadRx {
                         .filter(|_| sl.good() >= crate::slotpkt::FOUND || sl.flags() >= 512),
                     Format::Slots,
                 ),
+                // Plain HDLC on the inverted line: what the timeslot-packet
+                // format follows too (its packets, and any other frames).
+                (
+                    (hi.good >= PROBE_UNITS).then_some(hi.good * 1500),
+                    Format::Slots,
+                ),
                 // Blocks whose BCC checked, scored as HDLC frames are: the
                 // line idles between them.
                 (
@@ -721,6 +739,11 @@ impl PayloadRx {
                     && best.is_none_or(|b| n > b.0)
                 {
                     best = Some((n, kind, diff, skew, fmt, fcs, pe_octets));
+                    // (Packets carrying timeslots: any frame whose FCS
+                    // checks counts as one of its packets.)
+                    slots_plain = (fmt == Format::Slots
+                        && sl.stats.slot_packets < crate::slotpkt::FOUND)
+                        .then_some(hi.good + sl.stats.packets);
                 }
             }
         }
@@ -754,6 +777,14 @@ impl PayloadRx {
                 )
                 .into(),
                 (Format::Ibs, _) => "IBS/SMS framing (IESS-309, 16/15)".into(),
+                // (ASA251 ML-BN, a 9.6k radar link: 21 s of nothing but
+                // flags.)
+                // (Differential decoding first, as the stats go on to say:
+                // an NRZI line.)
+                (Format::Slots, _) if slots_plain == Some(0) => {
+                    "HDLC on an inverted line: idle flags only so far".into()
+                }
+                (Format::Slots, _) if slots_plain.is_some() => "HDLC on an inverted line".into(),
                 (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
                 (Format::Bsc, _) => "IBM bisync (BSC) blocks".into(),
                 (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
@@ -826,6 +857,13 @@ impl PayloadRx {
             Format::Slots => {
                 self.slots.push(&bits, &mut out.slots);
                 self.stats.slots = Some(self.slots.stats.clone());
+                // Any other HDLC on the same line (IP, a radar feed): whole
+                // frames whose FCS checks. The timeslot packets are not
+                // whole octets long, so they never count here (nor do they
+                // count as bad: `bad` is not read).
+                let inverted: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
+                self.hdlc.push(&inverted, &mut out.frames);
+                self.stats.hdlc_good = self.hdlc.good;
             }
             Format::Bsc => {
                 self.bsc.push(&bits, &mut out.bsc);
@@ -1084,6 +1122,13 @@ mod tests {
                 got[ts].len()
             );
         }
+        assert!(
+            rx.stats
+                .found
+                .as_ref()
+                .unwrap()
+                .starts_with("64 kbit/s timeslots")
+        );
         // A site with nothing to say: flags alone.
         let quiet = idle.repeat(2000);
         let mut rx = PayloadRx::new(L);
@@ -1091,6 +1136,40 @@ mod tests {
             rx.push(f, &mut out);
         }
         assert_eq!(rx.format(), Some(Format::Slots), "{:?}", rx.stats);
+        assert!(rx.stats.found.as_ref().unwrap().contains("idle flags only"));
+    }
+
+    #[test]
+    fn hdlc_frames_on_an_nrzi_line_under_v35() {
+        // A 9.6k CDM-570L link (ASA251 ML-BN): HDLC, NRZI-coded (a 0
+        // changes the level), V.35-scrambled; read as differential
+        // decoding, i.e. the HDLC inverted.
+        const L: usize = crate::dvbs::VITERBI_BLOCK;
+        let (frames, d) = hdlc_stream(150, 31);
+        let mut level = 0u8;
+        let line: Vec<u8> = d
+            .iter()
+            .map(|&b| {
+                level ^= 1 - b;
+                level
+            })
+            .collect();
+        let tx = scramble(Descrambler::SelfSync(&[3, 20]), L, &line);
+        let mut rx = PayloadRx::new(L);
+        let mut out = PayloadOut::default();
+        let mut got = Vec::new();
+        for f in tx.as_chunks::<L>().0 {
+            rx.push(f, &mut out);
+            got.extend(out.frames.drain(..).map(|f| f.0));
+        }
+        assert_eq!(rx.format(), Some(Format::Slots), "{:?}", rx.stats);
+        let found = rx.stats.found.as_ref().unwrap();
+        assert!(found.starts_with("HDLC on an inverted line"), "{found}");
+        assert!(found.contains("taps 3, 20") && found.contains("differential"));
+        let first = frames.iter().position(|f| *f == got[0]).unwrap();
+        assert!(first <= 1);
+        assert_eq!(got[..], frames[first..first + got.len()]);
+        assert!(got.len() + 8 >= frames.len(), "{}", got.len());
     }
 
     #[test]

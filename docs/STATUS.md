@@ -2255,3 +2255,14 @@ flag, not part of the number (also set on the recording's 247 NM track in
 decline, 05CE). Tracks are now keyed by the low 10 bits; the flag bits are
 kept (`Report::number_flags`, CSV `track_flags`, the tooltip counts the
 flagged reports). Its meaning is open.
+
+**ASA251 ML-BN "won't decode"** (Rory, 21 s VFO recording, 12346.375 MHz):
+9.6 kS/s QPSK, K = 7 ½ (channel BER 1.5e-3), V.35, NRZI — and HDLC
+flags only, the whole 21 s (one 32-bit error burst at 2 s): the link was
+up and idle, nothing to decode. The payload stage had said "64 kbit/s
+timeslots in HDLC packets" (the multi-radio format takes any inverted
+line with 512 flags). Now: plain HDLC on the inverted line is a search
+candidate too, and the label says "HDLC on an inverted line: idle flags
+only so far" until timeslot packets come; frames with a good FCS on such
+a line go to the HDLC stats and the IP stage. Test: HDLC frames on an
+NRZI line under V.35.
