@@ -747,7 +747,40 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         if let Some(f) = &st.fec
             && let Some(voice) = f.tdm.as_ref().and_then(|t| t.voice)
         {
-            call_voice_card(ui, voice, f.call_voice.as_ref(), v, &mut actions);
+            let channels: Vec<String> = (0..16)
+                .filter(|c| voice.channels >> c & 1 == 1)
+                .map(|c| c.to_string())
+                .collect();
+            let call = CallShown {
+                talking: voice.talking,
+                talk_blocks: voice.talk_blocks,
+                place: format!("channels {}", channels.join(", ")),
+                about: "G.728 LD-CELP at 16 kbit/s spread over four TDM channels, two bits a \
+                        TDM word. Where each channel's bits go is learnt from the voice \
+                        equipment's silence fill; one bit in 64 is in no channel and is guessed.",
+            };
+            call_voice_card(ui, &call, f.call_voice.as_ref(), v, &mut actions);
+        } else if let Some(f) = &st.fec
+            && let Some(t) = &f.fast_tdm
+            && let Some(c) = t.heard.and_then(|i| t.calls.get(i))
+        {
+            let others = if t.calls.len() > 1 {
+                format!(" · {} calls, the one speaking heard", t.calls.len())
+            } else {
+                String::new()
+            };
+            let call = CallShown {
+                talking: c.talking,
+                talk_blocks: c.talk_blocks,
+                place: format!(
+                    "bits {}–{} of a 64 kbit/s timeslot{others}",
+                    c.bit,
+                    c.bit + 1
+                ),
+                about: "G.728 LD-CELP at 16 kbit/s on two bits of each octet of a 64 kbit/s \
+                        timeslot, found by the voice equipment's silence fill.",
+            };
+            call_voice_card(ui, &call, f.call_voice.as_ref(), v, &mut actions);
         }
         if let Some(f) = &st.fec {
             if let Some(g) = &f.gse {
@@ -836,25 +869,27 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
 /// one recorded to a `.wav`.
 /// A call's G.728 voice in a Q-Flex's TDM multiplex: which channels, whether
 /// it is speaking, and ▶ / ● for it.
+/// A Q-Flex call as the call-voice card shows it, whichever multiplex it
+/// came from.
+struct CallShown {
+    talking: bool,
+    talk_blocks: u64,
+    /// Where it is carried, and how it was found (the hover text).
+    place: String,
+    about: &'static str,
+}
+
 fn call_voice_card(
     ui: &mut Ui,
-    voice: decsat_engine::TdmVoiceView,
+    voice: &CallShown,
     out: Option<&decsat_engine::CallVoiceView>,
     v: &UiVfo,
     actions: &mut Vec<Action>,
 ) {
     ui.add_space(6.0);
-    let channels: Vec<String> = (0..16)
-        .filter(|c| voice.channels >> c & 1 == 1)
-        .map(|c| c.to_string())
-        .collect();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Call voice (G.728)").strong())
-            .on_hover_text(
-                "G.728 LD-CELP at 16 kbit/s spread over four TDM channels, two bits a TDM word. \
-             Where each channel's bits go is learnt from the voice equipment's silence fill; \
-             one bit in 64 is in no channel and is guessed.",
-            );
+            .on_hover_text(voice.about);
         if out.is_some_and(|o| o.playing) {
             volume_control(ui);
         }
@@ -877,8 +912,8 @@ fn call_voice_card(
         }
         ui.label(
             RichText::new(format!(
-                "channels {} · {:.1} s of speech so far",
-                channels.join(", "),
+                "{} · {:.1} s of speech so far",
+                voice.place,
                 voice.talk_blocks as f64 * 0.04
             ))
             .small()
@@ -2105,8 +2140,8 @@ fn fastlink_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
     }
 }
 
-/// A faster Q-Flex's multiplex (k × 128.5 kbit/s): its frames and how much
-/// of it is changing. What fills it is not known yet.
+/// A faster Q-Flex's multiplex (k × 128.5 kbit/s): its frames, its HDLC
+/// timeslot, its calls and how much of it is changing.
 fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
@@ -2136,16 +2171,43 @@ fn fast_tdm_card(ui: &mut Ui, t: &decsat_engine::FastTdmStats) {
             ),
         );
         ui.end_row();
+        if !t.hdlc_runs.is_empty() {
+            ui.label("HDLC timeslot");
+            ui.colored_label(
+                good,
+                format!("{:.0} kbit/s · {} frames", t.hdlc_bps() / 1e3, t.hdlc_good),
+            )
+            .on_hover_text(
+                "Bridged Ethernet on an inverted line: the site's IP network. \
+                 Its packets are in the IP view (and the PCAP when recording).",
+            );
+            ui.end_row();
+        }
+        for (i, c) in t.calls.iter().enumerate() {
+            ui.label(format!("Call {}", i + 1));
+            ui.colored_label(
+                if c.talking { good } else { wait },
+                format!(
+                    "G.728 on bits {}–{} · {} · {:.1} s of speech",
+                    c.bit,
+                    c.bit + 1,
+                    if c.talking { "speech" } else { "silent" },
+                    c.talk_blocks as f64 * 0.04
+                ),
+            )
+            .on_hover_text(format!(
+                "A 64 kbit/s timeslot in 8-bit runs at frame bits {:?}; \
+                 the call is on two bits of each octet.",
+                c.runs
+            ));
+            ui.end_row();
+        }
         ui.label("Activity");
         ui.label(format!(
             "{:.2} % of bits changed since 20 ms before",
             100.0 * t.change
         ))
-        .on_hover_text(
-            "Idle, these links repeat every 2–10 ms; traffic changes them. \
-                 The channels inside are laid out differently from the 128.5 kbit/s \
-                 sites' and are not decoded yet.",
-        );
+        .on_hover_text("Idle, these links repeat every 2–10 ms; traffic changes them.");
         ui.end_row();
     });
 }

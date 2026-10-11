@@ -140,8 +140,8 @@ fn each_datagram(path: &Path, dt: f64, mut f: impl FnMut(&[u8], &IpInfo, f64)) -
     Ok(mpe.stats.datagrams)
 }
 
-/// A 16-bit stereo WAV of interleaved `pcm`.
-fn write_wav(path: &Path, rate: u32, pcm: &[i16]) -> Result<()> {
+/// A 16-bit WAV of `channels` interleaved in `pcm`.
+pub(crate) fn write_wav(path: &Path, rate: u32, channels: u16, pcm: &[i16]) -> Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -152,10 +152,10 @@ fn write_wav(path: &Path, rate: u32, pcm: &[i16]) -> Result<()> {
     b.extend_from_slice(b"WAVEfmt ");
     b.extend_from_slice(&16u32.to_le_bytes());
     b.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    b.extend_from_slice(&2u16.to_le_bytes()); // stereo
+    b.extend_from_slice(&channels.to_le_bytes());
     b.extend_from_slice(&rate.to_le_bytes());
-    b.extend_from_slice(&(rate * 4).to_le_bytes());
-    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&(rate * 2 * channels as u32).to_le_bytes());
+    b.extend_from_slice(&(2 * channels).to_le_bytes());
     b.extend_from_slice(&16u16.to_le_bytes());
     b.extend_from_slice(b"data");
     b.extend_from_slice(&data.to_le_bytes());
@@ -334,7 +334,7 @@ pub fn run(a: &McastArgs) -> Result<()> {
         {
             let stem = format!("decsat-{}_{}", s.group, s.port).replace([':', '.'], "_");
             let path = dir.join(format!("{stem}.wav"));
-            match write_wav(&path, *rate, pcm) {
+            match write_wav(&path, *rate, 2, pcm) {
                 Ok(()) => println!("    wrote {} ({:.1} s)", path.display(), r.seconds),
                 Err(e) => println!("    wav: {e}"),
             }

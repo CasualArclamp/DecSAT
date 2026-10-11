@@ -642,7 +642,7 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
 pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
     println!(
         "tdm 257 at {} × 128.5 kbit/s: {} · {} frames ({:.2} ms) · {} alignment-bit errors · \
-         {} losses · bits changed from 20 ms before {:.2} % (layout inside not known yet)",
+         {} losses · bits changed from 20 ms before {:.2} %",
         s.k,
         if s.aligned { "aligned" } else { "searching" },
         s.frames,
@@ -651,6 +651,27 @@ pub(crate) fn print_fast_tdm(s: &decsat_modem::tdmfast::FastStats) {
         s.losses,
         100.0 * s.change
     );
+    if !s.hdlc_runs.is_empty() {
+        println!(
+            "  HDLC timeslot: {:.0} kbit/s in 8-bit runs at frame bits {:?}, inverted line \
+             · {} frames with a good FCS ({} fragments between flags or bad FCS)",
+            s.hdlc_bps() / 1e3,
+            s.hdlc_runs,
+            s.hdlc_good,
+            s.hdlc_bad
+        );
+    }
+    for c in &s.calls {
+        println!(
+            "  G.728 call on bits {}–{} of the 64 kbit/s timeslot at frame bits {:?} · \
+             {:.1} s of speech, {:.1} s of silence fill",
+            c.bit,
+            c.bit + 1,
+            c.runs,
+            c.talk_blocks as f64 * 0.04,
+            c.fill_blocks as f64 * 0.04
+        );
+    }
 }
 
 /// The 257-bit TDM multiplex's report.

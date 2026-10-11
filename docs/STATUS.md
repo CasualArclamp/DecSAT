@@ -2032,7 +2032,7 @@ stream from channels 0, 1, 2, 3 and was decoding noise with speech's sync.
   `esp-ml-call-B-ch0-1-2-15.wav`, and the 0.9.0 mix
   (`esp-ml-monster-as-0.9.0-mixed.wav`) for comparison.
 
-## The faster FastLinks: framing cracked, the voice inside not yet (2026-10-11)
+## The faster FastLinks: framing, their IP and their calls (2026-10-11)
 
 Rory: "crack the faster fastlink payloads". Three Q-Flex FastLinks on the
 CAP sites, recorded together (HackRF at 1760.6 MHz, 4 MS/s, 60 s — a
@@ -2062,7 +2062,8 @@ channel BER 3–4 %, yet 99.9 % of codewords decode).
   frame rate — a frame every 1.00, 0.67 and 0.50 ms. All three align
   (59 910, 87 954 and 119 881 frames). `FastRx` finds the frames and meters
   activity (bits changed from 20 ms before); CLI and GUI show both.
-- **Inside: not cracked.** The frames are not the 128.5 kbit/s sites'
+- **Inside, at first: not cracked** (kept as found; the next part
+  undoes it). The frames are not the 128.5 kbit/s sites'
   sixteen 8 kbit/s channels. Idle, they are mostly constant bits with a few
   changing fields, repeating every 10 ms (k = 2), 4 ms (k = 3) or 2 ms
   (k = 4); on the 2 × link, 64-bit blocks of two 4-bit fields, a marker
@@ -2078,3 +2079,57 @@ channel BER 3–4 %, yet 99.9 % of codewords decode).
 
 `decsat payload … --inner-out f` writes the data inside the Paradise
 framing (0/1 bytes) for this kind of work.
+
+**Cracked** (`tdmfast.rs`), on a 15-minute recording of the three links
+(1760.6 MHz, 4 MS/s, 900 s), with traffic in it:
+
+- **The QPSK pairs come swapped.** Every pair of bits of the data stream
+  is in the other order from the one the multiplex was built in (which
+  pairing is not known, so both are tried, by absolute bit parity).
+  Swapped back, every 257-bit frame has one layout: octets from bit 1,
+  each kind at fixed places. All that was "a few 4-bit fields and a
+  marker" above was this, read across the wrong pairs.
+- **A 64 kbit/s HDLC timeslot.** 8-bit runs at fixed places in the frame
+  (2 × link: bits 17, 41, 81, 105, 145, 169, 209, 233 — eight a frame;
+  4 ×: 25, 57, 153, 185 — four), HDLC on an inverted line. Its frames are
+  bridged Ethernet with 802.1Q VLANs: the site's IP network — SNMP to
+  four managers, traps, OSPF, NTP, ICMP, PPPoE discovery, ARP, a UDP
+  multicast to 233.71.15.x:50000. The UDP payloads are encrypted: their
+  checksums fail while the HDLC FCS and the IP header checksums hold. B:
+  2633 frames, 2503 IP packets in 16 flows; C: 2782 frames. Found blind:
+  idle HDLC is flags, 10000001 inverted, so a run of it reads as one of
+  that's eight rotations most of the time, and the rotation steps
+  whenever a frame has gone by — runs showing all eight rotations, in 60 %
+  of frames, changing 25 times in 10 s; confirmed by three good FCS. The
+  frames go to the IP stage (IP view, PCAP).
+- **The calls: G.728 in a second 64 kbit/s timeslot**, the HDLC one's
+  runs 16 bits earlier (2 ×: bits 1, 25, 65, …, 217) or 24 (4 ×: 1, 33,
+  129, 161) — octets laid out [s v v v v x x x]. Each pair of `v` bits is
+  a 16 kbit/s G.728 stream, octet after octet, as on the CDM-600L's D&I
+  timeslot: on the 2 × link bits 2–3 and 4–5 are two calls with the same
+  talker in them (the decoded audio correlates 0.48, 2.6 ms apart: the
+  same speech coded twice, as at the 128.5 kbit/s sites' "two calls");
+  on the 4 × link bits 2–3 are an open radio channel, speech over a
+  noise floor most of the time (216 s of speech in 15 min). Idle, the
+  pairs send the equipment's silence fill (10-bit units 1111 cccc 11, the
+  160-bit cycle that made the fields "repeat every 10 ms"). Speech shows
+  clear harmonics on both links. The `s` and `x` bits change rarely
+  (signalling, likely). G.726-32 on the whole nibble had given white
+  noise; the four other ways of splitting the nibble (by bit, by nibble,
+  by half frame) give nothing.
+- **Found blind**: once the HDLC timeslot is known, its runs are moved
+  along the frame by whole octets (each place clear of it), a G.728
+  framer on every pair of neighbouring bits of each — 4 places at 2 ×, 10
+  at 4 × — and a pair is a call when it has sent 3 blocks of the
+  silence fill: the count stepping a codeword, which a wrong pairing
+  cannot fake. Speech's sync bits alone are not enough: a pair one bit
+  off sees them too (on the 4 × link bits 1–2 read as "talking" as long
+  as 2–3 did). The search stops 30 s after its last find. B: both calls,
+  40 s of speech each; C: its one call. The call speaking is the one
+  heard; it goes through the same player and recorder as the 128.5
+  kbit/s calls (`CallVoice` now takes any 8 kHz stream with its clock),
+  and `decsat payload --voice-out` writes it to a `.wav`.
+- **Still open**: the 3 × link (276 kBd, weak) aligns but shows no HDLC
+  timeslot — at 1500 frames a second a 64 kbit/s timeslot is 5⅓ octets a
+  frame, so its layout must span frames; and with no HDLC to start from,
+  its voice is not looked for.

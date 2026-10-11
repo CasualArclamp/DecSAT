@@ -575,7 +575,7 @@ impl TdmRx {
 /// The voice equipment's silence fill as a 16 kbit/s stream: 10-bit units
 /// 1111 cccc 11, the count stepping down one a unit — a 160-bit cycle (the
 /// same fill as on the CDM-600L's timeslot, STATUS.md).
-fn fill_bit(p: usize) -> u8 {
+pub(crate) fn fill_bit(p: usize) -> u8 {
     let (unit, k) = ((p / 10) % 16, p % 10);
     if (4..8).contains(&k) {
         ((15 - unit) >> (7 - k)) as u8 & 1

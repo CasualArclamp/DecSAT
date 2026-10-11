@@ -377,9 +377,10 @@ pub struct CallVoiceView {
     pub error: Option<String>,
 }
 
-/// A Q-Flex call's G.728 voice (decoded by the TDM receiver) through the
-/// multicast-audio player and recorder as RTP A-law, as an E1 timeslot
-/// goes: 16 samples a 2 ms TDM frame, silence when there is no speech.
+/// A Q-Flex call's G.728 voice (decoded by the TDM receiver, at any of the
+/// links' rates) through the multicast-audio player and recorder as RTP
+/// A-law, as an E1 timeslot goes: 8000 samples a second by the stream's
+/// clock, silence when there is no speech.
 struct CallVoice {
     play: bool,
     /// Playing by itself, as the voice floor allows, and whether the
@@ -399,8 +400,9 @@ struct CallVoice {
     record_rtp: (u16, u32),
     record_last: Option<(PathBuf, u64)>,
     error: Option<String>,
-    /// TDM frames already accounted for.
-    frames: u64,
+    /// The stream's clock (8 kHz samples) already accounted for, once
+    /// started.
+    clock: Option<u64>,
 }
 
 impl CallVoice {
@@ -421,14 +423,13 @@ impl CallVoice {
             record_rtp: (0, 0),
             record_last: None,
             error: None,
-            frames: 0,
+            clock: None,
         }
     }
 
-    /// `voice`: the call's stream, once found. With `voice_auto` it plays
-    /// by itself once it has spoken (▶ plays it regardless).
-    fn follow(&mut self, o: &FecOutput, voice: Option<decsat_modem::tdm257::VoiceView>) {
-        let spoken = voice.is_some_and(|v| v.talk_blocks > 0);
+    /// `spoken`: a call has been heard speaking. With `voice_auto` it plays
+    /// by itself from then on (▶ plays it regardless).
+    fn follow(&mut self, o: &FecOutput, spoken: bool) {
         self.auto = !o.tdm_play && o.voice_auto && spoken;
         let want = o.tdm_play || self.auto;
         if want != self.play {
@@ -469,16 +470,21 @@ impl CallVoice {
         }
     }
 
-    /// The receiver's decoded speech in; for each TDM frame since last
-    /// time, 2 ms of A-law out to the player and recorder.
-    fn feed(&mut self, rx: &mut decsat_modem::tdm257::TdmRx) {
+    /// Whether the receiver need decode speech: playing or recording.
+    fn wants_pcm(&self) -> bool {
+        self.play || self.record
+    }
+
+    /// The receiver's decoded speech in (8 kHz, taken), whether the call
+    /// is speaking now, and the stream's clock (8 kHz samples so far); for
+    /// each sample of clock since last time, a sample of A-law out to the
+    /// player and recorder.
+    fn feed(&mut self, pcm: &mut Vec<f32>, talking: bool, clock: u64) {
         use decsat_ip::mcast::rtp_packet;
-        rx.decode_voice = self.play || self.record;
         // Playing by itself, it waits its turn on the voice floor; ▶
         // plays it whatever the floor says.
-        let talking = rx.stats.voice.is_some_and(|v| v.talking);
         self.heard = !self.auto || crate::floor::may_play((self.source, 0), talking);
-        for &x in &rx.voice_pcm {
+        for &x in pcm.iter() {
             let b = decsat_modem::e1::alaw_encode(x);
             if self.play && self.heard {
                 self.play_q.push_back(b);
@@ -487,15 +493,16 @@ impl CallVoice {
                 self.record_q.push_back(b);
             }
         }
-        rx.voice_pcm.clear();
+        pcm.clear();
         for q in [&mut self.play_q, &mut self.record_q] {
             if q.len() > VOICE_BACKLOG {
                 q.drain(..q.len() - VOICE_BACKLOG / 2);
             }
         }
-        let new = rx.stats.frames.saturating_sub(self.frames);
-        self.frames = rx.stats.frames;
-        for _ in 0..new * decsat_modem::tdm257::WORDS as u64 {
+        // Rust note: `replace` stores the new clock and hands back the old
+        // one (the first time, none: start from here).
+        let new = clock.saturating_sub(self.clock.replace(clock).unwrap_or(clock));
+        for _ in 0..new {
             if let Some(p) = &mut self.player {
                 self.play_buf.push(voice_byte(&mut self.play_q));
                 if self.play_buf.len() == E1_CHUNK {
@@ -2159,15 +2166,36 @@ fn run(
                         Some(decsat_modem::payload::Format::ParadiseEsc)
                     ) && !payload_out.inner.is_empty();
                     if paradise && k > 1 {
-                        fast_tdm
-                            .get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k))
-                            .push(&payload_out.inner);
+                        let rx =
+                            fast_tdm.get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k));
+                        rx.push(&payload_out.inner);
+                        // Its HDLC timeslot's frames join the HDLC → IP
+                        // path below (bridged Ethernet: the IP is found
+                        // past its header).
+                        payload_out.frames.extend(
+                            rx.frames
+                                .drain(..)
+                                .map(|f| (f, decsat_modem::payload::Fcs::Crc16)),
+                        );
+                        // Its calls: the one heard plays and records.
+                        if !rx.stats.calls.is_empty() {
+                            let cv = call_voice.get_or_insert_with(CallVoice::new);
+                            let s = &rx.stats;
+                            cv.follow(&o, s.calls.iter().any(|c| c.talk_blocks > 0));
+                            let talking = s.heard.is_some_and(|i| s.calls[i].talking);
+                            rx.decode_voice = cv.wants_pcm();
+                            cv.feed(&mut rx.voice_pcm, talking, rx.voice_clock);
+                        }
                     } else if paradise {
                         let rx = tdm.get_or_insert_with(decsat_modem::tdm257::TdmRx::new);
                         rx.push(&payload_out.inner);
                         let cv = call_voice.get_or_insert_with(CallVoice::new);
-                        cv.follow(&o, rx.stats.voice);
-                        cv.feed(rx);
+                        let voice = rx.stats.voice;
+                        cv.follow(&o, voice.is_some_and(|v| v.talk_blocks > 0));
+                        rx.decode_voice = cv.wants_pcm();
+                        // 16 samples a 2 ms TDM frame.
+                        let clock = rx.stats.frames * decsat_modem::tdm257::WORDS as u64;
+                        cv.feed(&mut rx.voice_pcm, voice.is_some_and(|v| v.talking), clock);
                     }
                     if let Some(bits) = unread {
                         tpc_text
@@ -2481,7 +2509,7 @@ mod tests {
             (out(true, true), Some(spoken), true, false),
         ] {
             let mut cv = CallVoice::new();
-            cv.follow(&o, voice);
+            cv.follow(&o, voice.is_some_and(|v| v.talk_blocks > 0));
             let v = cv.view();
             assert_eq!((v.playing, v.auto), (playing, auto), "{voice:?}");
         }

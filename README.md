@@ -36,7 +36,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
 | **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK): frame structure, scrambling and payload found from the signal; HDLC → IP, MPEG-TS, E1, Comtech D&I++ voice and 64 kbit/s timeslots in HDLC packets | ✅ confirmed on a live Comtech CDM-600L carrier |
-| **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav` | ✅ decodes a live Q-Flex down to the calls' speech |
+| **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav`; the 2–4 × faster links' multiplex, its HDLC timeslot (bridged Ethernet → IP) and its G.728 calls | ✅ decodes live Q-Flex links down to the calls' speech, the faster ones' IP too |
 | **Viterbi K=7 → data** (IESS-308/309 SCPC and the like): rate 1/2–7/8, puncturing and orientation found blind and followed when the carrier turns; then the payload search — with or without differential decoding — for HDLC, TS, E1, D&I++, Paradise or IBS/SMS (IESS-309, 16/15) framing, or just the scrambler from the idle fill | ✅ decodes a live 10.24 kBd IESS-308 carrier to its IBS frames (rate 1/2, differential, V.35) |
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
 | **Comtech CDM-600 voice** (a decoder preset): the TPC 2964 chain to the D&I/E1 timeslots (or, at multi-radio sites, timeslots in HDLC packets), and the G.728 voice in every one of them played as soon as speech is found — no ▶, so several carriers can be heard at once, one voice at a time if you like | ✅ on a live CDM-600L; multi-radio trunks checked on recordings (idle) |
@@ -361,6 +361,17 @@ then says when someone speaks, and ▶/● play and record it. With **Voice:
 play when G.728 speech is found** (on by default) a call plays by itself
 once anyone has spoken, taking turns with the Comtech channels under **one
 voice at a time**; ⏹ turns that off for the VFO.
+
+The faster Q-Flex links (FastLink at 2, 3 or 4 × the 95 kBd links' rate)
+carry 2–4 × 128.5 kbit/s in the same Paradise framing, and the same 257-bit
+multiplex at that many times the frame rate, laid out differently: DecSAT
+frames it, meters its activity, and finds in it a 64 kbit/s HDLC timeslot —
+bridged Ethernet on an inverted line, the site's IP network — whose
+packets go to the IP view and the PCAP like any other IP; then, in another
+64 kbit/s timeslot beside it, the radios' calls: G.728 on two bits of each
+octet, found by their silence fill. The call speaking is heard, through
+the same ▶, ● and *play when G.728 speech is found* as the slower links'
+(`decsat payload … --voice-out call.wav` from a data recording).
 
 A carrier too slow to show three frames in the first look is marked
 *provisional* while it listens longer. Between identifications it keeps

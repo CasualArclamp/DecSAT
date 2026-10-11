@@ -32,6 +32,10 @@ pub struct PayloadArgs {
     /// multiplex, or multiplexes, as they come.
     #[arg(long)]
     pub inner_out: Option<PathBuf>,
+    /// Write a faster link's call voice here (.wav, 8 kHz): the call heard,
+    /// silence between its speech.
+    #[arg(long)]
+    pub voice_out: Option<PathBuf>,
 }
 
 pub fn run(a: &PayloadArgs) -> Result<()> {
@@ -49,6 +53,10 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     let mut out = PayloadOut::default();
     let mut tdm = TdmRx::new();
     let mut fast: Option<decsat_modem::tdmfast::FastRx> = None;
+    // The timeslot's HDLC frames (bridged Ethernet), for the summary, and
+    // the call voice (8 kHz).
+    let mut fast_frames: Vec<Vec<u8>> = Vec::new();
+    let mut voice: Vec<i16> = Vec::new();
     tdm.keep_frames = a.tdm_out.is_some();
     let mut esc = Vec::new();
     let mut inner = Vec::new();
@@ -74,11 +82,20 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
             pcm.clear();
             v.push(octets, false, &mut pcm);
         }
-        // k × 128.5 kbit/s: k multiplexes interleaved bit by bit.
+        // k × 128.5 kbit/s: the multiplex at k times the frame rate.
         let k = pay.stats.paradise.as_ref().map_or(1, |p| p.octets / 20);
         if k > 1 && !out.inner.is_empty() {
-            fast.get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k))
-                .push(&out.inner);
+            let rx = fast.get_or_insert_with(|| decsat_modem::tdmfast::FastRx::new(k));
+            rx.decode_voice = a.voice_out.is_some();
+            rx.push(&out.inner);
+            fast_frames.append(&mut rx.frames);
+            // Speech comes 40 ms at a time: silence up to a block behind
+            // the clock, then the speech.
+            let behind = rx.voice_clock.saturating_sub(320) as usize;
+            if voice.len() < behind && rx.voice_pcm.is_empty() {
+                voice.resize(behind, 0);
+            }
+            voice.extend(rx.voice_pcm.drain(..).map(|x| (x * 32767.0) as i16));
         } else if matches!(pay.format(), Some(Format::ParadiseEsc)) && !out.inner.is_empty() {
             tdm.push(&out.inner);
             metered += 1;
@@ -129,6 +146,15 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     }
     if let Some(s) = &fast {
         crate::decode::print_fast_tdm(&s.stats);
+        print_ethernet(&fast_frames);
+    }
+    if let Some(p) = &a.voice_out {
+        crate::mcast::write_wav(p, 8000, 1, &voice)?;
+        println!(
+            "wrote {:.1} s of call voice to {}",
+            voice.len() as f64 / 8000.0,
+            p.display()
+        );
     }
     if tdm.stats.frames > 0 || tdm.stats.locked {
         crate::decode::print_tdm(&tdm.stats);
@@ -158,4 +184,39 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// What bridged-Ethernet HDLC frames carry: their flows by VLAN, IPv4
+/// protocol and ports (or EtherType), busiest first.
+fn print_ethernet(frames: &[Vec<u8>]) {
+    use std::collections::BTreeMap;
+    let mut flows: BTreeMap<String, u64> = BTreeMap::new();
+    for f in frames.iter().filter(|f| f.len() >= 14) {
+        let (mut et, mut at, mut vlan) = (u16::from_be_bytes([f[12], f[13]]), 14, None);
+        if et == 0x8100 && f.len() >= 18 {
+            vlan = Some(u16::from_be_bytes([f[14], f[15]]) & 0xFFF);
+            et = u16::from_be_bytes([f[16], f[17]]);
+            at = 18;
+        }
+        let v = vlan.map_or(String::new(), |v| format!("VLAN {v} · "));
+        let key = match (et, decsat_ip::parse(&f[at..])) {
+            (0x0800, Some(i)) => {
+                let name = match i.protocol_name() {
+                    "other" => format!("protocol {}", i.protocol),
+                    n => n.to_string(),
+                };
+                match i.ports {
+                    Some((sp, dp)) => format!("{v}{name} {}:{sp} → {}:{dp}", i.src, i.dst),
+                    None => format!("{v}{name} {} → {}", i.src, i.dst),
+                }
+            }
+            _ => format!("{v}EtherType {et:04x}h"),
+        };
+        *flows.entry(key).or_default() += 1;
+    }
+    let mut v: Vec<_> = flows.into_iter().collect();
+    v.sort_by_key(|e| std::cmp::Reverse(e.1));
+    for (k, n) in v.iter().take(12) {
+        println!("    ×{n:<4} {k}");
+    }
 }
