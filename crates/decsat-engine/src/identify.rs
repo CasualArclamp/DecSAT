@@ -296,12 +296,23 @@ fn pow2_floor(n: usize, cap: usize) -> usize {
 /// sequence) within `[lo_hz, hi_hz]`, by FFT. Returns (frequency, peak-to-median
 /// power ratio in dB). Frequencies may be negative; the FFT is complex.
 fn strongest_line(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64) -> Option<(f64, f32)> {
+    line_in(seq, rate, lo_hz, hi_hz, false)
+}
+
+/// [`strongest_line`] with the mean left in (`keep_dc`): a power of the
+/// symbols has its line at DC when the carrier sits exactly on frequency,
+/// and taking the mean out would take the line out with it.
+fn line_in(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64, keep_dc: bool) -> Option<(f64, f32)> {
     let n = pow2_floor(seq.len(), 1 << 20);
     if n < 256 {
         return None;
     }
     let mut buf: Vec<Iq> = seq[..n].to_vec();
-    let mean = buf.iter().sum::<Iq>() / n as f32;
+    let mean = if keep_dc {
+        Iq::new(0.0, 0.0)
+    } else {
+        buf.iter().sum::<Iq>() / n as f32
+    };
     // Hann window keeps the line from leaking over the search band.
     for (k, s) in buf.iter_mut().enumerate() {
         let w = 0.5 - 0.5 * (std::f32::consts::TAU * k as f32 / n as f32).cos();
@@ -545,7 +556,7 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
                 }
             })
             .collect();
-        strongest_line(&p4, rs, -half, half)
+        line_in(&p4, rs, -half, half, true)
             .filter(|&(_, strength)| strength > 12.0)
             .map(|(f, _)| f / 4.0)
     };
@@ -584,15 +595,17 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
 
     // One ring: BPSK leaves a line in s², QPSK in s⁴ (but not s²), 8PSK only
     // in s⁸. The line sits at 2× (4×, 8×) the residual carrier offset, which
-    // this also measures. A line counts only when the next power has one at
-    // twice its frequency, as the carrier's own always does: data that
-    // repeat from frame to frame (an 8PSK modem's idle frames, a third of
-    // each repeated with its sign flipped) put lines into s² and s⁴ that
-    // are not the carrier's, and a lone s² line read 8PSK as BPSK.
+    // this also measures. A line does not count when the next power has a
+    // line elsewhere than at twice its frequency, as the carrier's own never
+    // does: data that repeat from frame to frame (an 8PSK modem's idle
+    // frames, a third of each repeated with its sign flipped) put lines into
+    // s² and s⁴ that are not the carrier's, and a lone s² line read 8PSK as
+    // BPSK. (No line at all in the next power — noise raised to the eighth
+    // power swamps a weak QPSK's s⁸ — does not count against it.)
     let p2: Vec<Iq> = sym.iter().map(|s| (s / rms) * (s / rms)).collect();
     let p4: Vec<Iq> = p2.iter().map(|s| s * s).collect();
     let p8: Vec<Iq> = p4.iter().map(|s| s * s).collect();
-    let line = |p: &[Iq]| strongest_line(p, rs, -half, half).filter(|&(_, st)| st > 20.0);
+    let line = |p: &[Iq]| line_in(p, rs, -half, half, true).filter(|&(_, st)| st > 20.0);
     let (l2, l4, l8) = (line(&p2), line(&p4), line(&p8));
     // Rust note: `rem_euclid` is a modulo that is never negative; the lines'
     // frequencies wrap at ±rs/2, so twice one is compared round the circle.
@@ -602,6 +615,7 @@ pub fn classify_constellation(sym: &[Iq], rs: f64) -> (ConstellationGuess, Optio
             let d = (fb - 2.0 * fa + half).rem_euclid(rs) - half;
             d.abs() <= tol
         }
+        (Some(_), None) => true,
         _ => false,
     };
     match (l2, l4, l8) {
@@ -1042,6 +1056,44 @@ mod tests {
     /// the sign flipped each frame, as a Comtech 8PSK TPC carrier's idle
     /// data do: the repetition puts lines into s² and s⁴ that are not the
     /// carrier's, and the classifier took it for BPSK.
+    /// QPSK centred almost exactly (a live carrier read −23 Hz off at
+    /// 64 kS/s): its s⁴ line sits at DC. Taking the mean out before looking
+    /// for lines took that line out too, and the carrier read as 8PSK.
+    #[test]
+    fn centred_qpsk_is_not_8psk() {
+        let mut x = 0x2545_F491u32;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        let mut gauss = move || {
+            let u1 = (next() as f64 + 1.0) / 4_294_967_297.0;
+            let u2 = next() as f64 / 4_294_967_296.0;
+            let r = (-2.0 * u1.ln()).sqrt();
+            let t = std::f64::consts::TAU * u2;
+            (r * t.cos(), r * t.sin())
+        };
+        for (df, esn0_db) in [(0.0, 10.0), (-23.0 / 64_000.0, 10.0), (1e-6, 7.0)] {
+            let sigma = (0.5 * 10f64.powf(-esn0_db / 10.0)).sqrt();
+            let sym: Vec<Iq> = (0..60_000)
+                .map(|n| {
+                    let (a, b) = gauss();
+                    let k = (gauss().0 > 0.0) as u32 * 2 + (gauss().0 > 0.0) as u32;
+                    let ph = std::f64::consts::TAU * (0.125 + k as f64 / 4.0 + df * n as f64);
+                    Iq::new((ph.cos() + sigma * a) as f32, (ph.sin() + sigma * b) as f32)
+                })
+                .collect();
+            let (guess, _) = classify_constellation(&sym, 1.0);
+            assert_eq!(
+                guess,
+                ConstellationGuess::Qpsk,
+                "offset {df}, Es/N0 {esn0_db} dB"
+            );
+        }
+    }
+
     #[test]
     fn eight_psk_with_repeating_frames_is_not_bpsk() {
         let mut x = 0x9E37_79B9u32;
