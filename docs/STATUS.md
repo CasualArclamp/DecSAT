@@ -2638,3 +2638,47 @@ no names. Names last 3 min after the last match, and only while the
 squawk stays. Labels, the table (Callsign column), the hover tip and the
 details box (type and registration) use them. "Callsigns" switch, off by
 default (it asks an outside service).
+
+## ASA176 PH-ML is the ML–PH voice trunk: four G.728 channels (2026-10-12)
+
+Rory's TPC 2964 data recording of "ASA176 PH-ML" (12327.2241 MHz, plan
+label CDM-570L, "may contain voice"): 23.17 Mbit in 23 s (start stamp
+to last write), so ~1 Mbit/s — a 1024 kbit/s TPC ¾ trunk (682.67 kS/s),
+not a 64k link. HDLC on an inverted line, unscrambled:
+the timeslot packets of `slotpkt`, two channels, **18h and 20h**, each a
+continuous 64 kbit/s timeslot (4100 packets of 44 octets in 22.6 s).
+
+- **18h carries three G.728 channels**: bits 1–2 a fixed 1 ms pattern,
+  bits 3–8 moving — G.728 sub-rate lanes in bits 3–4 and 5–6 (silence
+  fill throughout) and 7–8 (2.6 s of speech at the start: pitch
+  108–127 Hz, voicing to 0.56, then fill). **20h one**, bits 7–8 (fill);
+  bits 1–6 fixed. Same equipment framing as the CDM-600L (sync bit 1 in
+  32, inverted, counting fill).
+- Missed before on three counts: `slotpkt::timeslot` took only channel
+  bytes that are multiples of 10h (18h was dropped); `g728::Voice` kept
+  one lane a timeslot; and `decsat payload` searched mask `FEh`, never
+  bits 7–8.
+- Fixes: channels are numbered byte / 8 (08h–F8h → 1–31; 10h/20h, the
+  older sites', are now 2 and 4) and shown by their byte ("ch 18h") in
+  the GUI and CLI (`E1View::rows`). `Voice` keeps every lane that shows
+  speech or the fill, decodes them side by side and mixes them (a sample
+  an octet once found: `Framer::timeline` gives silence as zeros), and
+  widens when more bits start changing. Lanes are tried in pairs from the
+  start of each run of changing bits (`lane_starts`): the pair straddling
+  two lanes (bits 6–7 here) passed for speech whenever 7–8 spoke, its
+  "pitch" the codeword period. `E1View::voice` lists each timeslot's
+  lanes. `decsat payload` judges each channel's bits as the E1 stage does
+  and `--voice-out` writes the timeslots' voice mixed.
+- Checked: the recording (`payload … --frame-bits 2223 --bit-rate
+  1024000`) lists all four channels; a synthetic 682.7 kS/s TPC carrier
+  built from its bits (scratch, not committed) decodes live in the CLI
+  and GUI to "ch 18h · 3 × G.728 speech in 7–8", and the 18h recording
+  is the speech. Tests: lane starts, three lanes in one timeslot, channel
+  18h packets, the E1 stage with the trunk's shape.
+- **Also on the trunk**: packets of type 40h on channel 58h (5 % of
+  them) carry IPv4 from bit 125, LSB first — 225 of 226 headers check.
+  ASTERIX **CAT021** (ADS-B target reports) multicast 10.230.171.1:1028 →
+  233.71.15.30:50000 (86 datagrams, ~4/s), SNMP from site devices to an
+  NMS, PIM, ICMP and an ESP tunnel. Neither the packets' IP nor CAT021
+  is read by DecSAT yet. CAT021 carries callsigns (I021/170): a local
+  source for the radar scope's names.

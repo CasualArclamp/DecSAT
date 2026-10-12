@@ -565,6 +565,10 @@ pub struct Framer {
     pub fill_blocks: u64,
     /// 40 ms blocks looked at, either or neither.
     pub blocks: u64,
+    /// While decoding, give a block that is not speech as silence (zeros)
+    /// rather than nothing: one sample per two bits in, always, so that
+    /// lanes decoded side by side stay in step and can be mixed.
+    pub timeline: bool,
 }
 
 impl Default for Framer {
@@ -583,6 +587,7 @@ impl Framer {
             talk_blocks: 0,
             fill_blocks: 0,
             blocks: 0,
+            timeline: false,
         }
     }
 
@@ -737,6 +742,8 @@ impl Framer {
                     }
                 }
             }
+        } else if decode && self.timeline {
+            out.resize(out.len() + BLOCK * IDIM, 0.0);
         }
         self.raw.drain(..BLOCK * 10);
     }
@@ -775,57 +782,185 @@ impl Lane {
     pub fn talking(&self) -> bool {
         self.framer.talking
     }
+
+    /// The first of its two bits (G.704 numbering, 1..=7).
+    pub fn first_bit(&self) -> u8 {
+        self.bits[0].leading_zeros() as u8 + 1
+    }
+
+    /// Its two bits as one mask.
+    fn mask(&self) -> u8 {
+        self.bits[0] | self.bits[1]
+    }
+}
+
+/// Where G.728 channels may sit in a timeslot whose changing bits are
+/// `mask`: the first bit of each pair to try. Each run of changing bits is
+/// read in pairs from its first bit — the CDM-600L's timeslot is one run,
+/// bits 2–3; the PH trunk's channel 18h one of six, bits 3–8, three
+/// channels. Read from a run's second bit, a pair straddles two channels,
+/// and one of them speaking makes it look like speech too (that channel's
+/// sync bit lands on the straddling pair's 10-bit grid all the same): seen
+/// on bits 6–7 there. So an even run is only read from its start; an odd
+/// one has no telling which end is whole, and both readings are tried.
+fn lane_starts(mask: u8) -> Vec<u8> {
+    let on = |b: u8| (1..=8).contains(&b) && mask & (0x80 >> (b - 1)) != 0;
+    let mut starts = Vec::new();
+    let mut b = 1u8;
+    while b <= 8 {
+        if on(b) {
+            let first = b;
+            while on(b + 1) {
+                b += 1;
+            }
+            let step = if (b - first) % 2 == 1 { 2 } else { 1 };
+            // Rust note: `step_by` takes every `step`-th of the range.
+            starts.extend((first..b).step_by(step));
+        }
+        b += 1;
+    }
+    starts
+}
+
+/// A [`Lane`] being tried, or found, in a [`Voice`].
+struct Candidate {
+    lane: Lane,
+    /// It has carried G.728: speech, or the silence fill.
+    found: bool,
+    /// Its decoded samples not yet mixed (found lanes only).
+    queue: std::collections::VecDeque<f32>,
 }
 
 /// G.728 voice somewhere in a timeslot's sub-rate bits: a [`Lane`] on each
-/// pair of neighbouring bits that change, until one of them speaks (or
-/// sends the silence fill).
+/// pair of bits that may carry a channel (see [`lane_starts`]). Every lane
+/// that speaks or sends the silence fill is kept — one timeslot can carry
+/// several channels, each a radio — and they are decoded side by side and
+/// mixed.
 pub struct Voice {
     /// The changing bits ([`crate::e1::Coding::SubRate`]'s mask).
     pub mask: u8,
-    lanes: Vec<Lane>,
-    found: Option<usize>,
+    lanes: Vec<Candidate>,
+    scratch: Vec<f32>,
 }
 
 impl Voice {
     pub fn new(mask: u8) -> Self {
-        let on = |b: u8| mask & (0x80 >> (b - 1)) != 0;
-        let lanes = (1..=7u8)
-            .filter(|&b| on(b) && on(b + 1))
-            .map(Lane::new)
-            .collect();
-        Self {
-            mask,
-            lanes,
-            found: None,
-        }
+        let mut v = Self {
+            mask: 0,
+            lanes: Vec::new(),
+            scratch: Vec::new(),
+        };
+        v.widen(mask);
+        v
     }
 
-    /// The timeslot's octets in; with `decode`, speech out once a lane has
-    /// spoken.
-    pub fn push(&mut self, mut octets: &[u8], decode: bool, out: &mut Vec<f32>) {
-        // Until a lane speaks, all listen, a block's worth of octets at a
-        // time so that the rest go to the one found.
-        while self.found.is_none() && !octets.is_empty() {
-            let n = octets.len().min(BLOCK * IDIM);
-            for l in &mut self.lanes {
-                l.push(&octets[..n], false, out);
+    /// More bits seen changing: lanes to try in them too. The lanes found
+    /// stay; those still being tried are replaced by `lane_starts` of the
+    /// wider mask (a run grown by a channel starting up reads differently).
+    pub fn widen(&mut self, mask: u8) {
+        let mask = self.mask | mask;
+        if mask == self.mask && !self.lanes.is_empty() {
+            return;
+        }
+        self.mask = mask;
+        let taken = self.found_bits();
+        // Rust note: `retain` drops in place the elements the test fails.
+        self.lanes.retain(|c| c.found);
+        for first in lane_starts(mask) {
+            let lane = Lane::new(first);
+            if lane.mask() & taken == 0 {
+                self.lanes.push(Candidate {
+                    lane,
+                    found: false,
+                    queue: Default::default(),
+                });
             }
-            // Speech, or the silence fill: either way the lane is G.728.
-            self.found = self
-                .lanes
-                .iter()
-                .position(|l| l.framer.talk_blocks > 0 || l.framer.fill_blocks > 0);
-            octets = &octets[n..];
         }
-        if let Some(i) = self.found {
-            self.lanes[i].push(octets, decode, out);
+        self.lanes.sort_by_key(|c| c.lane.first_bit());
+    }
+
+    /// The bits of the lanes found.
+    fn found_bits(&self) -> u8 {
+        self.lanes
+            .iter()
+            .filter(|c| c.found)
+            .fold(0, |m, c| m | c.lane.mask())
+    }
+
+    /// The timeslot's octets in; with `decode`, the found lanes' speech out,
+    /// mixed: a sample an octet once a lane is found (silence as zeros),
+    /// nothing before.
+    pub fn push(&mut self, mut octets: &[u8], decode: bool, out: &mut Vec<f32>) {
+        // A block's worth of octets at a time: a lane finishes at most one
+        // block in it, so one found in it decodes from the next on, in step
+        // with the others.
+        while !octets.is_empty() {
+            let n = octets.len().min(BLOCK * IDIM);
+            for c in &mut self.lanes {
+                self.scratch.clear();
+                c.lane
+                    .push(&octets[..n], decode && c.found, &mut self.scratch);
+                c.queue.extend(self.scratch.drain(..));
+            }
+            octets = &octets[n..];
+            // Speech, or the silence fill: either way the lane is G.728 —
+            // unless it shares a bit with one found already.
+            for i in 0..self.lanes.len() {
+                let f = &self.lanes[i].lane.framer;
+                if !self.lanes[i].found
+                    && f.talk_blocks + f.fill_blocks > 0
+                    && self.lanes[i].lane.mask() & self.found_bits() == 0
+                {
+                    self.lanes[i].found = true;
+                    self.lanes[i].lane.framer.timeline = true;
+                }
+            }
+            if decode {
+                self.mix(out);
+            } else {
+                for c in &mut self.lanes {
+                    c.queue.clear();
+                }
+            }
         }
     }
 
-    /// The lane carrying G.728, once found.
-    pub fn lane(&self) -> Option<&Lane> {
-        self.found.map(|i| &self.lanes[i])
+    /// As much of the found lanes' speech as all of them have, summed.
+    fn mix(&mut self, out: &mut Vec<f32>) {
+        let n = self
+            .lanes
+            .iter()
+            .filter(|c| c.found)
+            .map(|c| c.queue.len())
+            .min()
+            .unwrap_or(0);
+        let start = out.len();
+        out.resize(start + n, 0.0);
+        for c in self.lanes.iter_mut().filter(|c| c.found) {
+            for (o, x) in out[start..].iter_mut().zip(c.queue.drain(..n)) {
+                *o += x;
+            }
+        }
+    }
+
+    /// The lanes carrying G.728, by bit position.
+    pub fn lanes(&self) -> impl Iterator<Item = &Lane> {
+        self.lanes.iter().filter(|c| c.found).map(|c| &c.lane)
+    }
+
+    /// G.728 has been found here.
+    pub fn found(&self) -> bool {
+        self.lanes.iter().any(|c| c.found)
+    }
+
+    /// A lane spoke in the last 40 ms.
+    pub fn talking(&self) -> bool {
+        self.lanes().any(Lane::talking)
+    }
+
+    /// A lane has spoken at all.
+    pub fn spoken(&self) -> bool {
+        self.lanes().any(|l| l.framer.talk_blocks > 0)
     }
 }
 
@@ -913,7 +1048,7 @@ mod tests {
         let mut voice = Voice::new(0x60);
         let mut got = Vec::new();
         voice.push(&timeslot(&cw), true, &mut got);
-        let lane = voice.lane().expect("found");
+        let lane = voice.lanes().next().expect("found");
         assert_eq!(lane.bits, [0x40, 0x20]);
         assert!(lane.talking());
         // The first block finds the lane; the next ones decode from a fresh
@@ -939,16 +1074,80 @@ mod tests {
         let mut voice = Voice::new(0x60);
         let mut out = Vec::new();
         voice.push(&timeslot(&fill), true, &mut out);
-        // The fill says G.728 is there, but nothing is decoded from it.
-        assert!(voice.lane().is_some_and(|l| !l.talking()) && out.is_empty());
+        // The fill says G.728 is there, but nothing is decoded from it:
+        // silence.
+        assert!(voice.found() && !voice.talking());
+        assert!(!out.is_empty() && out.iter().all(|&x| x == 0.0));
         // Then speech: found, and decoded.
         voice.push(&timeslot(&codewords(BLOCK * 3, 3)), true, &mut out);
-        assert!(voice.lane().is_some_and(|l| l.talking()));
-        // Then silence again: nothing out, not talking.
+        assert!(voice.talking());
+        // Then silence again: silence out, not talking.
         let n = out.len();
         voice.push(&timeslot(&fill), true, &mut out);
-        assert!(!voice.lane().unwrap().talking());
-        assert!(out.len() <= n + BLOCK * IDIM, "at most the block in flight");
+        assert!(!voice.talking());
+        assert!(
+            out[n + BLOCK * IDIM..].iter().all(|&x| x == 0.0),
+            "speech at most in the block in flight"
+        );
+    }
+
+    #[test]
+    fn lanes_are_read_from_the_start_of_each_run() {
+        assert_eq!(lane_starts(0x60), [2]); // the CDM-600L: bits 2–3
+        assert_eq!(lane_starts(0x3F), [3, 5, 7]); // PH trunk 18h: 3–8
+        assert_eq!(lane_starts(0x03), [7]);
+        assert_eq!(lane_starts(0x63), [2, 7]);
+        // An odd run: either end may be the whole pair.
+        assert_eq!(lane_starts(0x70), [2, 3]);
+        assert!(lane_starts(0x10).is_empty());
+    }
+
+    /// The PH trunk's channel 18h: three G.728 channels in one timeslot,
+    /// bits 3–4 and 5–6 sending the silence fill, 7–8 speech; bits 1–2 a
+    /// fixed pattern repeating each millisecond.
+    #[test]
+    fn three_channels_in_one_timeslot() {
+        let fill = |from: usize| -> Vec<u16> {
+            (0..BLOCK * 6).map(|i| ((i + from) % 16) as u16).collect()
+        };
+        let speech = codewords(BLOCK * 6, 11);
+        let line = |units: &[u16]| -> Vec<u8> {
+            units
+                .iter()
+                .flat_map(|&w| (0..10).rev().map(move |k| u8::from(w >> k & 1 == 0)))
+                .collect()
+        };
+        let (a, b, c) = (line(&fill(0)), line(&fill(5)), line(&speech));
+        let octets: Vec<u8> = (0..a.len() / 2)
+            .map(|i| {
+                let pair = |s: &[u8], first: u8| (s[2 * i] << 1 | s[2 * i + 1]) << (7 - first);
+                [0xC0, 0x80, 0x40, 0xC0, 0x00, 0xC0, 0x80, 0xC0][i % 8]
+                    | pair(&a, 3)
+                    | pair(&b, 5)
+                    | pair(&c, 7)
+            })
+            .collect();
+        let mut voice = Voice::new(0x3F);
+        let mut got = Vec::new();
+        voice.push(&octets, true, &mut got);
+        let lanes: Vec<(u8, bool)> = voice
+            .lanes()
+            .map(|l| (l.first_bit(), l.talking()))
+            .collect();
+        assert_eq!(lanes, [(3, false), (5, false), (7, true)]);
+        assert!(voice.talking() && voice.spoken());
+        // The mix is the speaking channel's speech, as if it were alone,
+        // a sample an octet once found.
+        let mut alone = Voice::new(0x03);
+        let mut want = Vec::new();
+        alone.push(&octets, true, &mut want);
+        assert!(want.iter().any(|&x| x != 0.0));
+        assert_eq!(got, want);
+        assert!(
+            got.len() + 2 * BLOCK * IDIM >= octets.len(),
+            "{}",
+            got.len()
+        );
     }
 
     /// The Q-Flex's silence fill as it comes out of its four TDM channels:

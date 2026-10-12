@@ -963,7 +963,7 @@ fn call_voice_card(
 
 fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<Action>) {
     ui.add_space(6.0);
-    let g728 = e.voice.iter().any(|v| v.is_some());
+    let g728 = e.voice.iter().any(|v| !v.is_empty());
     ui.horizontal(|ui| {
         let codec = if g728 { "G.728" } else { "G.711 A-law" };
         ui.label(RichText::new(format!("Voice: {} ({codec})", e.source)).strong());
@@ -997,7 +997,14 @@ fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<
     if let Some(a) = &e.audio {
         let s = a.status();
         let what = match (mixing, e.on_air) {
-            (true, Some(ch)) => format!("ch {ch} on air"),
+            (true, Some(ch)) => {
+                let name = e
+                    .rows
+                    .iter()
+                    .find(|r| r.0 == ch)
+                    .map(|r| r.1.trim().to_string());
+                format!("{} on air", name.unwrap_or_else(|| format!("ch {ch}")))
+            }
             (true, None) if one_at_a_time => "every G.728 channel, one voice at a time".into(),
             (true, None) => "every G.728 channel".into(),
             (false, _) => format!("TS {}", e.playing.unwrap_or_default()),
@@ -1035,42 +1042,59 @@ fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<
                 .striped(true)
                 .show(ui, |ui| {
                     // D&I++ carries n timeslots, shown as channels 1..=n
-                    // (which E1 timeslots they were is not sent).
-                    let last = e.channels.unwrap_or(31);
-                    for ts in 1..=last {
+                    // (which E1 timeslots they were is not sent); packets
+                    // the channels they name.
+                    for (ts, name) in &e.rows {
+                        let ts = *ts;
                         let db = e.levels_db[ts as usize];
-                        let name = if e.channels.is_some() { "ch" } else { "TS" };
-                        ui.label(RichText::new(format!("{name} {ts:2}")).monospace());
+                        ui.label(RichText::new(name).monospace());
                         level_bar(ui, db);
                         use decsat_engine::E1Coding as Coding;
                         let coding = e.coding.get(ts as usize).copied().unwrap_or_default();
-                        let voice = e.voice.get(ts as usize).copied().flatten();
+                        let voice = e.voice.get(ts as usize).map_or(&[][..], Vec::as_slice);
+                        let bits = |lanes: &mut dyn Iterator<Item = &(u8, bool)>| {
+                            lanes
+                                .map(|(b, _)| format!("{b}–{}", b + 1))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        let talking = voice.iter().any(|v| v.1);
+                        // Several channels in one timeslot: which speak.
+                        let codec = match voice.len() {
+                            0 | 1 => "G.728".to_string(),
+                            n => format!("{n} × G.728"),
+                        };
+                        let speech = if voice.len() > 1 {
+                            format!("speech in {}", bits(&mut voice.iter().filter(|v| v.1)))
+                        } else {
+                            "speech".into()
+                        };
                         let what = if ts == 16 && st.cas {
-                            "signalling"
-                        } else if let Some((_, talking)) = voice {
+                            "signalling".to_string()
+                        } else if !voice.is_empty() {
                             match (talking, mixing && one_at_a_time) {
-                                (true, true) if e.on_air == Some(ts) => "G.728 speech · on air",
-                                (true, true) => "G.728 speech · waiting",
-                                (true, false) => "G.728 speech",
-                                (false, _) => "G.728, silent",
+                                (true, true) if e.on_air == Some(ts) => format!("{codec} {speech} · on air"),
+                                (true, true) => format!("{codec} {speech} · waiting"),
+                                (true, false) => format!("{codec} {speech}"),
+                                (false, _) => format!("{codec}, silent"),
                             }
                         } else if db < -60.0 {
-                            "idle"
+                            "idle".into()
                         } else if matches!(coding, Coding::SubRate(_)) {
-                            "not G.711"
+                            "not G.711".into()
                         } else if coding == Coding::Steady {
-                            "steady"
+                            "steady".into()
                         } else if db > -12.0 {
-                            "data?"
+                            "data?".into()
                         } else {
-                            "active"
+                            "active".into()
                         };
                         let label = ui.label(RichText::new(format!("{db:5.0} dB {what}")).small());
-                        if let Some((bit, _)) = voice {
+                        if !voice.is_empty() {
                             label.on_hover_text(format!(
-                                "G.728 LD-CELP voice (16 kbit/s) in bits {}–{}, framed by a sync bit in each codeword (G.728 §3.11). ▶ and ● play and record it decoded.",
-                                bit,
-                                bit + 1
+                                "G.728 LD-CELP voice (16 kbit/s) in bits {}, framed by a sync bit in each codeword (G.728 §3.11). ▶ and ● play and record it decoded{}.",
+                                bits(&mut voice.iter()),
+                                if voice.len() > 1 { ", the channels mixed" } else { "" }
                             ));
                         } else if let Coding::SubRate(mask) = coding {
                             label.on_hover_text(format!(
@@ -1085,7 +1109,7 @@ fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<
                         // Playing because G.728 speech was found (the CDM-600
                         // voice preset): ⏹ turns that off for this VFO.
                         let auto_on = play.is_none()
-                            && (e.playing == Some(ts) || (mixing && voice.is_some()));
+                            && (e.playing == Some(ts) || (mixing && !voice.is_empty()));
                         let on = play == Some(ts) || auto_on;
                         if ui
                             .small_button(if on { "⏹" } else { "▶" })

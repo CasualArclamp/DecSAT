@@ -4,7 +4,8 @@
 //! TDM multiplex inside it — with every aligned 2 ms frame written out for
 //! analysis if asked (`--tdm-out`: 257 bytes of 0/1 a frame, the alignment
 //! bit first, then the sixteen 16-bit words). Timeslots in HDLC packets are
-//! looked through for G.728: speech, or the equipment's silence fill. BSC
+//! looked through for G.728: speech, or the equipment's silence fill, in
+//! every channel a timeslot carries (`--voice-out`: them all, mixed). BSC
 //! blocks are read as the PH-ML radar feed, HDLC frames of ASTERIX as the
 //! other radar feeds (`--radar-out`: a CSV, one line a track report). IP in
 //! HDLC frames is looked through for a radar station's monitoring traffic
@@ -37,8 +38,9 @@ pub struct PayloadArgs {
     /// multiplex, or multiplexes, as they come.
     #[arg(long)]
     pub inner_out: Option<PathBuf>,
-    /// Write a faster link's call voice here (.wav, 8 kHz): the call heard,
-    /// silence between its speech.
+    /// Write the voice here (.wav, 8 kHz), silence between its speech: a
+    /// faster link's call, or the G.728 in timeslot packets (every channel
+    /// mixed).
     #[arg(long)]
     pub voice_out: Option<PathBuf>,
     /// Write the radar feed's track reports here (.csv), when the data
@@ -78,11 +80,9 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     tdm.keep_frames = a.tdm_out.is_some();
     let mut esc = Vec::new();
     let mut inner = Vec::new();
-    // Timeslots in packets: each channel's octets, and a G.728 finder on
-    // every pair of neighbouring bits.
-    let mut slots: Vec<Option<(usize, decsat_modem::g728::Voice)>> =
-        (0..16).map(|_| None).collect();
-    let mut pcm = Vec::new();
+    // Timeslots in packets: each channel's octets, the bits changing in
+    // them, and a G.728 finder on those.
+    let mut slots: Vec<Option<SlotVoice>> = (0..32).map(|_| None).collect();
     // Modem frames during which each TDM channel read as active.
     let mut active = [0usize; decsat_modem::tdm257::CHANNELS];
     let mut metered = 0usize;
@@ -140,11 +140,9 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
             inner.extend_from_slice(&out.inner);
         }
         for (ts, octets) in &out.slots {
-            let (n, v) = slots[*ts as usize & 15]
-                .get_or_insert_with(|| (0, decsat_modem::g728::Voice::new(0xFE)));
-            *n += octets.len();
-            pcm.clear();
-            v.push(octets, false, &mut pcm);
+            slots[*ts as usize & 31]
+                .get_or_insert_with(SlotVoice::new)
+                .push(octets, a.voice_out.is_some());
         }
         // k × 128.5 kbit/s: the multiplex at k times the frame rate.
         let k = pay.stats.paradise.as_ref().map_or(1, |p| p.octets / 20);
@@ -205,22 +203,49 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         println!("  ESC: {} bits, {ones} ones", esc.len());
     }
     for (ts, s) in slots.iter().enumerate() {
-        let Some((n, v)) = s else { continue };
-        let what = match v.lane() {
-            Some(l) => format!(
-                "G.728 in bits {}–{}: {:.1} s of speech, {:.1} s of silence fill",
-                l.bits[0].leading_zeros() + 1,
-                l.bits[0].leading_zeros() + 2,
-                l.framer.talk_blocks as f64 * 0.04,
-                l.framer.fill_blocks as f64 * 0.04
-            ),
-            None => "no G.728 found".into(),
+        let Some(s) = s else { continue };
+        use decsat_modem::e1::Coding;
+        let bits = match s.coding() {
+            Coding::Unknown => "too short to judge".to_string(),
+            Coding::G711 => "G.711?".into(),
+            Coding::Steady => "steady".into(),
+            Coding::SubRate(m) => format!("bits {} change", Coding::bits_text(m)),
+        };
+        let lanes: Vec<String> = s
+            .voice
+            .iter()
+            .flat_map(|v| v.lanes())
+            .map(|l| {
+                format!(
+                    "{}–{} ({:.1} s speech, {:.1} s fill)",
+                    l.first_bit(),
+                    l.first_bit() + 1,
+                    l.framer.talk_blocks as f64 * 0.04,
+                    l.framer.fill_blocks as f64 * 0.04
+                )
+            })
+            .collect();
+        let what = match lanes.len() {
+            0 => "no G.728 found".to_string(),
+            1 => format!("G.728 in bits {}", lanes[0]),
+            n => format!("{n} G.728 channels, bits {}", lanes.join(", ")),
         };
         println!(
-            "  channel {:02x}h: {:.1} s of 64 kbit/s timeslot · {what}",
-            ts << 4,
-            *n as f64 / 8000.0
+            "  channel {:02x}h: {:.1} s of 64 kbit/s timeslot · {bits} · {what}",
+            decsat_modem::slotpkt::channel_byte(ts as u8),
+            s.octets as f64 / 8000.0
         );
+    }
+    // No call voice from a faster link: the timeslots' G.728, mixed.
+    if voice.is_empty() {
+        for s in slots.iter().flatten() {
+            if voice.len() < s.pcm.len() {
+                voice.resize(s.pcm.len(), 0);
+            }
+            for (v, &x) in voice.iter_mut().zip(&s.pcm) {
+                *v = (f32::from(*v) + x.clamp(-1.0, 1.0) * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
     }
     if let Some(p) = &a.inner_out {
         std::fs::write(p, &inner).with_context(|| format!("writing {}", p.display()))?;
@@ -270,6 +295,67 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A timeslot from packets: its changing bits judged over its first half
+/// second (as the app's E1 stage does), then a G.728 finder on them.
+struct SlotVoice {
+    octets: usize,
+    judge: decsat_modem::e1::BitActivity,
+    /// Octets held while the bits are judged, for the finder to start on.
+    held: Vec<u8>,
+    voice: Option<decsat_modem::g728::Voice>,
+    /// Its voice, a sample an octet from the start (silence until found).
+    pcm: Vec<f32>,
+}
+
+impl SlotVoice {
+    fn new() -> Self {
+        Self {
+            octets: 0,
+            judge: decsat_modem::e1::BitActivity::new(),
+            held: Vec::new(),
+            voice: None,
+            pcm: Vec::new(),
+        }
+    }
+
+    fn coding(&self) -> decsat_modem::e1::Coding {
+        self.judge.coding()[1]
+    }
+
+    fn push(&mut self, octets: &[u8], decode: bool) {
+        use decsat_modem::e1::{Coding, TIMESLOTS};
+        let start = self.octets;
+        self.octets += octets.len();
+        for &o in octets {
+            let mut f = [0xD5; TIMESLOTS];
+            f[1] = o;
+            self.judge.push(&f);
+        }
+        let had = self.pcm.len();
+        // Rust note: the judgement is read first; `&mut self.voice` below
+        // borrows that field alone, and `self.coding()` would borrow all.
+        let coding = self.coding();
+        match (&mut self.voice, coding) {
+            (Some(v), _) => v.push(octets, decode, &mut self.pcm),
+            (None, Coding::SubRate(m)) => {
+                self.held.extend_from_slice(octets);
+                let mut v = decsat_modem::g728::Voice::new(m);
+                v.push(&self.held, decode, &mut self.pcm);
+                self.voice = Some(v);
+                self.held = Vec::new();
+            }
+            (None, Coding::Unknown) => self.held.extend_from_slice(octets),
+            (None, _) => self.held.clear(),
+        }
+        // The first speech out: silence before it, so that it plays where
+        // it was said (its decoder runs a block or two behind the octets).
+        if had == 0 && !self.pcm.is_empty() {
+            let lead = (start + octets.len()).saturating_sub(self.pcm.len());
+            self.pcm.splice(0..0, std::iter::repeat_n(0.0, lead));
+        }
+    }
 }
 
 /// What bridged-Ethernet HDLC frames carry: their flows by VLAN, IPv4

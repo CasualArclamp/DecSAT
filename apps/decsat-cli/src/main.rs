@@ -186,7 +186,8 @@ enum Command {
         /// dropped: the file waits for slow decoders).
         #[arg(long)]
         fast: bool,
-        /// Record this E1 timeslot (or D&I++ channel) to a .wav in --out.
+        /// Record this E1 timeslot (or D&I++ channel, or packet channel:
+        /// its byte over 8, 18h as 3) to a .wav in --out.
         #[arg(long)]
         e1_record: Option<u8>,
         /// fastlink: record the TDM multiplex's call voice (G.728) to a

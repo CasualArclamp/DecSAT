@@ -504,18 +504,25 @@ pub(crate) fn report(st: &VfoStatus) {
         if let Some((p, n)) = &e.record_file {
             println!("  recorded to {} ({n} bytes)", p.display());
         }
-        for (ts, db) in e.levels_db.iter().enumerate().skip(1) {
-            if *db > -60.0 {
+        for (ts, name) in &e.rows {
+            let ts = *ts as usize;
+            let db = e.levels_db.get(ts).copied().unwrap_or(f32::NEG_INFINITY);
+            if db > -60.0 {
                 use decsat_modem::e1::Coding;
-                let voice = e.voice.get(ts).copied().flatten();
+                let voice = e.voice.get(ts).map_or(&[][..], Vec::as_slice);
                 let note = match e.coding.get(ts).copied().unwrap_or_default() {
-                    _ if voice.is_some() => {
-                        let (b, talking) = voice.unwrap_or_default();
-                        format!(
-                            " · G.728 voice in bits {b}–{} ({}; recorded decoded)",
-                            b + 1,
-                            if talking { "speaking" } else { "silent now" }
-                        )
+                    _ if !voice.is_empty() => {
+                        let lanes: Vec<String> = voice
+                            .iter()
+                            .map(|(b, talking)| {
+                                format!(
+                                    "bits {b}–{} {}",
+                                    b + 1,
+                                    if *talking { "speaking" } else { "silent now" }
+                                )
+                            })
+                            .collect();
+                        format!(" · G.728 voice in {} (recorded decoded)", lanes.join(", "))
                     }
                     Coding::SubRate(m) => format!(
                         " · not G.711: only bits {} change (sub-rate channels or compressed voice)",
@@ -524,8 +531,7 @@ pub(crate) fn report(st: &VfoStatus) {
                     Coding::Steady => " · steady (idle pattern or tone)".into(),
                     _ => String::new(),
                 };
-                let name = if e.channels.is_some() { "ch" } else { "TS" };
-                println!("  {name} {ts:2}: {db:6.1} dBFS{note}");
+                println!("  {name}: {db:6.1} dBFS{note}");
             }
         }
     }
@@ -642,9 +648,9 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
         );
     }
     if let Some(s) = &p.slots {
-        let ch: Vec<String> = (1..16)
+        let ch: Vec<String> = (1..32u8)
             .filter(|c| s.channels >> c & 1 == 1)
-            .map(|c| format!("{:02x}h", c << 4))
+            .map(|c| format!("{:02x}h", decsat_modem::slotpkt::channel_byte(c)))
             .collect();
         println!(
             "  timeslot packets: {} packets ({} carrying timeslots), {} lost, channels {}",

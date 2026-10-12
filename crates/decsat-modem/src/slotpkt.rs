@@ -14,7 +14,7 @@
 //! | 0       | 1                                                |
 //! | 1–4     | sequence count, one per packet on the link       |
 //! | 5–7     | 0                                                |
-//! | 8–15    | channel: `10h`, `20h`, … (here timeslot 1, 2, …) |
+//! | 8–15    | channel: a multiple of `08h` (`10h`, `18h`, `20h` seen) |
 //! | 16–23   | type: `13h` for timeslot data                    |
 //! | 24–28   | `0 x x x 0` (the middle three vary; not known)   |
 //! | 29–380  | the timeslot: 44 octets, MSB first (5.5 ms)      |
@@ -24,9 +24,15 @@
 //! Each channel's packets, joined in order, are a continuous 64 kbit/s
 //! timeslot: its 1 ms fixed pattern runs on unbroken from one packet into
 //! the next. On the sites recorded the timeslot is the CDM-600L's sub-rate
-//! voice — G.728 in bits 2–3 (see [`crate::g728`]). Other packet types
-//! (`13h` aside) come now and then, in the same 30 + 8n bit shape, and a
-//! site with nothing to say sends just those, every two seconds.
+//! voice — G.728 in bits 2–3 (see [`crate::g728`]). The ML–PH trunk
+//! (ASA176, 1024 kbit/s) carries channels `18h` and `20h`: G.728 again, but
+//! three channels in `18h` (bits 3–4, 5–6, 7–8) and one in `20h` (7–8).
+//! Channels are numbered here by the byte over 8 (`18h` is 3), so that
+//! they fit an E1's timeslots 1–31; what the equipment calls them is not
+//! known. Other packet types (`13h` aside) come now and then, in the same
+//! 30 + 8n bit shape, and a site with nothing to say sends just those,
+//! every two seconds. On the trunk, type `40h` (channel `58h`) carries IP
+//! from bit 125 on, LSB first: not read yet.
 
 /// Bits of a timeslot-data packet before its octets, and after them.
 const HEAD: usize = 29;
@@ -120,10 +126,16 @@ fn byte(bits: &[u8], i: usize) -> u8 {
         .fold(0, |a, &b| (a << 1) | b)
 }
 
-/// The timeslot a channel byte stands for: `10h` is 1, `20h` 2, … `F0h`
-/// 15; other values carry none.
+/// The channel number a channel byte stands for: the byte over 8, `08h`
+/// to `F8h` as 1 to 31 (`18h` is 3); other values carry none.
 pub fn timeslot(channel: u8) -> Option<u8> {
-    (channel & 0x0F == 0 && channel != 0).then_some(channel >> 4)
+    (channel & 0x07 == 0 && channel != 0).then_some(channel >> 3)
+}
+
+/// The channel byte of channel number `ts` ([`timeslot`] undone), for
+/// naming it as the line does: `18h`.
+pub fn channel_byte(ts: u8) -> u8 {
+    ts << 3
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -133,8 +145,9 @@ pub struct SlotStats {
     pub slot_packets: u64,
     /// Sequence counts skipped: packets lost (or not checking).
     pub lost: u64,
-    /// Channel bytes seen carrying timeslots, as a mask over `channel >> 4`.
-    pub channels: u16,
+    /// Channels seen carrying timeslots, as a mask over their numbers
+    /// ([`timeslot`]).
+    pub channels: u32,
 }
 
 /// Packets in, each channel's timeslot octets out.
@@ -211,7 +224,7 @@ pub fn packet_bits(seq: u8, ts: u8, octets: &[u8]) -> Vec<u8> {
     let lsb = |v: u8| (0..8).map(move |k| v >> k & 1);
     let mut p: Vec<u8> = Vec::new();
     p.extend(lsb(1 | (seq & 0x0F) << 1));
-    p.extend(lsb(ts << 4));
+    p.extend(lsb(channel_byte(ts)));
     p.extend(lsb(TYPE_SLOTS));
     p.extend([0, 1, 0, 1, 0]);
     for &o in octets {
@@ -283,6 +296,24 @@ mod tests {
         assert_eq!(rx.stats.channels, 0b110);
         assert_eq!(got[1], sent[1]);
         assert_eq!(got[2], sent[2]);
+    }
+
+    #[test]
+    fn channel_bytes_and_numbers() {
+        assert_eq!(timeslot(0x18), Some(3));
+        assert_eq!(timeslot(0x20), Some(4));
+        assert_eq!(timeslot(0x58), Some(11));
+        assert_eq!(timeslot(0x00), None);
+        assert_eq!(timeslot(0x1C), None);
+        assert_eq!(channel_byte(3), 0x18);
+        // Packets on channel 18h (as the ML–PH trunk sends) come out.
+        let mut rx = SlotRx::new();
+        let mut out = Vec::new();
+        let line: Vec<u8> = (0..4u8).flat_map(|k| packet_bits(k, 3, &[k; 44])).collect();
+        rx.push(&line, &mut out);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|(ts, o)| *ts == 3 && o.len() == 44));
+        assert_eq!(rx.stats.channels, 1 << 3);
     }
 
     #[test]
