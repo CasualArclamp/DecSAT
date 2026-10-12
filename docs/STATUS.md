@@ -2980,3 +2980,34 @@ and the radars are before anything is decoded. Checked unattended (scratch
 settings) on the mixed capture: the radar VFO tagged RADAR, the trunk
 ADS-B; both kept; the same capture opened with no VFOs showed both tags on
 their carriers.
+
+**Every Q-Flex in the 15-minute capture, searched for ADS-B** (Rory: "look
+for ADS-B on the Q-Flex"). The 1760.6 MHz, 4 MS/s, 900 s capture holds 14
+Q-Flex FastLinks (by the plan, with this LNB's ~+24 kHz: Broome - CAP 3 ×,
+Tindal - CAP 2 ×, KAR - MEL 4 ×, and eleven at 95 kS/s). All decoded in
+full but one:
+
+- **The ten 128.5 kbit/s links decoded carry G.728 voice only.** Speech
+  on most (24–415 s of 900). Searched their TDM multiplex for HDLC frames
+  with a good FCS-16 or FCS-32 (three or more), in each of the 16 channels
+  and every adjacent pair, each half of the word as a 64 kbit/s octet
+  timeslot in both bit orders, the whole word both ways, and the ESC
+  channel, each plain and inverted (a search that finds planted
+  CAT021-in-HDLC frames in a channel, all 300): nothing. Two links show
+  channels 1–4 active for ~4 minutes with no speech decoded; their
+  activity splits into two groups sharing channel 1 and comes in talk
+  spurts — the two-calls-sharing-channels layout again, not data.
+- **The three faster links' site IP is encrypted** — the 3 × link's too
+  (15 of its 29 flows flagged: the 233.71.15.1:50000 multicast, SNMP; its
+  TCP port 5928 flows random in 16-octet blocks as well; the rest OSPF,
+  ICMP, and NTP without checksums). The multicast is the only candidate
+  for an ADS-B or radar feed, and it cannot be read.
+- **One strong 95 kS/s carrier does not demodulate** (−1236.7 kHz: the
+  plan's ASA187 LEO - MEL; 20 dB over the floor): FastLink rate and
+  roll-off exactly, but no lock as QPSK, 8PSK, 8QAM, 16QAM or 16APSK, and
+  no FastLink sync, Viterbi or TPC 2964. Two carriers on one frequency
+  (Paradise's paired-carrier mode, each modem cancelling its own) would
+  look like this; not pursued.
+- ASA148 LT-ML (TPC 2964, 128 kS/s, a CDM-570L pair): idle flags.
+
+So no ADS-B or radar in clear on any Q-Flex recorded so far.
