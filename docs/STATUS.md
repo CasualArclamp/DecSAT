@@ -2784,3 +2784,38 @@ station's field monitor (KMDB, RAB and GBS set).
 - Open (the scope, in the PH-BN session's hands): ADS-B targets placed
   round a site keyed by SAC/SIC, the map under an ADS-B feed (its origin
   is no radar), the details box's "seen by" and "from radar" for ADS-B.
+
+## One voice at a time inside a timeslot; radar places kept by radar (2026-10-12)
+
+**Two channels of one timeslot talking at once** (Rory, live on the ML–PH
+trunk: ch 18h "3 × G.728 speech in 3–4, 7–8 · on air", both heard). The
+voice floor gave one talker at a time across carriers and timeslots, but
+`g728::Voice` mixed every channel of a timeslot. Now each G.728 channel is
+a talker of its own: `floor::lane_channel(timeslot, first bit)` on the
+app-wide floor in the voice preset's mix, and a `floor::LocalFloor` (same
+rule and hold) among the channels of a timeslot played with ▶ or recorded
+by itself. `Voice::set_heard(bits)` mixes only the channels heard, the
+others decoded and dropped so all stay in step; with the floor's hold off
+all are mixed, as before. `E1View::lane_heard` names the one heard; the
+row reads "… speech in 3–4, 7–8 · on air 7–8" (or "· hearing 7–8" when
+played by itself). `decsat payload --voice-out` still mixes (a file keeps
+everyone). Tests: one of two talkers heard is that one alone; lane
+channels both ways.
+
+**Radar places by radar, not by VFO** (Rory: "so you don't have to change
+it when you go to a different radar"). The scope kept a hand-set place as
+`radar_site.<VFO name>`: another radar on a VFO of the same name took it,
+and a radar on a new VFO had none. Now `prefs::RadarId`: an ASTERIX
+source by SAC/SIC (`radar_site.sac4.sic22`), a feed that does not say who
+it is (the BSC feed) by its carrier's RF (`radar_site.rf12328083khz`,
+matched within 10 kHz, so an LO trim or the drift a VFO follows is the
+same radar), else the VFO's name as before. The place an ASTERIX feed says
+(I034/120) is kept under its SAC/SIC as it comes, so the map is there at
+once next time, before the north marker; Site… keeps a hand-set place under
+the radar's key, and says which. A place kept for a VFO's name moves to the
+carrier's key the first time a BSC feed asks for it. The scope gets each
+VFO's RF (band centre + offset) from `ScopeInput::rf_hz` and the feeds'.
+Checked unattended with a scratch settings folder: the synthetic PH-BN
+carrier kept `radar_site.sac4.sic22`; the PH-ML recording with a made-up
+place under `radar_site.VFO 1` moved it to `radar_site.rf12328083khz` and
+drew its map switch enabled.

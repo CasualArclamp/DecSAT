@@ -28,29 +28,124 @@ pub fn settings_dir() -> Option<PathBuf> {
     Some(config_base()?.join("DecSAT"))
 }
 
-/// The settings key for a radar's place, by its VFO's name.
+/// The settings key a radar's place was kept under before places were kept
+/// by radar (2026-10-12): its VFO's name.
 fn radar_site_key(vfo: &str) -> String {
     format!("radar_site.{}", vfo.replace('=', "_"))
 }
 
-/// Where a feed's radar is, for feeds that do not say (the BSC feed), as
-/// the user set it for the VFO: (latitude, longitude). Kept in the user's
-/// settings only — a radar's place is theirs to know, not the project's.
-pub fn radar_site(vfo: &str) -> Option<(f64, f64)> {
-    let key = radar_site_key(vfo);
-    let all = read_all();
-    let v = &all.iter().find(|(k, _)| *k == key)?.1;
+/// Which radar a place belongs to — the radar itself, not the VFO showing
+/// it, so that going to another radar (another VFO, a retune, a VFO named
+/// as another was yesterday) brings that radar's own place. Places are
+/// kept in the user's settings only: a radar's place is theirs to know,
+/// not the project's.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RadarId {
+    /// An ASTERIX source (a radar, an ADS-B ground station): SAC and SIC.
+    Source(u8, u8),
+    /// A feed that does not say who it is (the BSC feed): its carrier's
+    /// RF, Hz.
+    Carrier(f64),
+    /// Not even the RF known (a recording named by its offset): the VFO's
+    /// name, as before.
+    Vfo(String),
+}
+
+/// A carrier kept within this of another is the same carrier (an LO trim,
+/// a VFO set a little off, the drift it follows), Hz: the band's radar
+/// carriers sit tens of kHz apart.
+pub const SAME_CARRIER_HZ: f64 = 10e3;
+
+impl RadarId {
+    /// Its settings key (a carrier's: its RF to the kHz).
+    fn key(&self) -> String {
+        match self {
+            RadarId::Source(sac, sic) => format!("radar_site.sac{sac}.sic{sic}"),
+            RadarId::Carrier(hz) => format!("radar_site.rf{:.0}khz", hz / 1e3),
+            RadarId::Vfo(name) => radar_site_key(name),
+        }
+    }
+
+    /// The same radar: a carrier within half the tolerance (so a VFO
+    /// following its carrier's drift is not a new radar every frame).
+    pub fn same(&self, other: &RadarId) -> bool {
+        match (self, other) {
+            (RadarId::Carrier(a), RadarId::Carrier(b)) => (a - b).abs() <= SAME_CARRIER_HZ / 2.0,
+            _ => self == other,
+        }
+    }
+
+    /// For display: "SAC 4 SIC 22", "the 12328.083 MHz carrier", "VFO 1".
+    pub fn label(&self) -> String {
+        match self {
+            RadarId::Source(sac, sic) => format!("SAC {sac} SIC {sic}"),
+            RadarId::Carrier(hz) => format!("the {:.3} MHz carrier", hz / 1e6),
+            RadarId::Vfo(name) => name.clone(),
+        }
+    }
+}
+
+fn parse_site(v: &str) -> Option<(f64, f64)> {
     let (lat, lon) = v.split_once(',')?;
     Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
 }
 
-/// Set (or with `None`, forget) a radar's place for a VFO.
-pub fn set_radar_site(vfo: &str, site: Option<(f64, f64)>) -> std::io::Result<()> {
-    let key = radar_site_key(vfo);
+fn site_text((lat, lon): (f64, f64)) -> String {
+    format!("{lat:.6},{lon:.6}")
+}
+
+/// The key radar `id`'s place is kept under, if it is: for a carrier, the
+/// nearest kept within [`SAME_CARRIER_HZ`].
+fn kept_key(all: &[(String, String)], id: &RadarId) -> Option<String> {
+    match id {
+        RadarId::Carrier(hz) => all
+            .iter()
+            .filter_map(|(k, _)| {
+                let khz: f64 = k
+                    .strip_prefix("radar_site.rf")?
+                    .strip_suffix("khz")?
+                    .parse()
+                    .ok()?;
+                let d = (khz * 1e3 - hz).abs();
+                (d <= SAME_CARRIER_HZ).then_some((d, k.clone()))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, k)| k),
+        _ => {
+            let key = id.key();
+            all.iter().any(|(k, _)| *k == key).then_some(key)
+        }
+    }
+}
+
+/// Where radar `id` is, as kept: (latitude, longitude). A carrier with
+/// nothing kept takes the place kept for VFO `vfo` before places were kept
+/// by radar, and keeps it as its own from then on (the BSC feed's place,
+/// set by hand on its VFO).
+pub fn radar_site(id: &RadarId, vfo: &str) -> Option<(f64, f64)> {
+    let mut all = read_all();
+    if let Some(key) = kept_key(&all, id) {
+        return parse_site(&all.iter().find(|(k, _)| *k == key)?.1);
+    }
+    if !matches!(id, RadarId::Carrier(_)) {
+        return None;
+    }
+    let old = radar_site_key(vfo);
+    let site = parse_site(&all.iter().find(|(k, _)| *k == old)?.1)?;
+    all.retain(|(k, _)| *k != old);
+    all.push((id.key(), site_text(site)));
+    let _ = write_all(&all);
+    Some(site)
+}
+
+/// Keep (or with `None`, forget) radar `id`'s place: a carrier's under the
+/// key it is already kept under, when it is.
+pub fn set_radar_site(id: &RadarId, site: Option<(f64, f64)>) -> std::io::Result<()> {
+    let mut all = read_all();
+    let key = kept_key(&all, id).unwrap_or_else(|| id.key());
     match site {
-        Some((lat, lon)) => write_key(&key, &format!("{lat:.6},{lon:.6}")),
+        Some(site) => write_key(&key, &site_text(site)),
         None => {
-            let mut all = read_all();
             all.retain(|(k, _)| *k != key);
             write_all(&all)
         }
@@ -296,4 +391,62 @@ pub fn set_output_dir(dir: PathBuf) -> std::io::Result<()> {
     write_key("output_dir", &dir.to_string_lossy())?;
     *OUTPUT_DIR.lock().unwrap() = Some(dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kept(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_radar_is_found_by_itself_not_its_vfo() {
+        // Made-up places.
+        let all = kept(&[
+            ("radar_site.sac4.sic99", "-10.000000,120.000000"),
+            ("radar_site.rf12300050khz", "-11.000000,121.000000"),
+            ("radar_site.rf12300090khz", "-12.000000,122.000000"),
+            ("radar_site.VFO 1", "-13.000000,123.000000"),
+        ]);
+        assert_eq!(
+            kept_key(&all, &RadarId::Source(4, 99)).as_deref(),
+            Some("radar_site.sac4.sic99")
+        );
+        assert_eq!(kept_key(&all, &RadarId::Source(4, 98)), None);
+        // A carrier a little off (an LO trim, drift): the nearest kept one
+        // within 10 kHz.
+        assert_eq!(
+            kept_key(&all, &RadarId::Carrier(12_300_053_400.0)).as_deref(),
+            Some("radar_site.rf12300050khz")
+        );
+        assert_eq!(
+            kept_key(&all, &RadarId::Carrier(12_300_082_000.0)).as_deref(),
+            Some("radar_site.rf12300090khz")
+        );
+        assert_eq!(kept_key(&all, &RadarId::Carrier(12_300_200_000.0)), None);
+        assert_eq!(
+            RadarId::Carrier(12_300_053_400.0).key(),
+            "radar_site.rf12300053khz"
+        );
+        assert_eq!(
+            parse_site(&all[0].1),
+            Some((-10.0, 120.0)),
+            "kept as lat,lon"
+        );
+    }
+
+    #[test]
+    fn a_carrier_following_its_drift_is_the_same_radar() {
+        let a = RadarId::Carrier(12_300_050_000.0);
+        assert!(a.same(&RadarId::Carrier(12_300_052_000.0)));
+        assert!(!a.same(&RadarId::Carrier(12_300_070_000.0)));
+        assert!(!a.same(&RadarId::Source(4, 99)));
+        assert!(RadarId::Source(4, 22).same(&RadarId::Source(4, 22)));
+        assert_eq!(RadarId::Source(4, 22).label(), "SAC 4 SIC 22");
+    }
 }

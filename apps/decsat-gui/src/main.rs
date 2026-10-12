@@ -1407,21 +1407,27 @@ impl eframe::App for App {
                     let fec = self.statuses.get(&id).and_then(|st| st.fec.as_ref());
                     // Every other VFO's radar feed, for a VFO whose IP
                     // carries only a station's monitoring traffic.
+                    // A carrier's RF: the band centre's (when known) plus
+                    // its VFO's offset.
+                    let centre = self.rf_center();
+                    let rf_of = |v: &UiVfo| (centre > 0.0).then_some(centre + v.settings.offset_hz);
                     let feeds = self
                         .vfos
                         .iter()
                         .filter(|v| v.id != id)
                         .filter_map(|v| {
                             let r = self.statuses.get(&v.id)?.fec.as_ref()?.radar.as_ref()?;
-                            Some((v.id, v.settings.name.clone(), r))
+                            Some((v.id, v.settings.name.clone(), r, rf_of(v)))
                         })
                         .collect();
+                    let rf_hz = self.vfos.iter().find(|v| v.id == id).and_then(rf_of);
                     let inp = radar_scope::ScopeInput {
                         radar: fec.and_then(|f| f.radar.as_ref()),
                         stations: fec
                             .and_then(|f| f.gse.as_ref())
                             .map_or(&[][..], |g| g.radar_stations.as_slice()),
                         feeds,
+                        rf_hz,
                     };
                     self.radar_scope.show(ui.ctx(), &name, inp);
                 }

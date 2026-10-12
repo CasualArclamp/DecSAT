@@ -34,6 +34,7 @@ use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
 use crate::adsb_names::AdsbNames;
+use crate::prefs::RadarId;
 use crate::radar_map::{Frame, LatLon, MapLayer, Style};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
@@ -80,9 +81,10 @@ pub struct RadarScope {
     /// in a box over the PPI's corner.
     selected: Option<u16>,
     map_loaded: bool,
-    /// The VFO whose hand-set radar place is loaded, that place, and the
-    /// place editor's text while it is open.
-    site_vfo: Option<String>,
+    /// The radar whose kept place is loaded (by the radar, not the VFO:
+    /// see [`RadarId`]), that place, and the place editor's text while it
+    /// is open.
+    site_id: Option<RadarId>,
     manual_site: Option<LatLon>,
     site_edit: Option<String>,
 }
@@ -94,8 +96,11 @@ pub struct ScopeInput<'a> {
     /// Radar stations' monitoring traffic in its IP.
     pub stations: &'a [StationView],
     /// Other VFOs' radar feeds, for a monitoring-only VFO's PPI: id, name,
-    /// feed.
-    pub feeds: Vec<(VfoId, String, &'a RadarStageView)>,
+    /// feed, and the RF of its carrier when known (Hz).
+    pub feeds: Vec<(VfoId, String, &'a RadarStageView, Option<f64>)>,
+    /// The RF of this VFO's carrier, when known (Hz): what a feed that does
+    /// not say who it is is known by.
+    pub rf_hz: Option<f64>,
 }
 
 /// A unit silent this long (s, the station's clock) is shown as quiet: the
@@ -208,7 +213,7 @@ impl Default for RadarScope {
             map_style: Style::Dark,
             map_brightness: 0.8,
             map_loaded: false,
-            site_vfo: None,
+            site_id: None,
             manual_site: None,
             site_edit: None,
             airports: Default::default(),
@@ -285,11 +290,6 @@ impl RadarScope {
                 .unwrap_or_default();
             self.map_brightness = brightness;
         }
-        if self.site_vfo.as_deref() != Some(name) {
-            self.site_vfo = Some(name.to_string());
-            self.manual_site = crate::prefs::radar_site(name).map(|(lat, lon)| LatLon { lat, lon });
-            self.site_edit = None;
-        }
         // Callsigns from an ADS-B feed decoded on another VFO, when there
         // is one (see `crate::adsb_names`).
         self.names.set_local(
@@ -308,7 +308,7 @@ impl RadarScope {
             .show(ctx, |ui| {
                 if let Some(r) = inp.radar {
                     self.follow(Some(own));
-                    self.contents(ui, r, inp.stations, None);
+                    self.contents(ui, r, inp.stations, None, (name, inp.rf_hz));
                 } else if !inp.stations.is_empty() {
                     // Monitoring only: the targets of another VFO's feed.
                     let chosen = self.targets_menu(ui, &inp.feeds);
@@ -325,7 +325,9 @@ impl RadarScope {
                             Some("No targets: choose a radar feed above to draw its targets.")
                         }
                     };
-                    self.contents(ui, feed.map_or(&empty, |f| f.2), inp.stations, note);
+                    // The radar's place is the drawn feed's.
+                    let whose = feed.map_or((name, inp.rf_hz), |f| (f.1.as_str(), f.3));
+                    self.contents(ui, feed.map_or(&empty, |f| f.2), inp.stations, note, whose);
                 } else {
                     ui.label(
                         "No radar feed on this VFO yet: a radar's track feed (BSC blocks, as \
@@ -356,7 +358,7 @@ impl RadarScope {
     fn targets_menu(
         &mut self,
         ui: &mut Ui,
-        feeds: &[(VfoId, String, &RadarStageView)],
+        feeds: &[(VfoId, String, &RadarStageView, Option<f64>)],
     ) -> Option<VfoId> {
         if self.targets_chosen
             && self
@@ -368,10 +370,11 @@ impl RadarScope {
         if !self.targets_chosen {
             self.targets = (feeds.len() == 1).then(|| feeds[0].0);
         }
-        let label = |f: &(VfoId, String, &RadarStageView)| match f.2.radar.source_label() {
-            Some(s) => format!("{} · {s}", f.1),
-            None => f.1.clone(),
-        };
+        let label =
+            |f: &(VfoId, String, &RadarStageView, Option<f64>)| match f.2.radar.source_label() {
+                Some(s) => format!("{} · {s}", f.1),
+                None => f.1.clone(),
+            };
         ui.horizontal_wrapped(|ui| {
             ui.label("Targets from");
             let shown = self
@@ -409,14 +412,18 @@ impl RadarScope {
         self.targets
     }
 
+    /// The scope for feed `r`, whose VFO is `whose` (its name, and its
+    /// carrier's RF when known).
     fn contents(
         &mut self,
         ui: &mut Ui,
         r: &RadarStageView,
         stations: &[StationView],
         note: Option<&str>,
+        whose: (&str, Option<f64>),
     ) {
         let v = &r.radar;
+        self.keep_site(v, whose);
         // The feed's header (none without a feed: the targets menu above
         // says why).
         let header = |ui: &mut Ui| {
@@ -517,13 +524,23 @@ impl RadarScope {
                 );
             }
             let feed_says = v.site.is_some();
+            let who = self
+                .site_id
+                .as_ref()
+                .map_or_else(|| "this radar".to_string(), RadarId::label);
             if ui
                 .add_enabled(!feed_says, egui::Button::new("Site…").small())
                 .on_hover_text(match self.manual_site {
-                    Some(s) => format!("The radar, as set: {:.6}, {:.6}", s.lat, s.lon),
-                    None => "Set where the radar is, for the map".into(),
+                    Some(s) => format!(
+                        "The radar, as kept for {who}: {:.6}, {:.6} (any VFO on it finds it)",
+                        s.lat, s.lon
+                    ),
+                    None => format!("Set where the radar is, for the map: kept for {who}"),
                 })
-                .on_disabled_hover_text("The feed says where its radar is")
+                .on_disabled_hover_text(format!(
+                    "The feed says where its radar is (kept for {who}, so the map is there \
+                     before it says again)"
+                ))
                 .clicked()
             {
                 self.site_edit = Some(
@@ -1080,8 +1097,39 @@ impl RadarScope {
         close
     }
 
-    /// Where the feed's radar is: as the feed says (ASTERIX), else as set
-    /// by hand for this VFO.
+    /// The radar's kept place, for the radar feed `v` is: loaded when the
+    /// radar changes (another feed, a retune); a place the feed says that
+    /// differs from the kept one is kept, so that it is there at once next
+    /// time.
+    fn keep_site(&mut self, v: &RadarView, (name, rf): (&str, Option<f64>)) {
+        let id = match (v.source, rf) {
+            (Some((sac, sic)), _) => RadarId::Source(sac, sic),
+            (None, Some(hz)) => RadarId::Carrier(hz),
+            (None, None) => RadarId::Vfo(name.to_string()),
+        };
+        if !self.site_id.as_ref().is_some_and(|k| k.same(&id)) {
+            self.manual_site =
+                crate::prefs::radar_site(&id, name).map(|(lat, lon)| LatLon { lat, lon });
+            self.site_id = Some(id.clone());
+            self.site_edit = None;
+        }
+        if let Some(s) = v.site {
+            let said = LatLon {
+                lat: s.lat,
+                lon: s.lon,
+            };
+            let moved = self
+                .manual_site
+                .is_none_or(|k| (k.lat - said.lat).abs() + (k.lon - said.lon).abs() > 1e-5);
+            if moved {
+                let _ = crate::prefs::set_radar_site(&id, Some((said.lat, said.lon)));
+                self.manual_site = Some(said);
+            }
+        }
+    }
+
+    /// Where the feed's radar is: as the feed says (ASTERIX), else as kept
+    /// for the radar (said by its feed before, or set by hand).
     fn site_of(&self, v: &RadarView) -> Option<LatLon> {
         v.site
             .map(|s| LatLon {
@@ -1120,14 +1168,19 @@ impl RadarScope {
                 close = true;
             }
             ui.label(
-                RichText::new("kept in your settings only, for this VFO's name")
-                    .weak()
-                    .small(),
+                RichText::new(format!(
+                    "kept in your settings only, for {}",
+                    self.site_id
+                        .as_ref()
+                        .map_or_else(|| "this radar".to_string(), RadarId::label)
+                ))
+                .weak()
+                .small(),
             );
         });
         if let Some(site) = set {
-            if let Some(vfo) = &self.site_vfo {
-                let _ = crate::prefs::set_radar_site(vfo, site.map(|p| (p.lat, p.lon)));
+            if let Some(id) = &self.site_id {
+                let _ = crate::prefs::set_radar_site(id, site.map(|p| (p.lat, p.lon)));
             }
             if site.is_some() {
                 self.map_on = true;
