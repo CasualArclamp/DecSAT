@@ -89,6 +89,12 @@ pub struct RadarScope {
     /// drawn over a radar's PPI at their own places, and whether to.
     overlay: Vec<AdsbFeed>,
     adsb_on: bool,
+    /// Other radars' feeds decoded on other VFOs, their places known: their
+    /// tracks and their sites drawn over this PPI too, and whether to; each
+    /// VFO's radar and kept place (looked up once a radar).
+    others: Vec<OtherRadar>,
+    others_on: bool,
+    other_sites: std::collections::HashMap<VfoId, (RadarId, Option<LatLon>)>,
     /// While an ADS-B feed in step with the radar is decoded: the radar's
     /// tracks no ADS-B aircraft is, drawn red (see `without_adsb`).
     no_adsb: Option<std::collections::HashSet<u16>>,
@@ -115,6 +121,23 @@ struct AdsbFeed {
 impl AdsbFeed {
     /// How far its clock is from a radar feed's at `tod`, s (round
     /// midnight the short way); `None` if either is not known yet.
+    fn skew(&self, tod: Option<f64>) -> Option<f64> {
+        let (a, b) = (tod?, self.tod?);
+        Some(((a - b + 43_200.0).rem_euclid(86_400.0) - 43_200.0).abs())
+    }
+}
+
+/// Another radar's feed on another VFO, for drawing over this PPI: its
+/// name, where it is, its clock, its tracks (x/y from its own site).
+struct OtherRadar {
+    name: String,
+    site: LatLon,
+    tod: Option<f64>,
+    tracks: Vec<Track>,
+}
+
+impl OtherRadar {
+    /// How far its clock is from a feed's at `tod`, s (as [`AdsbFeed::skew`]).
     fn skew(&self, tod: Option<f64>) -> Option<f64> {
         let (a, b) = (tod?, self.tod?);
         Some(((a - b + 43_200.0).rem_euclid(86_400.0) - 43_200.0).abs())
@@ -273,6 +296,9 @@ impl Default for RadarScope {
             overlay: Vec::new(),
             adsb_on: true,
             no_adsb: None,
+            others: Vec::new(),
+            others_on: true,
+            other_sites: Default::default(),
         }
     }
 }
@@ -486,6 +512,35 @@ impl RadarScope {
                 })
             })
             .collect();
+        // Other radars' feeds on other VFOs, where their places are known:
+        // theirs (ASTERIX), else the place kept for them.
+        let shown = [Some(own), self.targets];
+        let mut others = Vec::new();
+        for f in &inp.feeds {
+            let v = &f.2.radar;
+            if v.adsb || shown.contains(&Some(f.0)) || v.tracks.is_empty() {
+                continue;
+            }
+            let site = match v.site {
+                Some(s) => Some(LatLon {
+                    lat: s.lat,
+                    lon: s.lon,
+                }),
+                None => self.kept_site_of(f.0, v, &f.1, f.3),
+            };
+            if let Some(site) = site {
+                others.push(OtherRadar {
+                    name: v.source_label().map_or_else(
+                        || f.1.clone(),
+                        |l| format!("{} · {}", f.1, l.split(" · ").next().unwrap_or("")),
+                    ),
+                    site,
+                    tod: v.tod,
+                    tracks: v.tracks.clone(),
+                });
+            }
+        }
+        self.others = others;
         let mut open = true;
         egui::Window::new(format!("Radar scope — {name}"))
             .id(egui::Id::new("radar_scope"))
@@ -538,6 +593,31 @@ impl RadarScope {
         }
         // The beam turns smoothly: ~30 frames a second while open.
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    }
+
+    /// Where another VFO's radar is, as kept for it (by its SAC/SIC, else its
+    /// carrier's RF, else the VFO's name): looked up once a radar, again if
+    /// the VFO's feed turns out to be another.
+    fn kept_site_of(
+        &mut self,
+        vfo: VfoId,
+        v: &RadarView,
+        name: &str,
+        rf: Option<f64>,
+    ) -> Option<LatLon> {
+        let id = match (v.source, rf) {
+            (Some((sac, sic)), _) => RadarId::Source(sac, sic),
+            (None, Some(hz)) => RadarId::Carrier(hz),
+            (None, None) => RadarId::Vfo(name.to_string()),
+        };
+        if let Some((kept, site)) = self.other_sites.get(&vfo)
+            && kept.same(&id)
+        {
+            return *site;
+        }
+        let site = crate::prefs::radar_site(&id, name).map(|(lat, lon)| LatLon { lat, lon });
+        self.other_sites.insert(vfo, (id, site));
+        site
     }
 
     /// The beam follows feed `key` (a VFO); a different one starts it
@@ -787,6 +867,23 @@ impl RadarScope {
             ui.separator();
             ui.checkbox(&mut self.labels, "Labels");
             ui.checkbox(&mut self.trails, "Trails");
+            if !self.others.is_empty() {
+                let names: Vec<&str> = self.others.iter().map(|o| o.name.as_str()).collect();
+                ui.add_enabled(
+                    site.is_some(),
+                    egui::Checkbox::new(&mut self.others_on, "Other radars"),
+                )
+                .on_hover_text(format!(
+                    "The tracks of the other radar feeds decoded on other VFOs, at their \
+                     places (each radar's own, or the place kept for it): hollow circles in \
+                     the height colours, small for an aircraft this radar tracks too (same \
+                     Mode S address, or the same squawk within 3 NM), and each radar's \
+                     site marked. A feed whose clock is more than a minute from this one's \
+                     is left out. Now: {}",
+                    names.join(", ")
+                ))
+                .on_disabled_hover_text("Where is this radar? Set it with Site… to place them");
+            }
             if !self.overlay.is_empty() && !v.adsb {
                 ui.add_enabled(
                     site.is_some(),
@@ -1203,6 +1300,124 @@ impl RadarScope {
                 }
             }
         }
+        // Other radars' tracks, at their places: hollow circles in the
+        // height colours, each radar's site marked.
+        let mut other_near: Option<(f32, Track, String)> = None;
+        if self.others_on
+            && !self.others.is_empty()
+            && let Some(site) = self.site_of(v)
+        {
+            // Aircraft this radar tracks too: by Mode S address, else the
+            // same squawk within 3 NM.
+            let own: Vec<(Option<u32>, Option<u16>, f32, f32)> = v
+                .tracks
+                .iter()
+                .map(|t| (t.last.address, t.last.squawk, t.last.x, t.last.y))
+                .collect();
+            let mut skipped = None;
+            for o in &self.others {
+                if let Some(d) = o.skew(v.tod).filter(|&d| d > ADSB_SKEW_SECS) {
+                    skipped = Some((o.name.clone(), d));
+                    continue;
+                }
+                // Its site.
+                let (sx, sy) = to_nm(site, o.site);
+                let sp = to_screen(sx as f32, sy as f32);
+                if rect.expand(20.0).contains(sp) {
+                    let c = grid_text;
+                    painter.circle_stroke(sp, 6.0, Stroke::new(1.5, c));
+                    painter.line_segment(
+                        [sp - vec2(9.0, 0.0), sp + vec2(9.0, 0.0)],
+                        Stroke::new(1.0, c),
+                    );
+                    painter.line_segment(
+                        [sp - vec2(0.0, 9.0), sp + vec2(0.0, 9.0)],
+                        Stroke::new(1.0, c),
+                    );
+                    painter.text(
+                        sp + vec2(9.0, 9.0),
+                        Align2::LEFT_TOP,
+                        &o.name,
+                        FontId::proportional(11.0),
+                        c,
+                    );
+                }
+                for t in &o.tracks {
+                    let r = &t.last;
+                    if !r.updated() && !self.declining {
+                        continue;
+                    }
+                    // From its site to this one's frame.
+                    let ll = from_nm(o.site, f64::from(r.x), f64::from(r.y));
+                    let (x, y) = to_nm(site, ll);
+                    let p = to_screen(x as f32, y as f32);
+                    if !rect.expand(40.0).contains(p) {
+                        continue;
+                    }
+                    let both = own.iter().any(|&(a, sq, ox, oy)| {
+                        (a.is_some() && a == r.address)
+                            || (sq.is_some()
+                                && sq == r.squawk
+                                && (ox - x as f32).hypot(oy - y as f32) < 3.0)
+                    });
+                    let col = colour(t);
+                    if both {
+                        painter.circle_stroke(p, 3.0, Stroke::new(1.0, col.gamma_multiply(0.6)));
+                    } else {
+                        if self.trails {
+                            let n = t.trail.len();
+                            for (i, &(tx, ty)) in
+                                t.trail.iter().enumerate().take(n.saturating_sub(1))
+                            {
+                                let (px, py) =
+                                    to_nm(site, from_nm(o.site, f64::from(tx), f64::from(ty)));
+                                let alpha = 0.25 + 0.5 * i as f32 / n.max(1) as f32;
+                                painter.circle_filled(
+                                    to_screen(px as f32, py as f32),
+                                    1.3,
+                                    col.gamma_multiply(alpha),
+                                );
+                            }
+                        }
+                        let lead = to_screen(x as f32 + r.vx / 60.0, y as f32 + r.vy / 60.0);
+                        painter.line_segment([p, lead], Stroke::new(1.0, col.gamma_multiply(0.8)));
+                        painter.circle_stroke(p, 4.5, Stroke::new(1.5, col));
+                        if self.labels {
+                            let line1 = r.callsign.clone().unwrap_or_else(|| {
+                                r.squawk.map_or("----".into(), |q| format!("{q:04}"))
+                            });
+                            let line2 = format!(
+                                "{} {}",
+                                r.flight_level.map_or("---".into(), |f| format!("{f:03}")),
+                                r.ground_speed.map_or("-".into(), |g| format!("{g}"))
+                            );
+                            painter.text(
+                                p + vec2(7.0, -7.0),
+                                Align2::LEFT_BOTTOM,
+                                format!("{line1}\n{line2}"),
+                                FontId::monospace(10.5),
+                                col,
+                            );
+                        }
+                    }
+                    if let Some(q) = pointer {
+                        let d = q.distance(p);
+                        if d < 10.0 && other_near.as_ref().is_none_or(|(e, ..)| d < *e) {
+                            other_near = Some((d, t.clone(), o.name.clone()));
+                        }
+                    }
+                }
+            }
+            if let Some((name, d)) = skipped {
+                painter.text(
+                    rect.right_top() + vec2(-6.0, 6.0),
+                    Align2::RIGHT_TOP,
+                    format!("{name}: its clock is {d:.0} s from this radar's — not drawn"),
+                    FontId::proportional(11.0),
+                    grid_text,
+                );
+            }
+        }
         // ADS-B aircraft from other VFOs, over the radar's own tracks.
         let mut adsb_near: Option<(f32, Track, bool)> = None;
         let reds = self.no_adsb.as_ref().map_or(0, |s| s.len());
@@ -1356,6 +1571,12 @@ impl RadarScope {
             resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t, names));
         } else if let Some((_, t, tracked)) = adsb_near {
             resp.on_hover_ui_at_pointer(|ui| adsb_tip(ui, &t, tracked));
+        } else if let Some((_, t, radar)) = other_near {
+            let names = Some(&self.names);
+            resp.on_hover_ui_at_pointer(|ui| {
+                ui.label(RichText::new(format!("Seen by {radar}")).weak());
+                track_tip(ui, &t, names);
+            });
         } else if let Some(q) = pointer
             && rect.contains(q)
         {

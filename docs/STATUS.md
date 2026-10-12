@@ -3225,3 +3225,22 @@ recorder, spectrum, symbols, carrier ID). The bracket's hover says which
 without `--decoder` does the same. Checked on the mixed capture with "New
 VFOs run: Identify": the radar carrier came up CDM-570L Viterbi, the trunk
 CDM-570L trunk.
+
+## Two radars on one scope (2026-10-12)
+
+Rory: "if you are decoding 2 radars nearby can you show both radars on the
+map along with the ADS-B if available". A radar's scope now draws the
+other radar feeds decoded on other VFOs as well (`OtherRadar`): each where
+its place is known — its own (ASTERIX I034/120), else the place kept for
+it (by SAC/SIC or carrier RF, looked up once a VFO) — its site marked (⊕
+and its name), its tracks moved from its frame into this one's (through
+latitude and longitude): hollow circles in the height colours with their
+trail, leader and label, small and dim for an aircraft this radar tracks
+too (same Mode S address, or same squawk within 3 NM); hover names the
+radar. "Other radars" switch beside ADS-B; a feed whose clock is more than
+a minute from this one's is left out and named in the corner. With the
+ADS-B diamonds, the PPI is the radars' and the ADS-B picture together. A
+radar that does not say where it is needs its place set once with Site… on
+its own scope. Checked on the Oct 11 8 MS/s capture: AD-BN's scope with
+MTBB-BN on another VFO (its place made up in scratch settings): its site
+and its two test transponders drawn.
