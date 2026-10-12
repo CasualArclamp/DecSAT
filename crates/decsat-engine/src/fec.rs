@@ -580,6 +580,10 @@ pub struct E1View {
     /// The channel of this carrier holding the voice floor (heard now,
     /// others waiting; see [`crate::floor`]).
     pub on_air: Option<u8>,
+    /// For a timeslot carrying several G.728 channels: the one heard now
+    /// (its first bit), one at a time — on air in the mix, or of the
+    /// timeslot played by itself.
+    pub lane_heard: Vec<Option<u8>>,
     /// The timeslot recording, and the file (current or last) with bytes.
     pub recording: Option<u8>,
     pub record_file: Option<(PathBuf, u64)>,
@@ -626,6 +630,8 @@ struct E1Stage {
     heard: [bool; decsat_modem::e1::TIMESLOTS],
     /// This stage's number on the voice floor.
     source: u64,
+    /// A timeslot played or recorded by itself: its channels' own floor.
+    lane_floors: [crate::floor::LocalFloor; decsat_modem::e1::TIMESLOTS],
     /// Timeslots from HDLC packets: the channels seen (a mask), each
     /// channel's octets not yet made into frames, and when (in packets)
     /// each was last heard from.
@@ -709,6 +715,7 @@ impl E1Stage {
                 .collect(),
             heard: [false; decsat_modem::e1::TIMESLOTS],
             source: crate::floor::new_source(),
+            lane_floors: Default::default(),
             slots: None,
             slot_fifo: (0..decsat_modem::e1::TIMESLOTS)
                 .map(|_| VecDeque::new())
@@ -800,15 +807,57 @@ impl E1Stage {
         }
     }
 
-    /// Ask the voice floor which channels may be heard in the mix.
+    /// Ask the voice floor which channels may be heard in the mix: each
+    /// G.728 channel of each timeslot a talker of its own.
     fn ask_floor(&mut self) {
+        use crate::floor::{lane_channel, may_play};
+        let source = self.source;
         for t in 1..decsat_modem::e1::TIMESLOTS {
-            let talking = self.found(t).map(|v| v.talking());
-            self.heard[t] = match talking {
-                Some(talking) => crate::floor::may_play((self.source, t as u8), talking),
-                None => false,
-            };
+            self.heard[t] = Self::ask_lanes(&mut self.voice[t], |first, talking| {
+                may_play((source, lane_channel(t as u8, first)), talking)
+            });
         }
+    }
+
+    /// A timeslot played or recorded by itself: one of its G.728 channels
+    /// heard at a time too, on a floor of its own.
+    fn ask_lane_floor(&mut self) {
+        let mut own = [self.play_want, self.record_want];
+        if own[0] == own[1] {
+            own[1] = None;
+        }
+        for t in own.into_iter().flatten().filter(|&t| t != MIX) {
+            let t = t as usize;
+            let Some(f) = self.lane_floors.get_mut(t) else {
+                continue;
+            };
+            Self::ask_lanes(&mut self.voice[t], |first, talking| {
+                f.may_play((0, first), talking)
+            });
+        }
+    }
+
+    /// Which of a timeslot's G.728 channels `may` let be heard (first bit,
+    /// talking), set on its finder; whether any is.
+    fn ask_lanes(
+        voice: &mut Option<decsat_modem::g728::Voice>,
+        mut may: impl FnMut(u8, bool) -> bool,
+    ) -> bool {
+        let Some(v) = voice.as_mut().filter(|v| v.found()) else {
+            return false;
+        };
+        let lanes: Vec<(u8, u8, bool)> = v
+            .lanes()
+            .map(|l| (l.first_bit(), l.mask(), l.talking()))
+            .collect();
+        let mut bits = 0;
+        for (first, mask, talking) in lanes {
+            if may(first, talking) {
+                bits |= mask;
+            }
+        }
+        v.set_heard(bits);
+        bits != 0
     }
 
     /// A timeslot's own byte when it is G.711 audio (or a steady pattern:
@@ -940,6 +989,7 @@ impl E1Stage {
         if self.play_want == Some(MIX) {
             self.ask_floor();
         }
+        self.ask_lane_floor();
         for f in frames {
             self.activity.push(f);
             self.voice(f);
@@ -1048,7 +1098,22 @@ impl E1Stage {
             packets: None,
             on_air: holder
                 .filter(|h| h.0 == self.source && self.play_want == Some(MIX))
-                .map(|h| h.1),
+                .map(|h| crate::floor::lane_of(h.1).0),
+            lane_heard: (0..decsat_modem::e1::TIMESLOTS)
+                .map(|t| {
+                    // Only where there is a choice.
+                    self.found(t).filter(|v| v.lanes().count() > 1)?;
+                    match self.play_want {
+                        Some(MIX) => holder
+                            .filter(|h| h.0 == self.source)
+                            .map(|h| crate::floor::lane_of(h.1))
+                            .filter(|&(ts, _)| usize::from(ts) == t)
+                            .map(|(_, first)| first),
+                        Some(p) if usize::from(p) == t => self.lane_floors[t].holder().map(|h| h.1),
+                        _ => None,
+                    }
+                })
+                .collect(),
             stats,
             levels_db: self.levels_db.clone(),
             coding: self.activity.coding().to_vec(),

@@ -2,7 +2,13 @@
 //! themselves (the CDM-600 voice preset), one talker is heard at a time, as
 //! on a scanner with a hang time. Whoever starts speaking first holds the
 //! floor until they have been silent for the hold time; only then can
-//! another talker take it. A channel played with ▶ is not held back.
+//! another talker take it. A channel played with ▶ is not held back by the
+//! others.
+//!
+//! A talker is one G.728 channel: a timeslot can carry several (the ML–PH
+//! trunk's channel 18h, three, two of them once talking at once), each its
+//! own talker ([`lane_channel`]). A timeslot played or recorded by itself
+//! takes turns among its channels on a [`LocalFloor`], by the same rule.
 //!
 //! The floor is app-wide: every VFO's decoder thread asks it.
 
@@ -62,6 +68,44 @@ pub(crate) fn may_play(who: Talker, talking: bool) -> bool {
     )
 }
 
+/// A floor of one's own, for the channels of a timeslot played or recorded
+/// by itself: the app's rule and hold, but nobody else's talkers.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct LocalFloor(Option<Held>);
+
+impl LocalFloor {
+    /// May `who` be heard now? As [`may_play`], on this floor.
+    pub(crate) fn may_play(&mut self, who: Talker, talking: bool) -> bool {
+        let Some(hold) = hold() else {
+            return true;
+        };
+        decide(
+            &mut self.0,
+            who,
+            talking,
+            Instant::now(),
+            Duration::from_secs_f32(hold),
+        )
+    }
+
+    /// The talker holding it, if any.
+    pub(crate) fn holder(&self) -> Option<Talker> {
+        let hold = Duration::from_secs_f32(hold()?);
+        self.0.filter(|h| h.last.elapsed() <= hold).map(|h| h.who)
+    }
+}
+
+/// A G.728 channel's number on the floor: its timeslot (1–31) and the
+/// first of its two bits (1–7, G.704 numbering) in one octet.
+pub(crate) fn lane_channel(ts: u8, first_bit: u8) -> u8 {
+    ts << 3 | (first_bit & 7)
+}
+
+/// A [`lane_channel`] taken apart: (timeslot, first bit).
+pub(crate) fn lane_of(channel: u8) -> (u8, u8) {
+    (channel >> 3, channel & 7)
+}
+
 /// The talker holding the floor, if any (for display).
 pub fn holder() -> Option<Talker> {
     let f = FLOOR.lock().unwrap_or_else(|e| e.into_inner());
@@ -116,5 +160,15 @@ mod tests {
         // Nobody talking and the hold run out: nobody holds it.
         assert!(!decide(&mut f, a, false, at(9100), hold));
         assert!(f.is_none());
+    }
+
+    #[test]
+    fn lane_channels_go_both_ways() {
+        // The ML–PH trunk's channel 18h is timeslot 3; its lanes start at
+        // bits 3, 5 and 7.
+        for (ts, bit) in [(3, 3), (3, 7), (31, 7), (1, 1)] {
+            assert_eq!(lane_of(lane_channel(ts, bit)), (ts, bit));
+        }
+        assert_ne!(lane_channel(3, 3), lane_channel(3, 7));
     }
 }

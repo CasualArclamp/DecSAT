@@ -1072,9 +1072,22 @@ fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<
                         let what = if ts == 16 && st.cas {
                             "signalling".to_string()
                         } else if !voice.is_empty() {
+                            // Several channels: the one heard (one at a
+                            // time, as across carriers).
+                            let lane = e
+                                .lane_heard
+                                .get(ts as usize)
+                                .copied()
+                                .flatten()
+                                .map_or(String::new(), |b| format!(" {b}–{}", b + 1));
                             match (talking, mixing && one_at_a_time) {
-                                (true, true) if e.on_air == Some(ts) => format!("{codec} {speech} · on air"),
+                                (true, true) if e.on_air == Some(ts) => {
+                                    format!("{codec} {speech} · on air{lane}")
+                                }
                                 (true, true) => format!("{codec} {speech} · waiting"),
+                                (true, false) if !lane.is_empty() => {
+                                    format!("{codec} {speech} · hearing{lane}")
+                                }
                                 (true, false) => format!("{codec} {speech}"),
                                 (false, _) => format!("{codec}, silent"),
                             }
@@ -1094,7 +1107,12 @@ fn e1_card(ui: &mut Ui, e: &decsat_engine::E1View, v: &UiVfo, actions: &mut Vec<
                             label.on_hover_text(format!(
                                 "G.728 LD-CELP voice (16 kbit/s) in bits {}, framed by a sync bit in each codeword (G.728 §3.11). ▶ and ● play and record it decoded{}.",
                                 bits(&mut voice.iter()),
-                                if voice.len() > 1 { ", the channels mixed" } else { "" }
+                                if voice.len() > 1 {
+                                    ", one channel heard at a time (the voice floor; all mixed with \
+                                     its hold off)"
+                                } else {
+                                    ""
+                                }
                             ));
                         } else if let Coding::SubRate(mask) = coding {
                             label.on_hover_text(format!(

@@ -789,7 +789,7 @@ impl Lane {
     }
 
     /// Its two bits as one mask.
-    fn mask(&self) -> u8 {
+    pub fn mask(&self) -> u8 {
         self.bits[0] | self.bits[1]
     }
 }
@@ -835,12 +835,17 @@ struct Candidate {
 /// pair of bits that may carry a channel (see [`lane_starts`]). Every lane
 /// that speaks or sends the silence fill is kept — one timeslot can carry
 /// several channels, each a radio — and they are decoded side by side and
-/// mixed.
+/// mixed: those the caller lets be heard ([`Voice::set_heard`]), so that a
+/// voice floor can give one talker at a time within a timeslot as it does
+/// across carriers (the ML–PH trunk's channel 18h had bits 3–4 and 7–8
+/// talking at once).
 pub struct Voice {
     /// The changing bits ([`crate::e1::Coding::SubRate`]'s mask).
     pub mask: u8,
     lanes: Vec<Candidate>,
     scratch: Vec<f32>,
+    /// The bits whose lanes are mixed (all, unless set).
+    heard: u8,
 }
 
 impl Voice {
@@ -849,6 +854,7 @@ impl Voice {
             mask: 0,
             lanes: Vec::new(),
             scratch: Vec::new(),
+            heard: 0xFF,
         };
         v.widen(mask);
         v
@@ -925,7 +931,15 @@ impl Voice {
         }
     }
 
-    /// As much of the found lanes' speech as all of them have, summed.
+    /// Mix only the lanes on these bits (masks as [`Lane::bits`]; a lane is
+    /// heard when either of its bits is): the voice floor's choice. From
+    /// the next block decoded on.
+    pub fn set_heard(&mut self, bits: u8) {
+        self.heard = bits;
+    }
+
+    /// As much of the found lanes' speech as all of them have, the heard
+    /// ones' summed (the others' dropped, keeping all in step).
     fn mix(&mut self, out: &mut Vec<f32>) {
         let n = self
             .lanes
@@ -936,9 +950,13 @@ impl Voice {
             .unwrap_or(0);
         let start = out.len();
         out.resize(start + n, 0.0);
+        let heard = self.heard;
         for c in self.lanes.iter_mut().filter(|c| c.found) {
+            let on = c.lane.mask() & heard != 0;
             for (o, x) in out[start..].iter_mut().zip(c.queue.drain(..n)) {
-                *o += x;
+                if on {
+                    *o += x;
+                }
             }
         }
     }
@@ -1089,6 +1107,51 @@ mod tests {
             out[n + BLOCK * IDIM..].iter().all(|&x| x == 0.0),
             "speech at most in the block in flight"
         );
+    }
+
+    /// Two channels of one timeslot talking at once (bits 3–4 and 7–8, as
+    /// on the ML–PH trunk's channel 18h): both mixed by default; with one
+    /// heard, the mix is that one alone.
+    #[test]
+    fn one_of_two_talkers_heard() {
+        let line = |units: &[u16]| -> Vec<u8> {
+            units
+                .iter()
+                .flat_map(|&w| (0..10).rev().map(move |k| u8::from(w >> k & 1 == 0)))
+                .collect()
+        };
+        let (a, c) = (
+            line(&codewords(BLOCK * 6, 5)),
+            line(&codewords(BLOCK * 6, 11)),
+        );
+        let octets: Vec<u8> = (0..a.len() / 2)
+            .map(|i| {
+                let pair = |s: &[u8], first: u8| (s[2 * i] << 1 | s[2 * i + 1]) << (7 - first);
+                pair(&a, 3) | pair(&c, 7)
+            })
+            .collect();
+        let run = |heard: Option<u8>, mask: u8| {
+            let mut v = Voice::new(mask);
+            if let Some(h) = heard {
+                v.set_heard(h);
+            }
+            let mut out = Vec::new();
+            v.push(&octets, true, &mut out);
+            (v, out)
+        };
+        let (both, mixed) = run(None, 0x33);
+        let talking: Vec<(u8, bool)> = both.lanes().map(|l| (l.first_bit(), l.talking())).collect();
+        assert_eq!(talking, [(3, true), (7, true)]);
+        // Bits 7–8 heard: as if it were alone.
+        let (_, only_78) = run(Some(0x03), 0x33);
+        let (_, alone) = run(None, 0x03);
+        assert!(alone.iter().any(|&x| x != 0.0));
+        assert_eq!(only_78, alone);
+        assert_ne!(mixed, alone);
+        // Neither heard: silence, still in step.
+        let (_, none) = run(Some(0), 0x33);
+        assert_eq!(none.len(), mixed.len());
+        assert!(none.iter().all(|&x| x == 0.0));
     }
 
     #[test]
