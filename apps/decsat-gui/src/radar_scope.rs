@@ -283,24 +283,73 @@ fn ring_step(range: f32) -> f32 {
         .unwrap_or(100.0)
 }
 
-/// A track's colour by height: low traffic warm, high cool; no Mode C grey.
+// The track colours on the dark PPI and in the table. `const` because
+// `Color32::from_rgb` is a `const fn`: they are worked out when compiling,
+// and the legend below can name them.
+const LOW: Color32 = Color32::from_rgb(255, 190, 90);
+const MID: Color32 = Color32::from_rgb(140, 230, 120);
+const HIGH: Color32 = Color32::from_rgb(110, 200, 255);
+const NO_MODE_C: Color32 = Color32::from_gray(150);
+const COASTED: Color32 = Color32::from_rgb(255, 240, 60);
+const NO_ADSB: Color32 = Color32::from_rgb(255, 80, 70);
+
+/// A track's colour: coasted (no plot this scan) yellow, whatever its
+/// height; else by height, low traffic warm, high cool; no Mode C grey.
 fn colour(t: &Track) -> Color32 {
+    if !t.last.updated() {
+        return COASTED;
+    }
     match t.last.flight_level {
-        None => Color32::from_gray(150),
-        Some(fl) if fl < 100 => Color32::from_rgb(255, 190, 90),
-        Some(fl) if fl < 250 => Color32::from_rgb(140, 230, 120),
-        Some(_) => Color32::from_rgb(110, 200, 255),
+        None => NO_MODE_C,
+        Some(fl) if fl < 100 => LOW,
+        Some(fl) if fl < 250 => MID,
+        Some(_) => HIGH,
     }
 }
 
 /// The same, deep enough to read on the light map.
 fn colour_on_light(t: &Track) -> Color32 {
+    if !t.last.updated() {
+        return Color32::from_rgb(140, 120, 0);
+    }
     match t.last.flight_level {
         None => Color32::from_gray(70),
         Some(fl) if fl < 100 => Color32::from_rgb(190, 90, 0),
         Some(fl) if fl < 250 => Color32::from_rgb(20, 120, 30),
         Some(_) => Color32::from_rgb(15, 70, 190),
     }
+}
+
+/// What the colours of [`colour`] and the table's red mean, each line in
+/// its colour, short enough to stand beside the table; red only while
+/// there is an ADS-B feed to be red against.
+fn legend(ui: &mut Ui, red: bool) {
+    ui.vertical(|ui| {
+        ui.label(RichText::new("Colours").strong());
+        for (col, what, more) in [
+            (LOW, "< FL100", "Below FL100"),
+            (MID, "FL100–249", "FL100 to FL249"),
+            (HIGH, "≥ FL250", "FL250 and above"),
+            (NO_MODE_C, "no Mode C", "No flight level reported"),
+            (
+                COASTED,
+                "coasted ↓",
+                "No plot this scan: the track is coasted or in decline",
+            ),
+            (
+                NO_ADSB,
+                "no ADS-B",
+                "No aircraft of the ADS-B feed decoded on another VFO matches it",
+            ),
+        ] {
+            if col == NO_ADSB && !red {
+                continue;
+            }
+            // Monospace: Hack has ■, –, ≥ and ↓.
+            ui.label(RichText::new(format!("■ {what}")).monospace().color(col))
+                .on_hover_text(more);
+        }
+    });
 }
 
 impl RadarScope {
@@ -675,7 +724,10 @@ impl RadarScope {
                 .on_disabled_hover_text("Where is the radar? Set it with Site… to place them");
             }
             ui.checkbox(&mut self.declining, "Tracks in decline")
-                .on_hover_text("Tracks reported with status 83n0h: no plot on this scan");
+                .on_hover_text(
+                    "Tracks reported with status 83n0h: no plot on this scan \
+                     (yellow, hollow)",
+                );
             ui.checkbox(&mut self.glow, "Beam glow")
                 .on_hover_text("A fading glow behind the beam; off, the beam's line alone");
             ui.separator();
@@ -700,18 +752,7 @@ impl RadarScope {
                 .max(200.0);
             ui.vertical_centered(|ui| self.ppi(ui, v, side, note));
             ui.add_space(4.0);
-            egui::ScrollArea::vertical()
-                .id_salt("radar_tracks")
-                .max_height(table_h)
-                .show(ui, |ui| {
-                    table(
-                        ui,
-                        v,
-                        &mut self.selected,
-                        Some(&self.names),
-                        self.no_adsb.as_ref(),
-                    )
-                });
+            self.tracks(ui, v, table_h);
             return;
         }
         // The station beside the PPI; the track table under it when there
@@ -726,18 +767,7 @@ impl RadarScope {
                 self.ppi(ui, v, side, note);
                 if !v.tracks.is_empty() {
                     ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("radar_tracks")
-                        .max_height(table_h)
-                        .show(ui, |ui| {
-                            table(
-                                ui,
-                                v,
-                                &mut self.selected,
-                                Some(&self.names),
-                                self.no_adsb.as_ref(),
-                            )
-                        });
+                    self.tracks(ui, v, table_h);
                 }
             });
             ui.separator();
@@ -759,7 +789,9 @@ impl RadarScope {
     /// with the same Mode S address, nor the same callsign (the track's
     /// own, or the one the local ADS-B gave it by place, squawk and level).
     /// Aircraft without ADS-B, primary-only targets, or ADS-B out of reach.
-    /// `None` without such a feed (or for an ADS-B feed's own scope).
+    /// Coasted tracks are left out: they are drawn coasted's colour (see
+    /// `colour`). `None` without such a feed (or for an ADS-B feed's own
+    /// scope).
     fn without_adsb(&self, v: &RadarView) -> Option<std::collections::HashSet<u16>> {
         if v.adsb {
             return None;
@@ -784,6 +816,7 @@ impl RadarScope {
             v.tracks
                 .iter()
                 .map(|t| &t.last)
+                .filter(|r| r.updated())
                 .filter(|r| {
                     let by_address = r.address.is_some_and(|a| addresses.contains(&a));
                     let by_call =
@@ -793,6 +826,28 @@ impl RadarScope {
                 .map(|r| r.number)
                 .collect(),
         )
+    }
+
+    /// The track table, scrolling, with the colour legend standing beside
+    /// it. (The closures borrow `self.selected` mutably and `self.names`
+    /// immutably at once: Rust lets a closure capture separate fields.)
+    fn tracks(&mut self, ui: &mut Ui, v: &RadarView, table_h: f32) {
+        ui.horizontal_top(|ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("radar_tracks")
+                .max_height(table_h)
+                .show(ui, |ui| {
+                    table(
+                        ui,
+                        v,
+                        &mut self.selected,
+                        Some(&self.names),
+                        self.no_adsb.as_ref(),
+                    )
+                });
+            ui.separator();
+            legend(ui, self.no_adsb.is_some());
+        });
     }
 
     fn ppi(&mut self, ui: &mut Ui, v: &RadarView, side: f32, note: Option<&str>) {
@@ -915,7 +970,7 @@ impl RadarScope {
         let red = if light {
             Color32::from_rgb(200, 20, 20)
         } else {
-            Color32::from_rgb(255, 80, 70)
+            NO_ADSB
         };
         let no_adsb = |t: &Track| {
             self.no_adsb
@@ -1928,7 +1983,7 @@ fn table(
             for t in tracks {
                 let r = &t.last;
                 let col = if no_adsb.is_some_and(|s| s.contains(&r.number)) {
-                    Color32::from_rgb(255, 80, 70)
+                    NO_ADSB
                 } else {
                     colour(t)
                 };
