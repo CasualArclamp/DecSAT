@@ -508,7 +508,7 @@ impl RadarScope {
             if ui
                 .add_enabled(
                     site.is_some(),
-                    egui::Checkbox::new(&mut self.internet, "Internet"),
+                    egui::Checkbox::new(&mut self.internet, "adsb.lol"),
                 )
                 .on_hover_text(
                     "Callsigns for tracks the feed does not name, from adsb.lol (public \
@@ -516,7 +516,9 @@ impl RadarScope {
                      radar's place rounded to 0.1°, matched to tracks by place, squawk and \
                      level. Live only (a recording's sky is gone). Not needed while an \
                      ADS-B feed is decoded on another VFO (the ML–PH trunk's): its \
-                     callsigns name the tracks, and nothing is asked.",
+                     callsigns name the tracks, and nothing is asked. This switch is for \
+                     the callsigns alone: the map and airports download what they need \
+                     whatever it says.",
                 )
                 .changed()
             {

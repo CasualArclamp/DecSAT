@@ -1,6 +1,6 @@
 //! Callsigns for radar tracks whose feed carries none (the PH-ML BSC feed
 //! gives Mode A, Mode C and speed only): from an ADS-B feed decoded here
-//! (below) whenever there is one, else — only with the scope's "Internet"
+//! (below) whenever there is one, else — only with the scope's "adsb.lol"
 //! switch on — from a public ADS-B service: adsb.lol (free, no key; its
 //! data ODbL). Every [`EVERY`] it is asked
 //! for the aircraft within 250 NM of the radar — the radar's place rounded

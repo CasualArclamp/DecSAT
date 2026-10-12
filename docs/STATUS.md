@@ -2839,3 +2839,9 @@ on the ground and any emergency, in place of "From radar"; the hover tip
 its position. Checked unattended on the synthetic trunk carrier (scratch
 settings, the old switch set): 36 tracks, QFA66 descending to 4000 ft
 with its place and GNSS altitude, Internet off and nothing asked.
+
+The switch is named **adsb.lol** now (Rory: "we still need internet for
+the maps"): it governs the callsign lookup alone, and its first name read
+as if it cut the scope off the internet. The map's tiles and the airport
+data download whatever it says, as before; its setting keeps its key
+(`radar_internet`), so a tick made under the old name stays.
