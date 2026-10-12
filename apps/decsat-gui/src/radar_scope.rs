@@ -317,10 +317,31 @@ fn fast_or_high(r: &Report) -> bool {
         }
 }
 
+/// Mode S address blocks known to be military, inclusive (Rory's list; add
+/// a block as a line). `&[(u32, u32)]` is a slice of pairs, kept in the
+/// program's read-only data like the colours above.
+const MILITARY_ADDRESSES: &[(u32, u32)] = &[
+    // Australian Defence Force, in Australia's 7C0000–7FFFFF.
+    (0x7CF830, 0x7CFBFF),
+];
+
+fn military_address(r: &Report) -> bool {
+    r.address.is_some_and(|a| {
+        MILITARY_ADDRESSES
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&a))
+    })
+}
+
+/// Purple: a military Mode S address, or faster or higher than airliners go.
+fn likely_military(r: &Report) -> bool {
+    military_address(r) || fast_or_high(r)
+}
+
 /// A track's colour: coasted (no plot this scan) yellow, whatever its
 /// height; then a fixed transponder (a field monitor, not an aircraft) dark
-/// grey; fast or high (likely military) purple; else by height, low
-/// traffic warm, high cool; no Mode C grey.
+/// grey; a military address, or fast or high (likely military), purple;
+/// else by height, low traffic warm, high cool; no Mode C grey.
 fn colour(t: &Track) -> Color32 {
     if !t.last.updated() {
         return COASTED;
@@ -328,7 +349,7 @@ fn colour(t: &Track) -> Color32 {
     if t.last.field_monitor {
         return FIXED;
     }
-    if fast_or_high(&t.last) {
+    if likely_military(&t.last) {
         return FAST_HIGH;
     }
     match t.last.flight_level {
@@ -347,7 +368,7 @@ fn colour_on_light(t: &Track) -> Color32 {
     if t.last.field_monitor {
         return Color32::from_gray(135);
     }
-    if fast_or_high(&t.last) {
+    if likely_military(&t.last) {
         return Color32::from_rgb(120, 40, 170);
     }
     match t.last.flight_level {
@@ -371,9 +392,10 @@ fn legend(ui: &mut Ui, red: bool) {
             (NO_MODE_C, "no Mode C", "No flight level reported"),
             (
                 FAST_HIGH,
-                "fast / high",
-                "Faster or higher than airliners go, so likely military: \
-                 650 kt or more, FL450 or above, or over 350 kt below FL100",
+                "mil / fast",
+                "A military Mode S address (ADF: 7CF830–7CFBFF), or faster or \
+                 higher than airliners go, so likely military: 650 kt or more, \
+                 FL450 or above, or over 350 kt below FL100",
             ),
             (
                 FIXED,
@@ -2181,5 +2203,26 @@ mod tests {
         assert!(at(Some(20), 420));
         assert!(at(None, 700));
         assert!(!at(None, 400));
+    }
+
+    #[test]
+    fn military_addresses_are_purple() {
+        // The same airliner, slow and low enough not to be purple by itself.
+        let mut r = Report::parse(&[
+            0xFF, 0x18, 0x82, 0x70, 0x00, 0x8A, 0, 0, 0, 0, 0, 0, 0x33, 0x80, 0x18, 0xC4, 0, 0,
+            0x05, 0x14, 0, 0, 0, 0,
+        ])
+        .unwrap();
+        let mut with = |a: Option<u32>| {
+            r.address = a;
+            likely_military(&r)
+        };
+        assert!(with(Some(0x7CF830)));
+        assert!(with(Some(0x7CFBFF)));
+        // A field monitor just below, the block's next neighbour, a VH-.
+        assert!(!with(Some(0x7CF78A)));
+        assert!(!with(Some(0x7CFC00)));
+        assert!(!with(Some(0x7C7181)));
+        assert!(!with(None));
     }
 }

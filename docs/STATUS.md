@@ -3035,6 +3035,10 @@ military". The scope colours a track purple, ahead of its height colour
 but behind coasted yellow, at a ground speed of 650 kt or more, FL450 or
 above, or over 350 kt below FL100 (civil traffic keeps to 250 kt IAS
 there); the legend says so. A business jet above FL450 turns purple too.
+Rory then asked for military addresses as well: a Mode S address in
+`MILITARY_ADDRESSES` turns a track purple however it flies — for now the
+ADF's 7CF830–7CFBFF (his range; the field monitors sit just below, at
+7CF7xx). The legend's entry is "mil / fast".
 
 ## The CDM type found by itself (2026-10-12)
 
