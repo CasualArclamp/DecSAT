@@ -339,12 +339,12 @@ pub struct KnownRadar {
 /// Stations whose radar is known, by multicast group and port.
 ///
 /// The one on the 12335.13 MHz CDM-570L trunk is the CB-BN radar, Canberra
-/// (Rory, 2026-10-12): ASTERIX SAC 4 SIC 19, whose north marker puts it at
-/// 35.2376°S 149.1823°E, 903 m, and whose feed is the plan's CB-BN carrier
-/// (12335.22 MHz; 12335.24 as received on 2026-10-11). Rory first said SIC
-/// 20, the radar the AD-BN slot (12346.74 MHz) carries, at Adelaide
-/// Airport; the recordings settled it. The GUI's scope keeps another choice
-/// if one is made.
+/// (Rory, 2026-10-12): ASTERIX SAC 4 SIC 19, whose feed is the plan's CB-BN
+/// carrier (12335.22 MHz; 12335.24 as received on 2026-10-11). Rory first
+/// said SIC 20, the radar the AD-BN slot (12346.74 MHz) carries; the
+/// recordings settled it. The GUI's scope keeps another choice if one is
+/// made. (Radar positions stay out of the repo: the scope reads them from
+/// the feed.)
 const KNOWN: [(IpAddr, u16, KnownRadar); 1] = [(
     IpAddr::V4(std::net::Ipv4Addr::new(233, 71, 15, 145)),
     4021,

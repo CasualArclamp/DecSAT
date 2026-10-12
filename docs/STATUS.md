@@ -2894,8 +2894,8 @@ in "Targets from" keeps it as the station's radar (prefs
 `radar_station.<group:port>`). The side card and CLI name the radar.
 Note: the recordings of 2026-10-11 (radar survey, 1734.5 and 1745 MHz at
 8 MS/s) do not agree with the name: the 12335.24 MHz carrier (the plan's
-CB-BN) sent SIC 19, north marker 35.2376°S 149.1823°E at 903 m (Canberra),
-and SIC 20 (34.9524°S 138.5320°E, Adelaide Airport) came on 12346.74 MHz
+CB-BN) sent SIC 19, whose north marker places it at Canberra, and SIC 20
+(Adelaide, by its north marker) came on 12346.74 MHz
 (the plan's AD-BN slot). SIC 20 is used as asked. Checked on real signals:
 the trunk (same station, same multicast, in the 1734.5 MHz capture at
 +657.8 kHz), the SIC 19 carrier and the SIC 20 carrier, cut out and mixed
@@ -2960,8 +2960,8 @@ remote "- CAP"/"- MEL" sites: 2 ×, 3 ×, 4 × 128.5 kbit/s) and three
 
 **The station is SIC 19 after all** (Rory: "use SIC 19 then, CB-BN is
 Canberra"). `known_radar` now gives the 233.71.15.145:4021 station SAC 4
-SIC 19, the CB-BN carrier's radar (north marker 35.2376°S 149.1823°E,
-903 m), as the 2026-10-11 recordings said. On the real-signal mix the
+SIC 19, the CB-BN carrier's radar (Canberra by its north marker), as the
+2026-10-11 recordings said. On the real-signal mix the
 trunk's scope takes the SIC 19 feed by itself and draws its targets over
 Canberra, the station beside them.
 
