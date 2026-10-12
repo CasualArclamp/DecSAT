@@ -661,7 +661,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         if let Some(f) = &st.fec {
             fec_card(ui, f);
             if let Some(g) = &f.gse {
-                gse_card(ui, g);
+                gse_card(ui, g, v.id, &mut actions);
             }
             if let Some(t) = &f.ts {
                 ts_card(ui, t, v.id, &mut actions);
@@ -712,7 +712,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         });
         if let Some(f) = &st.fec {
             if let Some(g) = &f.gse {
-                gse_card(ui, g);
+                gse_card(ui, g, v.id, &mut actions);
             }
             if let Some(t) = &f.ts {
                 ts_card(ui, t, v.id, &mut actions);
@@ -783,7 +783,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         }
         if let Some(f) = &st.fec {
             if let Some(g) = &f.gse {
-                gse_card(ui, g);
+                gse_card(ui, g, v.id, &mut actions);
             }
             if let Some(t) = &f.ts {
                 ts_card(ui, t, v.id, &mut actions);
@@ -3173,9 +3173,21 @@ fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
 
 /// IP out of GSE: where it comes from, how much, who is talking, and the
 /// PCAP.
-fn gse_card(ui: &mut Ui, g: &GseView) {
+fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
     for st in &g.radar_stations {
         radar_station_card(ui, st);
+    }
+    if !g.radar_stations.is_empty() {
+        ui.add_space(4.0);
+        if ui
+            .button("📡 Radar scope")
+            .on_hover_text(
+                "The station's units and measurements beside a PPI. The monitoring traffic                  carries no targets and no antenna bearing: the PPI draws those of a radar                  feed another VFO decodes (ASTERIX or BSC), chosen in the scope",
+            )
+            .clicked()
+        {
+            actions.push(Action::OpenRadarScope(id));
+        }
     }
     ui.add_space(6.0);
     ui.label(RichText::new("IP").strong());

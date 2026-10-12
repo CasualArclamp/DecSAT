@@ -2572,3 +2572,20 @@ IP, Rory says), 354 s, data recording and PCAP: "multicast radar IP data",
   idle); `decsat payload` prints the given bit rate, not 128 kbit/s.
 - Open: what the points mean (a manual, or watching them during a known
   event); the 22-octet message; categories 1–4 named only by guess.
+
+**The station on the radar scope** (Rory: "add the PPI scope for that
+radar stuff"). The radar station card has the 📡 Radar scope button too.
+For a VFO with only a station's monitoring traffic, the scope shows the
+station beside the PPI: its units (green heard within 30 s, amber quiet,
+grey never heard) and the floats that move. The traffic has no targets,
+no antenna bearing and no radar identity, so the PPI draws the targets
+of a radar feed another VFO decodes: "Targets from", taken at once when
+there is only one feed, else chosen (none: the PPI says why it is empty).
+The feed's scan time is shown under the pedestal's readings: a pedestal
+point near it would say the feed is this station's radar. Checked on a
+synthetic mix: Rory's PH-ML recording plus a TPC 2964 carrier carrying the
+monitoring PCAP at +33 kHz (both found and named by Identify). The PH-ML
+targets were drawn on the TPC VFO's scope, beside the station; PH-ML scans
+in 3.69 s while the pedestal reads ~4.0, consistent with their being
+different radars. The unattended GUI's `--decoder` takes a list, one per
+claimed carrier in frequency order (`--decoder cdm570,tpc`).

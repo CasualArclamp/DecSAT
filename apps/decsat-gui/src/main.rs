@@ -1258,18 +1258,21 @@ impl eframe::App for App {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             let all = self.front.carriers.clone();
-            for c in picks {
+            for (k, c) in picks.into_iter().enumerate() {
+                // `--decoder a,b`: this carrier's, the last for any more.
+                let decoder = self
+                    .automation
+                    .decoders
+                    .get(k)
+                    .or(self.automation.decoders.last())
+                    .copied()
+                    .unwrap_or(self.new_decoder);
                 let bw = if c.narrow {
                     c.fit_among(20e3, &all)
                 } else {
                     c.vfo_bandwidth_among(&all)
                 };
-                let s = decsat_engine::VfoSettings::new(
-                    self.next_name(),
-                    c.center_hz,
-                    bw,
-                    self.new_decoder,
-                );
+                let s = decsat_engine::VfoSettings::new(self.next_name(), c.center_hz, bw, decoder);
                 self.apply(Action::Create(s));
             }
             let n = self.automation.select.unwrap_or(1).max(1);
@@ -1392,12 +1395,26 @@ impl eframe::App for App {
                 .map(|v| v.settings.name.clone());
             match name {
                 Some(name) => {
-                    let radar = self
-                        .statuses
-                        .get(&id)
-                        .and_then(|st| st.fec.as_ref())
-                        .and_then(|f| f.radar.as_ref());
-                    self.radar_scope.show(ui.ctx(), &name, radar);
+                    let fec = self.statuses.get(&id).and_then(|st| st.fec.as_ref());
+                    // Every other VFO's radar feed, for a VFO whose IP
+                    // carries only a station's monitoring traffic.
+                    let feeds = self
+                        .vfos
+                        .iter()
+                        .filter(|v| v.id != id)
+                        .filter_map(|v| {
+                            let r = self.statuses.get(&v.id)?.fec.as_ref()?.radar.as_ref()?;
+                            Some((v.id, v.settings.name.clone(), r))
+                        })
+                        .collect();
+                    let inp = radar_scope::ScopeInput {
+                        radar: fec.and_then(|f| f.radar.as_ref()),
+                        stations: fec
+                            .and_then(|f| f.gse.as_ref())
+                            .map_or(&[][..], |g| g.radar_stations.as_slice()),
+                        feeds,
+                    };
+                    self.radar_scope.show(ui.ctx(), &name, inp);
                 }
                 None => self.radar_scope.vfo = None, // the VFO was deleted
             }

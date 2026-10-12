@@ -12,11 +12,19 @@
 //! (a fading glow behind it is a switch, off by default).
 //! On the PH-ML recording it turns at 95–103°/s in 90 % of frames (the
 //! scan's 97.6°/s); jumping sector to sector it moved 45° every 0.43 s.
+//!
+//! A VFO whose IP carries a radar station's monitoring traffic
+//! (`decsat_ip::rcms`) opens the scope too: the station's units and
+//! measurements beside the PPI. That traffic says nothing of targets or of
+//! where the antenna points, and not which radar it is, so the PPI draws
+//! the targets of a radar feed another VFO decodes, chosen in the window
+//! (taken at once when there is only one).
 
 use std::time::Instant;
 
 use decsat_engine::radar::{RadarView, SECTORS, Track, tod_string};
 use decsat_engine::{RadarStageView, VfoId};
+use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2, pos2,
     vec2,
@@ -40,7 +48,28 @@ pub struct RadarScope {
     /// A fading glow behind the beam (off: the beam's line alone).
     glow: bool,
     sweep: Option<Sweep>,
+    /// For a monitoring-only VFO: the VFO whose feed the PPI draws, and
+    /// whether that was chosen (else the only feed there is is taken).
+    targets: Option<VfoId>,
+    targets_chosen: bool,
+    /// The feed the beam follows; a new one starts the beam afresh.
+    sweep_key: Option<VfoId>,
 }
+
+/// What the scope shows for its VFO.
+pub struct ScopeInput<'a> {
+    /// The VFO's own radar feed (BSC or ASTERIX), if it has one.
+    pub radar: Option<&'a RadarStageView>,
+    /// Radar stations' monitoring traffic in its IP.
+    pub stations: &'a [StationView],
+    /// Other VFOs' radar feeds, for a monitoring-only VFO's PPI: id, name,
+    /// feed.
+    pub feeds: Vec<(VfoId, String, &'a RadarStageView)>,
+}
+
+/// A unit silent this long (s, the station's clock) is shown as quiet: the
+/// slowest status period seen is 12 s.
+const QUIET_SECS: f64 = 30.0;
 
 /// The beam as drawn. The feed's time of day is mapped onto the scope's
 /// clock by the smallest delay a sector message has arrived with (one at
@@ -140,6 +169,9 @@ impl Default for RadarScope {
             declining: true,
             glow: false,
             sweep: None,
+            targets: None,
+            targets_chosen: false,
+            sweep_key: None,
         }
     }
 }
@@ -166,27 +198,49 @@ impl RadarScope {
     pub fn open(&mut self, vfo: VfoId) {
         if self.vfo != Some(vfo) {
             self.sweep = None;
+            self.targets = None;
+            self.targets_chosen = false;
         }
         self.vfo = Some(vfo);
     }
 
-    /// Draw the window for VFO `name`'s feed, if open.
-    pub fn show(&mut self, ctx: &egui::Context, name: &str, radar: Option<&RadarStageView>) {
-        if self.vfo.is_none() {
+    /// Draw the window for VFO `name`, if open.
+    pub fn show(&mut self, ctx: &egui::Context, name: &str, inp: ScopeInput) {
+        let Some(own) = self.vfo else {
             return;
-        }
+        };
         let mut open = true;
         egui::Window::new(format!("Radar scope — {name}"))
             .id(egui::Id::new("radar_scope"))
             .open(&mut open)
             .default_size([860.0, 760.0])
             .resizable(true)
-            .show(ctx, |ui| match radar {
-                Some(r) => self.contents(ui, r),
-                None => {
+            .show(ctx, |ui| {
+                if let Some(r) = inp.radar {
+                    self.follow(Some(own));
+                    self.contents(ui, r, inp.stations, None);
+                } else if !inp.stations.is_empty() {
+                    // Monitoring only: the targets of another VFO's feed.
+                    let chosen = self.targets_menu(ui, &inp.feeds);
+                    self.follow(chosen);
+                    let empty = RadarStageView::default();
+                    let feed = chosen.and_then(|id| inp.feeds.iter().find(|f| f.0 == id));
+                    let note = match (feed, inp.feeds.is_empty()) {
+                        (Some(_), _) => None,
+                        (None, true) => Some(
+                            "No targets: the monitoring traffic carries none.\nDecode a radar \
+                             feed (ASTERIX or BSC) on another VFO to draw its targets here.",
+                        ),
+                        (None, false) => {
+                            Some("No targets: choose a radar feed above to draw its targets.")
+                        }
+                    };
+                    self.contents(ui, feed.map_or(&empty, |f| f.2), inp.stations, note);
+                } else {
                     ui.label(
-                        "No radar feed on this VFO yet: a Viterbi K=7 VFO whose data are \
-                         BSC blocks carrying track reports (the PH-ML carrier).",
+                        "No radar feed on this VFO yet: a radar's track feed (BSC blocks, as \
+                         the PH-ML carrier; ASTERIX in HDLC, as the CDM-570 radar carriers) or \
+                         a radar station's monitoring traffic in its IP.",
                     );
                 }
             });
@@ -197,9 +251,85 @@ impl RadarScope {
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 
-    fn contents(&mut self, ui: &mut Ui, r: &RadarStageView) {
-        let v = &r.radar;
+    /// The beam follows feed `key` (a VFO); a different one starts it
+    /// afresh.
+    fn follow(&mut self, key: Option<VfoId>) {
+        if self.sweep_key != key {
+            self.sweep = None;
+            self.sweep_key = key;
+        }
+    }
+
+    /// For a monitoring-only VFO: which VFO's feed the PPI draws. The only
+    /// feed there is is taken until another is chosen; the choice lasts
+    /// while its VFO does.
+    fn targets_menu(
+        &mut self,
+        ui: &mut Ui,
+        feeds: &[(VfoId, String, &RadarStageView)],
+    ) -> Option<VfoId> {
+        if self.targets_chosen
+            && self
+                .targets
+                .is_some_and(|t| !feeds.iter().any(|f| f.0 == t))
+        {
+            self.targets_chosen = false; // its VFO went
+        }
+        if !self.targets_chosen {
+            self.targets = (feeds.len() == 1).then(|| feeds[0].0);
+        }
+        let label = |f: &(VfoId, String, &RadarStageView)| match f.2.radar.source_label() {
+            Some(s) => format!("{} · {s}", f.1),
+            None => f.1.clone(),
+        };
         ui.horizontal_wrapped(|ui| {
+            ui.label("Targets from");
+            let shown = self
+                .targets
+                .and_then(|t| feeds.iter().find(|f| f.0 == t))
+                .map_or_else(|| "none".to_string(), label);
+            egui::ComboBox::from_id_salt("radar_targets")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.targets.is_none(), "none")
+                        .clicked()
+                    {
+                        self.targets = None;
+                        self.targets_chosen = true;
+                    }
+                    for f in feeds {
+                        if ui
+                            .selectable_label(self.targets == Some(f.0), label(f))
+                            .clicked()
+                        {
+                            self.targets = Some(f.0);
+                            self.targets_chosen = true;
+                        }
+                    }
+                });
+            ui.label(RichText::new("which radar the station is, its traffic does not say").weak())
+                .on_hover_text(
+                    "The monitoring traffic names the station's units but not the radar: \
+                     no System Area/Identification Code, no position. Pick the feed of the \
+                     same radar if you know it; its scan time beside the pedestal's readings \
+                     may tell.",
+                );
+        });
+        self.targets
+    }
+
+    fn contents(
+        &mut self,
+        ui: &mut Ui,
+        r: &RadarStageView,
+        stations: &[StationView],
+        note: Option<&str>,
+    ) {
+        let v = &r.radar;
+        // The feed's header (none without a feed: the targets menu above
+        // says why).
+        let header = |ui: &mut Ui| {
             if let Some(t) = v.tod {
                 ui.label(RichText::new(format!("{} UTC", tod_string(t))).monospace());
                 ui.separator();
@@ -234,7 +364,10 @@ impl RadarScope {
                     format!("● {} ({n} reports)", name.unwrap_or_default()),
                 );
             }
-        });
+        };
+        if note.is_none() {
+            ui.horizontal_wrapped(header);
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.labels, "Labels");
             ui.checkbox(&mut self.trails, "Trails");
@@ -257,18 +390,51 @@ impl RadarScope {
                 .on_hover_text("Wheel zooms, drag pans, double-click re-centres");
         });
         let table_h = (28.0 + 18.0 * v.tracks.len() as f32).min(200.0);
+        if stations.is_empty() {
+            let side = (ui.available_height() - table_h - 8.0)
+                .min(ui.available_width())
+                .max(200.0);
+            ui.vertical_centered(|ui| self.ppi(ui, v, side, note));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt("radar_tracks")
+                .max_height(table_h)
+                .show(ui, |ui| table(ui, v));
+            return;
+        }
+        // The station beside the PPI; the track table under it when there
+        // are tracks.
+        const PANEL: f32 = 280.0;
+        let table_h = if v.tracks.is_empty() { 0.0 } else { table_h };
         let side = (ui.available_height() - table_h - 8.0)
-            .min(ui.available_width())
+            .min(ui.available_width() - PANEL - 16.0)
             .max(200.0);
-        ui.vertical_centered(|ui| self.ppi(ui, v, side));
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .id_salt("radar_tracks")
-            .max_height(table_h)
-            .show(ui, |ui| table(ui, v));
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                self.ppi(ui, v, side, note);
+                if !v.tracks.is_empty() {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("radar_tracks")
+                        .max_height(table_h)
+                        .show(ui, |ui| table(ui, v));
+                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(PANEL);
+                egui::ScrollArea::vertical()
+                    .id_salt("radar_station")
+                    .show(ui, |ui| {
+                        for st in stations {
+                            station_panel(ui, st, v.scan_secs);
+                        }
+                    });
+            });
+        });
     }
 
-    fn ppi(&mut self, ui: &mut Ui, v: &RadarView, side: f32) {
+    fn ppi(&mut self, ui: &mut Ui, v: &RadarView, side: f32, note: Option<&str>) {
         let (resp, painter) = ui.allocate_painter(vec2(side, side), Sense::click_and_drag());
         let rect = resp.rect;
         let centre = rect.center();
@@ -367,6 +533,19 @@ impl RadarScope {
             );
         }
         painter.circle_filled(origin, 3.0, grid_text);
+        if let Some(n) = note {
+            // A line at a time, each centred, the last 28 px off the edge.
+            let lines: Vec<&str> = n.lines().collect();
+            for (k, line) in lines.iter().rev().enumerate() {
+                painter.text(
+                    rect.center_bottom() + vec2(0.0, -28.0 - 18.0 * k as f32),
+                    Align2::CENTER_BOTTOM,
+                    line,
+                    FontId::proportional(13.0),
+                    grid_text,
+                );
+            }
+        }
 
         // Tracks, the nearest to the pointer remembered for its tooltip.
         let pointer = resp.hover_pos();
@@ -445,6 +624,89 @@ impl RadarScope {
                 grid_text,
             );
         }
+    }
+}
+
+/// A radar station's monitoring: its units, heard or not, and the
+/// measurements that move (the pedestal's floats), with the targets'
+/// feed's scan time beside them for comparison.
+fn station_panel(ui: &mut Ui, st: &StationView, feed_scan: Option<f64>) {
+    ui.label(RichText::new("Radar station (monitoring)").strong());
+    ui.label(RichText::new(st.flow.to_string()).monospace().small());
+    ui.label(
+        RichText::new(format!(
+            "{} messages over {:.0} s",
+            st.messages,
+            st.now - st.first
+        ))
+        .small(),
+    );
+    ui.add_space(6.0);
+    ui.label(RichText::new("Units").small().strong());
+    for u in &st.units {
+        let (col, how) = match u.last {
+            None => (Color32::from_gray(90), "not heard".to_string()),
+            Some(t) if st.now - t <= QUIET_SECS => (
+                Color32::from_rgb(90, 210, 110),
+                format!("heard {:.0} s ago", (st.now - t).max(0.0)),
+            ),
+            Some(t) => (
+                Color32::from_rgb(230, 170, 60),
+                format!("quiet for {:.0} s", st.now - t),
+            ),
+        };
+        ui.horizontal(|ui| {
+            let (r, p) = ui.allocate_painter(vec2(10.0, 14.0), Sense::hover());
+            p.circle_filled(r.rect.center(), 4.0, col);
+            ui.label(RichText::new(u.label()).small());
+            ui.label(
+                RichText::new(format!("{} points", u.points.len()))
+                    .small()
+                    .weak(),
+            );
+        })
+        .response
+        .on_hover_text(format!(
+            "{how}{}",
+            u.category
+                .map_or(String::new(), |c| format!(" · category {c}"))
+        ));
+    }
+    // The measurements: floats that change, unit by unit.
+    for u in &st.units {
+        let floats: Vec<_> = u
+            .points
+            .iter()
+            .filter(|p| p.section == SECTION_FLOAT && p.changes > 0)
+            .collect();
+        if floats.is_empty() {
+            continue;
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new(u.label()).small().strong())
+            .on_hover_text("What each point measures is not known: their numbers only");
+        egui::Grid::new(("station_floats", st.flow.to_string(), u.unit))
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                for p in floats {
+                    ui.label(RichText::new(p.id.to_string()).monospace().small());
+                    ui.label(RichText::new(p.value.to_string()).monospace().small());
+                    let range = p.range.map_or(String::new(), |(lo, hi)| {
+                        format!("{}–{}", float_text(lo), float_text(hi))
+                    });
+                    ui.label(RichText::new(range).small().weak());
+                    ui.end_row();
+                }
+            });
+    }
+    if let Some(s) = feed_scan {
+        ui.add_space(6.0);
+        ui.label(RichText::new(format!("The targets' feed scans in {s:.3} s")).small())
+            .on_hover_text(
+                "For comparison: a pedestal point reading about this (4 s is 15 rpm) may be \
+                 the scan period, and would say the feed is this station's radar",
+            );
     }
 }
 

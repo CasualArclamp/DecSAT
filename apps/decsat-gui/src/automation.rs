@@ -26,6 +26,9 @@ pub struct Options {
     pub lo_mhz: Option<f64>,
     /// Decoder for claimed carriers (default Identify).
     pub decoder: Option<decsat_engine::DecoderKind>,
+    /// `--decoder a,b,…`: one a claimed carrier, in frequency order (the
+    /// last for any more); `decoder` is the first.
+    pub decoders: Vec<decsat_engine::DecoderKind>,
     /// Open the TS analyser on the selected VFO.
     pub ts_viewer: bool,
     /// Open the radar scope on the selected VFO.
@@ -76,10 +79,15 @@ impl Options {
                 Some("--decoder") => {
                     let v = args.next().ok_or("--decoder needs a name")?;
                     let v = v.to_str().unwrap_or_default().to_ascii_lowercase();
-                    o.decoder = Some(
-                        decoder_by_name(&v)
-                            .ok_or("--decoder takes id, ip, ts, dvbs, tpc, cdm600, cdm570, fastlink, viterbi, cid, psk, rec or spec")?,
-                    );
+                    // A list gives each claimed carrier its own.
+                    for name in v.split(',') {
+                        o.decoders.push(decoder_by_name(name.trim()).ok_or(
+                            "--decoder takes id, ip, ts, dvbs, tpc, cdm600, cdm570, fastlink, \
+                             viterbi, cid, psk, rec or spec (or a comma-separated list of them, \
+                             one a claimed carrier)",
+                        )?);
+                    }
+                    o.decoder = o.decoders.first().copied();
                 }
                 Some("--plan") => {
                     o.plan = Some(PathBuf::from(args.next().ok_or("--plan needs a file")?));
@@ -149,6 +157,8 @@ pub struct Automation {
     pub vfo_at: Option<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
+    /// Each claimed carrier's decoder (`--decoder a,b,…`).
+    pub decoders: Vec<decsat_engine::DecoderKind>,
 }
 
 impl Automation {
@@ -166,6 +176,7 @@ impl Automation {
             vfo_at: o.vfo_at,
             play_audio: o.play_audio,
             audio_started: false,
+            decoders: o.decoders.clone(),
         }
     }
 
