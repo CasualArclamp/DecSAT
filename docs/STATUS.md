@@ -2964,3 +2964,19 @@ SIC 19, the CB-BN carrier's radar (north marker 35.2376°S 149.1823°E,
 903 m), as the 2026-10-11 recordings said. On the real-signal mix the
 trunk's scope takes the SIC 19 feed by itself and draws its targets over
 Canberra, the station beside them.
+
+## The waterfall says which carriers carry ADS-B and radar (2026-10-12)
+
+Rory: "show that that carrier is ADS-B and radar capable". `carrier_caps`
+(GUI): each VFO's decoders say what its carrier carries — ADS-B (CAT021
+reports) and/or a radar feed (sector messages or a scan, or track reports
+that are not ADS-B) — and that is kept by the carrier's RF in the user's
+settings (`carrier_caps.rf<kHz>=adsb,radar`, the same carrier within 10
+kHz). On the waterfall a VFO's label gets ADS-B (magenta) and RADAR
+(green) tags under it, from what it finds now or what its carrier is
+known for; a known carrier with no VFO on it gets its tags at the foot of
+the spectrum, over the plan's names, so the band shows where the ADS-B
+and the radars are before anything is decoded. Checked unattended (scratch
+settings) on the mixed capture: the radar VFO tagged RADAR, the trunk
+ADS-B; both kept; the same capture opened with no VFOs showed both tags on
+their carriers.

@@ -214,6 +214,27 @@ pub fn radar_airports() -> bool {
 
 /// Callsigns from ADS-B on the scope (off unless turned on: it asks an
 /// outside service).
+/// What carriers have been heard to carry ([`crate::carrier_caps`]): (RF
+/// Hz, `adsb,radar`), from `carrier_caps.rf<kHz>` keys.
+pub fn carrier_caps() -> Vec<(f64, String)> {
+    read_all()
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let khz: f64 = k
+                .strip_prefix("carrier_caps.rf")?
+                .strip_suffix("khz")?
+                .parse()
+                .ok()?;
+            Some((khz * 1e3, v))
+        })
+        .collect()
+}
+
+/// Keep what the carrier at `rf_hz` carries (see [`carrier_caps`]).
+pub fn set_carrier_caps(rf_hz: f64, caps: &str) -> std::io::Result<()> {
+    write_key(&format!("carrier_caps.rf{:.0}khz", rf_hz / 1e3), caps)
+}
+
 /// The scope may ask adsb.lol for callsigns (its "adsb.lol" switch, first
 /// called "Internet"; off unless turned on; the map and airports are not
 /// governed by it). Its own key: the old `radar_callsigns` switch, on for

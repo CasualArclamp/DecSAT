@@ -7,6 +7,7 @@
 mod adsb_names;
 mod automation;
 mod band_view;
+mod carrier_caps;
 mod filename;
 mod format;
 mod freq_display;
@@ -132,6 +133,8 @@ struct App {
     band: BandView,
     vfos: Vec<UiVfo>,
     statuses: BTreeMap<VfoId, VfoStatus>,
+    /// What carriers have been heard to carry (ADS-B, radar), by RF.
+    carrier_caps: carrier_caps::CarrierCaps,
     selected: Option<VfoId>,
     new_decoder: DecoderKind,
     names: u32,
@@ -195,6 +198,7 @@ impl Default for App {
             band: BandView::default(),
             vfos: Vec::new(),
             statuses: BTreeMap::new(),
+            carrier_caps: carrier_caps::CarrierCaps::load(),
             selected: None,
             new_decoder: DecoderKind::Identify,
             names: 1,
@@ -1207,6 +1211,16 @@ impl eframe::App for App {
                     self.statuses.insert(v.id, s);
                 }
             }
+            // What each VFO's carrier carries, learnt by its RF.
+            let centre = self.rf_center();
+            if centre > 0.0 {
+                for v in &self.vfos {
+                    if let Some(st) = self.statuses.get(&v.id) {
+                        self.carrier_caps
+                            .learn(centre + v.settings.offset_hz, carrier_caps::Caps::of(st));
+                    }
+                }
+            }
             // Move each VFO by the carrier drift its worker has followed —
             // only once the worker runs on the offset the GUI has, so the
             // move is recognised as its own and nothing restarts.
@@ -1383,6 +1397,7 @@ impl eframe::App for App {
                     next_name: self.next_name(),
                     can_retune: self.can_retune(),
                     plan: &self.plan,
+                    caps: &self.carrier_caps,
                 };
                 actions.extend(self.band.show(ui, &inp));
             });

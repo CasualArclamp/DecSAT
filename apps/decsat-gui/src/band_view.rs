@@ -71,6 +71,49 @@ pub struct BandInput<'a> {
     pub can_retune: bool,
     /// The frequency plan's carriers (RF), labelled where they fall.
     pub plan: &'a [crate::freqplan::Bookmark],
+    /// What carriers have been heard to carry (ADS-B, radar), by RF:
+    /// tagged on the waterfall.
+    pub caps: &'a crate::carrier_caps::CarrierCaps,
+}
+
+/// Small tags (ADS-B, RADAR) in a row centred on `x`, from `y` down; their
+/// rectangles.
+fn paint_tags(
+    painter: &egui::Painter,
+    x: f32,
+    y: f32,
+    tags: &[(&str, Color32)],
+    within: Rect,
+) -> Vec<Rect> {
+    let font = FontId::proportional(9.5);
+    let galleys: Vec<_> = tags
+        .iter()
+        .map(|&(t, c)| {
+            (
+                painter.layout_no_wrap(t.to_string(), font.clone(), Color32::BLACK),
+                c,
+            )
+        })
+        .collect();
+    let total: f32 = galleys.iter().map(|(g, _)| g.size().x + 8.0).sum::<f32>()
+        + 3.0 * galleys.len().saturating_sub(1) as f32;
+    // (Not `clamp`: it panics when the tags are wider than the view.)
+    let mut at = (x - total / 2.0)
+        .min(within.right() - total - 2.0)
+        .max(within.left() + 2.0);
+    let mut out = Vec::new();
+    for (g, c) in galleys {
+        let r = Rect::from_min_size(pos2(at, y), vec2(g.size().x + 8.0, 13.0));
+        painter.rect_filled(r, CornerRadius::same(3), c);
+        painter.galley(
+            r.left_top() + vec2(4.0, (13.0 - g.size().y) / 2.0),
+            g,
+            Color32::BLACK,
+        );
+        out.push(r);
+        at = r.right() + 3.0;
+    }
+    out
 }
 
 /// The colour of the frequency plan's marks (a carrier may bring its own).
@@ -658,6 +701,42 @@ impl BandView {
                 if over { Color32::WHITE } else { Color32::BLACK },
             );
             close_boxes.push((v.id, xr));
+            let known = (inp.rf_center > 0.0)
+                .then(|| inp.caps.at(inp.rf_center + s.offset_hz))
+                .flatten()
+                .map(|(_, c)| c)
+                .unwrap_or_default();
+            let caps = inp
+                .statuses
+                .get(&v.id)
+                .map_or(known, |st| known.union(crate::carrier_caps::Caps::of(st)));
+            if caps.any() {
+                // Below the carrier bracket and its rate.
+                paint_tags(&painter, lx, lr.bottom() + 24.0, &caps.tags(), rect);
+            }
+        }
+        // Carriers known to carry ADS-B or radar with no VFO on them: their
+        // tags over the spectrum's foot, above the plan's names.
+        if inp.rf_center > 0.0 {
+            for &(rf, caps) in inp.caps.all() {
+                let off = rf - inp.rf_center;
+                if off < lo || off > hi {
+                    continue;
+                }
+                let covered = inp.vfos.iter().any(|v| {
+                    (v.settings.offset_hz - off).abs()
+                        <= (v.settings.bandwidth_hz / 2.0).max(crate::prefs::SAME_CARRIER_HZ)
+                });
+                if !covered {
+                    paint_tags(
+                        &painter,
+                        x_of(off),
+                        spec.bottom() - 36.0,
+                        &caps.tags(),
+                        rect,
+                    );
+                }
+            }
         }
 
         // ---- DVB-CIDs locked: where each spread signal sits under its carrier,
