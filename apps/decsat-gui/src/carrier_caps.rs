@@ -35,6 +35,9 @@ pub fn model_tag(k: DecoderKind) -> Option<&'static str> {
         DecoderKind::Cdm570 => "CDM-570L Viterbi",
         DecoderKind::Cdm570Trunk => "CDM-570L trunk",
         DecoderKind::FastLink => "Q-Flex",
+        DecoderKind::Dvbs2Ip => "DVB-S2 IP",
+        DecoderKind::Dvbs2Ts => "DVB-S2 TS",
+        DecoderKind::DvbsTs => "DVB-S",
         _ => return None,
     })
 }
@@ -114,9 +117,23 @@ impl Caps {
 }
 
 /// The modem a VFO's carrier is, once its code has locked (and, for TPC
-/// 2964, once the payload's format is known: the model is read off it).
+/// 2964, once the payload's format is known: the model is read off it); a
+/// DVB-S2 carrier once frames decode, a DVB-S one once its code rate is
+/// found.
 fn modem(s: &VfoSettings, st: &VfoStatus) -> Option<DecoderKind> {
-    let (chain, f) = (st.chain?, st.fec.as_ref()?);
+    let f = st.fec.as_ref()?;
+    match s.decoder {
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => return (f.ok > 0).then_some(s.decoder),
+        DecoderKind::DvbsTs => {
+            return f
+                .dvbs
+                .as_ref()
+                .is_some_and(|d| d.rate.is_some() && d.packets > 0)
+                .then_some(DecoderKind::DvbsTs);
+        }
+        _ => {}
+    }
+    let chain = st.chain?;
     let locked = match chain {
         DecoderKind::Tpc2964 => {
             f.tpc.as_ref().is_some_and(|t| t.decoded > 0)
@@ -204,6 +221,33 @@ impl CarrierCaps {
     pub fn all(&self) -> &[(f64, Caps)] {
         &self.known
     }
+
+    /// The decoder for a VFO made over RF `lo..hi` (Hz) while new VFOs run
+    /// `chosen`: the one the carrier there is known to need — the modem it
+    /// was found to be (a survey, an earlier decode), the known carrier
+    /// nearest the VFO's centre — unless `chosen` is a tool rather than a
+    /// decoder (the IQ recorder, the spectrum, symbols, the carrier ID),
+    /// which is kept. The second value says it came from what is known.
+    pub fn decoder_for(&self, lo: f64, hi: f64, chosen: DecoderKind) -> (DecoderKind, bool) {
+        let tool = matches!(
+            chosen,
+            DecoderKind::IqRecord
+                | DecoderKind::Spectrum
+                | DecoderKind::PskSymbols
+                | DecoderKind::CarrierId
+        );
+        let centre = (lo + hi) / 2.0;
+        let known = self
+            .known
+            .iter()
+            .filter(|(hz, c)| *hz >= lo && *hz <= hi && c.model.is_some())
+            .min_by(|a, b| (a.0 - centre).abs().total_cmp(&(b.0 - centre).abs()))
+            .and_then(|(_, c)| c.model);
+        match known {
+            Some(k) if !tool && lo > 0.0 => (k, true),
+            _ => (chosen, false),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +290,46 @@ mod tests {
         );
         // Only the modem known is a carrier worth keeping too.
         assert!(Caps::parse("model=cdm570").any());
+    }
+
+    #[test]
+    fn a_vfo_over_a_known_carrier_takes_its_decoder() {
+        let k = CarrierCaps {
+            known: vec![
+                (
+                    12_300_000_000.0,
+                    Caps {
+                        model: Some(DecoderKind::Cdm570Trunk),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    12_300_300_000.0,
+                    Caps {
+                        adsb: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        };
+        // Over the trunk: its model, whatever new VFOs run (but a tool).
+        let over = |c| k.decoder_for(11_999_950_000.0 + 50_000_000.0, 12_300_050_000.0, c);
+        assert_eq!(
+            over(DecoderKind::Identify),
+            (DecoderKind::Cdm570Trunk, true)
+        );
+        assert_eq!(over(DecoderKind::CdmAuto), (DecoderKind::Cdm570Trunk, true));
+        assert_eq!(over(DecoderKind::IqRecord), (DecoderKind::IqRecord, false));
+        // Over a carrier known for ADS-B but not its modem, or nothing: as
+        // chosen.
+        assert_eq!(
+            k.decoder_for(12_300_250_000.0, 12_300_350_000.0, DecoderKind::Identify),
+            (DecoderKind::Identify, false)
+        );
+        assert_eq!(
+            k.decoder_for(12_400_000_000.0, 12_400_100_000.0, DecoderKind::CdmAuto),
+            (DecoderKind::CdmAuto, false)
+        );
     }
 
     #[test]

@@ -76,6 +76,18 @@ pub struct BandInput<'a> {
     pub caps: &'a crate::carrier_caps::CarrierCaps,
 }
 
+/// The decoder for a VFO made over offsets `lo..hi` (Hz from the band's
+/// centre): the one the carrier there is known to need (see
+/// [`crate::carrier_caps::CarrierCaps::decoder_for`]), else what new VFOs
+/// run; and whether it came from what is known.
+fn decoder_over(inp: &BandInput, lo: f64, hi: f64) -> (DecoderKind, bool) {
+    if inp.rf_center <= 0.0 {
+        return (inp.new_decoder, false);
+    }
+    inp.caps
+        .decoder_for(inp.rf_center + lo, inp.rf_center + hi, inp.new_decoder)
+}
+
 /// Small tags (the modem, ADS-B, RADAR) in a row centred on `x`, from `y`
 /// down — or a line or two further (`step`: down, or up when negative)
 /// where the row would cover one painted already (`placed`, which it
@@ -1011,17 +1023,30 @@ impl BandView {
             }
             if let Some(i) = carrier_hit {
                 let c = &inp.front.carriers[i];
+                let (dec, known) = decoder_over(
+                    inp,
+                    c.center_hz - c.bandwidth_hz / 2.0,
+                    c.center_hz + c.bandwidth_hz / 2.0,
+                );
+                let what = if known {
+                    format!(
+                        "{} (known)",
+                        crate::carrier_caps::model_tag(dec).unwrap_or(dec.short())
+                    )
+                } else {
+                    dec.short().to_string()
+                };
                 text = if c.narrow {
                     format!(
                         "click: {} on narrow line at {} ({:.0} dB) — a CW, a spur, or a slow carrier",
-                        inp.new_decoder.short(),
+                        what,
                         format::freq(inp.rf_center + c.center_hz),
                         c.snr_db
                     )
                 } else {
                     format!(
                         "click: {} on {} carrier, ~{}, {:.0} dB S/N",
-                        inp.new_decoder.short(),
+                        what,
                         format::freq(inp.rf_center + c.center_hz),
                         format::rate(c.symbol_rate_hz),
                         c.snr_db
@@ -1152,7 +1177,7 @@ impl BandView {
                         name_at((a + b) / 2.0, b - a),
                         (a + b) / 2.0,
                         (b - a).max(min_vfo),
-                        inp.new_decoder,
+                        decoder_over(inp, a, b).0,
                     );
                     s.record_dir = default_record_dir();
                     actions.push(Action::Create(s));
@@ -1196,11 +1221,15 @@ impl BandView {
                 // A plan carrier's name: a VFO on it, named so, a little
                 // wider than the carrier's occupied band.
                 let b = &inp.plan[i];
-                let mut s = VfoSettings::new(
-                    b.name.clone(),
+                let (off, bw) = (
                     b.freq_hz - inp.rf_center,
                     (b.bandwidth_hz * 1.12).max(min_vfo),
-                    inp.new_decoder,
+                );
+                let mut s = VfoSettings::new(
+                    b.name.clone(),
+                    off,
+                    bw,
+                    decoder_over(inp, off - bw / 2.0, off + bw / 2.0).0,
                 );
                 s.record_dir = default_record_dir();
                 actions.push(Action::Create(s));
@@ -1218,7 +1247,7 @@ impl BandView {
                     name_at(c.center_hz, bw),
                     c.center_hz,
                     bw.max(min_vfo),
-                    inp.new_decoder,
+                    decoder_over(inp, c.center_hz - bw / 2.0, c.center_hz + bw / 2.0).0,
                 );
                 s.record_dir = default_record_dir();
                 actions.push(Action::Create(s));
@@ -1240,7 +1269,9 @@ impl BandView {
             && carrier_hit.is_none()
         {
             let bw = ((hi - lo) / 25.0).max(min_vfo);
-            let mut s = VfoSettings::new(name_at(hz_of(p.x), bw), hz_of(p.x), bw, inp.new_decoder);
+            let at = hz_of(p.x);
+            let dec = decoder_over(inp, at - bw / 2.0, at + bw / 2.0).0;
+            let mut s = VfoSettings::new(name_at(at, bw), at, bw, dec);
             s.record_dir = default_record_dir();
             actions.push(Action::Create(s));
         }

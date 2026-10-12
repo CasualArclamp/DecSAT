@@ -3210,3 +3210,18 @@ Rory's VFO_103 capture (12347.55 MHz, not in his plan; 800 kS/s cf32,
 
 Next for this carrier: EDMAC as a payload format, the bridging
 encapsulation into the IP stage, and a recording of the 711 kS/s pair.
+
+## A VFO on a known carrier takes its decoder (2026-10-12)
+
+Rory: "after a scan, if you press on the green above or drag a decoder
+over it, it chooses the right decoder". `CarrierCaps::decoder_for`: a VFO
+made over a carrier whose modem is known (a survey, any earlier decode:
+the CDM model it turned out to be, a Q-Flex FastLink, and now DVB-S2 IP/TS
+and DVB-S too, which the carrier tags learn and show) takes that decoder —
+from a click on its green bracket, a drag across it, a double-click or a
+plan name — whatever "New VFOs run" says, unless that is a tool (IQ
+recorder, spectrum, symbols, carrier ID). The bracket's hover says which
+("click: CDM-570L trunk (known) on …"). Unattended `--claim-carriers`
+without `--decoder` does the same. Checked on the mixed capture with "New
+VFOs run: Identify": the radar carrier came up CDM-570L Viterbi, the trunk
+CDM-570L trunk.

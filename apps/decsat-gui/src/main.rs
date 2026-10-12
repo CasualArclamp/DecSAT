@@ -1343,15 +1343,31 @@ impl eframe::App for App {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             let all = self.front.carriers.clone();
+            let rf = self.rf_center();
             for (k, c) in picks.into_iter().enumerate() {
-                // `--decoder a,b`: this carrier's, the last for any more.
+                // `--decoder a,b`: this carrier's, the last for any more;
+                // none given, the one the carrier is known to need, as a
+                // click on its bracket takes.
                 let decoder = self
                     .automation
                     .decoders
                     .get(k)
                     .or(self.automation.decoders.last())
                     .copied()
-                    .unwrap_or(self.new_decoder);
+                    .unwrap_or_else(|| {
+                        let half = c.bandwidth_hz / 2.0;
+                        if rf > 0.0 {
+                            self.carrier_caps
+                                .decoder_for(
+                                    rf + c.center_hz - half,
+                                    rf + c.center_hz + half,
+                                    self.new_decoder,
+                                )
+                                .0
+                        } else {
+                            self.new_decoder
+                        }
+                    });
                 let bw = if c.narrow {
                     c.fit_among(20e3, &all)
                 } else {
