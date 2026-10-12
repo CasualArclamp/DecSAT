@@ -62,10 +62,11 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "fastlink" | "fl" => DecoderKind::FastLink,
         "viterbi" | "vit" => DecoderKind::Viterbi,
         "cdm570" | "570" => DecoderKind::Cdm570,
+        "trunk" | "cdm570-trunk" => DecoderKind::Cdm570Trunk,
         "cid" | "carrier-id" => DecoderKind::CarrierId,
         "psk" => DecoderKind::PskSymbols,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, fastlink, viterbi, cid, psk)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, fastlink, viterbi, cid, psk)"
         ),
     })
 }

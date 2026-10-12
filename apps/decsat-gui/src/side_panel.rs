@@ -357,7 +357,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
-            if matches!(s.decoder, DecoderKind::Cdm600Voice | DecoderKind::FastLink) {
+            if s.decoder.plays_voice() {
                 ui.label("Voice");
                 ui.checkbox(&mut s.voice_auto, "play when G.728 speech is found")
                     .on_hover_text(
@@ -439,7 +439,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.label("Drift");
                 ui.checkbox(&mut s.follow_carrier, "follow the carrier")
                     .on_hover_text(
-                        "While the demodulator is locked, the VFO moves with the carrier as                          its frequency drifts (an LNB warming up, Doppler), so it cannot                          wander out of the VFO. The decoder keeps running through the moves.",
+                        "While the demodulator is locked, the VFO moves with the carrier as its frequency drifts (an LNB warming up, Doppler), so it cannot wander out of the VFO. The decoder keeps running through the moves.",
                     );
                 ui.end_row();
             }
@@ -735,7 +735,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         match v.settings.decoder.chain() {
             DecoderKind::FastLink => fastlink_card(ui, c, &st),
             DecoderKind::Viterbi => viterbi_card(ui, c, &st, v.settings.decoder),
-            _ => tpc_card(ui, c, &st),
+            _ => tpc_card(ui, c, &st, v.settings.decoder),
         }
         if let Some(e) = st.fec.as_ref().and_then(|f| f.e1.as_ref()) {
             e1_card(ui, e, v, &mut actions);
@@ -1286,11 +1286,18 @@ fn text_card(ui: &mut Ui, t: &decsat_engine::TextView) {
 
 /// A TPC 2964 VFO: the carrier, the frame sync and structure found, the
 /// turbo decoder, and what the data carry.
-fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
+fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
-    ui.label(RichText::new("TPC 2964 (IESS-315)").strong());
+    ui.label(
+        RichText::new(if kind == DecoderKind::Cdm570Trunk {
+            "Comtech CDM-570L trunk · TPC 2964 (IESS-315)"
+        } else {
+            "TPC 2964 (IESS-315)"
+        })
+        .strong(),
+    );
     let f = st.fec.as_ref();
     let t = f.and_then(|f| f.tpc.as_ref());
     egui::Grid::new("tpc").num_columns(2).show(ui, |ui| {
@@ -2985,7 +2992,8 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
                     let r = ui
                         .selectable_label(decoder.is_cdm(), DecoderKind::CDM_MENU)
                         .on_hover_text(
-                            "CDM-570L TPC (IP), CDM-570L Viterbi (radar), CDM-600L voice: the                              model is chosen next",
+                            "CDM-570L TPC (IP), CDM-600L voice, CDM-570L Viterbi (radar), CDM-570L \
+                             trunk (voice + ADS-B): the model is chosen next",
                         );
                     if r.clicked() && !decoder.is_cdm() {
                         *decoder = DecoderKind::CDM[0];
@@ -3100,7 +3108,7 @@ fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
     ui.add_space(6.0);
     ui.label(RichText::new("Radar station (monitoring)").strong())
         .on_hover_text(
-            "A radar site's control and monitoring traffic (its RCMS) in UDP multicast:              what each unit of the radar says about itself — states, counters, measured              values, firmware versions. No targets travel this way. The units are named by              the station's own unit table; what each point means is not known, only its              number.",
+            "A radar site's control and monitoring traffic (its RCMS) in UDP multicast: what each unit of the radar says about itself — states, counters, measured values, firmware versions. No targets travel this way. The units are named by the station's own unit table; what each point means is not known, only its number.",
         );
     egui::Grid::new(("rcms", st.flow.to_string()))
         .num_columns(2)
@@ -3224,7 +3232,7 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
         if ui
             .button("📡 Radar scope")
             .on_hover_text(
-                "The station's units and measurements beside a PPI. The monitoring traffic                  carries no targets and no antenna bearing: the PPI draws those of a radar                  feed another VFO decodes (ASTERIX or BSC), chosen in the scope",
+                "The station's units and measurements beside a PPI. The monitoring traffic carries no targets and no antenna bearing: the PPI draws those of a radar feed another VFO decodes (ASTERIX or BSC), chosen in the scope",
             )
             .clicked()
         {

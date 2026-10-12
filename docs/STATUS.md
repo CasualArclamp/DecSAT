@@ -2867,3 +2867,19 @@ carrier and the PH-BN carrier made from its recording, at −800 kHz,
 scratch tools not committed): the note "its feed's clock is 540 s from
 the radar's — not drawn" and no names; with the limit lifted in a scratch
 build, the diamonds as above (the same aircraft by address in both).
+
+## A CDM model for the trunks: "CDM-570L trunk" (2026-10-12)
+
+Rory asked for a Comtech model for the ML–PH trunk's mix (voice, ADS-B,
+radar). `DecoderKind::Cdm570Trunk` ("CDM-570L trunk (TPC 2964 → G.728
+voice + IP: ADS-B, radar)", key `cdm570-trunk`, CLI and unattended
+`--decoder trunk`) runs the TPC 2964 chain like "CDM-570L TPC", and plays
+the G.728 voice it finds by itself under the voice floor (one channel at a
+time, now within a timeslot too) as the CDM-600L voice model does
+(`DecoderKind::plays_voice`); its IP goes to the IP stage as before, the
+ADS-B (CAT021) and any radar data to the radar view and scope. The VFO
+reads "TRK", lit while speech is on, and its card "Comtech CDM-570L trunk
+· TPC 2964". Checked unattended on the synthetic ASA176 carrier: ch 18h
+"3 × G.728 speech in 7–8 · on air 7–8", the ADS-B feed below. Also: four
+hover texts (the plan loader, follow the carrier, the radar station card
+and its scope button) had runs of spaces left in them by an earlier edit.

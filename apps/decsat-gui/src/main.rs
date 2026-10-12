@@ -850,7 +850,7 @@ impl App {
                 }
             }
             let plan_tip = if self.plan.is_empty() {
-                "Load a frequency plan: an SDR++ frequency-manager bookmark list (.json).                  Its carriers are labelled on the waterfall (zoom in for more names),                  clicking a name makes a VFO on that carrier, and VFOs made on one take                  its name. Kept only here: its path is remembered."
+                "Load a frequency plan: an SDR++ frequency-manager bookmark list (.json). Its carriers are labelled on the waterfall (zoom in for more names), clicking a name makes a VFO on that carrier, and VFOs made on one take its name. Kept only here: its path is remembered."
                     .to_string()
             } else {
                 format!(

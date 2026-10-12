@@ -49,6 +49,12 @@ pub enum DecoderKind {
     /// Viterbi chain, then the payload search — on PH-ML, BSC blocks
     /// carrying a radar track feed.
     Cdm570,
+    /// A Comtech CDM-570L trunk between centres (ASA176 ML–PH: TPC 2964,
+    /// 1024 kbit/s): the TPC 2964 chain to its timeslots in HDLC packets —
+    /// G.728 voice channels played as soon as speech is found, one talker at
+    /// a time — and the IP beside them: ADS-B (ASTERIX CAT021) and radar
+    /// data for the scope.
+    Cdm570Trunk,
     /// Teledyne Paradise Q-Flex FastLink (QPSK, rate 0.710): sync word,
     /// LDPC decoding and descrambling as measured on a live carrier; the
     /// data go to the same payload search as TPC 2964's.
@@ -71,7 +77,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 13] = [
+    pub const ALL: [DecoderKind; 14] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -79,6 +85,7 @@ impl DecoderKind {
         DecoderKind::Tpc2964,
         DecoderKind::Cdm600Voice,
         DecoderKind::Cdm570,
+        DecoderKind::Cdm570Trunk,
         DecoderKind::FastLink,
         DecoderKind::Viterbi,
         DecoderKind::CarrierId,
@@ -96,6 +103,7 @@ impl DecoderKind {
             DecoderKind::Tpc2964 => "TPC 2964 (IESS-315) → IP / TS",
             DecoderKind::Cdm600Voice => "Comtech CDM-600 voice (TPC → D&I → G.728)",
             DecoderKind::Cdm570 => "Comtech CDM-570L (Viterbi K=7 → data)",
+            DecoderKind::Cdm570Trunk => "Comtech CDM-570L trunk (TPC → voice + ADS-B/radar)",
             DecoderKind::FastLink => "Q-Flex FastLink (QPSK 0.710) → data",
             DecoderKind::Viterbi => "Viterbi K=7 (IESS-308/309 SCPC) → data",
             DecoderKind::CarrierId => "Carrier ID (DVB-CID)",
@@ -116,6 +124,7 @@ impl DecoderKind {
             DecoderKind::Tpc2964 => "tpc2964",
             DecoderKind::Cdm600Voice => "cdm600-voice",
             DecoderKind::Cdm570 => "cdm570",
+            DecoderKind::Cdm570Trunk => "cdm570-trunk",
             DecoderKind::FastLink => "fastlink",
             DecoderKind::Viterbi => "viterbi",
             DecoderKind::CarrierId => "carrier-id",
@@ -130,11 +139,12 @@ impl DecoderKind {
         DecoderKind::ALL.into_iter().find(|k| k.key() == key)
     }
 
-    /// The decoder chain a preset runs: the CDM-600 voice preset is TPC
-    /// 2964's, the CDM-570L's the Viterbi; every other kind its own.
+    /// The decoder chain a preset runs: the CDM-600 voice and CDM-570L
+    /// trunk presets are TPC 2964's, the CDM-570L's the Viterbi; every other
+    /// kind its own.
     pub fn chain(self) -> DecoderKind {
         match self {
-            DecoderKind::Cdm600Voice => DecoderKind::Tpc2964,
+            DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk => DecoderKind::Tpc2964,
             DecoderKind::Cdm570 => DecoderKind::Viterbi,
             k => k,
         }
@@ -143,15 +153,26 @@ impl DecoderKind {
     /// The Comtech CDM modems: one entry in the decoder menu
     /// ([`DecoderKind::CDM_MENU`]), the model chosen in a second menu.
     /// The first is what choosing the entry gives.
-    pub const CDM: [DecoderKind; 3] = [
+    pub const CDM: [DecoderKind; 4] = [
         DecoderKind::Tpc2964,
         DecoderKind::Cdm600Voice,
         DecoderKind::Cdm570,
+        DecoderKind::Cdm570Trunk,
     ];
     pub const CDM_MENU: &str = "Comtech CDM modem";
 
     pub fn is_cdm(self) -> bool {
         DecoderKind::CDM.contains(&self)
+    }
+
+    /// A preset that plays the G.728 voice it finds by itself (with its
+    /// "play when speech is found" switch): the CDM-600L's, the CDM-570L
+    /// trunk's, a Q-Flex FastLink's.
+    pub fn plays_voice(self) -> bool {
+        matches!(
+            self,
+            DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk | DecoderKind::FastLink
+        )
     }
 
     /// A CDM preset's name in the model menu (else the label).
@@ -163,6 +184,9 @@ impl DecoderKind {
             DecoderKind::Cdm600Voice => "CDM-600L voice (TPC 2964 → D&I++ → G.728)",
             DecoderKind::Cdm570 => {
                 "CDM-570L Viterbi (Viterbi K=7 → data, e.g. radar: BSC or ASTERIX)"
+            }
+            DecoderKind::Cdm570Trunk => {
+                "CDM-570L trunk (TPC 2964 → G.728 voice + IP: ADS-B, radar)"
             }
             k => k.label(),
         }
@@ -205,6 +229,7 @@ impl DecoderKind {
             DecoderKind::Tpc2964 => "TPC",
             DecoderKind::Cdm600Voice => "CDM",
             DecoderKind::Cdm570 => "570",
+            DecoderKind::Cdm570Trunk => "TRK",
             DecoderKind::FastLink => "FL",
             DecoderKind::Viterbi => "VIT",
             DecoderKind::CarrierId => "CID",
@@ -813,6 +838,7 @@ impl Worker {
             | DecoderKind::Tpc2964
             | DecoderKind::Cdm600Voice
             | DecoderKind::Cdm570
+            | DecoderKind::Cdm570Trunk
             | DecoderKind::FastLink
             | DecoderKind::Viterbi => Decoder::Modem {
                 kind: s.decoder.chain(),
@@ -1879,8 +1905,7 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
         e1_record: s.e1_record,
         tdm_play: s.tdm_play,
         tdm_record: s.tdm_record,
-        voice_auto: s.voice_auto
-            && matches!(s.decoder, DecoderKind::Cdm600Voice | DecoderKind::FastLink),
+        voice_auto: s.voice_auto && s.decoder.plays_voice(),
         bbframes: s.bbframes.clone(),
     }
 }
@@ -2064,6 +2089,20 @@ mod tests {
     use super::*;
     use decsat_fec::Constellation;
     use decsat_mod::Shaper;
+
+    #[test]
+    fn the_cdm_570l_trunk_preset() {
+        let k = DecoderKind::Cdm570Trunk;
+        // Saved and read back by its own key; run as TPC 2964; a CDM model
+        // that plays its voice by itself.
+        assert_eq!(DecoderKind::from_key(k.key()), Some(k));
+        assert_eq!(k.chain(), DecoderKind::Tpc2964);
+        assert!(k.is_cdm() && k.plays_voice() && k.demodulates());
+        assert!(!DecoderKind::Tpc2964.plays_voice());
+        // Every kind's key is its own.
+        let keys: std::collections::HashSet<_> = DecoderKind::ALL.map(|k| k.key()).into();
+        assert_eq!(keys.len(), DecoderKind::ALL.len());
+    }
 
     #[test]
     fn symbols_pack_into_bits_msb_first() {
