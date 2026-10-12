@@ -3058,3 +3058,27 @@ model on the synthetic TPC carrier (Identify picks TPC 2964, the model is
 a CDM-570L's data), the model from each payload. Checked unattended (muted)
 on the mixed capture: PH-BN found as CDM-570L Viterbi, the ASA176 trunk as
 a CDM-570L trunk; and in the CLI on the PH-BN carrier.
+
+**Live: every Q-Flex on the band searched for ADS-B (2026-10-12, 20:24
+local).** Rory: "survey now". HackRF at 1732, 1746, 1760.6, 1774 and
+1788 MHz, 20 MS/s, 60 s each, LNA 24 / VGA 20 (input −34 to −25 dBFS),
+LNB about +26 kHz (by the CAP links against the plan). Identify named 44
+FastLinks in the first three (none above 12366 MHz): 38 once deduplicated
+by RF, and two pairs Identify had merged (two 95 kS/s FastLinks 119 kHz
+apart read as one ~190 kS/s carrier: the plan's Doongan + TEN and Kilgor +
+Limbunya, decoded apart at their plan frequencies) — 42 in all.
+
+- **39 links at 128.5 kbit/s: G.728 voice, nothing else.** Every one
+  decoded (BER after LDPC clean but for a few failed codewords), its
+  multiplex searched as before (all channels, pairs, octet timeslots, both
+  words, the ESC; plain and inverted; three good FCS needed): no HDLC
+  frame, so no ASTERIX. Speech decoded on 25 of them in the minute.
+- **The three faster links (Broome 3 ×, Tindal 2 ×, KAR 4 ×): site IP
+  encrypted**, as in the 15-minute capture — the 233.71.15.x:50000
+  multicast and SNMP flagged; nothing in clear.
+- **LEO - MEL** still does not demodulate (no FastLink sync), as the day
+  before.
+
+No ADS-B or radar in clear on any Q-Flex live either. If the Q-Flex sites
+send ADS-B, it is in their encrypted multicast. Scripts (survey.py) and
+the 12 GB of captures stayed in the session's scratchpad.
