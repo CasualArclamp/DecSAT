@@ -585,7 +585,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decsat-audio"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "cpal",
  "decsat-ip",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-cli"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-core"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-dsp"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-engine"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-audio",
  "decsat-core",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-fec"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-frame"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-gse"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "decsat-ip",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-gui"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "decsat-audio",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-io"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-ip"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "thiserror 2.0.21",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-mod"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "decsat-dsp",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-modem"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "rustfft",
@@ -743,14 +743,14 @@ dependencies = [
 
 [[package]]
 name = "decsat-opus-sys"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "decsat-ts"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "decsat-core",
  "decsat-frame",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-xaac-sys"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "cc",
 ]
