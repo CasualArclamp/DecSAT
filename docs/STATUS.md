@@ -3244,3 +3244,60 @@ radar that does not say where it is needs its place set once with Site… on
 its own scope. Checked on the Oct 11 8 MS/s capture: AD-BN's scope with
 MTBB-BN on another VFO (its place made up in scratch settings): its site
 and its two test transponders drawn.
+
+## EDMAC and the bridged Ethernet inside it (2026-10-12)
+
+Rory: "build the EDMAC and Ethernet decoder" for the 238.96 kS/s 8PSK
+carrier (12347.55 MHz). Now TPC 2964 → V.35 → EDMAC → packet blocks →
+Ethernet → the IP stage (statistics, PCAP), found blind like any payload.
+
+- **`decsat-modem::edmac`**: the 1008-bit frames (header `000101110011`,
+  five 192-bit data blocks, 9-bit groups between: the first fixed
+  `111111100`, three carrying the M&C channel), found by the 21 fixed bits
+  three frames running, either way up; frames with them wrong are kept
+  (up to 4 bits) until three in a row, then searched for again. A payload
+  format (`Format::Edmac`), scored by frames found; its M&C bits go out as
+  the ESC bits, its data as the inner bits (text search). Re-running a
+  recorded `.bin` through `decsat payload`: V.35 on data already
+  descrambled shows every EDMAC frame a second time 20 bits on (the far
+  tap reaches past the header into idle data), so a later reading must now
+  beat EDMAC by 1/16 — though such a recording's first frames are written
+  before the descrambler is chosen, so a re-run of one is never clean.
+- **`decsat-modem::ethblock`** (the encapsulation, Comtech's name not
+  known): 258-byte blocks of a 4-byte word — 2 bytes not decoded (no
+  CRC-16 polynomial fits the block before or after, with or without the
+  words' flag and pointer bytes: all 32 768 tried), flags C7h without a pointer, 47h or B8h with one, and a
+  pointer (0–253) to the first byte after a packet ending in the block —
+  then 254 packet bytes, idle FFh. Idle the word is EB 49 C7 FF. Packets:
+  a length byte (0 = to the pointer; the long ones, and any the sender
+  chose), then `08 A0|A2, context (2), s, …`. `s` with 80h set + a type
+  byte (31h/32h/35h) = the whole Ethernet frame, no FCS, setting up the
+  context; without, a compressed packet: no flags → `[s][UDP checksum if
+  the context's was not 0][UDP payload]`, rebuilt from the context's
+  headers (IP identification kept, lengths and IP checksum recomputed) and
+  passed only if its UDP checksum checks; flags 40h/20h add bytes not
+  understood (SIP and a few RTP ones) and are counted. A length byte must
+  be followed by 08h (else it was an idle byte hit by an error — the data
+  of modem frames that did not decode reach this far); one-byte packets
+  `01 02` (a few a second) are counted. Locks on four words that look
+  right, one without a pointer (read upside down, pointer words can look
+  right; idle ones cannot) — the bytes come inverted here.
+- **On the 15 s capture** (`decode --decoder tpc --modulation 8psk --out`):
+  EDMAC 8290 frames; 3823 blocks; 105 whole frames, 96 rebuilt, 15 left
+  compressed, 24 before their context; **174 IP packets to the PCAP**, every
+  IP header checksum good, UDP 66 checked good + 54 without a checksum
+  (RTP) + 2 bad (whole frames hit by errors). The traffic: SNMP polling of
+  managed devices, BGP, SMB/TCP, and **SIP plus RTP from a "Radio (IP)"
+  user** — the RTP's header extension profile 0167h is ED-137's (EUROCAE
+  radio over IP); its 24-byte packets look like ED-137 keep-alives (no
+  audio in the 15 s). The GUI's side panel: Framing (EDMAC) and Packets
+  rows; the IP card's source "Bridged Ethernet (packet blocks)". Tests:
+  EDMAC at any phase, either way up, through errors and a gap; blocks with
+  length- and pointer-delimited packets, rebuilt UDP (with and without a
+  checksum), a failed checksum, idle errors, one-byte packets, random bits;
+  the payload stage finding all of it under V.35.
+
+Open: the word's first two bytes; the compressed flags 40h/20h (and the
+A0h/A2h bit); what the one-byte packets are; ED-137's signalling in the RTP
+extension. The 8PSK carrier loop reads "not locked" while the TPC decodes
+— not looked into yet.

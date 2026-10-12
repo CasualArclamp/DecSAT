@@ -1752,11 +1752,12 @@ impl IpStage {
             pcap_error: self.error.clone(),
             mpe: self.mpe.clone(),
             link: self.hdlc.map(|(n, fcs)| {
-                let fcs = match fcs {
-                    decsat_modem::payload::Fcs::Crc16 => "FCS-16",
-                    decsat_modem::payload::Fcs::Crc32 => "FCS-32",
+                let link = match fcs {
+                    decsat_modem::payload::Fcs::Crc16 => "HDLC (FCS-16)",
+                    decsat_modem::payload::Fcs::Crc32 => "HDLC (FCS-32)",
+                    decsat_modem::payload::Fcs::None => "Bridged Ethernet (packet blocks)",
                 };
-                format!("HDLC ({fcs}) · {n} frames with IP")
+                format!("{link} · {n} frames with IP")
             }),
             audio: self.audio.clone(),
             now_playing: self.mcast.now_playing(),

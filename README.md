@@ -38,7 +38,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | DVB-S2/S2X PL demodulation: frame lock, MODCOD per frame (ACM) | ✅ |
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
-| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK/8PSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
+| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK/8PSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), Comtech EDMAC → bridged Ethernet → IP, MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
 | **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav`; the 2–4 × faster links' multiplex, its HDLC timeslot (bridged Ethernet → IP) and its G.728 calls | ✅ decodes live Q-Flex links down to the calls' speech, the faster ones' IP too |
 | **Viterbi K=7 → data** (IESS-308/309 SCPC and the like): rate 1/2–7/8, puncturing and orientation found blind and followed when the carrier turns; then the payload search — with or without differential decoding — for HDLC, TS, E1, D&I++, Paradise or IBS/SMS (IESS-309, 16/15) framing, or just the scrambler from the idle fill | ✅ decodes a live 10.24 kBd IESS-308 carrier to its IBS frames (rate 1/2, differential, V.35) |
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
@@ -223,6 +223,20 @@ audio sniffer leaves it alone; a transport stream gets the TS outputs.
 reads a recorded PCAP back. Identify recognises the carrier by its unique
 word. What each search found is shown, so you can tell a finding from a
 default. It is confirmed on live Comtech CDM-600L and CDM-570L carriers.
+
+**Comtech EDMAC with bridged Ethernet** (worked out from a live 8PSK
+carrier; no specification was to hand): the data rate grown by 21/20 in
+1008-bit frames — a fixed header, five 192-bit data blocks and 9-bit
+overhead groups between them carrying the modems' M&C channel. Inside, the
+traffic is bridged Ethernet in 258-byte packet blocks: a 4-byte word with a
+pointer to where a packet ends, then packets, each with a length byte (or 0
+for "to the pointer") and a 6-byte header. A packet with whole headers sets
+up a header-compression context; the compressed UDP packets that follow
+(SNMP, the RTP of a radio-over-IP link) are rebuilt from it, their UDP
+checksum checked. The Ethernet frames go to the IP stage — statistics,
+PCAP — like any other; the side panel's **Framing** and **Packets** rows
+say how it is going. Compressed packets with flags not yet understood are
+counted, not rebuilt.
 
 ### Voice over E1 (G.704, Comtech D&I++)
 

@@ -7,7 +7,9 @@
 //! recur every 188 bytes, E1 frames whose alignment signal recurs every 512
 //! bits (an E1 carried transparently, see [`crate::e1`]), or Comtech
 //! Drop & Insert++ frames (see [`crate::dandi`]), or BSC blocks whose BCC
-//! checks (see [`crate::bsc`]). A format that frames the
+//! checks (see [`crate::bsc`]), or Comtech EDMAC frames (see
+//! [`crate::edmac`]; the bridged Ethernet inside, [`crate::ethblock`],
+//! found once they are). A format that frames the
 //! whole stream (TS, E1, D&I++) must account for at least half of it: three
 //! TS sync bytes in a row turn up by chance in a long enough listen.
 //!
@@ -34,6 +36,8 @@ use std::collections::VecDeque;
 use crate::bsc::BscRx;
 use crate::dandi::{DiPlusRx, DiPlusStats};
 use crate::e1::{E1Rx, TIMESLOTS};
+use crate::edmac::{EdmacRx, EdmacStats};
+use crate::ethblock::{EthBlockRx, EthBlockStats};
 use crate::ibs::IbsRx;
 use crate::paradise::EscRx;
 use crate::slotpkt::SlotRx;
@@ -193,6 +197,9 @@ pub struct Hdlc {
 pub enum Fcs {
     Crc16,
     Crc32,
+    /// None: whole Ethernet frames from the packet blocks inside EDMAC
+    /// framing ([`crate::ethblock`]), delimited by length and pointer.
+    None,
 }
 
 /// The longest frame taken, in bits.
@@ -414,6 +421,10 @@ impl TsAlign {
 /// What the label says of an HDLC line chosen while it carried nothing but
 /// flags (removed once frames come).
 const IDLE_FLAGS: &str = ": idle flags only so far";
+/// EDMAC's label, and what it says until the data inside are known.
+const EDMAC: &str = "Comtech EDMAC framing (21/20)";
+const PACKETS_WAIT: &str = ", data inside not known yet";
+const PACKETS: &str = " → bridged Ethernet in 258-byte packet blocks";
 
 /// What the data were found to carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +444,9 @@ pub enum Format {
     Slots,
     /// IBM bisync blocks (see [`crate::bsc`]): the PH-ML radar feed.
     Bsc,
+    /// Comtech EDMAC framing, 21/20 (see [`crate::edmac`]); inside it,
+    /// bridged Ethernet in packet blocks ([`crate::ethblock`]) or HDLC.
+    Edmac,
     /// No framing known, but the descrambled data are mostly an idle fill
     /// (constant, 1010… or a repeated byte): the scrambler is found even
     /// though what the data carry is not.
@@ -498,6 +512,9 @@ pub struct PayloadStats {
     pub slots: Option<crate::slotpkt::SlotStats>,
     /// BSC blocks, likewise.
     pub bsc: Option<crate::bsc::BscStats>,
+    /// EDMAC framing, likewise; the packet blocks inside it, once found.
+    pub edmac: Option<EdmacStats>,
+    pub packets: Option<EthBlockStats>,
     /// Frames of data looked at before deciding (or so far).
     pub probed: u64,
 }
@@ -520,6 +537,11 @@ const IDLE_SHARE: f64 = 0.75;
 /// with bursts between its fill (ASA253 MAL-BN, 15 s of nothing).
 const IDLE_ONLY: f64 = 0.99;
 
+/// Whether `n` beats `best` by a clear margin (1/16).
+fn n_beats(n: u64, best: u64) -> bool {
+    n > best + best / 16
+}
+
 /// Finds the descrambler and format of a modem's data, then follows them.
 pub struct PayloadRx {
     frame_len: usize,
@@ -533,6 +555,10 @@ pub struct PayloadRx {
     ibs: IbsRx,
     slots: SlotRx,
     bsc: BscRx,
+    edmac: EdmacRx,
+    packets: EthBlockRx,
+    /// HDLC on an inverted line, inside EDMAC framing.
+    hdlc_inverted: Hdlc,
     /// Also try the unscrambled data with its rails skewed.
     rail_skews: bool,
     /// Modem frames in a row the chosen framing has been lost (Paradise).
@@ -560,6 +586,9 @@ impl PayloadRx {
             ibs: IbsRx::new(),
             slots: SlotRx::new(),
             bsc: BscRx::new(),
+            edmac: EdmacRx::new(),
+            packets: EthBlockRx::new(),
+            hdlc_inverted: Hdlc::default(),
             raw_bits: Vec::new(),
             stats: PayloadStats::default(),
         }
@@ -639,6 +668,7 @@ impl PayloadRx {
             let mut slo = Vec::new();
             let mut bs = BscRx::new();
             let mut bso = Vec::new();
+            let mut ed = EdmacRx::new();
             // HDLC on the inverted line: differential decoding reads an
             // NRZI line inverted.
             let mut hi = Hdlc::default();
@@ -671,6 +701,7 @@ impl PayloadRx {
                 slo.clear();
                 bs.push(&bits, &mut bso);
                 bso.clear();
+                ed.push(&bits, &mut ped, &mut pee);
                 let inverted: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
                 hi.push(&inverted, &mut hio);
                 hio.clear();
@@ -744,10 +775,27 @@ impl PayloadRx {
                     (bs.stats.blocks >= crate::bsc::FOUND).then_some(bs.stats.blocks * 1500),
                     Format::Bsc,
                 ),
+                // Frames whose fixed bits checked.
+                (
+                    framed(ed.stats.frames * crate::edmac::FRAME as u64),
+                    Format::Edmac,
+                ),
             ];
             for (score, fmt) in candidates {
+                // EDMAC taken from an earlier reading needs beating clearly:
+                // a recording already descrambled, descrambled again by
+                // V.35, shows every frame a second time 20 bits on (its far
+                // tap reaches past the header into idle data) — about as
+                // many frames as the real ones.
+                let beats = |b: &(u64, Descrambler, bool, i8, Format, Fcs, usize)| {
+                    if fmt == Format::Edmac && b.4 == Format::Edmac {
+                        n_beats(score.unwrap_or(0), b.0)
+                    } else {
+                        score.unwrap_or(0) > b.0
+                    }
+                };
                 if let Some(n) = score
-                    && best.is_none_or(|b| n > b.0)
+                    && best.is_none_or(|b| beats(&b))
                 {
                     best = Some((n, kind, diff, skew, fmt, fcs, pe_octets));
                     // (Packets carrying timeslots: any frame whose FCS
@@ -799,12 +847,14 @@ impl PayloadRx {
                 (Format::Slots, _) if slots_plain.is_some() => "HDLC on an inverted line".into(),
                 (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
                 (Format::Bsc, _) => "IBM bisync (BSC) blocks".into(),
+                (Format::Edmac, _) => format!("{EDMAC}{PACKETS_WAIT}").into(),
                 (Format::Idle, _) if idle_only => {
                     "idle: nothing but its fill so far (no traffic to tell the format by)".into()
                 }
                 (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
                 (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)".into(),
                 (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
+                (Format::Hdlc, Fcs::None) => unreachable!("HDLC frames carry an FCS"),
             };
             self.stats.found = Some(format!(
                 "{}, {}{}{}",
@@ -896,6 +946,41 @@ impl PayloadRx {
             Format::Bsc => {
                 self.bsc.push(&bits, &mut out.bsc);
                 self.stats.bsc = Some(self.bsc.stats.clone());
+            }
+            Format::Edmac => {
+                let mut data = Vec::new();
+                let mut mc = Vec::new();
+                self.edmac.push(&bits, &mut data, &mut mc);
+                self.stats.edmac = Some(self.edmac.stats.clone());
+                // Inside: bridged Ethernet in packet blocks, or HDLC either
+                // way up.
+                let mut eth = Vec::new();
+                self.packets.push(&data, &mut eth);
+                out.frames.extend(eth.into_iter().map(|f| (f, Fcs::None)));
+                self.hdlc.push(&data, &mut out.frames);
+                let inverted: Vec<u8> = data.iter().map(|b| b ^ 1).collect();
+                self.hdlc_inverted.push(&inverted, &mut out.frames);
+                self.stats.hdlc_good = self.hdlc.good + self.hdlc_inverted.good;
+                if self.packets.stats.blocks > 0 {
+                    self.stats.packets = Some(self.packets.stats.clone());
+                }
+                // Say what is inside once something is.
+                let inside = if self.packets.stats.frames > 0 {
+                    Some(PACKETS)
+                } else if self.stats.hdlc_good > 0 {
+                    Some(" → HDLC")
+                } else {
+                    None
+                };
+                if let Some(inside) = inside
+                    && let Some(f) = &mut self.stats.found
+                    && f.contains(PACKETS_WAIT)
+                {
+                    *f = f.replacen(PACKETS_WAIT, inside, 1);
+                }
+                // The M&C channel, and the data for the text finder.
+                out.esc.extend_from_slice(&mc);
+                out.inner.extend_from_slice(&data);
             }
             // Descrambled, for the text finder and the data file.
             Format::Idle => out.inner.extend_from_slice(&bits),
@@ -1303,6 +1388,48 @@ mod tests {
         // The traffic stretch comes through intact.
         let t = &data[120 * 150..120 * 220];
         assert!(inner.windows(t.len()).any(|w| w == t));
+    }
+
+    #[test]
+    fn edmac_with_bridged_ethernet_under_v35() {
+        // As on a live 8PSK TPC 2964 carrier: Ethernet frames in packet
+        // blocks, inverted inside EDMAC frames, V.35-scrambled.
+        use crate::ethblock::tests::{full, udp_frame};
+        const L: usize = crate::tpc2964::DATA;
+        let frames: Vec<Vec<u8>> = (0..6u16)
+            .map(|k| udp_frame(k, &[k as u8; 40], false))
+            .collect();
+        let packets: Vec<(Vec<u8>, bool)> = frames
+            .iter()
+            .enumerate()
+            .map(|(k, f)| (full(0x100 + k as u16, 0, f), true))
+            .collect();
+        let idle = || crate::ethblock::blocks(&[], 0);
+        let mut bits: Vec<u8> = (0..6).flat_map(|_| idle()).collect();
+        bits.extend(crate::ethblock::blocks(&packets, 20));
+        bits.extend((0..6).flat_map(|_| idle()));
+        let data: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
+        let mut framed = Vec::new();
+        for d in data.as_chunks::<{ crate::edmac::DATA }>().0 {
+            crate::edmac::frame(d, &[1; crate::edmac::MC], &mut framed);
+        }
+        let sent = scramble(Descrambler::SelfSync(&[3, 20]), L, &framed);
+        let mut rx = PayloadRx::new(L);
+        let mut out = PayloadOut::default();
+        let mut got = Vec::new();
+        for f in sent.chunks(L) {
+            rx.push(f, &mut out);
+            got.append(&mut out.frames);
+        }
+        assert_eq!(rx.format(), Some(Format::Edmac), "{:?}", rx.stats);
+        let found = rx.stats.found.clone().unwrap();
+        assert!(
+            found.contains("bridged Ethernet") && found.contains("taps 3, 20"),
+            "{found}"
+        );
+        assert!(got.iter().all(|f| f.1 == Fcs::None));
+        let eth: Vec<Vec<u8>> = got.into_iter().map(|f| f.0).collect();
+        assert_eq!(eth, frames);
     }
 
     #[test]

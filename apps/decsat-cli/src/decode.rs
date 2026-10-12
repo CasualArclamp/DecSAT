@@ -657,6 +657,41 @@ pub(crate) fn print_payload(p: &decsat_modem::payload::PayloadStats) {
             hex(&e.varying)
         );
     }
+    if let Some(e) = &p.edmac {
+        println!(
+            "  edmac framing: {}{}, {} frames, {} with their fixed bits wrong, {} losses",
+            if e.locked { "aligned" } else { "searching" },
+            if e.inverted { " (inverted)" } else { "" },
+            e.frames,
+            e.misses,
+            e.losses
+        );
+    }
+    if let Some(k) = &p.packets {
+        println!(
+            "  packet blocks: {}{}, {} blocks ({} bad words, {} losses) · {} whole Ethernet frames, \
+             {} compressed rebuilt, {} compressed not rebuilt, {} before their context, \
+             {} UDP checksums failed, {} bad ({} pointer, {} start, {} too long), \
+             {} one-byte packets, {} bytes of errors between packets · {} contexts",
+            if k.locked { "aligned" } else { "searching" },
+            if k.inverted { " (inverted)" } else { "" },
+            k.blocks,
+            k.bad_words,
+            k.losses,
+            k.frames,
+            k.rebuilt,
+            k.not_rebuilt,
+            k.no_context,
+            k.checksum_failed,
+            k.bad,
+            k.bad_pointer,
+            k.bad_start,
+            k.too_long,
+            k.short,
+            k.idle_errors,
+            k.contexts
+        );
+    }
     if let Some(b) = &p.bsc {
         println!(
             "  bsc: {} blocks with a good BCC ({}), {} bad, line {}",

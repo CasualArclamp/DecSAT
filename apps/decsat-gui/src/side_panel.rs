@@ -1500,6 +1500,46 @@ fn payload_rows(ui: &mut Ui, f: Option<&FecStats>) {
             ));
             ui.end_row();
         }
+        if let Some(e) = &p.edmac {
+            ui.label("Framing");
+            ui.label(format!(
+                "EDMAC {} · {} frames · {} misaligned",
+                if e.locked { "aligned" } else { "searching" },
+                e.frames,
+                e.misses
+            ))
+            .on_hover_text(
+                "Comtech EDMAC, 21/20: 1008-bit frames of a 12-bit header, five \
+                 192-bit data blocks and 9-bit overhead groups between them (one \
+                 fixed, three carrying the modems' M&C channel).",
+            );
+            ui.end_row();
+        }
+        if let Some(k) = &p.packets {
+            ui.label("Packets");
+            ui.label(format!(
+                "{} Ethernet frames · {} rebuilt · {} compressed not rebuilt",
+                k.frames,
+                k.rebuilt,
+                k.not_rebuilt + k.no_context
+            ))
+            .on_hover_text(format!(
+                "Bridged Ethernet in 258-byte packet blocks (a 4-byte word with a \
+                 pointer, 254 packet bytes). Whole frames set up header-compression \
+                 contexts ({} so far); compressed UDP packets are rebuilt from them \
+                 and their UDP checksum checked ({} failed). Not rebuilt: {} with \
+                 flags not understood or a non-UDP context, {} before their context \
+                 was seen. {} blocks, {} bad words, {} packets that made no sense.",
+                k.contexts,
+                k.checksum_failed,
+                k.not_rebuilt,
+                k.no_context,
+                k.blocks,
+                k.bad_words,
+                k.bad
+            ));
+            ui.end_row();
+        }
         if p.hdlc_good + p.hdlc_bad > 0 {
             ui.label("HDLC");
             ui.label(format!("{} frames · {} bad FCS", p.hdlc_good, p.hdlc_bad));

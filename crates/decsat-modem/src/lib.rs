@@ -10,6 +10,8 @@
 //! - [`tpc2964`]: `tpc_2964` frames, their structure found from the signal.
 //! - [`payload`]: what a modem's data carry (HDLC, MPEG-TS) and how they are
 //!   scrambled, found from the data.
+//! - [`edmac`]: Comtech EDMAC framing (21/20, its M&C channel);
+//!   [`ethblock`]: the bridged Ethernet in 258-byte packet blocks inside it.
 //! - [`text`]: live text search in any bit stream, every reading at once.
 //! - [`g728`]: ITU-T G.728 LD-CELP 16 kbit/s voice, and finding it in two
 //!   bits of a timeslot (the CDM-600L's Drop & Insert voice).
@@ -25,6 +27,8 @@ pub mod conv;
 pub mod dandi;
 pub mod dvbs;
 pub mod e1;
+pub mod edmac;
+pub mod ethblock;
 pub mod fastlink;
 pub mod g728;
 pub mod ibs;
