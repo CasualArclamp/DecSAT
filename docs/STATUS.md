@@ -2346,7 +2346,7 @@ TPC carriers or wide trunks now.
   track status). Over 1496 frames every block parses to its exact length
   under the standard UAPs. Times of day agree with the clock (13:56 UTC).
 - **Radars** (SAC 4; I034/120 in the north marker): SIC 20 Adelaide
-  Airport (34.9524°S 138.5320°E, 30 m), SIC 19 near Canberra (903 m), SIC
+  Airport (its place in the north marker, 30 m up), SIC 19 near Canberra (903 m), SIC
   18 Cairns Airport (on the 12355.08 carrier), SIC 63 Darwin (12359.44),
   SIC 48 (MTBB, no position sent). Scan 3.95–3.97 s (I034/041). Each
   shows a few fixed Mode S transponders (squawks 77xx, FL −10, ≤ 10 kt,

@@ -2900,7 +2900,7 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&QFA66[i..i + 2], 16).unwrap())
             .collect();
-        const QFA66: &str = "150031ff235ba604ab042a27069be9321c523e6e7c147402c0800700a8ffb804aa6b95446076da0820010005c0a07b0b9c";
+        const QFA66: &str = "150031ff235ba604ab042a27069bf7388957caa07c147402c0800700a8ffb804aa6b95446076da0820010005c0a07b0b9c";
         let d = decsat_ip::packet::udp_v4([10, 0, 0, 1], [239, 1, 2, 3], 1028, 50000, &rec);
         let mut ip = IpStage::new();
         ip.ip(&d, &decsat_ip::parse(&d).unwrap());

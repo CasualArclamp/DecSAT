@@ -983,9 +983,10 @@ mod tests {
             .collect()
     }
 
-    /// Frames from the Adelaide feed (SAC 4, SIC 20), 2026-10-12 13:56 UTC.
+    /// Frames from a live feed (SAC 4, SIC 20), 2026-10-12 13:56 UTC, the
+    /// radar's place in the north marker replaced by a made-up one.
     const SECTOR: &str = "0303220010f404140261fc6a609400202000";
-    const NORTH: &str = "030322001def1004140161fda701fb9400202000840000001ee7251d6282fa";
+    const NORTH: &str = "030322001def1004140161fda701fb9400202000840000001ef7388a57ca9f";
     /// Two target reports (a CAT 048 block of two records), then a sector
     /// message.
     const TWO_TRACKS: &str = "0303300065ffbf02041461fd36a2aefac74b2fc93fd86001b97cf78a0100000000000000e1025ea9ea0f91001611674020a0ffbf02041461fd37a2bdfbc7440fd13fd86002b87cf78b0200000000000000e100100000000000e20034a28610dd000e15654020a0220010f404140261fd38c89400202000";
@@ -1012,9 +1013,9 @@ mod tests {
         assert_eq!(m[0].sector, u8::MAX);
         assert!((m[0].rotation_secs.unwrap() - 3.9609).abs() < 1e-3);
         let s = m[0].site.unwrap();
-        // Adelaide Airport.
-        assert!((s.lat + 34.9524).abs() < 1e-3, "{}", s.lat);
-        assert!((s.lon - 138.5320).abs() < 1e-3, "{}", s.lon);
+        // The made-up place (the real one stays out of the repo).
+        assert!((s.lat - -12.3457).abs() < 1e-3, "{}", s.lat);
+        assert!((s.lon - 123.4568).abs() < 1e-3, "{}", s.lon);
         assert_eq!(s.height_m, 30);
     }
 
@@ -1187,13 +1188,13 @@ mod tests {
     }
 
     /// ADS-B from the ML–PH trunk's multicast (SAC 4, SIC 171), 2026-10-12
-    /// 05:33 UTC, a record a block: an airliner descending into Perth, its
-    /// selected altitude and squawk (FRN 28) given; one with no FRN 28; the
-    /// ground station's field monitor.
-    const QFA66: &str = "150031ff235ba604ab042a27069be9321c523e6e7c147402c0800700a8ffb804aa6b95446076da0820010005c0a07b0b9c";
+    /// 05:33 UTC, a record a block, their places (I021/130) replaced by
+    /// made-up ones: an airliner descending, its selected altitude and squawk
+    /// (FRN 28) given; one with no FRN 28; the ground station's field monitor.
+    const QFA66: &str = "150031ff235ba604ab042a27069bf7388957caa07c147402c0800700a8ffb804aa6b95446076da0820010005c0a07b0b9c";
     const VOZ1859: &str =
-        "15002cff21db0404ab002827066ee9aa5f53e2647c7a48155c000705430129098b341158f6b1e35e6002003b";
-    const MONITOR: &str = "150022ff01110404ab48202706aae94045528a307cf77700a03c082cd10282082088";
+        "15002cff21db0404ab002827066ef74cc757ded57c7a48155c000705430129098b341158f6b1e35e6002003b";
+    const MONITOR: &str = "150022ff01110404ab48202706aaf740a357d2417cf77700a03c082cd10282082088";
 
     #[test]
     fn adsb_reports() {
@@ -1211,8 +1212,8 @@ mod tests {
         assert_eq!(r.mode_s.selected_level(), Some(40));
         assert_eq!(r.mode_s.vertical_rate(), Some(-450));
         let a = r.adsb.unwrap();
-        assert!((a.lat + 32.0679).abs() < 1e-3, "{}", a.lat);
-        assert!((a.lon - 115.6555).abs() < 1e-3, "{}", a.lon);
+        assert!((a.lat - -12.3457).abs() < 1e-3, "{}", a.lat);
+        assert!((a.lon - 123.4568).abs() < 1e-3, "{}", a.lon);
         assert_eq!((a.emitter, a.geo_alt_ft), (Some(5), Some(4400)));
         assert!(!a.field_monitor && !a.on_ground);
         // No FRN 28: no squawk; its geometric rate stands for the inertial.
@@ -1239,7 +1240,7 @@ mod tests {
         assert_eq!(v.source_label().as_deref(), Some("SAC 4 SIC 171 · ADS-B"));
         // Measured from the first aircraft's place rounded to 0.1°.
         let o = v.origin.unwrap();
-        assert_eq!((o.lat, o.lon), (-32.1, 115.7));
+        assert_eq!((o.lat, o.lon), (-12.3, 123.5));
         // Three aircraft, numbered as first heard; QFA66 twice is one.
         let n: Vec<(u16, Option<&str>)> = v
             .tracks
@@ -1252,8 +1253,8 @@ mod tests {
         );
         let q = &v.tracks[0];
         assert_eq!(q.reports, 2);
-        // 1.9 NM north and 2.3 NM west of the origin.
-        assert!((q.last.y - 1.93).abs() < 0.05, "{}", q.last.y);
-        assert!((q.last.x + 2.27).abs() < 0.05, "{}", q.last.x);
+        // 2.7 NM south and 2.5 NM west of the origin.
+        assert!((q.last.y - -2.74).abs() < 0.05, "{}", q.last.y);
+        assert!((q.last.x - -2.53).abs() < 0.05, "{}", q.last.x);
     }
 }

@@ -374,7 +374,7 @@ pub struct RadarView {
 }
 
 impl RadarView {
-    /// Which radar, for display: `SAC 4 SIC 20 · 34.9524°S 138.5320°E,
+    /// Which radar, for display: `SAC 4 SIC 20 · 12.3457°S 123.4568°E,
     /// 30 m` (ASTERIX feeds; `None` for the BSC one, which does not say);
     /// `SAC 4 SIC 171 · ADS-B` for ADS-B.
     pub fn source_label(&self) -> Option<String> {
