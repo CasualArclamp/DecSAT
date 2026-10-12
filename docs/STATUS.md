@@ -3038,7 +3038,10 @@ there); the legend says so. A business jet above FL450 turns purple too.
 Rory then asked for military addresses as well: a Mode S address in
 `MILITARY_ADDRESSES` turns a track purple however it flies — for now the
 ADF's 7CF830–7CFBFF (his range; the field monitors sit just below, at
-7CF7xx). The legend's entry is "mil / fast".
+7CF7xx). The legend's entry is "mil / fast". Then the US block too:
+ADF7C8–AFFFFF, the rest of the US A00000–AFFFFF above the N-number
+addresses (N1–N99999 fill A00001–ADF7C7), held for the US government and
+nearly all military.
 
 ## The CDM type found by itself (2026-10-12)
 

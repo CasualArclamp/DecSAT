@@ -323,6 +323,10 @@ fn fast_or_high(r: &Report) -> bool {
 const MILITARY_ADDRESSES: &[(u32, u32)] = &[
     // Australian Defence Force, in Australia's 7C0000–7FFFFF.
     (0x7CF830, 0x7CFBFF),
+    // United States: the rest of A00000–AFFFFF above the N-number block
+    // (N1–N99999 map one-to-one onto A00001–ADF7C7), held for the US
+    // government, nearly all of it military.
+    (0xADF7C8, 0xAFFFFF),
 ];
 
 fn military_address(r: &Report) -> bool {
@@ -393,9 +397,10 @@ fn legend(ui: &mut Ui, red: bool) {
             (
                 FAST_HIGH,
                 "mil / fast",
-                "A military Mode S address (ADF: 7CF830–7CFBFF), or faster or \
-                 higher than airliners go, so likely military: 650 kt or more, \
-                 FL450 or above, or over 350 kt below FL100",
+                "A military Mode S address (ADF 7CF830–7CFBFF, US \
+                 ADF7C8–AFFFFF), or faster or higher than airliners go, so \
+                 likely military: 650 kt or more, FL450 or above, or over \
+                 350 kt below FL100",
             ),
             (
                 FIXED,
@@ -2219,10 +2224,15 @@ mod tests {
         };
         assert!(with(Some(0x7CF830)));
         assert!(with(Some(0x7CFBFF)));
-        // A field monitor just below, the block's next neighbour, a VH-.
+        assert!(with(Some(0xADF7C8)));
+        assert!(with(Some(0xAFFFFF)));
+        // A field monitor just below, the block's next neighbour, a VH-;
+        // the last N-number (N99999), the next country's first address.
         assert!(!with(Some(0x7CF78A)));
         assert!(!with(Some(0x7CFC00)));
         assert!(!with(Some(0x7C7181)));
+        assert!(!with(Some(0xADF7C7)));
+        assert!(!with(Some(0xB00000)));
         assert!(!with(None));
     }
 }
