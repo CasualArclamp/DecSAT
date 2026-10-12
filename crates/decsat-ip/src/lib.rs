@@ -1,9 +1,10 @@
 //! IP out of DVB-S2: packet validation, IPv4 fragment reassembly (`frag`),
 //! a PCAP writer, live statistics, the blind IPv4 search (see `docs/DESIGN.md` §6 and Appendix B), multicast
 //! audio detection (`mcast`) and playback (`relay`), a streaming server
-//! for media players (`serve`), and a radar station's monitoring traffic
-//! (`rcms`).
+//! for media players (`serve`), a radar station's monitoring traffic
+//! (`rcms`), and ED-137 radio over IP's signalling and SIP (`ed137`).
 
+pub mod ed137;
 pub mod frag;
 pub mod mcast;
 pub mod packet;

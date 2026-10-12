@@ -39,6 +39,9 @@ pub struct Options {
     pub radar_range: Option<f32>,
     /// Pick this track (hex) on the radar scope.
     pub radar_track: Option<u16>,
+    /// Hold the side panel scrolled this far down (px), for screenshots
+    /// of the cards below the fold.
+    pub panel_scroll: Option<f32>,
     /// Drop VFOs here (offset from the centre, Hz; and its width, Hz):
     /// `--vfo-at` once a VFO, each taking its place in a `--decoder` list.
     pub vfo_at: Vec<(f64, f64)>,
@@ -85,6 +88,14 @@ impl Options {
                         v.to_str()
                             .and_then(|s| u16::from_str_radix(s, 16).ok())
                             .ok_or("--radar-track needs a track number (hex)")?,
+                    );
+                }
+                Some("--panel-scroll") => {
+                    let v = args.next().ok_or("--panel-scroll needs pixels")?;
+                    o.panel_scroll = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("--panel-scroll needs a number of pixels")?,
                     );
                 }
                 Some("--radar-range") => {
@@ -193,6 +204,7 @@ pub struct Automation {
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
     pub radar_track: Option<u16>,
+    pub panel_scroll: Option<f32>,
     pub vfo_at: Vec<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
@@ -215,6 +227,7 @@ impl Automation {
             ts_viewer: o.ts_viewer,
             radar_scope: o.radar_scope,
             radar_range: o.radar_range,
+            panel_scroll: o.panel_scroll,
             radar_track: o.radar_track,
             vfo_at: o.vfo_at.clone(),
             play_audio: o.play_audio,

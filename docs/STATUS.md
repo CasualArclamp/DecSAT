@@ -3327,3 +3327,62 @@ each the way a bracket click would). Checked on the 8 MS/s test scene: VFO 1 DVB
 (locked, IP and the test radio), VFO 2 TPC carrier → "auto TPC", VFO 3
 DVB-S2 32APSK → GSE/IP → TS-mode frames → MPEG-TS, VFO 4 → "auto 570
 VIT 3/4"; all locked.
+
+## ED-137 radio signalling; compressed fragments (2026-10-13)
+
+Rory: "decode the ED-137 radio signalling in the RTP", with a 159 s
+recording of the 8PSK carrier from the GUI (VFO_32, 12347.5531 MHz: its
+`.bin` and `.pcap`). tshark 4.6 (Rory's Wireshark install) served as the
+oracle: it dissects ED-137, ED-137A, B and C.
+
+- **`decsat-ip::ed137`**: RTP (RFC 3550, CSRCs, extension, padding); the
+  header extension of profile 0167h (ED-137A onwards: PTT type 3 bits, SQU,
+  PTT-id 6, PM, PTTS, SCT, 2 reserved, X, then type/length/value features)
+  and 0067h (the first edition's 32-bit word, VF); features 1 signal
+  quality (index, method; the RSSI index's dBm bands), 2 CLIMAX delay, 3
+  radio remote control, 4 CLIMAX delay compensation, the rest raw. Layout,
+  masks and value names from tshark's `-G fields` / `-G values` (Wireshark's
+  packet-rtp-ed137.c, GPL-2.0-or-later — credited in the module). A
+  `RadioRx` follows each stream (src, dst, ports, SSRC): keep-alives (PT
+  123, the SDP's `R2S/8000`) and sound, loss by sequence, PTT and squelch
+  now, times on and seconds on, a log of changes; streams under 3 packets
+  are stray (an SSRC hit by errors — this flow has no UDP checksum).
+  SIP: start line, From/To (display name or user, %-escapes undone), Call-ID,
+  top Via branch, WG67-Version / Subject / Priority / User-Agent, the SDP's
+  m=, c=, a=. **Refused or accepted**: one direction only shows the caller's
+  requests, but an ACK reusing the INVITE's branch acknowledges an error
+  answer (RFC 3261 §17.1.1.3), a new branch a 200 OK.
+- **Checked against tshark packet by packet** (`decsat pcap --radio-csv`,
+  matched by time): 488 of 488 agree on PTT, SQU, PTT-id, PM, PTTS, SCT,
+  SSRC, PT, sequence and the feature; tshark also shows one packet whose
+  extension length is broken (DecSAT drops it).
+- **What the recording holds**: one stream, 172.16.82.28:8602 →
+  10.26.185.112:8580 — R2S keep-alives only (PTT off, squelch closed, PTT-id
+  0, signal quality 0 by a vendor's method 4), ~5 a second as the SDP's
+  `R2S-KeepAlivePeriod:200` asks, none with sound in 159 s: the VCS → radio
+  direction of an idle radio. Every ~10 s the VCS ("Radio (IP)" at
+  172.16.82.15, user agent SipLib2-ganymed-evo4_1_113_0) INVITEs radio
+  109061002 @ 10.26.185.115 (Subject: radio, WG67-Version: radio.01, SDP
+  PCMA/PCMU + R2S, ptime 20, `type:Radio-TxRx`, `txrxmode:TxRx`, `bss:FRQ1
+  RSSI`, `sigtime:1`, `ptt_rep:0`, `rtphe:1`, no frequency id) with new
+  ports each time, and every one is **refused** (the ACKs reuse the
+  INVITEs' branches); the answers travel on the other direction's carrier.
+- **`ethblock` compressed flags understood**: 40h = one byte follows (00h
+  every time; taken for an IP identification change, the context's kept);
+  20h = the IP flags and fragment offset follow and the payload is that
+  fragment's bytes (no UDP header): the SIP INVITEs go in 300-byte IP
+  fragments — the first whole (context), the middle ones compressed
+  (offsets 280 and 528), the last whole under a context of its own. A
+  context now keeps Ethernet + IPv4 (+ UDP when its frame began a
+  datagram); a compressed first fragment cannot be rebuilt (its datagram's
+  length is not sent), not seen. On the recording: 937 rebuilt (was 805),
+  65 left (was 197), 537 keep-alives (was 487), the INVITEs whole.
+- `decsat pcap` puts fragments back together first; `decsat payload` reads
+  ED-137 and writes `--pcap-out` (the `.bin` decoded again: 1614 IP packets
+  where the GUI's PCAP, from the build before, had 1497). GUI: the IP
+  card's **Radio over IP (ED-137)** section; unattended `--panel-scroll PX`
+  holds the side panel scrolled for screenshots of the lower cards.
+
+Open: the voice (PCMA/PCMU when PTT or squelch is on) is counted, not
+played; the 40h byte's meaning; the other direction (radio → VCS, its
+squelch and receive audio) is on the paired carrier.

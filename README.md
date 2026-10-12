@@ -232,12 +232,27 @@ overhead groups between them carrying the modems' M&C channel. Inside, the
 traffic is bridged Ethernet in 258-byte packet blocks: a 4-byte word with a
 pointer to where a packet ends, then packets, each with a length byte (or 0
 for "to the pointer") and a 6-byte header. A packet with whole headers sets
-up a header-compression context; the compressed UDP packets that follow
-(SNMP, the RTP of a radio-over-IP link) are rebuilt from it, their UDP
-checksum checked. The Ethernet frames go to the IP stage — statistics,
-PCAP — like any other; the side panel's **Framing** and **Packets** rows
-say how it is going. Compressed packets with flags not yet understood are
-counted, not rebuilt.
+up a header-compression context; the compressed packets that follow
+(SNMP, the RTP of a radio-over-IP link, the middle fragments of its SIP)
+are rebuilt from it — UDP checksums checked, fragments put back together by
+the IP stage. The Ethernet frames go to the IP stage — statistics, PCAP —
+like any other; the side panel's **Framing** and **Packets** rows say how it
+is going.
+
+**ED-137 radio over IP** (air traffic control radio as VoIP, wherever it
+turns up in the IP): each RTP packet's header extension carries the radio's
+signalling — PTT and its type (normal, coupling, priority, emergency,
+test), squelch, the PTT's id, PTT mute and summation, simultaneous calls,
+and features such as signal quality and CLIMAX delay — in R2S keep-alives
+and voice packets alike. The IP card's **Radio over IP** section shows each
+stream's state live (PTT red, squelch green), how often and how long each
+was on, packets lost, and a log of the changes; the SIP dialogs that set the
+sessions up are read too — who calls whom, the SDP (radio type, Tx/Rx mode,
+keep-alive period, best-signal method) and whether the call was refused or
+accepted (one direction tells it by the ACK's transaction). The field
+layout follows Wireshark's ED-137 dissector, and agrees with tshark packet
+for packet on a live recording. `decsat pcap … --radio-csv` writes every
+packet's signalling.
 
 ### Voice over E1 (G.704, Comtech D&I++)
 
@@ -577,6 +592,8 @@ decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf  
 decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
 decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
 decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back
+decsat pcap recording.pcap --radio-csv radio.csv   # ED-137 radio signalling, packet by packet
+decsat payload link.bin --frame-bits 2223 --bit-rate 537665 --pcap-out ip.pcap   # a data recording's IP, decoded again
 decsat modcods                    # the DVB-S2 MODCOD table
 ```
 

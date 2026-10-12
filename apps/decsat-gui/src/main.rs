@@ -57,7 +57,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX]"
             );
             std::process::exit(2);
         }
@@ -1474,7 +1474,11 @@ impl eframe::App for App {
             .default_size(400.0)
             .min_size(300.0)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut area = egui::ScrollArea::vertical();
+                if let Some(px) = self.automation.panel_scroll {
+                    area = area.vertical_scroll_offset(px);
+                }
+                area.show(ui, |ui| {
                     let inp = side_panel::SideInput {
                         vfos: &self.vfos,
                         statuses: &self.statuses,

@@ -1229,6 +1229,9 @@ pub struct GseView {
     /// Radar stations' monitoring traffic (units, their points), each
     /// station by its flow.
     pub radar_stations: Vec<decsat_ip::rcms::StationView>,
+    /// ED-137 radio over IP, once any is seen: each stream's PTT and
+    /// squelch, the SIP dialogs, the log of changes.
+    pub radio: Option<decsat_ip::ed137::RadioView>,
 }
 
 /// Where and whether a VFO's FEC writes its output.
@@ -1483,6 +1486,8 @@ struct IpStage {
     /// A radar station's monitoring traffic in the UDP, once seen
     /// (`decsat_ip::rcms`), and the signal clock its times are on (s).
     rcms: Option<decsat_ip::rcms::RcmsRx>,
+    /// ED-137 radio over IP's signalling and SIP (`decsat_ip::ed137`).
+    radio: decsat_ip::ed137::RadioRx,
     clock: f64,
     /// ASTERIX found in UDP datagrams (the ML–PH trunk's ADS-B), for the
     /// radar stage to take.
@@ -1508,6 +1513,7 @@ impl IpStage {
             text: decsat_modem::text::ByteText::new(),
             frags: Reassembler::new(),
             rcms: None,
+            radio: decsat_ip::ed137::RadioRx::new(),
             clock: 0.0,
             asterix: Vec::new(),
             gse: GseIp::new(),
@@ -1669,7 +1675,10 @@ impl IpStage {
         self.mcast.packet(data, info);
         // A radar station's monitoring messages: tried on every UDP
         // datagram (a length check turns nearly all others away at once).
-        if let Some((payload, _, dport)) = udp_payload(data, info) {
+        if let Some((payload, sport, dport)) = udp_payload(data, info) {
+            // ED-137 radio over IP: its RTP's signalling, its SIP.
+            self.radio
+                .udp((info.src, sport), (info.dst, dport), payload, self.clock);
             let flow = decsat_ip::rcms::Flow {
                 src: info.src,
                 group: info.dst,
@@ -1789,6 +1798,7 @@ impl IpStage {
                 .or_else(|| self.recorder.as_ref().and_then(|r| r.error.clone())),
             text: self.text.view(),
             radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
+            radio: self.radio.active().then(|| self.radio.view()),
         }
     }
 

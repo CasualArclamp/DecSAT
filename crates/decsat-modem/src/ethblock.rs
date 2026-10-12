@@ -23,12 +23,22 @@
 //!   32h, 35h seen): the whole Ethernet frame follows, without its FCS. Its
 //!   headers set up the context the 2-byte number names.
 //! - `s` without it: a compressed packet of that context — `s` is a count
-//!   (low 3 bits) and flags (40h, 20h: each adds bytes not understood yet).
-//!   With no flags, a UDP context's packet is `s`, the UDP checksum (only
-//!   if the context's was not zero) and the UDP payload: rebuilt here from
-//!   the context's Ethernet, IP and UDP headers, its length and checksums
-//!   recomputed, the UDP checksum checked — SNMP and RTP flows ride this
-//!   way. The IP identification is not sent: the context's is kept.
+//!   (low 3 bits) and two flags, then:
+//!   - with 40h, one byte (00h every time it was seen: taken for a change
+//!     of the IP identification, and the context's kept);
+//!   - with 20h, the IP flags and fragment offset (2 bytes, as in the IP
+//!     header): the packet is a fragment. Without it the packet is whole
+//!     (the context's DF bit kept);
+//!   - when the packet starts a UDP datagram, the UDP checksum — only if
+//!     the context's was not zero;
+//!   - the payload: the UDP payload, or the fragment's bytes.
+//!
+//!   Rebuilt here from the context's Ethernet and IP headers (and its UDP
+//!   header, for a datagram's start), lengths and checksums recomputed, the
+//!   UDP checksum checked for a whole datagram. SNMP, the RTP of a radio
+//!   over IP link and its SIP (fragmented: 300-byte IP packets on that
+//!   link, the first fragment whole, the middle ones compressed, the last
+//!   whole under a context of its own) ride this way.
 //!
 //! Frames out are Ethernet frames, for the IP stage to find the IP in.
 
@@ -54,7 +64,13 @@ const MARK: u8 = 0x08;
 /// The one-byte packets' byte.
 const SHORT: u8 = 0x02;
 const FULL: u8 = 0x80;
-const FLAGS_UNKNOWN: u8 = 0x60;
+/// The count byte's flags: a byte follows (00h whenever seen); the IP
+/// fragment field follows.
+const ID_BYTE: u8 = 0x40;
+const FRAGMENT: u8 = 0x20;
+/// The IP header's don't-fragment and more-fragments bits.
+const DF: u16 = 0x4000;
+const MF: u16 = 0x2000;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EthBlockStats {
@@ -65,12 +81,15 @@ pub struct EthBlockStats {
     /// Words that did not look right; times lock was lost.
     pub bad_words: u64,
     pub losses: u64,
-    /// Whole Ethernet frames; compressed packets rebuilt; compressed ones
-    /// left (flags not understood, or a context that is not plain UDP);
+    /// Whole Ethernet frames; compressed packets rebuilt (of them,
+    /// fragments); compressed ones left (a context that is not IPv4, or a
+    /// datagram's start whose context has no UDP header, or a compressed
+    /// first fragment: its datagram's length is not known);
     /// compressed ones whose context had not been seen; rebuilt ones whose
     /// UDP checksum failed (dropped); packets that made no sense.
     pub frames: u64,
     pub rebuilt: u64,
+    pub fragments: u64,
     pub not_rebuilt: u64,
     pub no_context: u64,
     pub checksum_failed: u64,
@@ -90,11 +109,40 @@ pub struct EthBlockStats {
     pub contexts: usize,
 }
 
-/// A context: the headers of its last whole frame.
+/// A context: the headers of its last whole frame — Ethernet and IPv4,
+/// and the UDP header when that frame began a UDP datagram.
 struct Context {
-    /// Ethernet + IPv4 + UDP headers, when that is what it carried and the
-    /// packet was not a fragment.
-    udp: Option<Vec<u8>>,
+    head: Vec<u8>,
+    udp: Option<[u8; 8]>,
+}
+
+/// The context a whole frame sets up, if it carries IPv4.
+fn context(eth: &[u8]) -> Option<Context> {
+    let ip = eth.get(14..)?;
+    if eth.get(12..14)? != [0x08, 0x00] || ip.first()? >> 4 != 4 {
+        return None;
+    }
+    let ihl = usize::from(ip[0] & 0x0F) * 4;
+    if ihl < 20 || ip.len() < ihl {
+        return None;
+    }
+    let offset = (u16::from(ip[6]) << 8 | u16::from(ip[7])) & 0x1FFF;
+    let udp = if ip[9] == 17 && offset == 0 {
+        ip.get(ihl..ihl + 8).and_then(|u| u.try_into().ok())
+    } else {
+        None
+    };
+    Some(Context {
+        head: eth[..14 + ihl].to_vec(),
+        udp,
+    })
+}
+
+/// What became of a compressed packet.
+enum Rebuilt {
+    Frame { frame: Vec<u8>, fragment: bool },
+    BadChecksum,
+    Cannot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,7 +167,7 @@ pub struct EthBlockRx {
     missed: u32,
     state: State,
     packet: Vec<u8>,
-    contexts: HashMap<[u8; 2], Context>,
+    contexts: HashMap<[u8; 2], Option<Context>>,
     pub stats: EthBlockStats,
 }
 
@@ -332,12 +380,7 @@ impl EthBlockRx {
         let s = p[4];
         if s & FULL != 0 {
             let eth = p[6..].to_vec();
-            self.contexts.insert(
-                ctx,
-                Context {
-                    udp: udp_headers(&eth),
-                },
-            );
+            self.contexts.insert(ctx, context(&eth));
             self.stats.contexts = self.contexts.len();
             self.stats.frames += 1;
             frames.push(eth);
@@ -347,65 +390,86 @@ impl EthBlockRx {
             self.stats.no_context += 1;
             return;
         };
-        let Some(head) = c.udp.as_ref().filter(|_| s & FLAGS_UNKNOWN == 0) else {
-            self.stats.not_rebuilt += 1;
-            return;
-        };
-        match rebuild(head, &p[5..]) {
-            Some(f) => {
+        match c
+            .as_ref()
+            .map_or(Rebuilt::Cannot, |c| rebuild(c, s, &p[5..]))
+        {
+            Rebuilt::Frame { frame, fragment } => {
                 self.stats.rebuilt += 1;
-                frames.push(f);
+                self.stats.fragments += u64::from(fragment);
+                frames.push(frame);
             }
-            None => self.stats.checksum_failed += 1,
+            Rebuilt::BadChecksum => self.stats.checksum_failed += 1,
+            Rebuilt::Cannot => self.stats.not_rebuilt += 1,
         }
     }
 }
 
-/// The Ethernet, IPv4 and UDP headers of a whole frame, if it is an
-/// unfragmented IPv4 UDP packet.
-fn udp_headers(eth: &[u8]) -> Option<Vec<u8>> {
-    let ip = eth.get(14..)?;
-    if eth.get(12..14)? != [0x08, 0x00] || ip.first()? >> 4 != 4 || *ip.get(9)? != 17 {
-        return None;
-    }
-    let ihl = usize::from(ip[0] & 0x0F) * 4;
-    // More fragments, or an offset: a fragment.
-    let fragment = (u16::from(ip[6]) << 8 | u16::from(ip[7])) & 0x3FFF != 0;
-    (ihl >= 20 && !fragment && eth.len() >= 14 + ihl + 8).then(|| eth[..14 + ihl + 8].to_vec())
-}
-
-/// A compressed packet's frame, from its context's headers and what
-/// follows the count byte: the UDP checksum if the context's was not zero,
-/// then the payload. `None` when the checksum fails.
-fn rebuild(head: &[u8], rest: &[u8]) -> Option<Vec<u8>> {
-    let ihl = usize::from(head[14] & 0x0F) * 4;
-    let udp = 14 + ihl;
-    let with_sum = head[udp + 6..udp + 8] != [0, 0];
-    let (sum, payload) = if with_sum {
-        (rest.get(..2)?, rest.get(2..)?)
+/// A compressed packet's frame, from its context and the count byte `s`,
+/// and what follows it (see the module notes).
+fn rebuild(c: &Context, s: u8, rest: &[u8]) -> Rebuilt {
+    let mut i = usize::from(s & ID_BYTE != 0);
+    let df = u16::from_be_bytes([c.head[20], c.head[21]]) & DF;
+    let frag = if s & FRAGMENT != 0 {
+        let Some(f) = rest.get(i..i + 2) else {
+            return Rebuilt::Cannot;
+        };
+        i += 2;
+        u16::from_be_bytes([f[0], f[1]])
     } else {
-        (&[0u8, 0][..], rest)
+        df
     };
-    let mut f = head.to_vec();
-    let ulen = 8 + payload.len();
-    let total = ihl + ulen;
-    f[16..18].copy_from_slice(&(total as u16).to_be_bytes());
+    let Some(rest) = rest.get(i..) else {
+        return Rebuilt::Cannot;
+    };
+    let (offset, more) = (frag & 0x1FFF, frag & MF != 0);
+    let ihl = c.head.len() - 14;
+    // A datagram's start carries the UDP header (rebuilt); a later
+    // fragment, bytes as they come.
+    let (udp, payload, with_sum) = if offset == 0 {
+        let Some(u) = c.udp else {
+            return Rebuilt::Cannot;
+        };
+        if more {
+            return Rebuilt::Cannot;
+        }
+        let with_sum = u[6..8] != [0, 0];
+        let (sum, payload) = match (with_sum, rest.get(..2), rest.get(2..)) {
+            (false, ..) => (&[0u8, 0][..], rest),
+            (true, Some(s), Some(p)) => (s, p),
+            _ => return Rebuilt::Cannot,
+        };
+        let ulen = (8 + payload.len()) as u16;
+        let mut h = u.to_vec();
+        h[4..6].copy_from_slice(&ulen.to_be_bytes());
+        h[6..8].copy_from_slice(sum);
+        (h, payload, with_sum)
+    } else {
+        (Vec::new(), rest, false)
+    };
+    let mut f = c.head.clone();
+    let total = (ihl + udp.len() + payload.len()) as u16;
+    f[16..18].copy_from_slice(&total.to_be_bytes());
+    f[20..22].copy_from_slice(&frag.to_be_bytes());
     f[24..26].copy_from_slice(&[0, 0]);
-    let ck = !(sum16(&f[14..udp], 0) as u16);
+    let ck = !(sum16(&f[14..], 0) as u16);
     f[24..26].copy_from_slice(&ck.to_be_bytes());
-    f[udp + 4..udp + 6].copy_from_slice(&(ulen as u16).to_be_bytes());
-    f[udp + 6..udp + 8].copy_from_slice(sum);
+    let at = f.len();
+    f.extend_from_slice(&udp);
     f.extend_from_slice(payload);
     if with_sum {
         // Pseudo-header (addresses, protocol, UDP length), then the UDP
         // header and payload: all ones when the checksum is right.
-        let mut s = sum16(&f[26..34], 17 + ulen as u32);
-        s = sum16(&f[udp..], s);
+        let ulen = (f.len() - at) as u32;
+        let s = sum16(&f[at..], sum16(&f[26..34], 17 + ulen));
         if s != 0xFFFF {
-            return None;
+            return Rebuilt::BadChecksum;
         }
     }
-    Some(f)
+    Rebuilt::Frame {
+        frame: f,
+        fragment: frag & (MF | 0x1FFF) != 0,
+    }
 }
 
 /// Packet-block transmitter, for tests: packets (each the bytes after its
@@ -422,6 +486,11 @@ pub(crate) fn blocks(packets: &[(Vec<u8>, bool)], gap: usize) -> Vec<u8> {
         // packets would end in one.
         let end = stream.len() + 1 + p.len();
         let by_len = *with_len || ends.iter().any(|&e| e / DATA == end / DATA);
+        assert!(
+            !by_len || p.len() < 0xFF,
+            "a length byte cannot say {}",
+            p.len()
+        );
         stream.push(if by_len { p.len() as u8 } else { 0 });
         stream.extend_from_slice(p);
         if !by_len {
@@ -494,6 +563,58 @@ pub(crate) mod tests {
         p
     }
 
+    /// `p` (a compressed packet) with flags added to its count byte and
+    /// their bytes put after it.
+    fn with_flags(mut p: Vec<u8>, flags: &[u8], bytes: &[u8]) -> Vec<u8> {
+        p[4] |= flags.iter().fold(0, |a, f| a | f);
+        p.splice(5..5, bytes.iter().copied());
+        p
+    }
+
+    /// The IPv4 fragment of an Ethernet frame's datagram: `n` IP payload
+    /// bytes from `at` (a multiple of 8), MF as given.
+    fn fragment(eth: &[u8], at: usize, n: usize, more: bool) -> Vec<u8> {
+        let mut f = eth[..34].to_vec();
+        f.extend_from_slice(&eth[34 + at..34 + at + n]);
+        f[16..18].copy_from_slice(&((20 + n) as u16).to_be_bytes());
+        let field = (at / 8) as u16 | if more { MF } else { 0 };
+        f[20..22].copy_from_slice(&field.to_be_bytes());
+        f[24..26].copy_from_slice(&[0, 0]);
+        let ck = !(sum16(&f[14..34], 0) as u16);
+        f[24..26].copy_from_slice(&ck.to_be_bytes());
+        f
+    }
+
+    /// A datagram in three fragments, as the SIP of a radio over IP link
+    /// goes: the first whole (a context), the middle one compressed with
+    /// the 40h byte and its fragment field, the last whole under a context
+    /// of its own. The middle one comes out as it was sent.
+    #[test]
+    fn a_compressed_middle_fragment() {
+        let text: Vec<u8> = (0..592).map(|i| b'A' + (i % 26) as u8).collect();
+        let eth = udp_frame(0x1D82, &text, false);
+        let (a, b, c) = (
+            fragment(&eth, 0, 280, true),
+            fragment(&eth, 280, 280, true),
+            fragment(&eth, 560, 40, false),
+        );
+        let mut middle = vec![MARK, 0xA0, 0x0C, 0x75, ID_BYTE | FRAGMENT | 2, 0];
+        middle.extend_from_slice(&b[20..22]);
+        middle.extend_from_slice(&b[34..]);
+        let mut bits: Vec<u8> = (0..3).flat_map(|_| blocks(&[], 0)).collect();
+        bits.extend(blocks(
+            &[
+                (full(0x0C75, 1, &a), false),
+                (middle, false),
+                (full(0xC6C3, 2, &c), true),
+            ],
+            6,
+        ));
+        let (out, s) = run(&bits, 2000);
+        assert_eq!(out, vec![a, b, c], "{s:?}");
+        assert_eq!((s.rebuilt, s.fragments), (1, 1), "{s:?}");
+    }
+
     fn run(bits: &[u8], chunk: usize) -> (Vec<Vec<u8>>, EthBlockStats) {
         let mut rx = EthBlockRx::new();
         let mut out = Vec::new();
@@ -521,9 +642,17 @@ pub(crate) mod tests {
             (compressed(0x69F2, 2, &rtp[1]), true),
             (compressed(0xE5DD, 1, &snmp[2]), false),
             (compressed(0x69F2, 3, &rtp[2]), true),
-            // Unknown context; flags not understood.
+            // Unknown context; the 40h byte; a compressed first fragment
+            // (its datagram's length unknown).
             (compressed(0x1234, 0, &snmp[3]), true),
-            (compressed(0xE5DD, 0x42, &snmp[4]), true),
+            (
+                with_flags(compressed(0xE5DD, 2, &snmp[4]), &[ID_BYTE], &[0]),
+                true,
+            ),
+            (
+                with_flags(compressed(0xE5DD, 3, &snmp[5]), &[FRAGMENT], &[0x20, 0]),
+                true,
+            ),
         ];
         let mut bits = blocks(&[], 0);
         bits.extend(blocks(&[], 0));
@@ -534,12 +663,12 @@ pub(crate) mod tests {
             assert!(s.locked && s.inverted == inverted, "{s:?}");
             assert_eq!(
                 (s.frames, s.rebuilt, s.no_context, s.not_rebuilt, s.bad),
-                (3, 4, 1, 1, 0),
+                (3, 5, 1, 1, 0),
                 "{s:?}"
             );
             let mut want = vec![snmp[0].clone(), rtp[0].clone(), long.clone()];
             // Rebuilt: the context's IP identification kept.
-            for f in [&snmp[1], &rtp[1], &snmp[2], &rtp[2]] {
+            for f in [&snmp[1], &rtp[1], &snmp[2], &rtp[2], &snmp[4]] {
                 let mut g = f.clone();
                 let ctx = if f[40..42] == [0, 0] {
                     &rtp[0]

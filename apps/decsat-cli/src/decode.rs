@@ -583,6 +583,9 @@ pub(crate) fn report(st: &VfoStatus) {
         for st in &g.radar_stations {
             crate::pcap::print_station(st, false);
         }
+        if let Some(r) = &g.radio {
+            crate::pcap::print_radio(r);
+        }
         print_byte_text("ip text", &g.text);
     }
     if let Some(t) = &f.ts {

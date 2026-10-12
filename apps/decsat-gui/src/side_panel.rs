@@ -3492,6 +3492,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                 }
             });
     }
+    if let Some(r) = &g.radio {
+        radio_section(ui, r);
+    }
     if g.mpe.is_some() && g.source.is_none() {
         return; // no GSE to compare variants of
     }
@@ -3515,6 +3518,130 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                 }
             });
         });
+}
+
+/// ED-137 radio over IP: each stream's signalling now and so far, the SIP
+/// dialogs, the latest changes.
+fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
+    let ptt_on = Color32::from_rgb(240, 90, 80);
+    let squelch_open = Color32::from_rgb(90, 200, 120);
+    ui.add_space(6.0);
+    ui.label(RichText::new("Radio over IP (ED-137)").strong())
+        .on_hover_text(
+            "EUROCAE ED-137: air traffic control radio carried as VoIP. Each RTP packet \
+             carries the radio's signalling in its header extension — push-to-talk and its \
+             type, squelch, the PTT's id, signal quality; R2S keep-alives (payload type 123) \
+             carry it without sound. SIP sets the sessions up; its SDP says what the radio is.",
+        );
+    egui::Grid::new("radio_streams")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for s in &r.streams {
+                let n = &s.now;
+                ui.label(RichText::new(s.label()).monospace().small());
+                ui.horizontal(|ui| {
+                    if n.ptt.on() {
+                        ui.colored_label(ptt_on, format!("{} · id {}", n.ptt.name(), n.ptt_id));
+                    } else {
+                        ui.label("PTT off");
+                    }
+                    if n.squelch {
+                        ui.colored_label(squelch_open, "squelch open");
+                    } else {
+                        ui.label("squelch closed");
+                    }
+                });
+                ui.end_row();
+                let features: Vec<String> = n.features.iter().map(|f| f.describe()).collect();
+                ui.label("");
+                ui.label(
+                    RichText::new(format!(
+                        "{} keep-alives · {} with sound · PTT {}× ({:.1} s) · squelch {}× ({:.1} s) · {} lost",
+                        s.keepalives,
+                        s.voice,
+                        s.ptt_on,
+                        s.ptt_secs,
+                        s.squelch_on,
+                        s.squelch_secs,
+                        s.lost
+                    ))
+                    .small(),
+                )
+                .on_hover_text(if features.is_empty() {
+                    "no additional features".to_string()
+                } else {
+                    features.join("\n")
+                });
+                ui.end_row();
+            }
+        });
+    if r.stray > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{} stray packets (an SSRC or address hit by errors)",
+                r.stray
+            ))
+            .small(),
+        );
+    }
+    if !r.sessions.is_empty() {
+        egui::CollapsingHeader::new(format!("SIP dialogs ({})", r.session_count))
+            .id_salt("radio_sip")
+            .show(ui, |ui| {
+                for d in &r.sessions {
+                    let mut line = format!(
+                        "{:.0} s · {} → {} · {}",
+                        d.first_time,
+                        d.from,
+                        d.to,
+                        d.messages.join(", ")
+                    );
+                    if let Some(o) = d.outcome {
+                        line += &format!(" · {}", o.name());
+                    }
+                    let mut tip: Vec<String> = vec![format!("Call-ID {}", d.call_id)];
+                    tip.extend(d.extra.iter().map(|(k, v)| format!("{k}: {v}")));
+                    if let Some(m) = &d.media {
+                        tip.push(format!("SDP m={m}"));
+                    }
+                    tip.extend(
+                        d.attributes
+                            .iter()
+                            .filter(|(k, _)| k != "rtpmap")
+                            .map(|(k, v)| {
+                                if v.is_empty() {
+                                    format!("a={k}")
+                                } else {
+                                    format!("a={k}:{v}")
+                                }
+                            }),
+                    );
+                    if d.outcome.is_some() {
+                        tip.push(
+                            "refused: its ACK reuses the INVITE's transaction (an error \
+                             answer, sent the other way); accepted: its ACK is a new one"
+                                .into(),
+                        );
+                    }
+                    ui.label(RichText::new(line).small())
+                        .on_hover_text(tip.join("\n"));
+                }
+            });
+    }
+    if !r.events.is_empty() {
+        egui::CollapsingHeader::new(format!("Changes ({})", r.events.len()))
+            .id_salt("radio_events")
+            .show(ui, |ui| {
+                for e in r.events.iter().rev().take(30) {
+                    ui.label(
+                        RichText::new(format!("{:8.1} s  {}  ({})", e.time, e.what, e.stream))
+                            .monospace()
+                            .small(),
+                    );
+                }
+            });
+    }
 }
 
 /// Carrier loop rows for a two-column grid.

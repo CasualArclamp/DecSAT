@@ -57,6 +57,10 @@ pub struct PayloadArgs {
     /// times (bit/s).
     #[arg(long, default_value_t = 128_000.0)]
     pub bit_rate: f64,
+    /// Write the IP found in the data here (.pcap, raw IP), times from
+    /// --bit-rate: a recording run again with a newer decoder.
+    #[arg(long)]
+    pub pcap_out: Option<PathBuf>,
 }
 
 pub fn run(a: &PayloadArgs) -> Result<()> {
@@ -91,6 +95,16 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     let mut radar_csv = vec![decsat_modem::radar::CSV_HEADER.to_string()];
     let mut hdlc_lines: Vec<String> = Vec::new();
     let mut stations = decsat_ip::rcms::RcmsRx::new();
+    let mut radio = decsat_ip::ed137::RadioRx::new();
+    let mut frags = decsat_ip::Reassembler::new();
+    let mut pcap = match &a.pcap_out {
+        Some(p) => Some(
+            decsat_ip::PcapWriter::create(p)
+                .with_context(|| format!("creating {}", p.display()))?,
+        ),
+        None => None,
+    };
+    let start = std::time::SystemTime::now();
     for (k, frame) in bits.chunks_exact(a.frame_bits).enumerate() {
         out.clear();
         pay.push(frame, &mut out);
@@ -116,9 +130,23 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         // ASTERIX (ADS-B) in its datagrams.
         let t = ((k + 1) * a.frame_bits) as f64 / a.bit_rate;
         for (f, _) in &out.frames {
-            if let Some((pkt, info)) = decsat_engine::hdlc_ip(f)
-                && let Some((udp, _, dport)) = decsat_ip::mcast::udp_payload(pkt, &info)
-            {
+            let Some((pkt, info)) = decsat_engine::hdlc_ip(f) else {
+                continue;
+            };
+            if let Some(w) = &mut pcap {
+                w.write(start + std::time::Duration::from_secs_f64(t), pkt)?;
+            }
+            // Datagrams once whole (the SIP of a radio link comes in
+            // fragments).
+            let Some(whole) = frags.push(pkt, &info) else {
+                continue;
+            };
+            let whole = whole.into_owned();
+            let Some(info) = decsat_ip::parse(&whole) else {
+                continue;
+            };
+            if let Some((udp, sport, dport)) = decsat_ip::mcast::udp_payload(&whole, &info) {
+                radio.udp((info.src, sport), (info.dst, dport), udp, t);
                 let flow = decsat_ip::rcms::Flow {
                     src: info.src,
                     group: info.dst,
@@ -200,6 +228,13 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     }
     for st in &stations.view() {
         crate::pcap::print_station(st, false);
+    }
+    if radio.active() {
+        crate::pcap::print_radio(&radio.view());
+    }
+    if let (Some(mut w), Some(p)) = (pcap, &a.pcap_out) {
+        w.flush()?;
+        println!("wrote {} IP packets to {}", w.packets(), p.display());
     }
     if let Some(p) = &a.hdlc_out {
         // A line a frame, each ended by a newline (an empty file for none).
