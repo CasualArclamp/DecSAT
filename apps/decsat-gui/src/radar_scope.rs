@@ -29,7 +29,9 @@
 use std::time::Instant;
 
 use decsat_engine::radar::mode_s::{ModeS, altitude_text, flight_status_text};
-use decsat_engine::radar::{RadarView, Report, SECTORS, Track, detection, tod_string};
+use decsat_engine::radar::{
+    Adsb, RadarView, Report, SECTORS, Track, detection, emergency_text, emitter_text, tod_string,
+};
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
@@ -73,10 +75,11 @@ pub struct RadarScope {
     /// Airports and runways over the map.
     airports: crate::radar_airports::AirportLayer,
     airports_on: bool,
-    /// Callsigns from ADS-B for tracks without (off unless turned on: it
-    /// asks an outside service).
+    /// Callsigns from ADS-B for tracks without: from an ADS-B feed decoded
+    /// on another VFO when there is one; else, with `internet` (off unless
+    /// turned on: it asks an outside service), from adsb.lol.
     names: AdsbNames,
-    names_on: bool,
+    internet: bool,
     /// The track clicked (on the PPI or in the table): ringed, its details
     /// in a box over the PPI's corner.
     selected: Option<u16>,
@@ -219,7 +222,7 @@ impl Default for RadarScope {
             airports: Default::default(),
             airports_on: true,
             names: AdsbNames::default(),
-            names_on: false,
+            internet: false,
             selected: None,
         }
     }
@@ -281,7 +284,7 @@ impl RadarScope {
         if !self.map_loaded {
             self.map_loaded = true;
             self.airports_on = crate::prefs::radar_airports();
-            self.names_on = crate::prefs::radar_callsigns();
+            self.internet = crate::prefs::radar_internet();
             let (on, style, brightness) = crate::prefs::radar_map();
             self.map_on = on;
             self.map_style = Style::ALL
@@ -442,6 +445,7 @@ impl RadarScope {
             ui.separator();
             ui.label(match v.scan_secs {
                 Some(s) => format!("scan {s:.3} s ({:.1} rpm)", 60.0 / s),
+                None if v.adsb => "ADS-B: each aircraft reports itself (no scans)".into(),
                 None => "scan time: waiting for two north crossings".into(),
             });
             ui.separator();
@@ -504,17 +508,19 @@ impl RadarScope {
             if ui
                 .add_enabled(
                     site.is_some(),
-                    egui::Checkbox::new(&mut self.names_on, "Callsigns"),
+                    egui::Checkbox::new(&mut self.internet, "Internet"),
                 )
                 .on_hover_text(
                     "Callsigns for tracks the feed does not name, from adsb.lol (public \
                      ADS-B, ODbL): asked every 15 s for the aircraft within 250 NM of the \
                      radar's place rounded to 0.1°, matched to tracks by place, squawk and \
-                     level. Needs the internet; live only (a recording's sky is gone).",
+                     level. Live only (a recording's sky is gone). Not needed while an \
+                     ADS-B feed is decoded on another VFO (the ML–PH trunk's): its \
+                     callsigns name the tracks, and nothing is asked.",
                 )
                 .changed()
             {
-                crate::prefs::set_radar_callsigns(self.names_on);
+                crate::prefs::set_radar_internet(self.internet);
             }
             if before != (self.map_on, self.map_style, self.map_brightness) {
                 crate::prefs::set_radar_map(
@@ -523,7 +529,9 @@ impl RadarScope {
                     self.map_brightness,
                 );
             }
-            let feed_says = v.site.is_some();
+            // ADS-B: positions are the aircraft's own, measured from the
+            // feed's origin; nothing to set.
+            let feed_says = v.site.is_some() || v.origin.is_some();
             let who = self
                 .site_id
                 .as_ref()
@@ -580,14 +588,7 @@ impl RadarScope {
             egui::ScrollArea::vertical()
                 .id_salt("radar_tracks")
                 .max_height(table_h)
-                .show(ui, |ui| {
-                    table(
-                        ui,
-                        v,
-                        &mut self.selected,
-                        self.names_on.then_some(&self.names),
-                    )
-                });
+                .show(ui, |ui| table(ui, v, &mut self.selected, Some(&self.names)));
             return;
         }
         // The station beside the PPI; the track table under it when there
@@ -605,14 +606,7 @@ impl RadarScope {
                     egui::ScrollArea::vertical()
                         .id_salt("radar_tracks")
                         .max_height(table_h)
-                        .show(ui, |ui| {
-                            table(
-                                ui,
-                                v,
-                                &mut self.selected,
-                                self.names_on.then_some(&self.names),
-                            )
-                        });
+                        .show(ui, |ui| table(ui, v, &mut self.selected, Some(&self.names)));
                 }
             });
             ui.separator();
@@ -671,7 +665,8 @@ impl RadarScope {
         // On the light map: dark rings, deep colours.
         let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
         let mut frame = None;
-        if (self.map_on || self.airports_on || self.names_on)
+        let naming = self.internet || self.names.has_local();
+        if (self.map_on || self.airports_on || naming)
             && let Some(site) = self.site_of(v)
         {
             let f = Frame {
@@ -702,8 +697,8 @@ impl RadarScope {
                 self.airports.draw(&painter, &f, self.range, light);
                 notes.extend(self.airports.status().map(|n| (n, true)));
             }
-            if self.names_on {
-                self.names.update(site, v);
+            self.names.update(site, v, self.internet);
+            if naming {
                 notes.push((self.names.status(), self.names.error.is_some()));
             }
             for (k, (n, warn)) in notes.iter().enumerate() {
@@ -855,7 +850,7 @@ impl RadarScope {
             if self.labels {
                 let r = &t.last;
                 // The callsign (Mode S's, else ADS-B's), else the squawk.
-                let line1 = match call(r, self.names_on.then_some(&self.names)) {
+                let line1 = match call(r, Some(&self.names)) {
                     Some(c) => c,
                     None => r.squawk.map_or("----".into(), |s| format!("{s:04}")),
                 };
@@ -894,7 +889,7 @@ impl RadarScope {
             self.selected = None;
         }
         if let Some((_, t)) = nearest {
-            let names = self.names_on.then_some(&self.names);
+            let names = Some(&self.names);
             resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t, names));
         } else if let Some(q) = pointer
             && rect.contains(q)
@@ -938,7 +933,7 @@ impl RadarScope {
     ) -> bool {
         let r = &t.last;
         let mut close = false;
-        let names = self.names_on.then_some(&self.names);
+        let names = Some(&self.names);
         let title = match call(r, names) {
             Some(c) => format!("{c} · track {:03X}", r.number),
             None => format!("Track {:03X}", r.number),
@@ -1037,20 +1032,26 @@ impl RadarScope {
                                 ),
                             );
                             mode_s_rows(ui, &t.mode_s, &row);
-                            if v.source.is_some() {
-                                row(ui, "Seen by", detection((r.status >> 8) as u8).into());
+                            if let Some(a) = r.adsb {
+                                adsb_rows(ui, &a, &row);
+                            } else {
+                                if v.source.is_some() {
+                                    row(ui, "Seen by", detection((r.status >> 8) as u8).into());
+                                }
+                                row(
+                                    ui,
+                                    "From radar",
+                                    format!("{:.1} NM at {:05.1}°", r.range(), r.bearing()),
+                                );
                             }
-                            row(
-                                ui,
-                                "From radar",
-                                format!("{:.1} NM at {:05.1}°", r.range(), r.bearing()),
-                            );
                             if let Some((code, d, b)) =
                                 self.airports.nearest(f64::from(r.x), f64::from(r.y))
                             {
                                 row(ui, "From airport", format!("{d:.1} NM {b:03.0}° of {code}"));
                             }
-                            if let Some(site) = self.site_of(v) {
+                            if r.adsb.is_none()
+                                && let Some(site) = self.site_of(v)
+                            {
                                 let p =
                                     crate::radar_map::from_nm(site, f64::from(r.x), f64::from(r.y));
                                 row(ui, "Lat, lon", format!("{:.4}, {:.4}", p.lat, p.lon));
@@ -1128,10 +1129,12 @@ impl RadarScope {
         }
     }
 
-    /// Where the feed's radar is: as the feed says (ASTERIX), else as kept
+    /// Where the feed's radar is: as the feed says (ASTERIX), else, for an
+    /// ADS-B feed, the origin its reports are measured from, else as kept
     /// for the radar (said by its feed before, or set by hand).
     fn site_of(&self, v: &RadarView) -> Option<LatLon> {
         v.site
+            .or(v.origin)
             .map(|s| LatLon {
                 lat: s.lat,
                 lon: s.lon,
@@ -1295,7 +1298,12 @@ fn name_rows(
     if let Some(c) = &r.callsign {
         row(ui, "Callsign", format!("{c} (Mode S)"));
     } else if let Some(n) = names.and_then(|n| n.name(r.number)) {
-        row(ui, "Callsign", format!("{} (ADS-B)", n.callsign));
+        let from = if n.local {
+            "ADS-B decoded here"
+        } else {
+            "adsb.lol"
+        };
+        row(ui, "Callsign", format!("{} ({from})", n.callsign));
         let what: Vec<&str> = [n.kind.as_deref(), n.registration.as_deref()]
             .into_iter()
             .flatten()
@@ -1343,7 +1351,10 @@ fn track_tip(ui: &mut Ui, t: &Track, names: Option<&AdsbNames>) {
         row(
             ui,
             "Position",
-            format!("{:.1} NM at {:05.1}°", r.range(), r.bearing()),
+            match r.adsb {
+                Some(a) => format!("{:.4}, {:.4} (ADS-B)", a.lat, a.lon),
+                None => format!("{:.1} NM at {:05.1}°", r.range(), r.bearing()),
+            },
         );
         row(
             ui,
@@ -1417,6 +1428,33 @@ fn selected_text(ms: &ModeS) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The details box's ADS-B rows (ASTERIX CAT021): where the aircraft says
+/// it is, and what it is.
+fn adsb_rows(ui: &mut Ui, a: &Adsb, row: &dyn Fn(&mut Ui, &str, String)) {
+    row(
+        ui,
+        "Seen by",
+        if a.field_monitor {
+            "ADS-B (a ground station's field monitor)".into()
+        } else {
+            "ADS-B".into()
+        },
+    );
+    row(ui, "Lat, lon", format!("{:.5}, {:.5}", a.lat, a.lon));
+    if let Some(ft) = a.geo_alt_ft {
+        row(ui, "GNSS altitude", format!("{ft} ft"));
+    }
+    if let Some(e) = a.emitter {
+        row(ui, "Emitter", emitter_text(e).into());
+    }
+    if a.on_ground {
+        row(ui, "Flight status", "on the ground".into());
+    }
+    if let Some(e) = a.emergency.filter(|&e| e != 0) {
+        row(ui, "Emergency", emergency_text(e).into());
+    }
 }
 
 /// The details box's Mode S rows: what the aircraft says of itself.

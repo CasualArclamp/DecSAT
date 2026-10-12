@@ -175,14 +175,17 @@ pub fn radar_airports() -> bool {
 
 /// Callsigns from ADS-B on the scope (off unless turned on: it asks an
 /// outside service).
-pub fn radar_callsigns() -> bool {
+/// The scope may ask adsb.lol for callsigns ("Internet"; off unless
+/// turned on). Its own key: the old `radar_callsigns` switch, on for the
+/// lookup before an ADS-B feed was decoded here, is no longer read.
+pub fn radar_internet() -> bool {
     read_all()
         .iter()
-        .any(|(k, v)| k == "radar_callsigns" && v == "1")
+        .any(|(k, v)| k == "radar_internet" && v == "1")
 }
 
-pub fn set_radar_callsigns(on: bool) {
-    let _ = write_key("radar_callsigns", if on { "1" } else { "0" });
+pub fn set_radar_internet(on: bool) {
+    let _ = write_key("radar_internet", if on { "1" } else { "0" });
 }
 
 pub fn set_radar_airports(on: bool) {

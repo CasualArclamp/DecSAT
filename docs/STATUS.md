@@ -2819,3 +2819,23 @@ Checked unattended with a scratch settings folder: the synthetic PH-BN
 carrier kept `radar_site.sac4.sic22`; the PH-ML recording with a made-up
 place under `radar_site.VFO 1` moved it to `radar_site.rf12328083khz` and
 drew its map switch enabled.
+
+## The scope with ADS-B; an "Internet" switch for the online lookup (2026-10-12)
+
+With CAT021 decoded off the ML–PH trunk, Rory: "make a tick box for
+'internet' … as we don't need to use an ADS-B site". Callsigns from an
+ADS-B feed decoded on another VFO now name radar tracks always (nothing
+asked of anyone); adsb.lol is asked only with the scope's **Internet**
+switch on — its own setting, `radar_internet`, off by default (the old
+`radar_callsigns` switch is no longer read, so the lookup stays off until
+ticked). Names say where they came from: "(ADS-B decoded here)" or
+"(adsb.lol)". The ADS-B feed's own scope: the header says it has no scans
+("each aircraft reports itself") instead of waiting for north crossings;
+the map and airports are drawn round the feed's origin (`site_of` takes
+`RadarView::origin` after a radar's own place); Site… is not offered; the
+details box gives "Seen by ADS-B" (or a ground station's field monitor),
+the aircraft's own latitude and longitude, GNSS altitude, emitter class,
+on the ground and any emergency, in place of "From radar"; the hover tip
+its position. Checked unattended on the synthetic trunk carrier (scratch
+settings, the old switch set): 36 tracks, QFA66 descending to 4000 ft
+with its place and GNSS altitude, Internet off and nothing asked.

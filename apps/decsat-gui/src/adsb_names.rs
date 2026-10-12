@@ -1,6 +1,8 @@
 //! Callsigns for radar tracks whose feed carries none (the PH-ML BSC feed
-//! gives Mode A, Mode C and speed only), from a public ADS-B service:
-//! adsb.lol (free, no key; its data ODbL). Every [`EVERY`] it is asked
+//! gives Mode A, Mode C and speed only): from an ADS-B feed decoded here
+//! (below) whenever there is one, else — only with the scope's "Internet"
+//! switch on — from a public ADS-B service: adsb.lol (free, no key; its
+//! data ODbL). Every [`EVERY`] it is asked
 //! for the aircraft within 250 NM of the radar — the radar's place rounded
 //! to 0.1°, so its exact place is not sent — and each track is matched to
 //! the aircraft at its place: within [`NEAR_NM`] (plus the distance flown
@@ -59,6 +61,8 @@ pub struct Name {
     pub callsign: String,
     pub registration: Option<String>,
     pub kind: Option<String>,
+    /// From an ADS-B feed decoded here (else from the service).
+    pub local: bool,
     squawk: Option<u16>,
     matched: Instant,
 }
@@ -208,9 +212,21 @@ impl AdsbNames {
         self.local = seen;
     }
 
-    /// Ask the service when due (unless an ADS-B feed here says), take its
-    /// answer when in, and name the tracks of `v` (the radar at `site`).
-    pub fn update(&mut self, site: LatLon, v: &RadarView) {
+    /// An ADS-B feed decoded here gives the names.
+    pub fn has_local(&self) -> bool {
+        !self.local.is_empty()
+    }
+
+    /// Name the tracks of `v` (the radar at `site`): from the ADS-B feed
+    /// decoded here when there is one; else, with `internet`, from the
+    /// service, asked when due (its answer taken when in); else not at all.
+    pub fn update(&mut self, site: LatLon, v: &RadarView, internet: bool) {
+        if self.local.is_empty() && !internet {
+            // Nothing to name them by: what was matched goes.
+            self.latest.clear();
+            self.latest_at = None;
+            self.pending = None;
+        }
         if !self.local.is_empty() {
             self.latest = self
                 .local
@@ -241,6 +257,7 @@ impl AdsbNames {
             }
         }
         if self.local.is_empty()
+            && internet
             && self.pending.is_none()
             && self.asked.is_none_or(|t| t.elapsed() >= EVERY)
         {
@@ -283,6 +300,7 @@ impl AdsbNames {
                             callsign: s.callsign.clone(),
                             registration: s.registration.clone(),
                             kind: s.kind.clone(),
+                            local: !self.local.is_empty(),
                             squawk: r.squawk,
                             matched: Instant::now(),
                         },
