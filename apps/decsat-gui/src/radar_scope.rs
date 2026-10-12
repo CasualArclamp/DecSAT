@@ -23,14 +23,16 @@
 //! A map can go under the PPI (see [`crate::radar_map`]) once the radar's
 //! place is known: from the feed (ASTERIX), else set by hand for the VFO
 //! and kept in the user's own settings; airports and runways over it (see
-//! [`crate::radar_airports`]).
+//! [`crate::radar_airports`]). Tracks whose feed names none can be named
+//! from a public ADS-B service, when asked (see [`crate::adsb_names`]).
 
 use std::time::Instant;
 
-use decsat_engine::radar::{RadarView, SECTORS, Track, tod_string};
+use decsat_engine::radar::{RadarView, Report, SECTORS, Track, tod_string};
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
+use crate::adsb_names::AdsbNames;
 use crate::radar_map::{Frame, LatLon, MapLayer, Style};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
@@ -69,6 +71,10 @@ pub struct RadarScope {
     /// Airports and runways over the map.
     airports: crate::radar_airports::AirportLayer,
     airports_on: bool,
+    /// Callsigns from ADS-B for tracks without (off unless turned on: it
+    /// asks an outside service).
+    names: AdsbNames,
+    names_on: bool,
     /// The track clicked (on the PPI or in the table): ringed, its details
     /// in a box over the PPI's corner.
     selected: Option<u16>,
@@ -206,6 +212,8 @@ impl Default for RadarScope {
             site_edit: None,
             airports: Default::default(),
             airports_on: true,
+            names: AdsbNames::default(),
+            names_on: false,
             selected: None,
         }
     }
@@ -267,6 +275,7 @@ impl RadarScope {
         if !self.map_loaded {
             self.map_loaded = true;
             self.airports_on = crate::prefs::radar_airports();
+            self.names_on = crate::prefs::radar_callsigns();
             let (on, style, brightness) = crate::prefs::radar_map();
             self.map_on = on;
             self.map_style = Style::ALL
@@ -475,6 +484,21 @@ impl RadarScope {
             {
                 crate::prefs::set_radar_airports(self.airports_on);
             }
+            if ui
+                .add_enabled(
+                    site.is_some(),
+                    egui::Checkbox::new(&mut self.names_on, "Callsigns"),
+                )
+                .on_hover_text(
+                    "Callsigns for tracks the feed does not name, from adsb.lol (public \
+                     ADS-B, ODbL): asked every 15 s for the aircraft within 250 NM of the \
+                     radar's place rounded to 0.1°, matched to tracks by place, squawk and \
+                     level. Needs the internet; live only (a recording's sky is gone).",
+                )
+                .changed()
+            {
+                crate::prefs::set_radar_callsigns(self.names_on);
+            }
             if before != (self.map_on, self.map_style, self.map_brightness) {
                 crate::prefs::set_radar_map(
                     self.map_on,
@@ -529,7 +553,14 @@ impl RadarScope {
             egui::ScrollArea::vertical()
                 .id_salt("radar_tracks")
                 .max_height(table_h)
-                .show(ui, |ui| table(ui, v, &mut self.selected));
+                .show(ui, |ui| {
+                    table(
+                        ui,
+                        v,
+                        &mut self.selected,
+                        self.names_on.then_some(&self.names),
+                    )
+                });
             return;
         }
         // The station beside the PPI; the track table under it when there
@@ -547,7 +578,14 @@ impl RadarScope {
                     egui::ScrollArea::vertical()
                         .id_salt("radar_tracks")
                         .max_height(table_h)
-                        .show(ui, |ui| table(ui, v, &mut self.selected));
+                        .show(ui, |ui| {
+                            table(
+                                ui,
+                                v,
+                                &mut self.selected,
+                                self.names_on.then_some(&self.names),
+                            )
+                        });
                 }
             });
             ui.separator();
@@ -606,7 +644,7 @@ impl RadarScope {
         // On the light map: dark rings, deep colours.
         let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
         let mut frame = None;
-        if (self.map_on || self.airports_on)
+        if (self.map_on || self.airports_on || self.names_on)
             && let Some(site) = self.site_of(v)
         {
             let f = Frame {
@@ -626,23 +664,34 @@ impl RadarScope {
                 }),
                 px_per_nm,
             };
-            let mut notes = Vec::new();
+            // Notes for the corner: (text, a warning).
+            let mut notes: Vec<(String, bool)> = Vec::new();
             if self.map_on {
                 self.map
                     .draw(ui.ctx(), &painter, &f, self.map_style, self.map_brightness);
-                notes.extend(self.map.error.as_ref().map(|e| format!("map: {e}")));
+                notes.extend(self.map.error.as_ref().map(|e| (format!("map: {e}"), true)));
             }
             if self.airports_on {
                 self.airports.draw(&painter, &f, self.range, light);
-                notes.extend(self.airports.status());
+                notes.extend(self.airports.status().map(|n| (n, true)));
             }
-            for (k, n) in notes.iter().enumerate() {
+            if self.names_on {
+                self.names.update(site, v);
+                notes.push((self.names.status(), self.names.error.is_some()));
+            }
+            for (k, (n, warn)) in notes.iter().enumerate() {
                 painter.text(
                     rect.left_top() + vec2(6.0, 6.0 + 14.0 * k as f32),
                     Align2::LEFT_TOP,
                     n,
                     FontId::proportional(11.0),
-                    Color32::from_rgb(230, 170, 60),
+                    if *warn {
+                        Color32::from_rgb(230, 170, 60)
+                    } else if light {
+                        Color32::from_gray(40)
+                    } else {
+                        Color32::from_gray(170)
+                    },
                 );
             }
             frame = Some(f);
@@ -778,9 +827,9 @@ impl RadarScope {
             }
             if self.labels {
                 let r = &t.last;
-                // The callsign when Mode S gives one, else the squawk.
-                let line1 = match &r.callsign {
-                    Some(c) => c.clone(),
+                // The callsign (Mode S's, else ADS-B's), else the squawk.
+                let line1 = match call(r, self.names_on.then_some(&self.names)) {
+                    Some(c) => c,
                     None => r.squawk.map_or("----".into(), |s| format!("{s:04}")),
                 };
                 let line2 = format!(
@@ -817,7 +866,8 @@ impl RadarScope {
             self.selected = None;
         }
         if let Some((_, t)) = nearest {
-            resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t));
+            let names = self.names_on.then_some(&self.names);
+            resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t, names));
         } else if let Some(q) = pointer
             && rect.contains(q)
         {
@@ -860,7 +910,8 @@ impl RadarScope {
     ) -> bool {
         let r = &t.last;
         let mut close = false;
-        let title = match &r.callsign {
+        let names = self.names_on.then_some(&self.names);
+        let title = match call(r, names) {
             Some(c) => format!("{c} · track {:03X}", r.number),
             None => format!("Track {:03X}", r.number),
         };
@@ -911,6 +962,7 @@ impl RadarScope {
                                 ui.label(RichText::new(val).monospace());
                                 ui.end_row();
                             };
+                            name_rows(ui, r, names, &row);
                             if let Some(a) = r.address {
                                 row(ui, "Mode S", format!("{a:06X}"));
                             }
@@ -1150,7 +1202,36 @@ fn station_panel(ui: &mut Ui, st: &StationView, feed_scan: Option<f64>) {
     }
 }
 
-fn track_tip(ui: &mut Ui, t: &Track) {
+/// A track's callsign: Mode S's, else ADS-B's (when looked up).
+fn call(r: &Report, names: Option<&AdsbNames>) -> Option<String> {
+    r.callsign
+        .clone()
+        .or_else(|| Some(names?.name(r.number)?.callsign.clone()))
+}
+
+/// The callsign row, saying where it came from, and the aircraft's type
+/// and registration when ADS-B gave them.
+fn name_rows(
+    ui: &mut Ui,
+    r: &Report,
+    names: Option<&AdsbNames>,
+    row: &dyn Fn(&mut Ui, &str, String),
+) {
+    if let Some(c) = &r.callsign {
+        row(ui, "Callsign", format!("{c} (Mode S)"));
+    } else if let Some(n) = names.and_then(|n| n.name(r.number)) {
+        row(ui, "Callsign", format!("{} (ADS-B)", n.callsign));
+        let what: Vec<&str> = [n.kind.as_deref(), n.registration.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !what.is_empty() {
+            row(ui, "Aircraft", what.join(" · "));
+        }
+    }
+}
+
+fn track_tip(ui: &mut Ui, t: &Track, names: Option<&AdsbNames>) {
     let r = &t.last;
     ui.label(RichText::new(format!("Track {:03X}", r.number)).strong());
     egui::Grid::new("radar_tip").num_columns(2).show(ui, |ui| {
@@ -1159,9 +1240,7 @@ fn track_tip(ui: &mut Ui, t: &Track) {
             ui.label(v);
             ui.end_row();
         };
-        if let Some(c) = &r.callsign {
-            row(ui, "Callsign", c.clone());
-        }
+        name_rows(ui, r, names, &row);
         if let Some(a) = r.address {
             row(ui, "Mode S", format!("{a:06X}"));
         }
@@ -1225,16 +1304,17 @@ fn track_tip(ui: &mut Ui, t: &Track) {
 }
 
 /// The tracks, nearest first; a click on a track's number picks it.
-fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>) {
+fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>, names: Option<&AdsbNames>) {
     let mut tracks: Vec<&Track> = v.tracks.iter().collect();
     tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
     egui::Grid::new("radar_table")
-        .num_columns(8)
+        .num_columns(9)
         .striped(true)
         .spacing([14.0, 2.0])
         .show(ui, |ui| {
             for h in [
-                "Track", "Mode A", "FL", "GS kt", "Range NM", "Bearing", "Heading", "Reports",
+                "Track", "Callsign", "Mode A", "FL", "GS kt", "Range NM", "Bearing", "Heading",
+                "Reports",
             ] {
                 ui.label(RichText::new(h).strong());
             }
@@ -1257,6 +1337,7 @@ fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>) {
                 {
                     *selected = (!picked).then_some(r.number);
                 }
+                cell(ui, call(r, names).unwrap_or_default());
                 cell(ui, r.squawk.map_or("----".into(), |s| format!("{s:04}")));
                 cell(
                     ui,

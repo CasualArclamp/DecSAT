@@ -4,6 +4,7 @@
 //! DecSAT desktop GUI: an SDR++-style wideband waterfall with VFOs, each
 //! running a decoder of your choice.
 
+mod adsb_names;
 mod automation;
 mod band_view;
 mod filename;

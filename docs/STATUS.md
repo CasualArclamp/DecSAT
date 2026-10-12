@@ -2626,3 +2626,15 @@ place is known, reports, status, raw octets). Again, ×, or a click on
 nothing lets it go; a pick waits while its track is away.
 `--radar-track HEX` for unattended runs. `Track::levels`,
 `Track::vertical_rate` in the modem.
+
+**Callsigns from ADS-B** (Rory chose the online lookup; the PH-ML feed
+has none and no carrier with flight-plan data is known): `adsb_names.rs`
+asks adsb.lol (free, no key, ODbL) every 15 s for the aircraft within
+250 NM of the radar's place rounded to 0.1°, with curl, and matches each
+track without a Mode S callsign to the nearest aircraft within 2 NM plus
+the distance flown since, the same squawk when both have one, the level
+within 1500 ft — never by squawk alone, so a recording (another sky) gets
+no names. Names last 3 min after the last match, and only while the
+squawk stays. Labels, the table (Callsign column), the hover tip and the
+details box (type and registration) use them. "Callsigns" switch, off by
+default (it asks an outside service).

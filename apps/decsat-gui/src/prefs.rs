@@ -78,6 +78,18 @@ pub fn radar_airports() -> bool {
         .is_none_or(|(_, v)| v == "1")
 }
 
+/// Callsigns from ADS-B on the scope (off unless turned on: it asks an
+/// outside service).
+pub fn radar_callsigns() -> bool {
+    read_all()
+        .iter()
+        .any(|(k, v)| k == "radar_callsigns" && v == "1")
+}
+
+pub fn set_radar_callsigns(on: bool) {
+    let _ = write_key("radar_callsigns", if on { "1" } else { "0" });
+}
+
 pub fn set_radar_airports(on: bool) {
     let _ = write_key("radar_airports", if on { "1" } else { "0" });
 }
