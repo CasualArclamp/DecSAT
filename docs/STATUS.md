@@ -3022,8 +3022,9 @@ ME, MI, FOE/FRI; the second's ADSB, SCN and PAI bits) and I048/170 (CNF,
 RAD, DOU, MAH, CDM; TRE, GHO, SUP, TCC), tables from Cat 048 edition 1.32,
 and I021/040 from Cat 021 edition 0.23 for ADS-B. An item the record
 leaves out gives no rows, rather than its fields read as zeros from the
-packed word. The scope's details box lists them under each item's name,
-a field a row; hovering a row lists every value it can take. The BSC feed's
+packed word. The scope's details box lists, under the word, only the
+fields set now (not zero: Rory's ask), a row each; hovering a row names
+its item and lists every value it can take. The BSC feed's
 words are said by what each was seen to mean (`radar::bsc_status_text`).
 A846h is Mode S roll-call, RDP chain 2, a confirmed SSR/Mode S track,
 climb mode unknown. PH-BN's track 1A9 (E800h, roll-call + PSR on a

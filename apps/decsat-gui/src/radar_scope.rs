@@ -1905,8 +1905,8 @@ fn selected_text(ms: &ModeS) -> Option<String> {
 }
 
 /// The details box's status rows: the status word, then each field of the
-/// items it is read from — under each item's name, a field a row, its value
-/// and what it means; every value the field can take on hover. `asterix`:
+/// items it is read from that is set (not zero), a row each, its value and
+/// what it means; on hover, its item and every value it can take. `asterix`:
 /// the report came from an ASTERIX radar feed, not the BSC one (whose
 /// words are known only by what each was seen to mean).
 fn status_rows(ui: &mut Ui, r: &Report, asterix: bool) {
@@ -1945,14 +1945,15 @@ fn status_rows(ui: &mut Ui, r: &Report, asterix: bool) {
     key(ui, "Status");
     val(ui, format!("{:04X}h{suffix}", r.status));
     ui.end_row();
-    let mut item = "";
-    for f in status_fields(category, &r.raw) {
-        if f.item != item {
-            item = f.item;
-            key(ui, f.item);
-            ui.label(RichText::new(f.title).weak().small());
-            ui.end_row();
-        }
+    // Only the fields set now (Rory's ask): a zero is mostly a field's
+    // nothing-to-say value (though RAD 0 is a combined track and CDM 0
+    // level flight; the Vertical row says the latter).
+    // Rust note: `.into_iter().filter(…)` keeps the fields the closure
+    // says yes to.
+    for f in status_fields(category, &r.raw)
+        .into_iter()
+        .filter(|f| f.value != 0)
+    {
         key(ui, &format!("  {}", f.name));
         val(ui, format!("{} {}", f.value, f.meaning())).on_hover_ui(|ui| field_values(ui, &f));
         ui.end_row();
