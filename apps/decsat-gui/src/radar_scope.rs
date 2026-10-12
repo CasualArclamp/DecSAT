@@ -87,6 +87,9 @@ pub struct RadarScope {
     /// drawn over a radar's PPI at their own places, and whether to.
     overlay: Vec<AdsbFeed>,
     adsb_on: bool,
+    /// While an ADS-B feed in step with the radar is decoded: the radar's
+    /// tracks no ADS-B aircraft is, drawn red (see `without_adsb`).
+    no_adsb: Option<std::collections::HashSet<u16>>,
     map_loaded: bool,
     /// The radar whose kept place is loaded (by the radar, not the VFO:
     /// see [`RadarId`]), that place, and the place editor's text while it
@@ -267,6 +270,7 @@ impl Default for RadarScope {
             selected: None,
             overlay: Vec::new(),
             adsb_on: true,
+            no_adsb: None,
         }
     }
 }
@@ -699,7 +703,15 @@ impl RadarScope {
             egui::ScrollArea::vertical()
                 .id_salt("radar_tracks")
                 .max_height(table_h)
-                .show(ui, |ui| table(ui, v, &mut self.selected, Some(&self.names)));
+                .show(ui, |ui| {
+                    table(
+                        ui,
+                        v,
+                        &mut self.selected,
+                        Some(&self.names),
+                        self.no_adsb.as_ref(),
+                    )
+                });
             return;
         }
         // The station beside the PPI; the track table under it when there
@@ -717,7 +729,15 @@ impl RadarScope {
                     egui::ScrollArea::vertical()
                         .id_salt("radar_tracks")
                         .max_height(table_h)
-                        .show(ui, |ui| table(ui, v, &mut self.selected, Some(&self.names)));
+                        .show(ui, |ui| {
+                            table(
+                                ui,
+                                v,
+                                &mut self.selected,
+                                Some(&self.names),
+                                self.no_adsb.as_ref(),
+                            )
+                        });
                 }
             });
             ui.separator();
@@ -732,6 +752,47 @@ impl RadarScope {
                     });
             });
         });
+    }
+
+    /// While an ADS-B feed in step with this radar's clock is decoded on
+    /// another VFO: the radar's tracks that no ADS-B aircraft is — none
+    /// with the same Mode S address, nor the same callsign (the track's
+    /// own, or the one the local ADS-B gave it by place, squawk and level).
+    /// Aircraft without ADS-B, primary-only targets, or ADS-B out of reach.
+    /// `None` without such a feed (or for an ADS-B feed's own scope).
+    fn without_adsb(&self, v: &RadarView) -> Option<std::collections::HashSet<u16>> {
+        if v.adsb {
+            return None;
+        }
+        let aircraft: Vec<&Report> = self
+            .overlay
+            .iter()
+            .filter(|f| f.skew(v.tod).is_none_or(|d| d <= ADSB_SKEW_SECS))
+            .flat_map(|f| f.tracks.iter().map(|t| &t.last))
+            .filter(|r| r.adsb.is_some_and(|a| !a.field_monitor))
+            .collect();
+        if aircraft.is_empty() {
+            return None;
+        }
+        let addresses: std::collections::HashSet<u32> =
+            aircraft.iter().filter_map(|r| r.address).collect();
+        let calls: std::collections::HashSet<&str> = aircraft
+            .iter()
+            .filter_map(|r| r.callsign.as_deref())
+            .collect();
+        Some(
+            v.tracks
+                .iter()
+                .map(|t| &t.last)
+                .filter(|r| {
+                    let by_address = r.address.is_some_and(|a| addresses.contains(&a));
+                    let by_call =
+                        call(r, Some(&self.names)).is_some_and(|c| calls.contains(c.as_str()));
+                    !by_address && !by_call
+                })
+                .map(|r| r.number)
+                .collect(),
+        )
     }
 
     fn ppi(&mut self, ui: &mut Ui, v: &RadarView, side: f32, note: Option<&str>) {
@@ -848,6 +909,19 @@ impl RadarScope {
             )
         };
         let colour = if light { colour_on_light } else { colour };
+        // Radar tracks no ADS-B aircraft is: red (worked out after the
+        // names are matched, above).
+        self.no_adsb = self.without_adsb(v);
+        let red = if light {
+            Color32::from_rgb(200, 20, 20)
+        } else {
+            Color32::from_rgb(255, 80, 70)
+        };
+        let no_adsb = |t: &Track| {
+            self.no_adsb
+                .as_ref()
+                .is_some_and(|s| s.contains(&t.last.number))
+        };
         let origin = to_screen(0.0, 0.0);
         // Range rings out to the corners' reach.
         let reach = self.range * std::f32::consts::SQRT_2 + view.length();
@@ -941,7 +1015,7 @@ impl RadarScope {
             if !t.last.updated() && !self.declining {
                 continue;
             }
-            let col = colour(t);
+            let col = if no_adsb(t) { red } else { colour(t) };
             let p = to_screen(t.last.x, t.last.y);
             if self.trails {
                 let n = t.trail.len();
@@ -998,6 +1072,9 @@ impl RadarScope {
         }
         // ADS-B aircraft from other VFOs, over the radar's own tracks.
         let mut adsb_near: Option<(f32, Track, bool)> = None;
+        let reds = self.no_adsb.as_ref().map_or(0, |s| s.len());
+        let red_note = format!("{reds} radar tracks without ADS-B (red)");
+        let mut overlay_drawn = false;
         if self.adsb_on
             && !v.adsb
             && !self.overlay.is_empty()
@@ -1106,14 +1183,26 @@ impl RadarScope {
                 Some(d) if shown == 0 => {
                     format!("ADS-B: its feed's clock is {d:.0} s from the radar's — not drawn")
                 }
-                _ => format!("ADS-B: {shown} aircraft · {tracked_n} tracked by the radar too"),
+                _ => format!(
+                    "ADS-B: {shown} aircraft · {tracked_n} tracked by the radar too · {red_note}"
+                ),
             };
+            overlay_drawn = true;
             painter.text(
                 rect.right_bottom() + vec2(-6.0, -6.0),
                 Align2::RIGHT_BOTTOM,
                 text,
                 FontId::proportional(11.0),
                 col,
+            );
+        }
+        if !overlay_drawn && self.no_adsb.is_some() {
+            painter.text(
+                rect.right_bottom() + vec2(-6.0, -6.0),
+                Align2::RIGHT_BOTTOM,
+                red_note,
+                FontId::proportional(11.0),
+                red,
             );
         }
         // A click on a track picks it (again: lets it go); on nothing, lets
@@ -1298,6 +1387,9 @@ impl RadarScope {
                                 let p =
                                     crate::radar_map::from_nm(site, f64::from(r.x), f64::from(r.y));
                                 row(ui, "Lat, lon", format!("{:.4}, {:.4}", p.lat, p.lon));
+                            }
+                            if self.no_adsb.as_ref().is_some_and(|s| s.contains(&r.number)) {
+                                row(ui, "ADS-B", "no aircraft matches (red)".into());
                             }
                             let age = v.tod.map(|now| (now - t.seen).rem_euclid(86_400.0));
                             row(
@@ -1805,7 +1897,14 @@ fn mode_s_rows(ui: &mut Ui, ms: &ModeS, row: &dyn Fn(&mut Ui, &str, String)) {
 }
 
 /// The tracks, nearest first; a click on a track's number picks it.
-fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>, names: Option<&AdsbNames>) {
+/// `no_adsb`: tracks no ADS-B aircraft is, in red (see `without_adsb`).
+fn table(
+    ui: &mut Ui,
+    v: &RadarView,
+    selected: &mut Option<u16>,
+    names: Option<&AdsbNames>,
+    no_adsb: Option<&std::collections::HashSet<u16>>,
+) {
     let mut tracks: Vec<&Track> = v.tracks.iter().collect();
     tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
     egui::Grid::new("radar_table")
@@ -1828,7 +1927,11 @@ fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>, names: Option<&
             ui.end_row();
             for t in tracks {
                 let r = &t.last;
-                let col = colour(t);
+                let col = if no_adsb.is_some_and(|s| s.contains(&r.number)) {
+                    Color32::from_rgb(255, 80, 70)
+                } else {
+                    colour(t)
+                };
                 let cell = |ui: &mut Ui, s: String| {
                     ui.label(RichText::new(s).monospace().color(col));
                 };

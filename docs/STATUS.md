@@ -2903,3 +2903,19 @@ at 500 kS/s (scratch script): the trunk's scope drew SIC 20's targets,
 SIC 20's scope showed the station. SIC 20 scans in 3.961 s; pedestal
 points 2303/2307 read 3.96–4.06 there. The unattended GUI's `--vfo-at`
 may be given once a VFO, each taking its place in the `--decoder` list.
+
+## Radar tracks without ADS-B, in red (2026-10-12)
+
+Rory (through the radar-station session): radar tracks in red when no
+ADS-B aircraft matches them, only while both a radar feed and an ADS-B
+feed are decoded. `RadarScope::without_adsb`: with an ADS-B feed in step
+with the radar's clock (within a minute, as for the overlay), the radar's
+tracks with neither the Mode S address of an ADS-B aircraft nor its
+callsign (the track's own, or the one the local ADS-B gave it by place,
+squawk and level) are red on the PPI and in the table, and the details box
+says "ADS-B: no aircraft matches"; the corner note counts them ("24 radar
+tracks without ADS-B (red)"), with or without the ADS-B diamonds shown.
+Primary-only targets, aircraft without ADS-B, and ADS-B out of reach all
+read red. Checked on the mixed capture with the clock limit lifted in a
+scratch build (the feeds nine minutes apart): the primary-only tracks red,
+those matched by address in their colours.
