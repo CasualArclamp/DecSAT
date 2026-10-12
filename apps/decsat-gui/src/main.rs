@@ -52,8 +52,10 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--claim-carriers] [--decoder id|ip|ts|dvbs|tpc|cdm600|fastlink|viterbi|cid|psk|rec|spec] [--plan FILE.json] \
-                 [--select N] [--after SECS] [--screenshot OUT.png]"
+                "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                 [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
+                 [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
+                 [--radar-track HEX] [--play-audio]"
             );
             std::process::exit(2);
         }

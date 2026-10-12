@@ -11,8 +11,10 @@ a media player, multicast radio played in the app. Beyond DVB it takes the
 SCPC modems behind thin-route links apart — Intelsat TPC 2964 (Comtech),
 Paradise Q-Flex FastLink, K = 7 Viterbi (IESS-308/309) — down to their E1,
 Drop & Insert and TDM channels, and plays the voice in them (G.711, and
-G.728 LD-CELP found by itself); DVB-CID carrier IDs too. It was called
-**DecDVB** until October 2026.
+G.728 LD-CELP found by itself); it reads the radar feeds on such links —
+track reports in IBM bisync or ASTERIX, ADS-B in IP — onto a radar scope
+with a map; DVB-CID carrier IDs too. It was called **DecDVB** until
+October 2026.
 
 ![DecSAT: carriers in an 8 MS/s span, each claimed by an Identify VFO; the selected one is identified as a DVB-S2X ACM carrier at 500 kS/s with its four MODCODs listed](docs/images/waterfall.png)
 
@@ -29,29 +31,31 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | | |
 |---|---|
 | Waterfall + spectrum over the whole span, zoom and pan | ✅ |
-| Carrier detection: every carrier marked with its symbol rate | ✅ |
+| Carrier detection: every carrier marked with its symbol rate; slow ones (a 9.6 kS/s link in a 20 MS/s span) told from CW tones and spurs by a finer look | ✅ |
 | VFOs: draw, drag, resize, click a carrier to claim it; one thread each | ✅ |
 | **Identify** — blind symbol rate, roll-off, constellation, DVB-S2/S2X detection | ✅ |
 | DVB-S2/S2X PL demodulation: frame lock, MODCOD per frame (ACM) | ✅ |
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
-| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK): frame structure, scrambling and payload found from the signal; HDLC → IP, MPEG-TS, E1, Comtech D&I++ voice and 64 kbit/s timeslots in HDLC packets | ✅ confirmed on a live Comtech CDM-600L carrier |
+| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
 | **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav`; the 2–4 × faster links' multiplex, its HDLC timeslot (bridged Ethernet → IP) and its G.728 calls | ✅ decodes live Q-Flex links down to the calls' speech, the faster ones' IP too |
 | **Viterbi K=7 → data** (IESS-308/309 SCPC and the like): rate 1/2–7/8, puncturing and orientation found blind and followed when the carrier turns; then the payload search — with or without differential decoding — for HDLC, TS, E1, D&I++, Paradise or IBS/SMS (IESS-309, 16/15) framing, or just the scrambler from the idle fill | ✅ decodes a live 10.24 kBd IESS-308 carrier to its IBS frames (rate 1/2, differential, V.35) |
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
-| **Comtech CDM-600 voice** (a decoder preset): the TPC 2964 chain to the D&I/E1 timeslots (or, at multi-radio sites, timeslots in HDLC packets), and the G.728 voice in every one of them played as soon as speech is found — no ▶, so several carriers can be heard at once, one voice at a time if you like | ✅ on a live CDM-600L; multi-radio trunks checked on recordings (idle) |
-| **E1 voice**: G.704 E1 or Comtech Drop & Insert++ timeslots, G.711 A-law — levels per channel, listen, record `.wav`; G.728 LD-CELP 16 kbit/s voice in two bits of a timeslot found and decoded | ✅ (G.728 confirmed on a live CDM-600L's D&I voice) |
+| **Comtech CDM modems** (one decoder entry): the type found by itself — TPC 2964, K = 7 Viterbi or FastLink from the first look, the model from the data — or chosen: CDM-600L voice (TPC → D&I++ → G.728), CDM-570L TPC (→ IP / TS), CDM-570L Viterbi, CDM-570L trunk (voice + IP with ADS-B and radar); the G.728 voice in every channel played as soon as speech is found — no ▶, so several carriers can be heard at once, one voice at a time if you like | ✅ on live CDM-600L and CDM-570L carriers |
+| **E1 voice**: G.704 E1 or Comtech Drop & Insert++ timeslots, G.711 A-law — levels per channel, listen, record `.wav`; G.728 LD-CELP 16 kbit/s voice in two bits of a timeslot — up to three such channels in one timeslot — found and decoded | ✅ (G.728 confirmed on live CDM-600L and CDM-570L voice) |
+| **Radar feeds** on CDM-570/570L links: track reports in IBM bisync blocks, **ASTERIX** categories 034 and 048 in HDLC (the Mode S registers in them read too) and ADS-B (category 021) in IP — a track table, a CSV log, and the **radar scope**: a PPI with trails and leaders, a map, airports and runways, ADS-B aircraft over a radar's picture, callsigns from a decoded ADS-B feed or (switched on) adsb.lol | ✅ on live carriers |
+| **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers | ✅ |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
-| **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO | ✅ |
+| **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
 | **LDPC + BCH → BBFRAMEs**: all 21 S2 and 31 S2X codes, BBHEADER, stream info, payload rate | ✅ |
 | **S2X**: 8-bit PLS code, all 55 normal/short MODCODs — 2+4+2 8APSK to 256APSK, the new interleavers | ✅ |
 | **S2X VL-SNR**: the VL-SNR header, pi/2-BPSK (and spread), medium FECFRAMEs, all 9 MODCODs — down to about 0 dB Es/N0 so far | ✅ |
 | PL scrambling: the preferred sequences of S2X Table 19e found from the pilots | ✅ |
 | S2X superframing (Annex E) | to do |
-| **GSE → IP → PCAP** + live IP stats; GSE variant detected from the data | ✅ |
+| **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
 | **Multicast audio** from GSE or MPE: SAP/SDP names, codecs; unannounced RTP AAC and Opus described from their packets; IPv4 fragments reassembled; now-playing messages; play in the app (volume, pause) or VLC/PotPlayer; record to file | ✅ checked on a recording of a live MPE radio multiplex |
@@ -97,7 +101,10 @@ runs and applies to existing VFOs too.
 
 The side bar lists the VFOs with their CPU load (✕ removes one), and shows the
 selected one's settings, its Identify result or demodulator state (lock, Es/N0 and Eb/N0,
-residual offset), a carrier-locked constellation and a zoomed spectrum.
+residual offset), a carrier-locked constellation and a zoomed spectrum. The
+status bar counts the carriers and narrow lines, and shows the front end's
+load and the input level — orange when the HackRF's gain is too high (see
+*HackRF One* below).
 
 ### DVB-S2 → GSE/IP → PCAP
 
@@ -204,22 +211,26 @@ finds the rest from the signal:
    descrambler — the (2, 3, 9, 12) polynomial self-synchronising or additive,
    ITU-T V.35's and V.29's — whichever yields frames that check.
 
-IP found in the HDLC frames (Cisco HDLC, PPP, or anything with the packet
-after a short header) gets the same statistics, PCAP and multicast audio as
-GSE; a transport stream gets the TS outputs. **● Record** also writes the
-decoded data to a `.bin`. Identify recognises the carrier by its unique
+IP found in the HDLC frames (Cisco HDLC, PPP, Frame Relay as RFC 2427
+carries it, or anything with the packet after a short header) gets the same
+statistics, PCAP and multicast audio as GSE — a flow whose UDP checksums all
+fail while its headers check is marked **encrypted** in transit, and the
+audio sniffer leaves it alone; a transport stream gets the TS outputs.
+**● Record** also writes the decoded data to a `.bin`, and `decsat pcap`
+reads a recorded PCAP back. Identify recognises the carrier by its unique
 word. What each search found is shown, so you can tell a finding from a
-default. It is confirmed on synthetic carriers; a recording of a real one
-would settle the details the documents leave open.
+default. It is confirmed on live Comtech CDM-600L and CDM-570L carriers.
 
 ### Voice over E1 (G.704, Comtech D&I++)
 
 Modems carrying telephony or radio links (airband voice, for one) send
 64 kbit/s G.711 channels: a whole E1, or — Comtech's **Drop & Insert++** —
-the chosen timeslots in frames of 2944 bits (64 overhead, 2880 data; the
-layout is not published and was worked out from a CDM-600L carrier: a
-24-bit header, then five blocks of 72 bytes each after 10 bits of
-overhead). Behind the TPC 2964 decoder the payload search finds either,
+the chosen timeslots in blocks of 2944 bits (64 overhead, 2880 data; the
+layout is not published and was worked out from CDM-600L carriers: a 21-bit
+sync and three bits that say whether the block starts a frame, then five
+blocks of 72 bytes each after 10 bits of overhead — a block a timeslot
+every 45 ms, the timeslots' bytes taking turns). Behind the TPC 2964
+decoder the payload search finds either,
 under the V.35 descrambler or any other it tries, and the **Voice** card
 lists the channels with their levels: **▶** listens (the app's player and
 volume), **●** records a `.wav`. A timeslot whose sign bit never changes is
@@ -240,13 +251,19 @@ written from the Recommendation and matches its Appendix I test vectors
 
 **Multi-radio sites** send their timeslots differently: as HDLC packets on an
 inverted line (idle flags read `00000011` repeated), each packet a sequence
-count, a channel (`10h`, `20h`, …), a type byte `13h` and 44 octets — 5.5 ms —
-of one 64 kbit/s timeslot. Each channel's packets join into a continuous
-timeslot with the same G.728 sub-channel in bits 2–3, so the **Voice** card
-lists them as ch 1, 2, … and finds, plays and records each as above. A site
-with nothing to say sends only a status packet every two seconds.
+count, a channel byte (`08h`–`F8h`), a type byte `13h` and 44 octets — 5.5 ms
+— of one 64 kbit/s timeslot. Each channel's packets join into a continuous
+timeslot, and the **Voice** card lists them by that byte (ch 10h, 18h, …)
+and finds, plays and records the G.728 in each as above — a trunk's
+timeslot can hold up to three G.728 channels in different bit pairs, each
+decoded, and *one voice at a time* holds within the timeslot too. Packets
+of another type on such a trunk carry the site's IP, which goes to the IP
+stage (with the ADS-B in it: see below). A site with nothing to say sends
+only a status packet every two seconds.
 
-The **CDM-600 voice** preset plays every channel with G.728 by itself.
+The **Comtech CDM modem** entry's voice models — CDM-600L voice, CDM-570L
+trunk, or *type found*, which picks the chain from the first look and the
+model from the data — play every channel with G.728 by itself.
 **One voice at a time** (the toolbar, on by default) works like a scanner's
 hang time across all carriers and channels: whoever speaks first is heard,
 and the others wait until they have been quiet for the **hold** (3 s, set
@@ -259,6 +276,71 @@ Offline:
 
 ```bash
 decsat decode capture_148148Sps.cf32 --decoder tpc --out dir --e1-record 1
+```
+
+### Radar feeds and the radar scope
+
+The same thin-route links carry air-traffic surveillance. Any VFO whose
+chain yields the frames reads it (the **Comtech CDM modem** entry with *type
+found* picks the chain itself; CDM-570L Viterbi and CDM-570L trunk are the
+usual ones), in three forms:
+
+- **Track reports in IBM bisync blocks** (SYN, an SOH heading, DLE STX … DLE
+  ETX, a BCC) on a 9.6 kbit/s link: one message a sector, 32 a scan, each
+  report a track's position, velocity, Mode A code, Mode C level and
+  ground speed. The format is nobody's standard; it was worked out from
+  the signal.
+- **ASTERIX** in HDLC UI frames on 64 kbit/s links: category 034 service
+  messages (sector crossings, the north marker with the radar's place and
+  scan time) and category 048 target reports (position, Mode 3/A, flight
+  level, Mode S address, track number, velocity, status), with the Mode S
+  registers the radar reads from each aircraft (BDS 4,0, 5,0 and 6,0:
+  selected altitude, altimeter setting, true track, heading, IAS, Mach,
+  vertical rates). A block counts only if its records parse to its exact
+  length under the standard UAPs.
+- **ADS-B** as ASTERIX category 021 (edition 0.23) in a trunk's IP: each
+  aircraft's own position, altitude, callsign, squawk and emitter class.
+
+The VFO's **Radar feed** card lists the tracks; **📡 Radar scope** opens a
+window with a PPI — the beam turning at the measured scan rate, range
+rings, trails, one-minute leaders, Mode A / level / speed labels, hover
+details, a track table, wheel zoom and drag pan. Click a track, or its row,
+for its details: Mode S/A/C, climb or descent, speed and heading, range
+and bearing from the radar and from the nearest airport, latitude and
+longitude when the radar's place is known, the status word said field by
+field, the raw octets. Coasted tracks are yellow; fast or high ones purple
+(650 kt or more, FL450 or above, or over 350 kt below FL100); and with an
+ADS-B feed in step with the radar's clock, the ADS-B aircraft are drawn over
+the radar's picture as magenta diamonds at the places they report, and the
+radar tracks no ADS-B aircraft matches turn red.
+
+Under the PPI, **Map** draws OpenStreetMap tiles (fetched with the system's
+`curl`, cached for good under `%APPDATA%\DecSAT`; **Light** or dark) and
+**Airports** the airports and runways of OurAirports' open data (fetched
+once, refreshed monthly). The radar's place comes from the feed when it
+gives it (ASTERIX's north marker), else **Site…** sets it; either is kept in
+your own settings, keyed by the radar, never in the project. Tracks the
+feed leaves unnamed take callsigns from an ADS-B feed decoded on another
+VFO (nothing asked of anyone) or, only with the **adsb.lol** switch on (off
+by default), from that site's live aircraft near the radar. The waterfall
+tags a carrier **ADS-B** or **RADAR** once a decoder has found either in it,
+and remembers the carrier. While a VFO records, its track reports go to a
+`.csv` beside the PCAP.
+
+A CDM-570L trunk that carries a radar station's **monitoring and control**
+multicast (Frame Relay; a word-oriented format of typed points, the units
+named in the data) gets a **Radar station** card above the IP card, and
+its scope shows the station's units and the readings that move beside the
+PPI, with the targets of the radar feed another VFO decodes. What the
+points mean is not known yet.
+
+Offline, and unattended:
+
+```bash
+decsat decode radar_64000Sps.cf32 --decoder auto --fast      # a radar link: its reports
+decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --radar-out tracks.csv --voice-out voice.wav   # a trunk's data recording
+decsat pcap recording.pcap --csv points.csv                   # a recorded PCAP: the IP, a station's points
+decsat-gui capture.cs8 --vfo-at 1461800:140000 --decoder trunk --radar-scope --radar-range 120 --after 20 --screenshot scope.png
 ```
 
 ### Carrier ID (DVB-CID)
@@ -329,7 +411,9 @@ they recur (chance runs do not recur) and list long strings as they come.
 
 It splits what it *knows* from what it *guesses*. **DVB-S2** is reported as a
 fact — PLHEADERs found repeating exactly where their own PLS codes predict the
-next frame — with the MODCODs in use, pilots, frame lengths, and CCM vs ACM.
+next frame — with the MODCODs in use, pilots, frame lengths, and CCM vs ACM
+(a MODCOD read once among many frames is a misread header, said so, not
+taken for ACM or S2X).
 Anything else gets measurements (symbol rate, roll-off, an estimated
 constellation) and a labelled guess: plain QPSK reads *"possibly DVB-S (not
 verified)"* (the DVB-S decoder confirms it), and a BPSK or QPSK carrier with
@@ -443,6 +527,9 @@ decsat payload fastlink.bin --tdm-out frames.bin  # a modem .bin through the pay
 decsat decode --hackrf 1635.0 --decoder fastlink --offset 640e3 --bandwidth 200e3   --out dir --record-on-activity     # watch a FastLink live, record when a channel speaks
 decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   # a Q-Flex's call voice to a .wav
 decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf   # a DVB-S2 carrier, its good BBFRAMEs kept
+decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
+decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
+decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back
 decsat modcods                    # the DVB-S2 MODCOD table
 ```
 
@@ -462,8 +549,17 @@ In an existing clone, `git submodule update --init` fetches them.
 
 Click **📡 HackRF** in the toolbar, set the frequency, sample rate and gains,
 and **Start**. Frequency and gains apply live. **LNB LO** only labels the axis
-(RF = tuned + LO): 10700 MHz by default (a universal Ku LNB's high band),
+(RF = tuned + LO): 10600 MHz by default (a universal Ku LNB's high band),
 9750 MHz for its low band or QO-100, 0 without one.
+
+**Gain:** the HackRF's LNA and mixer compress long before its ADC clips,
+and the products land on the carriers, which then slip and lose frames —
+at LNA 40 dB a clean 14 dB carrier in a full Ku-band slice lost most of its
+frames, at LNA 24 dB none. The status bar's **input** level turns orange
+above −25 dBFS: lower the LNA gain. A carrier that still misbehaves at one
+tuning (slips, a raised noise floor beside it) is usually clean a few MHz
+either side — the HackRF's synthesisers put noise at particular offsets —
+so retune a little.
 
 The driver is pure Rust over USB ([`seify-hackrfone`](https://crates.io/crates/seify-hackrfone)
 on `nusb`): no libhackrf, no libusb, nothing to install beyond the WinUSB driver
@@ -498,6 +594,12 @@ algorithms studied from and credited to:
   de-encapsulation, including the proprietary header-length and split
   fragment-ID variants found on real carriers
 - DecDRM — the waterfall's GPU ring texture
+
+The radar scope draws OpenStreetMap's tiles (© OpenStreetMap contributors,
+ODbL; credited on the map), OurAirports' airport and runway data (public
+domain) and, when you switch it on, aircraft from adsb.lol (ODbL). ASTERIX
+is read from EUROCONTROL's category specifications, the Mode S registers
+from ICAO Doc 9871.
 
 ## Licence
 
