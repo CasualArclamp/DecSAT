@@ -293,6 +293,8 @@ const HIGH: Color32 = Color32::from_rgb(110, 200, 255);
 const NO_MODE_C: Color32 = Color32::from_gray(150);
 const COASTED: Color32 = Color32::from_rgb(255, 240, 60);
 const FAST_HIGH: Color32 = Color32::from_rgb(200, 120, 255);
+// A darker grey than no Mode C's, to tell the two apart.
+const FIXED: Color32 = Color32::from_gray(105);
 const NO_ADSB: Color32 = Color32::from_rgb(255, 80, 70);
 
 /// Faster or higher than airliners go, so likely military: a ground speed
@@ -316,11 +318,15 @@ fn fast_or_high(r: &Report) -> bool {
 }
 
 /// A track's colour: coasted (no plot this scan) yellow, whatever its
-/// height; then fast or high (likely military) purple; else by height,
-/// low traffic warm, high cool; no Mode C grey.
+/// height; then a fixed transponder (a field monitor, not an aircraft) dark
+/// grey; fast or high (likely military) purple; else by height, low
+/// traffic warm, high cool; no Mode C grey.
 fn colour(t: &Track) -> Color32 {
     if !t.last.updated() {
         return COASTED;
+    }
+    if t.last.field_monitor {
+        return FIXED;
     }
     if fast_or_high(&t.last) {
         return FAST_HIGH;
@@ -337,6 +343,9 @@ fn colour(t: &Track) -> Color32 {
 fn colour_on_light(t: &Track) -> Color32 {
     if !t.last.updated() {
         return Color32::from_rgb(140, 120, 0);
+    }
+    if t.last.field_monitor {
+        return Color32::from_gray(135);
     }
     if fast_or_high(&t.last) {
         return Color32::from_rgb(120, 40, 170);
@@ -365,6 +374,12 @@ fn legend(ui: &mut Ui, red: bool) {
                 "fast / high",
                 "Faster or higher than airliners go, so likely military: \
                  650 kt or more, FL450 or above, or over 350 kt below FL100",
+            ),
+            (
+                FIXED,
+                "fixed xpdr",
+                "A fixed transponder: a field monitor on the ground that checks \
+                 the radar, not an aircraft",
             ),
             (
                 COASTED,
@@ -824,9 +839,9 @@ impl RadarScope {
     /// with the same Mode S address, nor the same callsign (the track's
     /// own, or the one the local ADS-B gave it by place, squawk and level).
     /// Aircraft without ADS-B, primary-only targets, or ADS-B out of reach.
-    /// Coasted tracks are left out: they are drawn coasted's colour (see
-    /// `colour`). `None` without such a feed (or for an ADS-B feed's own
-    /// scope).
+    /// Coasted tracks and fixed transponders are left out: they are drawn
+    /// their own colours (see `colour`). `None` without such a feed (or for
+    /// an ADS-B feed's own scope).
     fn without_adsb(&self, v: &RadarView) -> Option<std::collections::HashSet<u16>> {
         if v.adsb {
             return None;
@@ -851,7 +866,7 @@ impl RadarScope {
             v.tracks
                 .iter()
                 .map(|t| &t.last)
-                .filter(|r| r.updated())
+                .filter(|r| r.updated() && !r.field_monitor)
                 .filter(|r| {
                     let by_address = r.address.is_some_and(|a| addresses.contains(&a));
                     let by_call =

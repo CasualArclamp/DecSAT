@@ -74,6 +74,10 @@ pub struct Report {
     /// Not updated this scan: a track in decline (BSC) or coasted, with no
     /// plot (ASTERIX).
     pub coasting: bool,
+    /// From a field monitor — a fixed transponder on the ground that checks
+    /// the radar — not an aircraft (ASTERIX: I048/020 or I021/040's RAB
+    /// bit; the BSC feed does not say).
+    pub field_monitor: bool,
     /// East and north of the radar, NM.
     pub x: f32,
     pub y: f32,
@@ -257,6 +261,7 @@ impl Report {
             number_flags: u16::from_be_bytes([r[4], r[5]]) & !NUMBER_MASK,
             // Updated: 8270h (8260h once); 83n0 in decline.
             coasting: status & 0xFF0F != 0x8200,
+            field_monitor: false,
             x: f32::from(s16(&r[6..])) * NM_PER_UNIT,
             y: f32::from(s16(&r[8..])) * NM_PER_UNIT,
             vx: f32::from(r[10] as i8) * KT_PER_UNIT,

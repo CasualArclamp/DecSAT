@@ -830,6 +830,8 @@ fn cat048(r: &Record, raw: &[u8]) -> Option<Message> {
         number,
         number_flags: 0,
         coasting: descriptor >> 5 == 0,
+        // RAB: I048/020's bit 2.
+        field_monitor: descriptor & 0x02 != 0,
         x,
         y,
         vx,
@@ -941,6 +943,7 @@ fn cat021(r: &Record, raw: &[u8]) -> Option<Message> {
         number: 0,
         number_flags: 0,
         coasting: false,
+        field_monitor: descriptor & 0x0800 != 0,
         x: 0.0,
         y: 0.0,
         vx,
@@ -1024,8 +1027,10 @@ mod tests {
         assert_eq!(r.number, 0x25E);
         assert_eq!(r.address, Some(0x7CF78A));
         assert_eq!(r.squawk, Some(7711));
-        // −10 FL (¼ FL units, 14 bits signed): a ground transponder.
+        // −10 FL (¼ FL units, 14 bits signed): a ground transponder, which
+        // says so (RAB).
         assert_eq!(r.flight_level, Some(-10));
+        assert!(r.field_monitor);
         // The (smoothed) track's Cartesian position agrees with the plot's
         // polar one, 175.0 NM at 280.1°, to a few hundredths of a NM.
         assert!((r.range() - 174.98).abs() < 0.1, "{}", r.range());
@@ -1050,6 +1055,7 @@ mod tests {
         assert_eq!(m[0].source, Some((4, 22)));
         assert_eq!(r.address, Some(0x7C7181));
         assert_eq!((r.flight_level, r.squawk), (Some(380), Some(4275)));
+        assert!(!r.field_monitor);
         assert_eq!(detection((r.status >> 8) as u8), "Mode S roll-call");
         let ms = &r.mode_s;
         assert_eq!(ms.flight_status, Some(0));
