@@ -36,8 +36,9 @@ pub struct Options {
     pub radar_range: Option<f32>,
     /// Pick this track (hex) on the radar scope.
     pub radar_track: Option<u16>,
-    /// Drop a VFO here (offset from the centre, Hz; and its width, Hz).
-    pub vfo_at: Option<(f64, f64)>,
+    /// Drop VFOs here (offset from the centre, Hz; and its width, Hz):
+    /// `--vfo-at` once a VFO, each taking its place in a `--decoder` list.
+    pub vfo_at: Vec<(f64, f64)>,
     /// Play the selected VFO's first multicast audio stream in the app.
     pub play_audio: bool,
     /// A frequency plan to show (unattended runs do not read the saved one).
@@ -94,7 +95,7 @@ impl Options {
                         .flatten()
                         .ok_or("--vfo-at needs OFFSET_HZ[:BW_HZ]")?;
                     let bw = it.next().flatten().unwrap_or(20e3);
-                    o.vfo_at = Some((at, bw));
+                    o.vfo_at.push((at, bw));
                 }
                 Some("--play-audio") => o.play_audio = true,
                 Some("--decoder") => {
@@ -178,7 +179,7 @@ pub struct Automation {
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
     pub radar_track: Option<u16>,
-    pub vfo_at: Option<(f64, f64)>,
+    pub vfo_at: Vec<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
     /// Each claimed carrier's decoder (`--decoder a,b,…`).
@@ -199,7 +200,7 @@ impl Automation {
             radar_scope: o.radar_scope,
             radar_range: o.radar_range,
             radar_track: o.radar_track,
-            vfo_at: o.vfo_at,
+            vfo_at: o.vfo_at.clone(),
             play_audio: o.play_audio,
             audio_started: false,
             decoders: o.decoders.clone(),

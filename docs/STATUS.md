@@ -2883,3 +2883,23 @@ reads "TRK", lit while speech is on, and its card "Comtech CDM-570L trunk
 "3 × G.728 speech in 7–8 · on air 7–8", the ADS-B feed below. Also: four
 hover texts (the plan loader, follow the carrier, the radar station card
 and its scope button) had runs of spaces left in them by an earlier edit.
+
+**The station is the SIC 20 radar** (Rory: "the CB-BN radar is ASTERIX SIC
+20, use that one"). `decsat_ip::rcms::known_radar` gives the
+233.71.15.145:4021 station SAC 4 SIC 20 (`StationView::radar`); the
+station's scope takes the feed sending SAC 4 SIC 20 by itself (none while
+no VFO decodes it, with a note saying so), and that feed's own scope shows
+the station beside its PPI. Choosing another feed that gives its SAC/SIC
+in "Targets from" keeps it as the station's radar (prefs
+`radar_station.<group:port>`). The side card and CLI name the radar.
+Note: the recordings of 2026-10-11 (radar survey, 1734.5 and 1745 MHz at
+8 MS/s) do not agree with the name: the 12335.24 MHz carrier (the plan's
+CB-BN) sent SIC 19, north marker 35.2376°S 149.1823°E at 903 m (Canberra),
+and SIC 20 (34.9524°S 138.5320°E, Adelaide Airport) came on 12346.74 MHz
+(the plan's AD-BN slot). SIC 20 is used as asked. Checked on real signals:
+the trunk (same station, same multicast, in the 1734.5 MHz capture at
++657.8 kHz), the SIC 19 carrier and the SIC 20 carrier, cut out and mixed
+at 500 kS/s (scratch script): the trunk's scope drew SIC 20's targets,
+SIC 20's scope showed the station. SIC 20 scans in 3.961 s; pedestal
+points 2303/2307 read 3.96–4.06 there. The unattended GUI's `--vfo-at`
+may be given once a VFO, each taking its place in the `--decoder` list.

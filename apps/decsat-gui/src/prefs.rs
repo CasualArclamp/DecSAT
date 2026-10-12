@@ -12,6 +12,14 @@ static OUTPUT_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// The receiver's clock correction, ppm (see `VfoSettings::clock_ppm`).
 static CLOCK_PPM: Mutex<f64> = Mutex::new(0.0);
 
+/// Radar stations' radars as chosen in the scope: the station (its
+/// multicast group:port) and the SAC/SIC of the feed chosen for it. Read
+/// once, then kept here: the scope and the main window ask every frame.
+static STATION_RADARS: Mutex<Option<Vec<StationRadar>>> = Mutex::new(None);
+
+/// A station (`group:port`) and its radar's SAC and SIC.
+type StationRadar = (String, (u8, u8));
+
 /// Where per-user settings live: %APPDATA%, or ~/.config.
 fn config_base() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
@@ -150,6 +158,37 @@ pub fn set_radar_site(id: &RadarId, site: Option<(f64, f64)>) -> std::io::Result
             write_all(&all)
         }
     }
+}
+
+/// The radar chosen for radar station `station` (its multicast
+/// `group:port`) in the scope, if one was: its SAC and SIC.
+pub fn station_radar(station: &str) -> Option<(u8, u8)> {
+    let mut cache = STATION_RADARS.lock().unwrap();
+    // Rust note: `get_or_insert_with` reads the file the first time only.
+    let all = cache.get_or_insert_with(|| {
+        read_all()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let st = k.strip_prefix("radar_station.")?.to_string();
+                let (sac, sic) = v.split_once(',')?;
+                Some((st, (sac.trim().parse().ok()?, sic.trim().parse().ok()?)))
+            })
+            .collect()
+    });
+    all.iter().find(|(s, _)| s == station).map(|(_, r)| *r)
+}
+
+/// Keep `radar` (SAC, SIC) as radar station `station`'s.
+pub fn set_station_radar(station: &str, radar: (u8, u8)) {
+    let _ = station_radar(station); // the cache filled
+    if let Some(all) = STATION_RADARS.lock().unwrap().as_mut() {
+        all.retain(|(s, _)| s != station);
+        all.push((station.to_string(), radar));
+    }
+    let _ = write_key(
+        &format!("radar_station.{station}"),
+        &format!("{},{}", radar.0, radar.1),
+    );
 }
 
 /// The scope's map: shown, its style, its brightness.

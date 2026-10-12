@@ -3116,6 +3116,15 @@ fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
             ui.label("Sent");
             ui.label(RichText::new(st.flow.to_string()).monospace().small());
             ui.end_row();
+            if let Some((sac, sic)) = crate::radar_scope::station_radar(st) {
+                ui.label("Radar");
+                ui.label(format!("SAC {sac} SIC {sic}")).on_hover_text(
+                    "Which radar this station is: known from outside the traffic (it does not \
+                     say), or as chosen in the radar scope. The scope draws that radar's \
+                     ASTERIX targets when a VFO decodes them.",
+                );
+                ui.end_row();
+            }
             ui.label("Messages");
             ui.label(format!(
                 "{} · {} repeats{}",

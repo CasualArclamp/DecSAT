@@ -125,14 +125,26 @@ const ADSB_SKEW_SECS: f64 = 60.0;
 pub struct ScopeInput<'a> {
     /// The VFO's own radar feed (BSC or ASTERIX), if it has one.
     pub radar: Option<&'a RadarStageView>,
-    /// Radar stations' monitoring traffic in its IP.
-    pub stations: &'a [StationView],
+    /// Radar stations' monitoring traffic: in its IP, or, for a VFO
+    /// with a radar feed, any VFO's station known to be the same radar.
+    pub stations: Vec<&'a StationView>,
     /// Other VFOs' radar feeds, for a monitoring-only VFO's PPI: id, name,
     /// feed, and the RF of its carrier when known (Hz).
     pub feeds: Vec<(VfoId, String, &'a RadarStageView, Option<f64>)>,
     /// The RF of this VFO's carrier, when known (Hz): what a feed that does
     /// not say who it is is known by.
     pub rf_hz: Option<f64>,
+}
+
+/// A radar station's key in the prefs: its multicast group and port.
+fn station_key(st: &StationView) -> String {
+    format!("{}:{}", st.flow.group, st.flow.port)
+}
+
+/// Which radar station `st` is, as its SAC and SIC: as chosen in the
+/// scope (kept in the prefs), else as known (`decsat_ip::rcms::known_radar`).
+pub fn station_radar(st: &StationView) -> Option<(u8, u8)> {
+    crate::prefs::station_radar(&station_key(st)).or(st.radar.map(|k| (k.sac, k.sic)))
 }
 
 /// A unit silent this long (s, the station's clock) is shown as quiet: the
@@ -352,26 +364,36 @@ impl RadarScope {
             .show(ctx, |ui| {
                 if let Some(r) = inp.radar {
                     self.follow(Some(own));
-                    self.contents(ui, r, inp.stations, None, (name, inp.rf_hz));
+                    self.contents(ui, r, &inp.stations, None, (name, inp.rf_hz));
                 } else if !inp.stations.is_empty() {
-                    // Monitoring only: the targets of another VFO's feed.
-                    let chosen = self.targets_menu(ui, &inp.feeds);
+                    // Monitoring only: the targets of another VFO's feed —
+                    // the station's own radar's when it is known.
+                    let station = inp.stations[0];
+                    let wanted = station_radar(station);
+                    let chosen = self.targets_menu(ui, &inp.feeds, station);
                     self.follow(chosen);
                     let empty = RadarStageView::default();
                     let feed = chosen.and_then(|id| inp.feeds.iter().find(|f| f.0 == id));
-                    let note = match (feed, inp.feeds.is_empty()) {
-                        (Some(_), _) => None,
-                        (None, true) => Some(
+                    let note = match (feed, wanted, inp.feeds.is_empty()) {
+                        (Some(_), ..) => None,
+                        (None, Some((sac, sic)), _) => Some(format!(
+                            "No targets yet: this station is the SAC {sac} SIC {sic} radar.\n\
+                             Decode that radar's ASTERIX feed on another VFO to draw them here."
+                        )),
+                        (None, None, true) => Some(
                             "No targets: the monitoring traffic carries none.\nDecode a radar \
-                             feed (ASTERIX or BSC) on another VFO to draw its targets here.",
+                             feed (ASTERIX or BSC) on another VFO to draw its targets here."
+                                .to_string(),
                         ),
-                        (None, false) => {
-                            Some("No targets: choose a radar feed above to draw its targets.")
-                        }
+                        (None, None, false) => Some(
+                            "No targets: choose a radar feed above to draw its targets."
+                                .to_string(),
+                        ),
                     };
+                    let note = note.as_deref();
                     // The radar's place is the drawn feed's.
                     let whose = feed.map_or((name, inp.rf_hz), |f| (f.1.as_str(), f.3));
-                    self.contents(ui, feed.map_or(&empty, |f| f.2), inp.stations, note, whose);
+                    self.contents(ui, feed.map_or(&empty, |f| f.2), &inp.stations, note, whose);
                 } else {
                     ui.label(
                         "No radar feed on this VFO yet: a radar's track feed (BSC blocks, as \
@@ -396,14 +418,18 @@ impl RadarScope {
         }
     }
 
-    /// For a monitoring-only VFO: which VFO's feed the PPI draws. The only
-    /// feed there is is taken until another is chosen; the choice lasts
-    /// while its VFO does.
+    /// For a monitoring-only VFO: which VFO's feed the PPI draws. Until
+    /// one is chosen: the feed of `station`'s radar when it is known (none
+    /// while that feed is not decoded), else the only feed there is. A
+    /// choice lasts while its VFO does, and a feed that says its SAC/SIC is
+    /// kept as the station's radar from then on.
     fn targets_menu(
         &mut self,
         ui: &mut Ui,
         feeds: &[(VfoId, String, &RadarStageView, Option<f64>)],
+        station: &StationView,
     ) -> Option<VfoId> {
+        let wanted = station_radar(station);
         if self.targets_chosen
             && self
                 .targets
@@ -412,7 +438,13 @@ impl RadarScope {
             self.targets_chosen = false; // its VFO went
         }
         if !self.targets_chosen {
-            self.targets = (feeds.len() == 1).then(|| feeds[0].0);
+            self.targets = match wanted {
+                Some(src) => feeds
+                    .iter()
+                    .find(|f| f.2.radar.source == Some(src))
+                    .map(|f| f.0),
+                None => (feeds.len() == 1).then(|| feeds[0].0),
+            };
         }
         let label =
             |f: &(VfoId, String, &RadarStageView, Option<f64>)| match f.2.radar.source_label() {
@@ -442,16 +474,38 @@ impl RadarScope {
                         {
                             self.targets = Some(f.0);
                             self.targets_chosen = true;
+                            if let Some(src) = f.2.radar.source {
+                                crate::prefs::set_station_radar(&station_key(station), src);
+                            }
                         }
                     }
                 });
-            ui.label(RichText::new("which radar the station is, its traffic does not say").weak())
-                .on_hover_text(
-                    "The monitoring traffic names the station's units but not the radar: \
-                     no System Area/Identification Code, no position. Pick the feed of the \
-                     same radar if you know it; its scan time beside the pedestal's readings \
-                     may tell.",
-                );
+            match wanted {
+                Some((sac, sic)) => {
+                    ui.label(
+                        RichText::new(format!("this station is the SAC {sac} SIC {sic} radar"))
+                            .weak(),
+                    )
+                    .on_hover_text(
+                        "Known from outside the traffic, which names the station's units but \
+                         not the radar (or chosen here before): its feed is taken by its \
+                         SAC/SIC when a VFO decodes it. Choosing another feed that says its \
+                         SAC/SIC keeps that one as the station's radar instead.",
+                    );
+                }
+                None => {
+                    ui.label(
+                        RichText::new("which radar the station is, its traffic does not say")
+                            .weak(),
+                    )
+                    .on_hover_text(
+                        "The monitoring traffic names the station's units but not the radar: \
+                         no System Area/Identification Code, no position. Pick the feed of the \
+                         same radar if you know it; its scan time beside the pedestal's \
+                         readings may tell.",
+                    );
+                }
+            }
         });
         self.targets
     }
@@ -462,7 +516,7 @@ impl RadarScope {
         &mut self,
         ui: &mut Ui,
         r: &RadarStageView,
-        stations: &[StationView],
+        stations: &[&StationView],
         note: Option<&str>,
         whose: (&str, Option<f64>),
     ) {
@@ -1391,6 +1445,10 @@ impl RadarScope {
 /// feed's scan time beside them for comparison.
 fn station_panel(ui: &mut Ui, st: &StationView, feed_scan: Option<f64>) {
     ui.label(RichText::new("Radar station (monitoring)").strong());
+    if let Some((sac, sic)) = station_radar(st) {
+        ui.label(RichText::new(format!("The SAC {sac} SIC {sic} radar")).small())
+            .on_hover_text("Known from outside the traffic, which does not say, or chosen here");
+    }
     ui.label(RichText::new(st.flow.to_string()).monospace().small());
     ui.label(
         RichText::new(format!(

@@ -326,6 +326,46 @@ impl std::fmt::Display for Flow {
     }
 }
 
+/// A station whose radar is known: the radar's ASTERIX System Area and
+/// Identification Codes (I034/010, I048/010), so its feed can be found.
+/// The monitoring traffic does not say (no SAC/SIC, no place): this comes
+/// from outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownRadar {
+    pub sac: u8,
+    pub sic: u8,
+}
+
+/// Stations whose radar is known, by multicast group and port.
+///
+/// The one on the 12335.13 MHz CDM-570L trunk: Rory (2026-10-12) says it
+/// is the CB-BN radar and that radar is ASTERIX SIC 20 (SAC 4, as all the
+/// band's radars). The recordings of 2026-10-11 do not agree on the name:
+/// the carrier at 12335.24 MHz (the plan's CB-BN) sent SIC 19, whose north
+/// marker is near Canberra at 903 m, while SIC 20 came on 12346.74 MHz
+/// (the plan's AD-BN slot) with Adelaide Airport's place. SIC 20 is what
+/// was asked for; the GUI's scope keeps another choice if one is made.
+const KNOWN: [(IpAddr, u16, KnownRadar); 1] = [(
+    IpAddr::V4(std::net::Ipv4Addr::new(233, 71, 15, 145)),
+    4021,
+    KnownRadar { sac: 4, sic: 20 },
+)];
+
+/// The radar of the station sending as `flow`, when known.
+pub fn known_radar(flow: &Flow) -> Option<KnownRadar> {
+    KNOWN
+        .iter()
+        .find(|(group, port, _)| *group == flow.group && *port == flow.port)
+        .map(|k| k.2)
+}
+
+impl KnownRadar {
+    /// `SAC 4 SIC 20`.
+    pub fn label(&self) -> String {
+        format!("SAC {} SIC {}", self.sac, self.sic)
+    }
+}
+
 /// One point as last heard.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointView {
@@ -370,6 +410,8 @@ impl UnitView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StationView {
     pub flow: Flow,
+    /// Which radar it is, when known ([`known_radar`]).
+    pub radar: Option<KnownRadar>,
     /// Messages, repeats among them, and those whose body was not read.
     pub messages: u64,
     pub repeats: u64,
@@ -515,6 +557,7 @@ impl Station {
         }
         StationView {
             flow,
+            radar: known_radar(&flow),
             messages: self.messages,
             repeats: self.repeats,
             unread: self.unread,
@@ -694,6 +737,8 @@ mod tests {
         let v = rx.view();
         assert_eq!(v.len(), 1);
         let s = &v[0];
+        // The CB-BN radar's station, by its group and port.
+        assert_eq!(s.radar.map(|r| (r.sac, r.sic)), Some((4, 20)));
         assert_eq!(s.units[0].label(), "PEDESTAL (D2h)");
         assert_eq!(s.units[0].category, Some(3));
         assert_eq!(s.units[1].label(), "UCS_SSR (AEh)");

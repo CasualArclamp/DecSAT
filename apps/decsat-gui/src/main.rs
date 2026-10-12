@@ -1233,7 +1233,7 @@ impl eframe::App for App {
         // Unattended: claim the carriers once the detector has settled — the
         // eight strongest that are not rough lumps, in frequency order.
         // (`--vfo-at` drops one VFO where asked instead.)
-        if (self.automation.claim_carriers || self.automation.vfo_at.is_some())
+        if (self.automation.claim_carriers || !self.automation.vfo_at.is_empty())
             && !self.automation.claimed
             && self.front.row_seq > 40
         {
@@ -1243,10 +1243,18 @@ impl eframe::App for App {
                 .carriers
                 .iter()
                 .copied()
-                .filter(|c| c.is_clean() && self.automation.vfo_at.is_none())
+                .filter(|c| c.is_clean() && self.automation.vfo_at.is_empty())
                 .collect();
-            if let Some((at, bw)) = self.automation.vfo_at {
-                let s = decsat_engine::VfoSettings::new(self.next_name(), at, bw, self.new_decoder);
+            for (k, (at, bw)) in self.automation.vfo_at.clone().into_iter().enumerate() {
+                // `--decoder a,b`: this VFO's, the last for any more.
+                let decoder = self
+                    .automation
+                    .decoders
+                    .get(k)
+                    .or(self.automation.decoders.last())
+                    .copied()
+                    .unwrap_or(self.new_decoder);
+                let s = decsat_engine::VfoSettings::new(self.next_name(), at, bw, decoder);
                 self.apply(Action::Create(s));
             }
             picks.sort_by(|a, b| {
@@ -1421,11 +1429,29 @@ impl eframe::App for App {
                         })
                         .collect();
                     let rf_hz = self.vfos.iter().find(|v| v.id == id).and_then(rf_of);
+                    let radar = fec.and_then(|f| f.radar.as_ref());
+                    // The stations: this VFO's own; and for a radar feed,
+                    // any VFO's station known to be that radar (its
+                    // SAC/SIC), shown beside its PPI.
+                    let own_source = radar.and_then(|r| r.radar.source);
+                    let stations = self
+                        .vfos
+                        .iter()
+                        .filter_map(|v| {
+                            let g = self.statuses.get(&v.id)?.fec.as_ref()?.gse.as_ref()?;
+                            Some((v.id, g))
+                        })
+                        .flat_map(|(v, g)| g.radar_stations.iter().map(move |s| (v, s)))
+                        .filter(|(v, s)| {
+                            *v == id
+                                || own_source
+                                    .is_some_and(|src| radar_scope::station_radar(s) == Some(src))
+                        })
+                        .map(|(_, s)| s)
+                        .collect();
                     let inp = radar_scope::ScopeInput {
-                        radar: fec.and_then(|f| f.radar.as_ref()),
-                        stations: fec
-                            .and_then(|f| f.gse.as_ref())
-                            .map_or(&[][..], |g| g.radar_stations.as_slice()),
+                        radar,
+                        stations,
                         feeds,
                         rf_hz,
                     };

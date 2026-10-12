@@ -130,6 +130,12 @@ pub(crate) fn print_station(s: &StationView, all: bool) {
         s.unread,
         s.now - s.first
     );
+    if let Some(r) = s.radar {
+        println!(
+            "  its radar: {} (known from outside the traffic, which does not say)",
+            r.label()
+        );
+    }
     for u in &s.units {
         let kinds: Vec<String> = u
             .messages
