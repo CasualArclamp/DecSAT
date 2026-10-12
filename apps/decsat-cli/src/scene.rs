@@ -139,7 +139,7 @@ pub fn write(out: &Path, seconds: f64) -> Result<()> {
             t += decsat_modem::tpc2964::FRAME as f64 / (2.0 * BAUD);
         }
         let mut syms = Vec::new();
-        modulate(&bits, true, &mut syms);
+        modulate(&bits, decsat_core::Modulation::Qpsk, &mut syms);
         shaped(&syms, 64, 0.35)
     };
 

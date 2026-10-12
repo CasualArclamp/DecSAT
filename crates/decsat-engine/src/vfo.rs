@@ -1385,8 +1385,8 @@ impl Worker {
                         let usable = !matches!(id.verdict, Verdict::NoSignal);
                         if let Some(rs) = rs.filter(|&r| usable && out_rate / r >= 2.0) {
                             let seed = id.carrier_offset_hz.unwrap_or(0.0) / rs;
-                            // DVB-S is always QPSK; TPC 2964 is BPSK or QPSK
-                            // (as set, or as Identify saw it).
+                            // DVB-S is always QPSK; TPC 2964 is BPSK, QPSK
+                            // or 8PSK (as set, or as Identify saw it).
                             let modulation = match *kind {
                                 DecoderKind::Tpc2964 => match self
                                     .settings
@@ -1397,6 +1397,9 @@ impl Worker {
                                         decsat_core::Modulation::Bpsk
                                         | decsat_core::Modulation::Pi2Bpsk,
                                     ) => decsat_core::Modulation::Bpsk,
+                                    Some(decsat_core::Modulation::Psk8) => {
+                                        decsat_core::Modulation::Psk8
+                                    }
                                     _ => decsat_core::Modulation::Qpsk,
                                 },
                                 _ => decsat_core::Modulation::Qpsk,
@@ -1926,7 +1929,7 @@ fn offer_symbols(
 ) {
     let s = syms.iter().map(|s| s.1).collect();
     match kind {
-        DecoderKind::Tpc2964 => w.offer_tpc(s, modulation != decsat_core::Modulation::Bpsk),
+        DecoderKind::Tpc2964 => w.offer_tpc(s, modulation),
         DecoderKind::FastLink => w.offer_fastlink(s),
         DecoderKind::Viterbi => w.offer_viterbi(s),
         _ => w.offer_dvbs(s),
@@ -3254,7 +3257,7 @@ mod tests {
         }
         // Tune in mid-frame.
         let mut syms = Vec::new();
-        modulate(&bits[1000..], true, &mut syms);
+        modulate(&bits[1000..], decsat_core::Modulation::Qpsk, &mut syms);
         let mut sh = Shaper::new(4, 0.35, 16);
         let mut x = Vec::new();
         sh.process(&syms, &mut x);
@@ -3342,7 +3345,7 @@ mod tests {
             tx.frame(d, &mut bits);
         }
         let mut syms = Vec::new();
-        modulate(&bits[500..], true, &mut syms);
+        modulate(&bits[500..], decsat_core::Modulation::Qpsk, &mut syms);
         let mut sh = Shaper::new(4, 0.35, 16);
         let mut x = Vec::new();
         sh.process(&syms, &mut x);
@@ -3425,7 +3428,7 @@ mod tests {
             tx.frame(d, &mut bits);
         }
         let mut syms = Vec::new();
-        modulate(&bits[300..], true, &mut syms);
+        modulate(&bits[300..], decsat_core::Modulation::Qpsk, &mut syms);
         // 4 samples a symbol: the band is 4 × 43 616 S/s wide.
         let rs = 64_000.0 * 46.0 / 45.0 / 1.5;
         let mut sh = Shaper::new(4, 0.35, 16);

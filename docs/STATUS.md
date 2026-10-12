@@ -3163,3 +3163,50 @@ octet 21 a value falling with range (plot strength?). `radar::bsc_seen_by`,
 reply) (0Ch)", every flag value seen on hover), Strength?. All marked as
 read off the recording, not known. Checked unattended on the recording:
 track 103, primary only, beam 148.0° against its bearing 148.1°.
+
+## TPC 2964 on 8PSK; an EDMAC carrier with bridged Ethernet (2026-10-12)
+
+Rory's VFO_103 capture (12347.55 MHz, not in his plan; 800 kS/s cf32,
+15.8 s) — "find out what this 8PSK is": 8PSK, 238 962 S/s, α 0.25, Es/N0
+10.6 dB, one of the survey's open "Comtech 8PSK" carriers.
+
+- **The code is tpc_2964, laid out as on QPSK.** Frames of 988 symbols =
+  2964 bits; the UW F50B8h reads plainly under the RCV-20x manual's Figure
+  3.1 8PSK labels (reflected Gray round the circle, 000, 001, 011, 010,
+  110, 111, 101, 100, most significant bit first), starting on the
+  *second* bit of a symbol; then 46 rows of (64,57), x⁶ + x + 1, parity
+  last, code bits unscrambled (`Structure::TEST`). At the raw BER of ~4 %
+  a 64-bit parity test is only +0.002 above chance — lost in the noise —
+  but whole-row Hamming syndromes show it at once: 7.2 % of rows and 15 %
+  of columns clean, against 1/128 at random. Whether the 711 kS/s pair
+  (whose UW flipped 180° every frame) is the same layout is still open.
+- **Receiver**: `tpc2964` takes a `Modulation` (BPSK, QPSK, 8PSK; anything
+  else stays QPSK): 8PSK max-log soft bits on its own Figure 3.1 labels
+  (DVB-S2's 8PSK labels are these bit-reversed), 16 orientations, the UW
+  looked for at every bit as before. Identify looks for the UW on 8PSK
+  too, a TPC VFO hands 8PSK on, the FEC thread's data rate counts 3 bits a
+  symbol. On the capture: Identify names it, `auto` picks TPC, 3557 of
+  3800 frames decode (channel BER 4 %; the failures sit at the 30 carrier
+  slips). Tests: the structure under four orientations at 12 dB; every
+  frame clean at 9.5 dB Es/N0.
+- **Payload, found by hand (no decoder yet)**: V.35 (3, 20) descrambled,
+  then Comtech **EDMAC** framing — 1008-bit frames: a 12-bit header
+  `000101110011`, five 192-bit data blocks with 9-bit overhead groups
+  between them (the first constant `111111100`): 48 overhead bits per 960
+  data = 21/20, so 537.7 kbit/s carries **512 kbit/s**. The same layout as
+  the RCV-20x manual's EDMAC-2 data-mask example (`13-204,214-405,415-606,
+  616-807,817-2928`, a 2928-bit frame ≈ 1.6 % overhead). The overhead
+  groups (27 bits a frame, the M&C channel) ran one 216-bit cycle (8
+  frames) throughout: no M&C traffic in the 15 s.
+- **The 512 kbit/s carry bridged Ethernet**, MSB first, the line idling at
+  1 (true polarity = the descrambled data inverted), no HDLC flags: a
+  6-byte header (`08 A0/A2 xx xx 8n 31/32`, the 8n counting per flow),
+  the Ethernet header (one MAC pair throughout — one direction of a
+  routed link — EtherType 0800), the IP packet, and a 4-byte trailer that
+  is not an Ethernet FCS. 88 checksum-good IPv4 headers in 15 s: SIP and
+  RTP-like UDP, SNMP polls and syslog to managed devices, BGP, SMB/TCP —
+  an enterprise WAN. Plus an 18-bit word every 2064 data bits. How frames
+  are delimited (length?) is not known, so no PCAP yet.
+
+Next for this carrier: EDMAC as a payload format, the bridging
+encapsulation into the IP stage, and a recording of the 711 kS/s pair.

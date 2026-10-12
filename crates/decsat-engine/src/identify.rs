@@ -1114,10 +1114,13 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     id.carrier_locked = lock.coherence > decsat_dsp::LOCK_COHERENCE;
 
     // 8. Not DVB-S2: the unique word of an Intelsat TPC 2964 carrier, every
-    //    2964 bits, is quick to look for on BPSK and QPSK.
+    //    2964 bits, is quick to look for on BPSK, QPSK and 8PSK.
     let tpc = !is_s2
-        && matches!(cst, ConstellationGuess::Bpsk | ConstellationGuess::Qpsk)
-        && decsat_modem::tpc2964::detect(&lock.symbols, cst == ConstellationGuess::Qpsk);
+        && matches!(
+            cst,
+            ConstellationGuess::Bpsk | ConstellationGuess::Qpsk | ConstellationGuess::Psk8
+        )
+        && decsat_modem::tpc2964::detect(&lock.symbols, cst.modulation());
     // Paradise Q-Flex FastLink: its sync word every 11 538 symbols.
     let fastlink = !is_s2
         && !tpc

@@ -2,7 +2,12 @@
 //! modems, as the CTCOM RCV-20x manual describes it (Table 3.2): frames of
 //! 2964 bits — a 20-bit unique word F50B8h and a 2944-bit (64,57) × (46,39)
 //! product codeword carrying 2223 data bits, no CRC — and a (2, 3, 9, 12)
-//! descrambler with preset 475h. BPSK and QPSK are handled here.
+//! descrambler with preset 475h. BPSK, QPSK and 8PSK are handled here.
+//!
+//! On 8PSK the frame's bits simply run on, three to a symbol in the
+//! manual's Figure 3.1 labelling, so a frame of 988 symbols need not start
+//! on a symbol's first bit (a live Comtech 238.96 kS/s carrier's UW starts
+//! on the second): the UW is looked for at every bit.
 //!
 //! IESS-315 sets the carrier's performance and leaves the code to
 //! "compatible turbo modems", so what the manual does not say — how the
@@ -16,7 +21,7 @@
 //! What the data carry, and any scrambling of the data, is
 //! [`payload`](crate::payload)'s business.
 
-use decsat_core::Iq;
+use decsat_core::{Iq, Modulation};
 
 use crate::payload::{SelfSyncScrambler, hdlc_frame};
 use crate::tpc::{ExtHamming, ProductCode};
@@ -405,10 +410,10 @@ impl TpcHdlcTx {
     }
 }
 
-/// Whether carrier-locked BPSK or QPSK `symbols` carry the tpc_2964 unique
-/// word every 2964 bits (under any orientation): for Identify.
-pub fn detect(symbols: &[Iq], qpsk: bool) -> bool {
-    let mut rx = TpcRx::new(qpsk);
+/// Whether carrier-locked `symbols` carry the tpc_2964 unique word every
+/// 2964 bits (under any orientation): for Identify.
+pub fn detect(symbols: &[Iq], modulation: Modulation) -> bool {
+    let mut rx = TpcRx::new(modulation);
     // Look all through the listen, a few frames at a time: the loop may
     // slip somewhere in it.
     let per = rx.per();
@@ -418,16 +423,78 @@ pub fn detect(symbols: &[Iq], qpsk: bool) -> bool {
     })
 }
 
-/// Map bits to BPSK (0 → +1) or Gray QPSK (I then Q, 0 → +), unit power.
-pub fn modulate(bits: &[u8], qpsk: bool, out: &mut Vec<Iq>) {
-    let pm = |b: u8| if b == 0 { 1.0f32 } else { -1.0 };
-    if qpsk {
-        let k = std::f32::consts::FRAC_1_SQRT_2;
-        for p in bits.as_chunks::<2>().0 {
-            out.push(Iq::new(pm(p[0]) * k, pm(p[1]) * k));
+/// How the frame's bits ride the symbols, as the RCV-20x manual's Figure
+/// 3.1 labels them: BPSK 0 → +1; QPSK Gray, I then Q, 0 → +; 8PSK three
+/// bits a symbol, most significant first, Gray round the circle — label
+/// k ⊕ (k >> 1) on point k counter-clockwise (000, 001, 011, 010, 110, …).
+/// The points sit at k × 45° here, where the carrier loop leaves them; the
+/// figure's 22.5° start is one of the orientations the UW resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mapper {
+    Bpsk,
+    Qpsk,
+    Psk8,
+}
+
+impl Mapper {
+    /// Anything but BPSK and 8PSK is taken as QPSK (16QAM, which the
+    /// manual lists too, is not handled).
+    fn of(m: Modulation) -> Self {
+        match m {
+            Modulation::Bpsk | Modulation::Pi2Bpsk => Mapper::Bpsk,
+            Modulation::Psk8 => Mapper::Psk8,
+            _ => Mapper::Qpsk,
         }
-    } else {
-        out.extend(bits.iter().map(|&b| Iq::new(pm(b), 0.0)));
+    }
+
+    fn bits(self) -> usize {
+        match self {
+            Mapper::Bpsk => 1,
+            Mapper::Qpsk => 2,
+            Mapper::Psk8 => 3,
+        }
+    }
+}
+
+/// Bits a symbol carries when tpc_2964 is sent on `m`.
+pub fn bits_per_symbol(m: Modulation) -> usize {
+    Mapper::of(m).bits()
+}
+
+/// 8PSK point k at k × 45°: (cos, sin).
+const PSK8: [(f32, f32); 8] = {
+    const R: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    [
+        (1.0, 0.0),
+        (R, R),
+        (0.0, 1.0),
+        (-R, R),
+        (-1.0, 0.0),
+        (-R, -R),
+        (0.0, -1.0),
+        (R, -R),
+    ]
+};
+
+/// Map bits to symbols on `m` (see [`Mapper`]), unit power.
+pub fn modulate(bits: &[u8], m: Modulation, out: &mut Vec<Iq>) {
+    let pm = |b: u8| if b == 0 { 1.0f32 } else { -1.0 };
+    match Mapper::of(m) {
+        Mapper::Bpsk => out.extend(bits.iter().map(|&b| Iq::new(pm(b), 0.0))),
+        Mapper::Qpsk => {
+            let k = std::f32::consts::FRAC_1_SQRT_2;
+            for p in bits.as_chunks::<2>().0 {
+                out.push(Iq::new(pm(p[0]) * k, pm(p[1]) * k));
+            }
+        }
+        Mapper::Psk8 => {
+            for t in bits.as_chunks::<3>().0 {
+                let label = usize::from(t[0] << 2 | t[1] << 1 | t[2]);
+                // The point whose Gray label this is.
+                let k = (0..8).find(|&k| k ^ (k >> 1) == label).unwrap();
+                out.push(Iq::new(PSK8[k].0, PSK8[k].1));
+            }
+        }
     }
 }
 
@@ -484,24 +551,25 @@ const UW_LOST: u32 = 4;
 /// Decoder iterations (Chase–Pyndiah).
 const ITERATIONS: usize = 8;
 
-/// (rotation in quarter turns, conjugated, inverted)
+/// (rotation in steps of the constellation's symmetry — quarter turns for
+/// QPSK, eighths for 8PSK —, conjugated, inverted)
 type Orientation = (u8, bool, bool);
 
 /// Symbols either way a slip is looked for.
 const SLIP: usize = 2;
 
-/// tpc_2964 receiver: carrier-locked BPSK or QPSK symbols in, data bits
-/// out, a frame (`DATA` bits) at a time.
+/// tpc_2964 receiver: carrier-locked BPSK, QPSK or 8PSK symbols in, data
+/// bits out, a frame (`DATA` bits) at a time.
 ///
 /// The carrier loop leaves a phase ambiguity (2 ways for BPSK, 8 for QPSK
-/// counting a mirror image), which the UW resolves. When the loop slips a
-/// quarter turn, or symbol timing gains or loses a symbol, the UW goes
-/// missing where it was due; the other orientations and offsets of up to
-/// [`SLIP`] symbols are then tried there, and one under which this UW and
-/// the next both appear is taken at once, rather than losing frames to a
-/// full search.
+/// and 16 for 8PSK, counting mirror images), which the UW resolves. When
+/// the loop slips a step, or symbol timing gains or loses a symbol, the UW
+/// goes missing where it was due; the other orientations and offsets of up
+/// to [`SLIP`] symbols are then tried there, and one under which this UW
+/// and the next both appear is taken at once, rather than losing frames to
+/// a full search.
 pub struct TpcRx {
-    qpsk: bool,
+    mapper: Mapper,
     /// Symbols not yet used up.
     held: Vec<Iq>,
     /// Locked: the orientation, and the bit in `held` where the next frame
@@ -516,14 +584,33 @@ pub struct TpcRx {
     pub stats: TpcStats,
 }
 
-fn soft_bits(qpsk: bool, s: Iq, (rot, conj, inv): Orientation, out: &mut Vec<f32>) {
+/// One symbol's soft bits (positive for 0) under orientation `o`.
+fn soft_bits(m: Mapper, s: Iq, (rot, conj, inv): Orientation, out: &mut Vec<f32>) {
     let mut y = if conj { s.conj() } else { s };
+    if m == Mapper::Psk8 {
+        // Max-log: |y − x|² = |y|² + 1 − 2 Re(y x*), so each bit's value
+        // is the best correlation with a point labelled 0 less the best
+        // with one labelled 1. Turning y back `rot` eighths is correlating
+        // it with the point `rot` further on.
+        let mut best = [[f32::NEG_INFINITY; 2]; 3];
+        for k in 0..8 {
+            let (c, s) = PSK8[(k + rot as usize) % 8];
+            let corr = y.re * c + y.im * s;
+            let label = k ^ (k >> 1);
+            for (b, bit) in best.iter_mut().enumerate() {
+                let v = &mut bit[(label >> (2 - b)) & 1];
+                *v = v.max(corr);
+            }
+        }
+        out.extend(best.iter().map(|b| b[0] - b[1]));
+        return;
+    }
     for _ in 0..rot {
         y *= Iq::new(0.0, -1.0);
     }
     let sign = if inv { -1.0 } else { 1.0 };
     out.push(sign * y.re);
-    if qpsk {
+    if m == Mapper::Qpsk {
         out.push(sign * y.im);
     }
 }
@@ -538,9 +625,11 @@ fn uw_errors(bits: &[f32], at: usize) -> u32 {
 }
 
 impl TpcRx {
-    pub fn new(qpsk: bool) -> Self {
+    /// A receiver for tpc_2964 sent on `modulation` (BPSK, QPSK or 8PSK;
+    /// anything else is taken as QPSK).
+    pub fn new(modulation: Modulation) -> Self {
         TpcRx {
-            qpsk,
+            mapper: Mapper::of(modulation),
             held: Vec::new(),
             lock: None,
             layout: None,
@@ -553,25 +642,33 @@ impl TpcRx {
 
     /// Bits per symbol.
     fn per(&self) -> usize {
-        if self.qpsk { 2 } else { 1 }
+        self.mapper.bits()
+    }
+
+    /// Steps of the constellation's rotational symmetry in a turn.
+    fn steps(&self) -> u8 {
+        match self.mapper {
+            Mapper::Psk8 => 8,
+            _ => 4,
+        }
     }
 
     fn orientations(&self) -> Vec<Orientation> {
-        if self.qpsk {
-            (0..4)
+        if self.mapper == Mapper::Bpsk {
+            vec![(0, false, false), (0, false, true)]
+        } else {
+            (0..self.steps())
                 .flat_map(|r| [(r, false, false), (r, true, false)])
                 .collect()
-        } else {
-            vec![(0, false, false), (0, false, true)]
         }
     }
 
     fn set_orientation(&mut self, o: Orientation) {
-        self.stats.orientation = Some(match (self.qpsk, o) {
-            (false, (_, _, inv)) => if inv { "inverted" } else { "upright" }.into(),
-            (true, (r, c, _)) => format!(
+        self.stats.orientation = Some(match (self.mapper, o) {
+            (Mapper::Bpsk, (_, _, inv)) => if inv { "inverted" } else { "upright" }.into(),
+            (_, (r, c, _)) => format!(
                 "turned {}°{}",
-                90 * r as u32,
+                360 / u32::from(self.steps()) * u32::from(r),
                 if c { ", mirrored" } else { "" }
             ),
         });
@@ -583,7 +680,7 @@ impl TpcRx {
         let (s0, s1) = (at / per, (at + n).div_ceil(per));
         let mut v = Vec::with_capacity((s1 - s0) * per);
         for &s in &self.held[s0..s1] {
-            soft_bits(self.qpsk, s, o, &mut v);
+            soft_bits(self.mapper, s, o, &mut v);
         }
         let skip = at - s0 * per;
         v.drain(..skip);
@@ -613,7 +710,7 @@ impl TpcRx {
         for o in self.orientations() {
             bits.clear();
             for &s in &self.held {
-                soft_bits(self.qpsk, s, o, &mut bits);
+                soft_bits(self.mapper, s, o, &mut bits);
             }
             let found = (0..FRAME).find(|&off| {
                 (0..UW_FRAMES).all(|m| uw_errors(&bits, off + m * FRAME) <= UW_ERRORS)
@@ -842,11 +939,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// Frame bits as BPSK/QPSK at `esn0_db`, conjugated if `conj` and then
-    /// turned by `turn`, starting mid-frame.
-    pub(crate) fn on_air(bits: &[u8], qpsk: bool, esn0_db: f32, turn: Iq, conj: bool) -> Vec<Iq> {
+    /// Frame bits on `m` at `esn0_db`, conjugated if `conj` and then
+    /// turned by `turn`, starting mid-frame (on 8PSK, 778 bits in puts
+    /// each frame's UW on a symbol's third bit).
+    pub(crate) fn on_air(
+        bits: &[u8],
+        m: Modulation,
+        esn0_db: f32,
+        turn: Iq,
+        conj: bool,
+    ) -> Vec<Iq> {
         let mut sym = Vec::new();
-        modulate(&bits[778..], qpsk, &mut sym);
+        modulate(&bits[778..], m, &mut sym);
         let sigma = (10f32.powf(-esn0_db / 10.0) / 2.0).sqrt();
         let mut n = gauss(0xABC);
         sym.into_iter()
@@ -857,7 +961,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn check(st: Structure, qpsk: bool, esn0: f32, turn: Iq, conj: bool) -> TpcStats {
+    fn check(st: Structure, m: Modulation, esn0: f32, turn: Iq, conj: bool) -> TpcStats {
         let tx = TpcTx::new(st);
         let mut next = rng(5);
         let mut bits = Vec::new();
@@ -867,8 +971,8 @@ pub(crate) mod tests {
             tx.frame(&d, &mut bits);
             sent.push(d);
         }
-        let sym = on_air(&bits, qpsk, esn0, turn, conj);
-        let mut rx = TpcRx::new(qpsk);
+        let sym = on_air(&bits, m, esn0, turn, conj);
+        let mut rx = TpcRx::new(m);
         let mut out = Vec::new();
         for c in sym.chunks(1000) {
             rx.push(c, &mut out);
@@ -916,7 +1020,7 @@ pub(crate) mod tests {
             (Iq::new(-1.0, 0.0), false),
             (Iq::new(0.0, -1.0), true),
         ] {
-            check(st, true, 8.0, turn, conj);
+            check(st, Modulation::Qpsk, 8.0, turn, conj);
         }
     }
 
@@ -942,7 +1046,7 @@ pub(crate) mod tests {
                 },
             },
         ] {
-            check(st, false, 7.0, Iq::new(-1.0, 0.0), false);
+            check(st, Modulation::Bpsk, 7.0, Iq::new(-1.0, 0.0), false);
         }
     }
 
@@ -957,7 +1061,7 @@ pub(crate) mod tests {
             tx.frame(&d, &mut bits);
             sent.push(d);
         }
-        let mut sym = on_air(&bits, true, 9.0, Iq::new(1.0, 0.0), false);
+        let mut sym = on_air(&bits, Modulation::Qpsk, 9.0, Iq::new(1.0, 0.0), false);
         // A quarter turn from a third of the way in, and a symbol lost at
         // two thirds.
         let n = sym.len();
@@ -965,7 +1069,7 @@ pub(crate) mod tests {
             *s *= Iq::new(0.0, 1.0);
         }
         sym.remove(2 * n / 3);
-        let mut rx = TpcRx::new(true);
+        let mut rx = TpcRx::new(Modulation::Qpsk);
         let mut out = Vec::new();
         for c in sym.chunks(700) {
             rx.push(c, &mut out);
@@ -1001,8 +1105,40 @@ pub(crate) mod tests {
         };
         // QPSK at 5 dB Es/N0 (Eb/N0 3.2 dB at rate 3/4): raw BER ~2.3 %,
         // and every frame comes out clean.
-        let s = check(st, true, 5.0, Iq::new(1.0, 0.0), false);
+        let s = check(st, Modulation::Qpsk, 5.0, Iq::new(1.0, 0.0), false);
         assert!(s.channel_ber() > 0.01, "{s:?}");
+        assert_eq!(s.failed, 0, "{s:?}");
+    }
+
+    /// 8PSK, as a live Comtech carrier sends it (the test structure, the
+    /// UW off the symbol grid), under eighth turns and mirror images.
+    #[test]
+    fn finds_the_structure_on_8psk_under_any_orientation() {
+        for (k, conj) in [(0, false), (3, true), (5, false), (6, true)] {
+            let a = std::f32::consts::FRAC_PI_4 * k as f32;
+            let s = check(
+                Structure::TEST,
+                Modulation::Psk8,
+                12.0,
+                Iq::new(a.cos(), a.sin()),
+                conj,
+            );
+            assert_eq!(s.failed, 0, "{s:?}");
+        }
+    }
+
+    /// 8PSK at 9.5 dB Es/N0 (Eb/N0 6 dB at rate 3/4), a little under the
+    /// live carrier's 10.6 dB: raw BER ~3 %, and every frame comes out clean.
+    #[test]
+    fn corrects_a_noisy_8psk_channel() {
+        let s = check(
+            Structure::TEST,
+            Modulation::Psk8,
+            9.5,
+            Iq::new(1.0, 0.0),
+            false,
+        );
+        assert!(s.channel_ber() > 0.02, "{s:?}");
         assert_eq!(s.failed, 0, "{s:?}");
     }
 }

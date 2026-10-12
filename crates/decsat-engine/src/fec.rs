@@ -51,10 +51,10 @@ pub(crate) enum FecInput {
     Frame(PlFrame),
     /// Carrier-locked QPSK symbols of a DVB-S carrier.
     Dvbs(Vec<Iq>),
-    /// Carrier-locked symbols of a TPC 2964 carrier: QPSK, else BPSK.
+    /// Carrier-locked symbols of a TPC 2964 carrier: BPSK, QPSK or 8PSK.
     Tpc {
         symbols: Vec<Iq>,
-        qpsk: bool,
+        modulation: decsat_core::Modulation,
     },
     /// Carrier-locked QPSK symbols of a Q-Flex FastLink carrier.
     FastLink(Vec<Iq>),
@@ -1389,8 +1389,11 @@ impl FecWorker {
     }
 
     /// Queue a block of TPC 2964 symbols.
-    pub fn offer_tpc(&self, symbols: Vec<Iq>, qpsk: bool) {
-        self.send(FecInput::Tpc { symbols, qpsk });
+    pub fn offer_tpc(&self, symbols: Vec<Iq>, modulation: decsat_core::Modulation) {
+        self.send(FecInput::Tpc {
+            symbols,
+            modulation,
+        });
     }
 
     /// Queue a block of Q-Flex FastLink symbols.
@@ -2216,12 +2219,15 @@ fn run(
                 tpc_frames.clear();
                 // Data bits a block, the data rate, and the raw file's tag.
                 let (secs, block, data_bps, tag) = match modem {
-                    FecInput::Tpc { symbols, qpsk } => {
-                        use decsat_modem::tpc2964::{DATA, FRAME, TpcRx};
-                        let rx = tpc.get_or_insert_with(|| TpcRx::new(qpsk));
+                    FecInput::Tpc {
+                        symbols,
+                        modulation,
+                    } => {
+                        use decsat_modem::tpc2964::{DATA, FRAME, TpcRx, bits_per_symbol};
+                        let rx = tpc.get_or_insert_with(|| TpcRx::new(modulation));
                         rx.push(&symbols, &mut tpc_frames);
-                        let bps =
-                            symbol_rate * if qpsk { 2.0 } else { 1.0 } * DATA as f64 / FRAME as f64;
+                        let bps = symbol_rate * bits_per_symbol(modulation) as f64 * DATA as f64
+                            / FRAME as f64;
                         (symbols.len() as f64 / symbol_rate, DATA, bps, "tpc2964")
                     }
                     FecInput::FastLink(symbols) => {
@@ -2729,7 +2735,7 @@ mod tests {
                 w.quit();
             }
             for _ in 0..8 {
-                w.offer_tpc(block.clone(), true);
+                w.offer_tpc(block.clone(), decsat_core::Modulation::Qpsk);
             }
             let stats = Arc::clone(&w.stats);
             drop(w);

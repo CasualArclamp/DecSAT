@@ -38,7 +38,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | DVB-S2/S2X PL demodulation: frame lock, MODCOD per frame (ACM) | ✅ |
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
-| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
+| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK/8PSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
 | **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav`; the 2–4 × faster links' multiplex, its HDLC timeslot (bridged Ethernet → IP) and its G.728 calls | ✅ decodes live Q-Flex links down to the calls' speech, the faster ones' IP too |
 | **Viterbi K=7 → data** (IESS-308/309 SCPC and the like): rate 1/2–7/8, puncturing and orientation found blind and followed when the carrier turns; then the payload search — with or without differential decoding — for HDLC, TS, E1, D&I++, Paradise or IBS/SMS (IESS-309, 16/15) framing, or just the scrambler from the idle fill | ✅ decodes a live 10.24 kBd IESS-308 carrier to its IBS frames (rate 1/2, differential, V.35) |
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
@@ -196,9 +196,11 @@ goes to the same TS outputs and analyser as DVB-S2's.
 The rate-3/4 turbo product code of Intelsat IESS-315 VSAT carriers, as the
 CTCOM RCV-20x manual describes it: frames of 2964 bits, a 20-bit unique word
 F50B8h and a (64,57) × (46,39) extended-Hamming product codeword holding 2223
-data bits, with a (2, 3, 9, 12) / 475h scrambler. IESS-315 itself sets only
-performance and leaves the code to "compatible turbo modems", so the VFO
-finds the rest from the signal:
+data bits, with a (2, 3, 9, 12) / 475h scrambler — on BPSK, QPSK or 8PSK
+(Gray-labelled as the manual's Figure 3.1; on 8PSK a frame is 988 symbols
+and its UW need not start on a symbol's first bit). IESS-315 itself sets
+only performance and leaves the code to "compatible turbo modems", so the
+VFO finds the rest from the signal:
 
 1. **Unique word** every 2964 bits, under each carrier phase ambiguity; a
    carrier slip or a lost symbol is repaired at the next frame.
@@ -417,8 +419,8 @@ next frame — with the MODCODs in use, pilots, frame lengths, and CCM vs ACM
 taken for ACM or S2X).
 Anything else gets measurements (symbol rate, roll-off, an estimated
 constellation) and a labelled guess: plain QPSK reads *"possibly DVB-S (not
-verified)"* (the DVB-S decoder confirms it), and a BPSK or QPSK carrier with
-the TPC 2964 unique word every 2964 bits is named as such. For the rest it
+verified)"* (the DVB-S decoder confirms it), and a BPSK, QPSK or 8PSK carrier
+with the TPC 2964 unique word every 2964 bits is named as such. For the rest it
 looks for fingerprints of proprietary waveforms:
 
 - **DVB-S2-style headers off their own grid**: SOF and PLS headers that recur
