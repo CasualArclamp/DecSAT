@@ -3230,6 +3230,12 @@ fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
     }
 }
 
+/// Why a flow is called encrypted.
+const ENCRYPTED_TIP: &str = "Every UDP checksum in this flow fails while the IP header's \
+     checksum and the link's FCS hold: the payloads were changed after the sender made \
+     them, by an encryptor on the way. Their contents cannot be read (the Q-Flex sites' \
+     networks: SNMP and the 233.71.15.x:50000 multicast, random data in 16-byte blocks).";
+
 /// IP out of GSE: where it comes from, how much, who is talking, and the
 /// PCAP.
 fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
@@ -3314,6 +3320,16 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
             ui.label(names.join(" · "));
             ui.end_row();
         }
+        if g.encrypted_flows > 0 {
+            ui.label("Encrypted");
+            ui.label(format!(
+                "{} flow{}: UDP checksums fail",
+                g.encrypted_flows,
+                if g.encrypted_flows == 1 { "" } else { "s" }
+            ))
+            .on_hover_text(ENCRYPTED_TIP);
+            ui.end_row();
+        }
         if !g.other_protocols.is_empty() {
             ui.label("Not IP");
             let v: Vec<String> = g
@@ -3351,11 +3367,19 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
             .striped(true)
             .show(ui, |ui| {
                 for f in &g.top {
-                    ui.label(
-                        RichText::new(format!("{} → {}", f.src, f.dst))
-                            .monospace()
-                            .small(),
+                    let r = ui.label(
+                        RichText::new(format!(
+                            "{} → {}{}",
+                            f.src,
+                            f.dst,
+                            if f.encrypted() { " · encrypted" } else { "" }
+                        ))
+                        .monospace()
+                        .small(),
                     );
+                    if f.encrypted() {
+                        r.on_hover_text(ENCRYPTED_TIP);
+                    }
                     ui.label(RichText::new(format!("{}", f.packets)).small());
                     ui.label(RichText::new(format!("{:.1} kB", f.bytes as f64 / 1e3)).small());
                     ui.end_row();

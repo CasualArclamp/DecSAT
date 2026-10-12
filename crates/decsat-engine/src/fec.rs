@@ -1188,6 +1188,8 @@ pub struct GseView {
     /// The busiest flows by bytes.
     pub top: Vec<Flow>,
     pub flows: usize,
+    /// Flows encrypted in transit (their UDP checksums fail).
+    pub encrypted_flows: usize,
     /// IP bit rate over the last couple of seconds of signal.
     pub ip_bps: f64,
     /// The PCAP being written, or the last one, and its packet count.
@@ -1635,6 +1637,9 @@ impl IpStage {
     /// the payloads takes whole datagrams, fragments put back together.
     fn ip(&mut self, data: &[u8], info: &IpInfo) {
         self.stats.add(info);
+        if let Some(ok) = decsat_ip::packet::udp_checksum_ok(data, info) {
+            self.stats.udp_checksum(info, ok);
+        }
         self.win.0 += data.len() as f64;
         if let Some(w) = &mut self.pcap
             && let Err(e) = w.write(SystemTime::now(), data)
@@ -1734,6 +1739,7 @@ impl IpStage {
             protocols: self.stats.protocols.clone(),
             top: self.top.clone(),
             flows: self.stats.flow_count(),
+            encrypted_flows: self.stats.encrypted_flows(),
             ip_bps: self.ip_bps,
             pcap: self
                 .path

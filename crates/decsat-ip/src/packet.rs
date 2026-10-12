@@ -118,6 +118,45 @@ fn parse_v6(d: &[u8]) -> Option<IpInfo> {
     })
 }
 
+/// Whether an IPv4 UDP datagram's checksum (RFC 768: over a pseudo-header
+/// of the addresses, protocol and length, then the UDP header and data, as
+/// long as the UDP length says) holds. `None` when there is none to check:
+/// a zero checksum (none sent), a fragment (its checksum covers the whole
+/// datagram), a UDP length past the packet's end or shorter than its
+/// header, or not UDP over IPv4.
+///
+/// The IP header's checksum and the link's FCS holding while this fails
+/// mean the data were changed after the sender made the checksum: an inline
+/// encryptor, as on the Q-Flex links' site networks. There every UDP
+/// checksum fails, the payloads are random in whole 16-octet blocks, and
+/// each packet runs 23–35 octets past what its (original) UDP length says:
+/// the encryptor's padding and trailer, the UDP header left as it was.
+pub fn udp_checksum_ok(ip: &[u8], info: &IpInfo) -> Option<bool> {
+    if info.protocol != PROTO_UDP || !info.src.is_ipv4() {
+        return None;
+    }
+    let ihl = (ip.first()? & 0x0F) as usize * 4;
+    // More fragments, or an offset: not the whole datagram.
+    if u16::from_be_bytes([*ip.get(6)?, *ip.get(7)?]) & 0x3FFF != 0 {
+        return None;
+    }
+    let udp = ip.get(ihl..info.len)?;
+    if udp.len() < 8 || udp[6..8] == [0, 0] {
+        return None;
+    }
+    let ulen = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if !(8..=udp.len()).contains(&ulen) {
+        return None;
+    }
+    let udp = &udp[..ulen];
+    let mut sum = Vec::with_capacity(12 + ulen);
+    sum.extend_from_slice(&ip[12..20]);
+    sum.extend_from_slice(&[0, PROTO_UDP]);
+    sum.extend_from_slice(&(ulen as u16).to_be_bytes());
+    sum.extend_from_slice(udp);
+    Some(checksum(&sum) == 0)
+}
+
 /// Build a valid IPv4/UDP packet (for tests and test signals).
 pub fn udp_v4(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
     let len = 20 + 8 + payload.len();
@@ -134,6 +173,28 @@ pub fn udp_v4(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]
     p[22..24].copy_from_slice(&dport.to_be_bytes());
     p[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
     p[28..].copy_from_slice(payload);
+    p
+}
+
+/// [`udp_v4`] with its UDP checksum filled in (for tests).
+pub fn udp_v4_checked(
+    src: [u8; 4],
+    dst: [u8; 4],
+    sport: u16,
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut p = udp_v4(src, dst, sport, dport, payload);
+    let mut sum = Vec::with_capacity(12 + p.len() - 20);
+    sum.extend_from_slice(&p[12..20]);
+    sum.extend_from_slice(&[0, PROTO_UDP]);
+    sum.extend_from_slice(&((p.len() - 20) as u16).to_be_bytes());
+    sum.extend_from_slice(&p[20..]);
+    let c = match checksum(&sum) {
+        0 => 0xFFFF, // a computed zero is sent as all ones (RFC 768)
+        c => c,
+    };
+    p[26..28].copy_from_slice(&c.to_be_bytes());
     p
 }
 
@@ -175,6 +236,25 @@ mod tests {
         bad[15] ^= 1;
         assert!(parse(&bad).is_none(), "checksum must catch it");
         assert!(parse(&p[..p.len() - 1]).is_none(), "truncated");
+    }
+
+    /// As the Q-Flex sites' encryptor sends them: the UDP header as made,
+    /// the payload replaced and grown past the UDP length (padding and a
+    /// trailer), the IP header made good again.
+    #[test]
+    fn a_datagram_encrypted_in_transit_fails_its_udp_checksum() {
+        let plain = udp_v4_checked([10, 240, 135, 1], [233, 71, 15, 1], 1028, 50000, b"CAT021");
+        let info = parse(&plain).unwrap();
+        assert_eq!(udp_checksum_ok(&plain, &info), Some(true));
+        let mut p = plain[..28].to_vec();
+        p.extend((0..32u8).map(|i| i.wrapping_mul(97) ^ 0xA5));
+        let len = p.len() as u16;
+        p[2..4].copy_from_slice(&len.to_be_bytes());
+        p[10..12].copy_from_slice(&[0, 0]);
+        let c = checksum(&p[..20]);
+        p[10..12].copy_from_slice(&c.to_be_bytes());
+        let info = parse(&p).expect("the IP header checks");
+        assert_eq!(udp_checksum_ok(&p, &info), Some(false));
     }
 
     #[test]

@@ -2919,3 +2919,41 @@ Primary-only targets, aircraft without ADS-B, and ADS-B out of reach all
 read red. Checked on the mixed capture with the clock limit lifted in a
 scratch build (the feeds nine minutes apart): the primary-only tracks red,
 those matched by address in their colours.
+
+## Q-Flex: ADS-B and radar looked for; the sites' IP is encrypted (2026-10-12)
+
+Rory: "the Q-Flex should have ADS-B and some radar". Looked for on what is
+recorded: the 15-minute capture of the three faster links (the plan's
+remote "- CAP"/"- MEL" sites: 2 ×, 3 ×, 4 × 128.5 kbit/s) and three
+128.5 kbit/s links (ML-NBK, ESP-ML, the 2026-10-09 VFO 3).
+
+- **The faster links' site IP is encrypted in transit.** Every UDP
+  datagram's checksum fails (2375 on the 2 × link, 2498 on the 4 ×; the
+  plain radar station multicast on the TPC trunk: 15 345 good, 0 bad)
+  while the HDLC FCS and the IP header checksums hold; the payloads have
+  7.999 bits of entropy an octet, come in whole 16-octet blocks, never
+  repeat a first block, and run 23–35 octets past what their UDP length
+  field says — an inline encryptor that keeps the UDP header and pads and
+  tags the payload. That covers the SNMP and the site multicast to
+  233.71.15.x:50000 (2 pkt/s on the 2 × link, 1.4 on the 4 ×; 64–384
+  octets; a 64-octet packet about once a second): the right size and rhythm
+  for a surveillance feed (a status message a second, reports growing with
+  traffic), but not readable here.
+- **No plain ASTERIX elsewhere.** The faster links' other timeslots held
+  idle flags for all 15 minutes. On the 128.5 kbit/s links, channels 6–15
+  (in pairs 6–7, 8–9, 10–11, 12–13 by their statistics) gave no HDLC frame
+  with a good FCS and no BSC SYNs, alone, paired or all together, plain or
+  inverted, whole or with the subframes' status octets dropped: the
+  signalling seen before.
+- Plain ASTERIX on any Q-Flex timeslot would reach the scope already: the
+  HDLC timeslots' frames go to the IP stage, whose UDP payloads are read
+  for ASTERIX (`asterix::datagram`), and non-IP frames of ASTERIX to the
+  radar stage.
+- **Built**: `decsat_ip::packet::udp_checksum_ok` (over the UDP length's
+  span); `IpStats` counts checksums per flow and `Flow::encrypted()` (≥ 8
+  checked, ≥ 95 % failing); the IP card marks such flows "encrypted" and
+  counts them; the CLI says so; the multicast audio sniffer leaves them out
+  (the random payloads had "sniffed" as MPEG audio and AAC, offered to
+  play).
+- Open: a Q-Flex recording while a site sends its ADS-B or radar in clear,
+  if any does.

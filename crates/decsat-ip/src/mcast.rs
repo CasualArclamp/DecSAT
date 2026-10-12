@@ -341,6 +341,12 @@ struct Flow {
     src: Option<IpAddr>,
     packets: u64,
     bytes: u64,
+    /// UDP checksums checked and failed: a flow whose checksums all fail is
+    /// encrypted in transit, and its random payloads would "sniff" as audio
+    /// now and then (the Q-Flex sites' multicast read as MPEG audio and
+    /// AAC).
+    udp_checked: u64,
+    udp_bad: u64,
     rtp_votes: u32,
     rtp: bool,
     ssrc: Option<u32>,
@@ -698,6 +704,10 @@ impl McastScanner {
         let f = self.flows.entry(key).or_default();
         f.src = Some(info.src);
         f.packets += 1;
+        if let Some(ok) = crate::packet::udp_checksum_ok(ip, info) {
+            f.udp_checked += 1;
+            f.udp_bad += u64::from(!ok);
+        }
         f.bytes += payload.len() as u64;
         f.win_bytes += payload.len() as u64;
 
@@ -918,6 +928,8 @@ impl McastScanner {
         let mut v: Vec<AudioStream> = self
             .flows
             .iter()
+            // Not an encrypted flow (as `stats::Flow::encrypted`).
+            .filter(|(_, f)| !(f.udp_checked >= 8 && f.udp_bad * 20 >= f.udp_checked * 19))
             .map(|(&(group, port), f)| {
                 // An encoder may announce one payload type and send another
                 // (a radio multiplex announced MPEG audio as type 14 and sent

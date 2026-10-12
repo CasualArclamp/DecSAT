@@ -550,7 +550,24 @@ pub(crate) fn report(st: &VfoStatus) {
             println!("  via {l}");
         }
         for fl in g.top.iter().take(8) {
-            println!("  {fl:?}");
+            println!(
+                "  {} -> {}: {} packets, {} bytes{}",
+                fl.src,
+                fl.dst,
+                fl.packets,
+                fl.bytes,
+                if fl.encrypted() {
+                    " (encrypted: UDP checksums fail)"
+                } else {
+                    ""
+                }
+            );
+        }
+        if g.encrypted_flows > 0 {
+            println!(
+                "  {} flows encrypted in transit (UDP checksums fail, IP headers and FCS hold)",
+                g.encrypted_flows
+            );
         }
         for (group, port, sdp) in &g.stations {
             println!(
