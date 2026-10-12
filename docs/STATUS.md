@@ -3089,3 +3089,20 @@ Limbunya, decoded apart at their plan frequencies) — 42 in all.
 No ADS-B or radar in clear on any Q-Flex live either. If the Q-Flex sites
 send ADS-B, it is in their encrypted multicast. Scripts (survey.py) and
 the 12 GB of captures stayed in the session's scratchpad.
+
+## The CDM type on the waterfall's carrier tags (2026-10-12)
+
+Rory: "show cdm type on the waterfall carrier tags too". `carrier_caps`
+now keeps the modem beside ADS-B and radar (`model=<decoder key>` in the
+setting): for a VFO on a Comtech CDM model, once its code has locked (and
+for TPC 2964 once the payload's format is known), the model its data say
+(the type found's, or `vfo::cdm_model` of the chain and payload whichever
+model was chosen); for a FastLink VFO, Q-Flex. A light-blue tag leads the
+row — "CDM-570L trunk", "CDM-570L Viterbi", "CDM-570L TPC", "CDM-600L
+voice", "Q-Flex" — under a VFO's label and on known carriers with no VFO
+on them; a newer reading replaces the kept one (TPC → trunk as the
+timeslot packets show). Rows of tags from carriers close together no
+longer cover each other: a row moves a line down (under the labels) or up
+(at the spectrum's foot). Checked unattended on the mixed capture
+(muted): kept `radar,model=cdm570` and `adsb,model=cdm570-trunk`, both
+shown with and without VFOs.

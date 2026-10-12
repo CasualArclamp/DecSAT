@@ -1218,8 +1218,10 @@ impl eframe::App for App {
             if centre > 0.0 {
                 for v in &self.vfos {
                     if let Some(st) = self.statuses.get(&v.id) {
-                        self.carrier_caps
-                            .learn(centre + v.settings.offset_hz, carrier_caps::Caps::of(st));
+                        self.carrier_caps.learn(
+                            centre + v.settings.offset_hz,
+                            carrier_caps::Caps::of(&v.settings, st),
+                        );
                     }
                 }
             }

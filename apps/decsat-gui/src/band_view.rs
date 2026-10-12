@@ -76,15 +76,18 @@ pub struct BandInput<'a> {
     pub caps: &'a crate::carrier_caps::CarrierCaps,
 }
 
-/// Small tags (ADS-B, RADAR) in a row centred on `x`, from `y` down; their
-/// rectangles.
+/// Small tags (the modem, ADS-B, RADAR) in a row centred on `x`, from `y`
+/// down — or a line or two further (`step`: down, or up when negative)
+/// where the row would cover one painted already (`placed`, which it
+/// joins): two carriers close together.
 fn paint_tags(
     painter: &egui::Painter,
     x: f32,
-    y: f32,
+    (y, step): (f32, f32),
     tags: &[(&str, Color32)],
     within: Rect,
-) -> Vec<Rect> {
+    placed: &mut Vec<Rect>,
+) {
     let font = FontId::proportional(9.5);
     let galleys: Vec<_> = tags
         .iter()
@@ -101,7 +104,13 @@ fn paint_tags(
     let mut at = (x - total / 2.0)
         .min(within.right() - total - 2.0)
         .max(within.left() + 2.0);
-    let mut out = Vec::new();
+    let row = |y: f32| Rect::from_min_size(pos2(at, y), vec2(total, 13.0)).expand(1.0);
+    let y = [0.0, 1.0, 2.0]
+        .into_iter()
+        .map(|k| y + k * step)
+        .find(|&y| !placed.iter().any(|p| p.intersects(row(y))))
+        .unwrap_or(y);
+    placed.push(row(y));
     for (g, c) in galleys {
         let r = Rect::from_min_size(pos2(at, y), vec2(g.size().x + 8.0, 13.0));
         painter.rect_filled(r, CornerRadius::same(3), c);
@@ -110,10 +119,8 @@ fn paint_tags(
             g,
             Color32::BLACK,
         );
-        out.push(r);
         at = r.right() + 3.0;
     }
-    out
 }
 
 /// The colour of the frequency plan's marks (a carrier may bring its own).
@@ -638,6 +645,8 @@ impl BandView {
 
         // The ✕ on each VFO's label, for the click handler below.
         let mut close_boxes: Vec<(VfoId, Rect)> = Vec::new();
+        // The tag rows painted under the labels, kept clear of each other.
+        let mut tag_rows: Vec<Rect> = Vec::new();
         for v in inp.vfos {
             let s = &v.settings;
             let x0 = x_of(s.offset_hz - s.bandwidth_hz / 2.0);
@@ -726,17 +735,24 @@ impl BandView {
                 .flatten()
                 .map(|(_, c)| c)
                 .unwrap_or_default();
-            let caps = inp
-                .statuses
-                .get(&v.id)
-                .map_or(known, |st| known.union(crate::carrier_caps::Caps::of(st)));
+            let caps = inp.statuses.get(&v.id).map_or(known, |st| {
+                known.union(crate::carrier_caps::Caps::of(s, st))
+            });
             if caps.any() {
                 // Below the carrier bracket and its rate.
-                paint_tags(&painter, lx, lr.bottom() + 24.0, &caps.tags(), rect);
+                paint_tags(
+                    &painter,
+                    lx,
+                    (lr.bottom() + 24.0, 15.0),
+                    &caps.tags(),
+                    rect,
+                    &mut tag_rows,
+                );
             }
         }
         // Carriers known to carry ADS-B or radar with no VFO on them: their
         // tags over the spectrum's foot, above the plan's names.
+        let mut foot_rows = Vec::new();
         if inp.rf_center > 0.0 {
             for &(rf, caps) in inp.caps.all() {
                 let off = rf - inp.rf_center;
@@ -751,9 +767,10 @@ impl BandView {
                     paint_tags(
                         &painter,
                         x_of(off),
-                        spec.bottom() - 36.0,
+                        (spec.bottom() - 36.0, -15.0),
                         &caps.tags(),
                         rect,
+                        &mut foot_rows,
                     );
                 }
             }
