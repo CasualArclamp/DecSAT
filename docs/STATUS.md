@@ -2524,3 +2524,51 @@ first 45 bits and a 16-bit glitch aside): an idle line.
 - **"idle fill between bursts" said of a line with no bursts**
   (`payload.rs`): above 99 % fill the payload now reads "idle: nothing but
   its fill so far (no traffic to tell the format by)".
+
+## A radar station's monitoring in IP: the 12335.13 MHz CDM-570L trunk (2026-10-12)
+
+Rory's TPC 2964 VFO at 12 335.1341 MHz (a CDM-570L: the CDM-600s do no
+IP, Rory says), 354 s, data recording and PCAP: "multicast radar IP data",
+"just do the radar part".
+
+- **The link** (`decsat payload … --frame-bits 2223 --bit-rate 62500`):
+  62.5 kbit/s, HDLC on an inverted line, not scrambled, 15 461 frames, no
+  bad FCS. **Frame Relay**: 15 425 on DLCI 100 (Q.922 address `18 41`, UI,
+  RFC 2427 NLPID CCh = IPv4), 31 LMI status enquiries on DLCI 0, 5 Cisco
+  CDP frames (SNAP). `hdlc_ip` already found the IP past the 4 octets.
+- **The IP**: one multicast is 99 % of it, 10.230.73.244:30002 →
+  233.71.15.145:4021, 43 datagrams/s (18 kbit/s); the rest is SNMP, PIM,
+  ICMP and NTP of the site (not looked into).
+- **The multicast is the radar's monitoring and control (RCMS), not target
+  data.** A word-oriented format (lengths in 16-bit words): a 12-octet
+  header (length, sending unit, kind 100/102/103/105, unit addressed,
+  flags), sections of typed points (32-bit point numbers; 32-bit integers,
+  IEEE floats, texts), `00 00`. A unit table every 10 s names nine units
+  in Spanish — `PEDESTAL`, `UCS_SSR`, `UCS_SCR`, `UCS_RELOJ` (clock),
+  `UCS_EQUIPO`, `UCS_CNR`, `UCS_SWITCH`, `UCS_UTS20S`, `PPI` — so likely
+  an Indra radar (not confirmed). The pedestal sends two sets of four
+  floats (~3, ~15, ~700, ~4.0: two drives? the last perhaps the scan
+  period); the SSR two channels of five modules' firmware dates and
+  versions; the rest states and counters. Point meanings are unknown;
+  layout and evidence in `decsat-ip/src/rcms.rs`. All 15 263 datagrams
+  parse to their last octet but one 22-octet configuration message (18
+  copies) whose body is no chain of sections. No plots or tracks are on
+  this trunk at all; the radar's ASTERIX goes elsewhere (the CDM-570
+  Viterbi radar carriers).
+- **Built**: `decsat_ip::rcms` (parser; `RcmsRx` takes a flow after 3
+  well-shaped messages, counts repeats — every message goes 2–4 times —
+  apart from updates); the IP stage tries it on every UDP datagram
+  (`GseView::radar_stations`); GUI "Radar station (monitoring)" card above
+  the IP card (units from the table, each with its points: value, range,
+  updates; the moving floats open); `decsat pcap file.pcap [--csv] [--all]`
+  reads a PCAP back (new `read_pcap`: raw IP or Ethernet); `decsat payload`
+  and `decode` print the station. Checked on the PCAP, on the data
+  recording, and on a synthetic TPC 2964 carrier carrying the PCAP's
+  packets in Frame Relay (scratch generator, not committed): Identify,
+  1349/1349 frames, the station in the GUI.
+- Also: the CDM model menu says **CDM-570L TPC** (was "CDM-600 / 600L
+  data") and **CDM-570L Viterbi**; an HDLC line chosen while idle no
+  longer says "idle flags only so far" once frames come (this trunk began
+  idle); `decsat payload` prints the given bit rate, not 128 kbit/s.
+- Open: what the points mean (a manual, or watching them during a known
+  event); the 22-octet message; categories 1–4 named only by guess.

@@ -1142,6 +1142,9 @@ pub struct GseView {
     pub audio_forwarded: u64,
     /// Text in the packets' payloads (UDP/TCP data).
     pub text: decsat_modem::text::ByteTextView,
+    /// Radar stations' monitoring traffic (units, their points), each
+    /// station by its flow.
+    pub radar_stations: Vec<decsat_ip::rcms::StationView>,
 }
 
 /// Where and whether a VFO's FEC writes its output.
@@ -1390,6 +1393,10 @@ struct IpStage {
     text: decsat_modem::text::ByteText,
     /// IPv4 fragments put back together.
     frags: Reassembler,
+    /// A radar station's monitoring traffic in the UDP, once seen
+    /// (`decsat_ip::rcms`), and the signal clock its times are on (s).
+    rcms: Option<decsat_ip::rcms::RcmsRx>,
+    clock: f64,
 }
 
 impl IpStage {
@@ -1410,6 +1417,8 @@ impl IpStage {
             hdlc: None,
             text: decsat_modem::text::ByteText::new(),
             frags: Reassembler::new(),
+            rcms: None,
+            clock: 0.0,
             gse: GseIp::new(),
             stats: IpStats::default(),
             packets: Vec::new(),
@@ -1564,6 +1573,17 @@ impl IpStage {
         };
         self.text.push_unit(ip_payload(data, info));
         self.mcast.packet(data, info);
+        // A radar station's monitoring messages: tried on every UDP
+        // datagram (a length check turns nearly all others away at once).
+        if let Some((payload, _, dport)) = udp_payload(data, info) {
+            let flow = decsat_ip::rcms::Flow {
+                src: info.src,
+                group: info.dst,
+                port: dport,
+            };
+            let rx = self.rcms.get_or_insert_with(decsat_ip::rcms::RcmsRx::new);
+            rx.udp(flow, payload, self.clock);
+        }
         if (self.audio_want.is_some() || self.record_want.is_some())
             && let Some((payload, _, dport)) = udp_payload(data, info)
         {
@@ -1587,6 +1607,7 @@ impl IpStage {
     /// Signal time passes (every frame, good or not).
     fn tick(&mut self, secs: f64) {
         self.mcast.tick(secs);
+        self.clock += secs;
         self.win.1 += secs;
         if self.win.1 >= 2.0 || (self.ip_bps == 0.0 && self.win.1 > 0.2) {
             self.ip_bps = self.win.0 * 8.0 / self.win.1;
@@ -1663,6 +1684,7 @@ impl IpStage {
                 .clone()
                 .or_else(|| self.recorder.as_ref().and_then(|r| r.error.clone())),
             text: self.text.view(),
+            radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
         }
     }
 
@@ -2020,11 +2042,12 @@ impl Drop for RawFile {
 }
 
 /// The IP packet in an HDLC frame: after whatever header the link puts
-/// first (Cisco HDLC's 4 bytes, PPP's 4 or fewer, an Ethernet header…),
+/// first (Cisco HDLC's 4 bytes, PPP's 4 or fewer, Frame Relay's 4 — RFC
+/// 2427's Q.922 address, UI, NLPID CCh —, an Ethernet header…),
 /// found by trying each offset for a packet that validates and fills the
 /// rest of the frame exactly — or, IPv4 only (its header has a checksum),
 /// that fits in it.
-fn hdlc_ip(frame: &[u8]) -> Option<(&[u8], IpInfo)> {
+pub fn hdlc_ip(frame: &[u8]) -> Option<(&[u8], IpInfo)> {
     const MAX_HEADER: usize = 24;
     let offsets = 0..=MAX_HEADER.min(frame.len());
     for off in offsets.clone() {
@@ -2501,6 +2524,40 @@ fn run(
 mod tests {
     use super::*;
     use crate::demod::Demod;
+
+    /// IP over Frame Relay in HDLC (the 12335.13 MHz TPC carrier's: DLCI
+    /// 100, NLPID CCh) reaches the IP stage, and a radar station's
+    /// monitoring multicast in it shows as a station with its units.
+    #[test]
+    fn radar_station_monitoring_over_frame_relay() {
+        // The pedestal's float (point 2300 = 2.9), to 233.71.15.145:4021.
+        let msg = [
+            0x00, 0x0f, 0x00, 0xd2, 0x00, 0x69, 0x00, 0xc8, 0x00, 0x01, 0x01, 0x01, 0x00, 0x08,
+            0x00, 0x07, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x08, 0xfc, 0x40, 0x39, 0x99, 0x9a,
+            0x00, 0x00,
+        ];
+        let mut stage = IpStage::new();
+        for k in 0..5u8 {
+            let mut m = msg;
+            m[27] ^= k; // a new value each time: updates, not repeats
+            let pkt =
+                decsat_ip::packet::udp_v4([10, 230, 73, 244], [233, 71, 15, 145], 30002, 4021, &m);
+            // Q.922 address (DLCI 100), UI, NLPID IPv4, then the packet.
+            let mut frame = vec![0x18, 0x41, 0x03, 0xCC];
+            frame.extend(&pkt);
+            let (ip, info) = hdlc_ip(&frame).expect("IP found past the Frame Relay header");
+            stage.ip(ip, &info);
+            stage.tick(0.5);
+        }
+        let v = stage.view();
+        assert_eq!(v.radar_stations.len(), 1);
+        let st = &v.radar_stations[0];
+        assert_eq!(st.flow.port, 4021);
+        let ped = st.units.iter().find(|u| u.unit == 0xD2).unwrap();
+        // Three of the five: two went to taking the flow as a station's.
+        assert_eq!(ped.points[0].updates, 3);
+        assert_eq!(ped.points[0].changes, 2);
+    }
     use decsat_frame::StreamFormat;
     use decsat_mod::{FrameSpec, PlFramer, Shaper, TsBbFramer};
     use std::f64::consts::TAU;

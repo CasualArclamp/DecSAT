@@ -8,6 +8,7 @@ mod cidgen;
 mod decode;
 mod mcast;
 mod payload;
+mod pcap;
 mod record;
 mod scene;
 mod tx;
@@ -106,6 +107,9 @@ enum Command {
     /// Run a modem data recording (.bin) through the payload stage again:
     /// format, Paradise framing, the TDM multiplex inside.
     Payload(payload::PayloadArgs),
+    /// Read a PCAP of IP again (a VFO's, written on Record): a radar
+    /// station's monitoring traffic in it, unit by unit.
+    Pcap(pcap::PcapArgs),
     /// List the multicast radio in a recorded transport stream (IP from MPE):
     /// what each stream is, now-playing messages; decode or record them.
     Mcast(mcast::McastArgs),
@@ -305,6 +309,7 @@ fn main() -> Result<()> {
         }
         Command::Mcast(a) => mcast::run(&a),
         Command::Payload(a) => payload::run(&a),
+        Command::Pcap(a) => pcap::run(&a),
         Command::Record(a) => record::run(&a),
         Command::Scan {
             file,

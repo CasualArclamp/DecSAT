@@ -555,6 +555,9 @@ pub(crate) fn report(st: &VfoStatus) {
         for a in &g.audio {
             println!("  audio: {} ({:?})", a.name(), a.codec);
         }
+        for st in &g.radar_stations {
+            crate::pcap::print_station(st, false);
+        }
         print_byte_text("ip text", &g.text);
     }
     if let Some(t) = &f.ts {

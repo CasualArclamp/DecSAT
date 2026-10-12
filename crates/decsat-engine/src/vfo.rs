@@ -157,9 +157,13 @@ impl DecoderKind {
     /// A CDM preset's name in the model menu (else the label).
     pub fn cdm_model(self) -> &'static str {
         match self {
-            DecoderKind::Tpc2964 => "CDM-600 / 600L data (TPC 2964 → IP / TS)",
+            // (IP comes from the CDM-570Ls: the CDM-600s carry voice, Rory
+            // says — they do no IP.)
+            DecoderKind::Tpc2964 => "CDM-570L TPC (TPC 2964 → IP / TS)",
             DecoderKind::Cdm600Voice => "CDM-600L voice (TPC 2964 → D&I++ → G.728)",
-            DecoderKind::Cdm570 => "CDM-570L (Viterbi K=7 → data, e.g. radar: BSC or ASTERIX)",
+            DecoderKind::Cdm570 => {
+                "CDM-570L Viterbi (Viterbi K=7 → data, e.g. radar: BSC or ASTERIX)"
+            }
             k => k.label(),
         }
     }

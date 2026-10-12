@@ -6,9 +6,10 @@
 //! bit first, then the sixteen 16-bit words). Timeslots in HDLC packets are
 //! looked through for G.728: speech, or the equipment's silence fill. BSC
 //! blocks are read as the PH-ML radar feed, HDLC frames of ASTERIX as the
-//! other radar feeds (`--radar-out`: a CSV, one line a track report). HDLC
-//! frames that check can be written out as hex (`--hdlc-out`), for links
-//! whose content is not yet known.
+//! other radar feeds (`--radar-out`: a CSV, one line a track report). IP in
+//! HDLC frames is looked through for a radar station's monitoring traffic
+//! (`decsat_ip::rcms`). HDLC frames that check can be written out as hex
+//! (`--hdlc-out`), for links whose content is not yet known.
 
 use std::path::PathBuf;
 
@@ -49,7 +50,8 @@ pub struct PayloadArgs {
     /// bytes in hex (without the FCS).
     #[arg(long)]
     pub hdlc_out: Option<PathBuf>,
-    /// The recording's bit rate, for --hdlc-out's times (bit/s).
+    /// The recording's bit rate, for --hdlc-out's and the radar station's
+    /// times (bit/s).
     #[arg(long, default_value_t = 128_000.0)]
     pub bit_rate: f64,
 }
@@ -87,6 +89,7 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
     let mut radar = decsat_modem::radar::RadarRx::new();
     let mut radar_csv = vec![decsat_modem::radar::CSV_HEADER.to_string()];
     let mut hdlc_lines: Vec<String> = Vec::new();
+    let mut stations = decsat_ip::rcms::RcmsRx::new();
     for (k, frame) in bits.chunks_exact(a.frame_bits).enumerate() {
         out.clear();
         pay.push(frame, &mut out);
@@ -106,6 +109,20 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
                         .iter()
                         .map(|r| decsat_modem::radar::csv_line(&m, r)),
                 );
+            }
+        }
+        // A radar station's monitoring traffic in the frames' IP.
+        let t = ((k + 1) * a.frame_bits) as f64 / a.bit_rate;
+        for (f, _) in &out.frames {
+            if let Some((pkt, info)) = decsat_engine::hdlc_ip(f)
+                && let Some((udp, _, dport)) = decsat_ip::mcast::udp_payload(pkt, &info)
+            {
+                let flow = decsat_ip::rcms::Flow {
+                    src: info.src,
+                    group: info.dst,
+                    port: dport,
+                };
+                stations.udp(flow, udp, t);
             }
         }
         // ASTERIX radar data in the HDLC frames.
@@ -154,11 +171,12 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
         }
     }
     println!(
-        "{}: {} frames of {} bits ({:.1} s at 128 kbit/s)",
+        "{}: {} frames of {} bits ({:.1} s at {:.1} kbit/s)",
         a.file.display(),
         bits.len() / a.frame_bits,
         a.frame_bits,
-        bits.len() as f64 / 128e3
+        bits.len() as f64 / a.bit_rate,
+        a.bit_rate / 1e3
     );
     crate::decode::print_payload(&pay.stats);
     if pay.stats.bsc.is_some() || radar.view().messages > 0 {
@@ -172,6 +190,9 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
                 p.display()
             );
         }
+    }
+    for st in &stations.view() {
+        crate::pcap::print_station(st, false);
     }
     if let Some(p) = &a.hdlc_out {
         // A line a frame, each ended by a newline (an empty file for none).

@@ -149,8 +149,9 @@ crates/
                   variants (header-len, split frag-id); label/protocol handling
   decsat-ts       TS-mode BBFRAME → MPEG-TS; null-packet reinsertion, sync,
                   Generic/Newtec CRC variants
-  decsat-ip       IPv4/IPv6 parse, PCAP writer, stream classification + stats,
-                  blind IP-header-checksum fallback search
+  decsat-ip       IPv4/IPv6 parse, PCAP writer and reader, stream
+                  classification + stats, blind IP-header-checksum fallback
+                  search; a radar station's monitoring multicast (rcms)
   decsat-audio    multicast radio in the app: RTP/RFC 2250/3016/3640/7587
                   and raw ES depacketising, MPEG audio (Symphonia), AAC
                   with SBR/PS (libxaac), Opus (libopus), resampling, sound output

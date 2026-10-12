@@ -32,7 +32,7 @@ pub use demod::{Demod, LockState, PlFrame};
 pub use estimate::{BandEstimate, estimate_band};
 pub use fec::{
     BbFrame, CallVoiceView, E1View, FecDecoder, FecOutput, FecStats, GseView, MIX as VOICE_MIX,
-    TsView,
+    TsView, hdlc_ip,
 };
 pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, SourceState};
 pub use identify::{

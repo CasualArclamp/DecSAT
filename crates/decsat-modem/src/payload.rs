@@ -411,6 +411,10 @@ impl TsAlign {
     }
 }
 
+/// What the label says of an HDLC line chosen while it carried nothing but
+/// flags (removed once frames come).
+const IDLE_FLAGS: &str = ": idle flags only so far";
+
 /// What the data were found to carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -790,7 +794,7 @@ impl PayloadRx {
                 // (Differential decoding first, as the stats go on to say:
                 // an NRZI line.)
                 (Format::Slots, _) if slots_plain == Some(0) => {
-                    "HDLC on an inverted line: idle flags only so far".into()
+                    format!("HDLC on an inverted line{IDLE_FLAGS}").into()
                 }
                 (Format::Slots, _) if slots_plain.is_some() => "HDLC on an inverted line".into(),
                 (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
@@ -875,6 +879,15 @@ impl PayloadRx {
                 let inverted: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
                 self.hdlc.push(&inverted, &mut out.frames);
                 self.stats.hdlc_good = self.hdlc.good;
+                // Chosen while the line idled, it said "idle flags only so
+                // far": once frames come, it no longer does (the 12335.13
+                // MHz trunk began idle, then carried 15 000 frames).
+                if self.hdlc.good > 0
+                    && let Some(f) = &mut self.stats.found
+                    && f.contains(IDLE_FLAGS)
+                {
+                    *f = f.replacen(IDLE_FLAGS, "", 1);
+                }
             }
             Format::Bsc => {
                 self.bsc.push(&bits, &mut out.bsc);
@@ -1148,6 +1161,15 @@ mod tests {
         }
         assert_eq!(rx.format(), Some(Format::Slots), "{:?}", rx.stats);
         assert!(rx.stats.found.as_ref().unwrap().contains("idle flags only"));
+        // Then traffic: the label stops saying so.
+        let (_, d) = hdlc_stream(40, 7);
+        let inverted: Vec<u8> = d.iter().map(|b| b ^ 1).collect();
+        for f in inverted.as_chunks::<L>().0 {
+            rx.push(f, &mut out);
+        }
+        assert!(rx.stats.hdlc_good > 0);
+        let found = rx.stats.found.as_ref().unwrap();
+        assert!(found.starts_with("HDLC on an inverted line,"), "{found}");
     }
 
     #[test]

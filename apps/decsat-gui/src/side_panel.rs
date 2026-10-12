@@ -2943,7 +2943,7 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
                     let r = ui
                         .selectable_label(decoder.is_cdm(), DecoderKind::CDM_MENU)
                         .on_hover_text(
-                            "TPC 2964 data, CDM-600L voice, CDM-570L: the model is chosen next",
+                            "CDM-570L TPC (IP), CDM-570L Viterbi (radar), CDM-600L voice: the                              model is chosen next",
                         );
                     if r.clicked() && !decoder.is_cdm() {
                         *decoder = DecoderKind::CDM[0];
@@ -3050,9 +3050,133 @@ fn radar_card(
     }
 }
 
+/// A radar station's monitoring traffic found in the IP (`decsat_ip::rcms`):
+/// the station's flow and counts, then each unit with its points. Not
+/// target data: the units' own reports about themselves.
+fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
+    use decsat_ip::rcms::{SECTION_FLOAT, SECTION_TEXT, float_text};
+    ui.add_space(6.0);
+    ui.label(RichText::new("Radar station (monitoring)").strong())
+        .on_hover_text(
+            "A radar site's control and monitoring traffic (its RCMS) in UDP multicast:              what each unit of the radar says about itself — states, counters, measured              values, firmware versions. No targets travel this way. The units are named by              the station's own unit table; what each point means is not known, only its              number.",
+        );
+    egui::Grid::new(("rcms", st.flow.to_string()))
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("Sent");
+            ui.label(RichText::new(st.flow.to_string()).monospace().small());
+            ui.end_row();
+            ui.label("Messages");
+            ui.label(format!(
+                "{} · {} repeats{}",
+                st.messages,
+                st.repeats,
+                if st.unread > 0 {
+                    format!(" · {} not read", st.unread)
+                } else {
+                    String::new()
+                }
+            ))
+            .on_hover_text("Each message is sent two to four times over; repeats are not updates");
+            ui.end_row();
+            let named = st.units.iter().filter(|u| u.name.is_some()).count();
+            let heard = st
+                .units
+                .iter()
+                .filter(|u| u.name.is_some() && u.last.is_some())
+                .count();
+            let others = st.units.len() - named;
+            ui.label("Units");
+            ui.label(format!(
+                "{named} in its table, {heard} of them heard{}",
+                if others > 0 {
+                    format!(" · {others} others")
+                } else {
+                    String::new()
+                }
+            ))
+            .on_hover_text(
+                "The station names its units in a table it sends every 10 s; the others                  (keep-alives, the table's sender) are listed by number",
+            );
+            ui.end_row();
+        });
+    for u in &st.units {
+        let changing = u.points.iter().filter(|p| p.changes > 0).count();
+        let when = match u.last {
+            Some(t) => format!("{:.0} s ago", (st.now - t).max(0.0)),
+            None => "not heard".into(),
+        };
+        let head = format!(
+            "{} · {} points{} · {when}",
+            u.label(),
+            u.points.len(),
+            if changing > 0 {
+                format!(", {changing} changing")
+            } else {
+                String::new()
+            }
+        );
+        egui::CollapsingHeader::new(RichText::new(head).small())
+            .id_salt(("rcms_unit", st.flow.to_string(), u.unit))
+            // Open at first where measurements move (the pedestal's floats).
+            .default_open(
+                u.points
+                    .iter()
+                    .any(|p| p.changes > 0 && p.section == SECTION_FLOAT),
+            )
+            .show(ui, |ui| {
+                if let Some(c) = u.category {
+                    let kinds: Vec<String> = u
+                        .messages
+                        .iter()
+                        .map(|(k, n)| format!("{} {n}", decsat_ip::rcms::kind_name(*k)))
+                        .collect();
+                    ui.label(RichText::new(format!("category {c} · {}", kinds.join(", "))).small());
+                }
+                if u.points.is_empty() {
+                    return;
+                }
+                // The changing points first: those are the measurements.
+                let mut pts: Vec<&decsat_ip::rcms::PointView> = u.points.iter().collect();
+                pts.sort_by_key(|p| (p.changes == 0, p.section, p.id));
+                egui::Grid::new(("rcms_pts", st.flow.to_string(), u.unit))
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for h in ["point", "value", "range", "updates"] {
+                            ui.label(RichText::new(h).small().strong());
+                        }
+                        ui.end_row();
+                        for p in pts {
+                            let what = match p.section {
+                                SECTION_FLOAT => "float",
+                                SECTION_TEXT => "text",
+                                _ => "integer",
+                            };
+                            ui.label(RichText::new(p.id.to_string()).monospace().small())
+                                .on_hover_text(format!("{what}, section type {}", p.section));
+                            ui.label(RichText::new(p.value.to_string()).monospace().small());
+                            let range = match p.range {
+                                Some((lo, hi)) if p.changes > 0 => {
+                                    format!("{}–{}", float_text(lo), float_text(hi))
+                                }
+                                _ => "steady".into(),
+                            };
+                            ui.label(RichText::new(range).small());
+                            ui.label(RichText::new(p.updates.to_string()).small());
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+}
+
 /// IP out of GSE: where it comes from, how much, who is talking, and the
 /// PCAP.
 fn gse_card(ui: &mut Ui, g: &GseView) {
+    for st in &g.radar_stations {
+        radar_station_card(ui, st);
+    }
     ui.add_space(6.0);
     ui.label(RichText::new("IP").strong());
     egui::Grid::new("gse").num_columns(2).show(ui, |ui| {
