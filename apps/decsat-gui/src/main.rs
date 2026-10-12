@@ -12,6 +12,7 @@ mod freq_display;
 mod freqplan;
 mod player;
 mod prefs;
+mod radar_airports;
 mod radar_map;
 mod radar_scope;
 mod radio;
@@ -1287,6 +1288,9 @@ impl eframe::App for App {
                 && let Some(id) = self.selected
             {
                 self.radar_scope.open(id);
+                if let Some(nm) = self.automation.radar_range {
+                    self.radar_scope.set_range(nm);
+                }
             }
         }
         if self.automation.play_audio

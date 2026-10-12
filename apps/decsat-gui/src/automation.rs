@@ -31,8 +31,9 @@ pub struct Options {
     pub decoders: Vec<decsat_engine::DecoderKind>,
     /// Open the TS analyser on the selected VFO.
     pub ts_viewer: bool,
-    /// Open the radar scope on the selected VFO.
+    /// Open the radar scope on the selected VFO, at this range (NM).
     pub radar_scope: bool,
+    pub radar_range: Option<f32>,
     /// Drop a VFO here (offset from the centre, Hz; and its width, Hz).
     pub vfo_at: Option<(f64, f64)>,
     /// Play the selected VFO's first multicast audio stream in the app.
@@ -64,6 +65,14 @@ impl Options {
                 Some("--claim-carriers") => o.claim_carriers = true,
                 Some("--ts-viewer") => o.ts_viewer = true,
                 Some("--radar-scope") => o.radar_scope = true,
+                Some("--radar-range") => {
+                    let v = args.next().ok_or("--radar-range needs NM")?;
+                    o.radar_range = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("--radar-range needs a number of NM")?,
+                    );
+                }
                 Some("--vfo-at") => {
                     let v = args.next().ok_or("--vfo-at needs OFFSET_HZ[:BW_HZ]")?;
                     let v = v.to_str().unwrap_or_default();
@@ -154,6 +163,7 @@ pub struct Automation {
     pub select: Option<usize>,
     pub ts_viewer: bool,
     pub radar_scope: bool,
+    pub radar_range: Option<f32>,
     pub vfo_at: Option<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
@@ -173,6 +183,7 @@ impl Automation {
             select: o.select,
             ts_viewer: o.ts_viewer,
             radar_scope: o.radar_scope,
+            radar_range: o.radar_range,
             vfo_at: o.vfo_at,
             play_audio: o.play_audio,
             audio_started: false,

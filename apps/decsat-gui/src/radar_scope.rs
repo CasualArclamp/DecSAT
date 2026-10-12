@@ -22,7 +22,8 @@
 //!
 //! A map can go under the PPI (see [`crate::radar_map`]) once the radar's
 //! place is known: from the feed (ASTERIX), else set by hand for the VFO
-//! and kept in the user's own settings.
+//! and kept in the user's own settings; airports and runways over it (see
+//! [`crate::radar_airports`]).
 
 use std::time::Instant;
 
@@ -65,6 +66,9 @@ pub struct RadarScope {
     map_on: bool,
     map_style: Style,
     map_brightness: f32,
+    /// Airports and runways over the map.
+    airports: crate::radar_airports::AirportLayer,
+    airports_on: bool,
     map_loaded: bool,
     /// The VFO whose hand-set radar place is loaded, that place, and the
     /// place editor's text while it is open.
@@ -197,6 +201,8 @@ impl Default for RadarScope {
             site_vfo: None,
             manual_site: None,
             site_edit: None,
+            airports: Default::default(),
+            airports_on: true,
         }
     }
 }
@@ -230,6 +236,11 @@ fn colour_on_light(t: &Track) -> Color32 {
 }
 
 impl RadarScope {
+    /// The range shown, NM centre to edge (unattended runs).
+    pub fn set_range(&mut self, nm: f32) {
+        self.range = nm.clamp(MIN_RANGE, MAX_RANGE);
+    }
+
     pub fn open(&mut self, vfo: VfoId) {
         if self.vfo != Some(vfo) {
             self.sweep = None;
@@ -246,6 +257,7 @@ impl RadarScope {
         };
         if !self.map_loaded {
             self.map_loaded = true;
+            self.airports_on = crate::prefs::radar_airports();
             let (on, style, brightness) = crate::prefs::radar_map();
             self.map_on = on;
             self.map_style = Style::ALL
@@ -441,6 +453,19 @@ impl RadarScope {
                         .text("bright"),
                 );
             }
+            if ui
+                .add_enabled(
+                    site.is_some(),
+                    egui::Checkbox::new(&mut self.airports_on, "Airports"),
+                )
+                .on_hover_text(
+                    "Airports and runways (OurAirports, public domain): runways with \
+                     surveyed ends solid, others laid by heading and length, dimmer",
+                )
+                .changed()
+            {
+                crate::prefs::set_radar_airports(self.airports_on);
+            }
             if before != (self.map_on, self.map_style, self.map_brightness) {
                 crate::prefs::set_radar_map(
                     self.map_on,
@@ -569,10 +594,13 @@ impl RadarScope {
 
         let painter = painter.with_clip_rect(rect);
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(6, 14, 10));
-        if self.map_on
+        // On the light map: dark rings, deep colours.
+        let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
+        let mut frame = None;
+        if (self.map_on || self.airports_on)
             && let Some(site) = self.site_of(v)
         {
-            let frame = Frame {
+            let f = Frame {
                 rect,
                 site,
                 to_screen: Box::new(move |x, y| {
@@ -589,25 +617,27 @@ impl RadarScope {
                 }),
                 px_per_nm,
             };
-            self.map.draw(
-                ui.ctx(),
-                &painter,
-                &frame,
-                self.map_style,
-                self.map_brightness,
-            );
-            if let Some(e) = &self.map.error {
+            let mut notes = Vec::new();
+            if self.map_on {
+                self.map
+                    .draw(ui.ctx(), &painter, &f, self.map_style, self.map_brightness);
+                notes.extend(self.map.error.as_ref().map(|e| format!("map: {e}")));
+            }
+            if self.airports_on {
+                self.airports.draw(&painter, &f, self.range, light);
+                notes.extend(self.airports.status());
+            }
+            for (k, n) in notes.iter().enumerate() {
                 painter.text(
-                    rect.left_top() + vec2(6.0, 6.0),
+                    rect.left_top() + vec2(6.0, 6.0 + 14.0 * k as f32),
                     Align2::LEFT_TOP,
-                    format!("map: {e}"),
+                    n,
                     FontId::proportional(11.0),
                     Color32::from_rgb(230, 170, 60),
                 );
             }
+            frame = Some(f);
         }
-        // On the light map: dark rings, deep colours.
-        let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
         let (grid, grid_text) = if light {
             (Color32::from_rgb(40, 90, 60), Color32::from_rgb(20, 70, 40))
         } else {
@@ -772,6 +802,13 @@ impl RadarScope {
                 FontId::monospace(11.0),
                 grid_text,
             );
+            // An airport under the pointer: its code and name.
+            if self.airports_on
+                && let Some(f) = &frame
+                && let Some(name) = self.airports.at(f, q, self.range)
+            {
+                resp.on_hover_text_at_pointer(name);
+            }
         }
     }
 }

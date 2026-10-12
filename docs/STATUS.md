@@ -2604,3 +2604,15 @@ over (every channel + 255 − max − min); CARTO's dark basemap now answers
 else **Site…** in the scope, saved as `radar_site.<VFO name>` in the
 user's prefs — never in the project (tests and hints use made-up places).
 Map on/off, style and brightness are prefs too.
+
+**Airports and runways on the scope** (Rory, same day): OurAirports' open
+data (public domain), `airports.csv` and `runways.csv` fetched once with
+curl into `%APPDATA%\DecSAT\airports\` and refreshed after 30 days
+(`radar_airports.rs`, its own RFC 4180 reader). Runways with surveyed
+ends solid; the rest (in Australia 1505 of 2049 have no ends) laid along
+their heading (else number × 10°, magnetic) and length on the airport's
+reference point, dimmer. Large and medium airports always with their
+ICAO code; small ones inside 120 NM (codes inside 40); runway numbers
+inside 25 NM; heliports, seaplane bases and closed ones left out; an
+airport's name on hover. "Airports" switch beside the map's. Unattended
+runs: `--radar-range NM`.

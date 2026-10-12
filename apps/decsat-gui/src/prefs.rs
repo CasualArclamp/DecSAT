@@ -70,6 +70,18 @@ pub fn radar_map() -> (bool, String, f32) {
     )
 }
 
+/// Airports and runways on the scope (on unless turned off).
+pub fn radar_airports() -> bool {
+    read_all()
+        .iter()
+        .find(|(k, _)| k == "radar_airports")
+        .is_none_or(|(_, v)| v == "1")
+}
+
+pub fn set_radar_airports(on: bool) {
+    let _ = write_key("radar_airports", if on { "1" } else { "0" });
+}
+
 pub fn set_radar_map(on: bool, style: &str, brightness: f32) {
     let _ = write_key("radar_map", if on { "1" } else { "0" });
     let _ = write_key("radar_map_style", style);
