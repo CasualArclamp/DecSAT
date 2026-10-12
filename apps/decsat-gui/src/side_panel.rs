@@ -8,7 +8,7 @@ use decsat_engine::{
     RateSource, TsView, Verdict, VfoId, VfoStatus,
 };
 use decsat_gse::{Source, Variant};
-use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Ui, vec2};
+use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Ui, pos2, vec2};
 use egui_plot::{Line, Plot, PlotPoints, Points};
 
 use crate::band_view::{
@@ -39,6 +39,8 @@ pub struct SideInput<'a> {
     pub view_width: f64,
     pub next_name: String,
     pub have_source: bool,
+    /// What carriers are known to be (the modem's type), by RF.
+    pub caps: &'a crate::carrier_caps::CarrierCaps,
 }
 
 pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<Action> {
@@ -103,13 +105,43 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             crate::band_view::short(&v.settings, st),
             badge(&v.settings, st)
         );
-        ui.painter().text(
+        let text_rect = ui.painter().text(
             rect.min + vec2(22.0, 12.0),
             egui::Align2::LEFT_CENTER,
             text,
             egui::FontId::proportional(13.0),
             ui.visuals().text_color(),
         );
+        // The modem's type, as found (or known for the carrier), after it —
+        // where there is room before the CPU reading.
+        let mut model_rect = None;
+        let model = crate::carrier_caps::vfo_model(
+            &v.settings,
+            st,
+            inp.caps,
+            inp.rf_center + v.settings.offset_hz,
+        );
+        if let Some(tag) = model.and_then(crate::carrier_caps::model_tag) {
+            let g = ui.painter().layout_no_wrap(
+                tag.to_string(),
+                egui::FontId::proportional(10.5),
+                Color32::BLACK,
+            );
+            let r = egui::Rect::from_min_size(
+                pos2(text_rect.right() + 8.0, rect.center().y - 7.5),
+                vec2(g.size().x + 10.0, 15.0),
+            );
+            if r.right() < rect.right() - 90.0 {
+                ui.painter()
+                    .rect_filled(r, CornerRadius::same(3), crate::carrier_caps::MODEM);
+                ui.painter().galley(
+                    r.left_top() + vec2(5.0, (15.0 - g.size().y) / 2.0),
+                    g,
+                    Color32::BLACK,
+                );
+                model_rect = Some(r);
+            }
+        }
         let load_col = if load > 0.9 {
             Color32::from_rgb(255, 90, 90)
         } else if load > 0.5 {
@@ -157,6 +189,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         }
         if over_x {
             resp.on_hover_text("Delete this VFO");
+        } else if let Some(r) = model_rect
+            && resp.hover_pos().is_some_and(|p| r.contains(p))
+        {
+            resp.on_hover_text(
+                "The modem, as its decoder found it once its code locked (the CDM model                  from what its data carry), or as kept for this carrier",
+            );
         }
     }
 

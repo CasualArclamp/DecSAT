@@ -28,7 +28,7 @@ pub const RADAR: Color32 = Color32::from_rgb(110, 220, 110);
 pub const MODEM: Color32 = Color32::from_rgb(140, 185, 255);
 
 /// A modem's tag: the CDM model, or the Q-Flex.
-fn model_tag(k: DecoderKind) -> Option<&'static str> {
+pub fn model_tag(k: DecoderKind) -> Option<&'static str> {
     Some(match k {
         DecoderKind::Tpc2964 => "CDM-570L TPC",
         DecoderKind::Cdm600Voice => "CDM-600L voice",
@@ -137,6 +137,22 @@ fn modem(s: &VfoSettings, st: &VfoStatus) -> Option<DecoderKind> {
     } else {
         (s.decoder == DecoderKind::FastLink).then_some(DecoderKind::FastLink)
     }
+}
+
+/// The modem a VFO's carrier is: as its decoders find it now, else as kept
+/// for the carrier at `rf` (Hz; 0 or less: not known).
+pub fn vfo_model(
+    s: &VfoSettings,
+    st: Option<&VfoStatus>,
+    known: &CarrierCaps,
+    rf: f64,
+) -> Option<DecoderKind> {
+    st.and_then(|st| modem(s, st)).or_else(|| {
+        (rf > 0.0)
+            .then(|| known.at(rf))
+            .flatten()
+            .and_then(|(_, c)| c.model)
+    })
 }
 
 /// The carriers known, by RF (Hz).

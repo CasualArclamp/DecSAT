@@ -1380,6 +1380,7 @@ impl eframe::App for App {
                         view_width: self.band.hi - self.band.lo,
                         next_name: self.next_name(),
                         have_source: self.engine.is_some(),
+                        caps: &self.carrier_caps,
                     };
                     actions.extend(side_panel::show(ui, &inp, &mut self.new_decoder));
                 });

@@ -3106,3 +3106,14 @@ longer cover each other: a row moves a line down (under the labels) or up
 (at the spectrum's foot). Checked unattended on the mixed capture
 (muted): kept `radar,model=cdm570` and `adsb,model=cdm570-trunk`, both
 shown with and without VFOs.
+
+## The CDM type in the VFO list (2026-10-12)
+
+Rory: "show the cdm type in the vfo list too". Each row of the side
+panel's VFO list now ends its text with the same light-blue tag as the
+waterfall: the modem its decoder found once the code locked (the CDM model
+its data say, whichever model was chosen — a VFO set to "CDM-570L TPC" on
+the ASA176 trunk reads "CDM-570L trunk"), else the one kept for its
+carrier (`carrier_caps::vfo_model`); shown where it fits before the CPU
+reading, explained on hover. Checked unattended on the mixed capture: VFO
+1 (type found) "CDM-570L Viterbi", VFO 2 (TPC chosen) "CDM-570L trunk".
