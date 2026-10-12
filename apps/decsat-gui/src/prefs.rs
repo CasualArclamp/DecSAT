@@ -20,7 +20,60 @@ fn config_base() -> Option<PathBuf> {
 }
 
 fn prefs_path() -> Option<PathBuf> {
-    Some(config_base()?.join("DecSAT").join("prefs.txt"))
+    Some(settings_dir()?.join("prefs.txt"))
+}
+
+/// DecSAT's per-user folder: the settings, and caches (map tiles).
+pub fn settings_dir() -> Option<PathBuf> {
+    Some(config_base()?.join("DecSAT"))
+}
+
+/// The settings key for a radar's place, by its VFO's name.
+fn radar_site_key(vfo: &str) -> String {
+    format!("radar_site.{}", vfo.replace('=', "_"))
+}
+
+/// Where a feed's radar is, for feeds that do not say (the BSC feed), as
+/// the user set it for the VFO: (latitude, longitude). Kept in the user's
+/// settings only — a radar's place is theirs to know, not the project's.
+pub fn radar_site(vfo: &str) -> Option<(f64, f64)> {
+    let key = radar_site_key(vfo);
+    let all = read_all();
+    let v = &all.iter().find(|(k, _)| *k == key)?.1;
+    let (lat, lon) = v.split_once(',')?;
+    Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
+}
+
+/// Set (or with `None`, forget) a radar's place for a VFO.
+pub fn set_radar_site(vfo: &str, site: Option<(f64, f64)>) -> std::io::Result<()> {
+    let key = radar_site_key(vfo);
+    match site {
+        Some((lat, lon)) => write_key(&key, &format!("{lat:.6},{lon:.6}")),
+        None => {
+            let mut all = read_all();
+            all.retain(|(k, _)| *k != key);
+            write_all(&all)
+        }
+    }
+}
+
+/// The scope's map: shown, its style, its brightness.
+pub fn radar_map() -> (bool, String, f32) {
+    let all = read_all();
+    let get = |key: &str| all.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+    (
+        get("radar_map").is_none_or(|v| v == "1"),
+        get("radar_map_style").unwrap_or_default(),
+        get("radar_map_brightness")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.8),
+    )
+}
+
+pub fn set_radar_map(on: bool, style: &str, brightness: f32) {
+    let _ = write_key("radar_map", if on { "1" } else { "0" });
+    let _ = write_key("radar_map_style", style);
+    let _ = write_key("radar_map_brightness", &format!("{brightness:.2}"));
 }
 
 /// The first time DecSAT runs, take DecDVB's settings over (a copy: the old

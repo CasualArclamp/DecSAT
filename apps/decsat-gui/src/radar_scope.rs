@@ -19,12 +19,18 @@
 //! where the antenna points, and not which radar it is, so the PPI draws
 //! the targets of a radar feed another VFO decodes, chosen in the window
 //! (taken at once when there is only one).
+//!
+//! A map can go under the PPI (see [`crate::radar_map`]) once the radar's
+//! place is known: from the feed (ASTERIX), else set by hand for the VFO
+//! and kept in the user's own settings.
 
 use std::time::Instant;
 
 use decsat_engine::radar::{RadarView, SECTORS, Track, tod_string};
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
+
+use crate::radar_map::{Frame, LatLon, MapLayer, Style};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2, pos2,
     vec2,
@@ -54,6 +60,17 @@ pub struct RadarScope {
     targets_chosen: bool,
     /// The feed the beam follows; a new one starts the beam afresh.
     sweep_key: Option<VfoId>,
+    /// The map under the PPI, and how it is shown (kept in the settings).
+    map: MapLayer,
+    map_on: bool,
+    map_style: Style,
+    map_brightness: f32,
+    map_loaded: bool,
+    /// The VFO whose hand-set radar place is loaded, that place, and the
+    /// place editor's text while it is open.
+    site_vfo: Option<String>,
+    manual_site: Option<LatLon>,
+    site_edit: Option<String>,
 }
 
 /// What the scope shows for its VFO.
@@ -172,6 +189,14 @@ impl Default for RadarScope {
             targets: None,
             targets_chosen: false,
             sweep_key: None,
+            map: MapLayer::default(),
+            map_on: true,
+            map_style: Style::Dark,
+            map_brightness: 0.8,
+            map_loaded: false,
+            site_vfo: None,
+            manual_site: None,
+            site_edit: None,
         }
     }
 }
@@ -209,6 +234,21 @@ impl RadarScope {
         let Some(own) = self.vfo else {
             return;
         };
+        if !self.map_loaded {
+            self.map_loaded = true;
+            let (on, style, brightness) = crate::prefs::radar_map();
+            self.map_on = on;
+            self.map_style = Style::ALL
+                .into_iter()
+                .find(|s| s.label() == style)
+                .unwrap_or_default();
+            self.map_brightness = brightness;
+        }
+        if self.site_vfo.as_deref() != Some(name) {
+            self.site_vfo = Some(name.to_string());
+            self.manual_site = crate::prefs::radar_site(name).map(|(lat, lon)| LatLon { lat, lon });
+            self.site_edit = None;
+        }
         let mut open = true;
         egui::Window::new(format!("Radar scope — {name}"))
             .id(egui::Id::new("radar_scope"))
@@ -368,7 +408,52 @@ impl RadarScope {
         if note.is_none() {
             ui.horizontal_wrapped(header);
         }
-        ui.horizontal(|ui| {
+        let site = self.site_of(v);
+        ui.horizontal_wrapped(|ui| {
+            let before = (self.map_on, self.map_style, self.map_brightness);
+            ui.add_enabled(site.is_some(), egui::Checkbox::new(&mut self.map_on, "Map"))
+                .on_hover_text("A map under the PPI, the radar at its place")
+                .on_disabled_hover_text(
+                    "Where is the radar? This feed does not say: set it with Site…",
+                );
+            if self.map_on && site.is_some() {
+                egui::ComboBox::from_id_salt("radar_map_style")
+                    .width(70.0)
+                    .selected_text(self.map_style.label())
+                    .show_ui(ui, |ui| {
+                        for s in Style::ALL {
+                            ui.selectable_value(&mut self.map_style, s, s.label());
+                        }
+                    });
+                ui.add(
+                    egui::Slider::new(&mut self.map_brightness, 0.1..=1.0)
+                        .show_value(false)
+                        .text("bright"),
+                );
+            }
+            if before != (self.map_on, self.map_style, self.map_brightness) {
+                crate::prefs::set_radar_map(
+                    self.map_on,
+                    self.map_style.label(),
+                    self.map_brightness,
+                );
+            }
+            let feed_says = v.site.is_some();
+            if ui
+                .add_enabled(!feed_says, egui::Button::new("Site…").small())
+                .on_hover_text(match self.manual_site {
+                    Some(s) => format!("The radar, as set: {:.6}, {:.6}", s.lat, s.lon),
+                    None => "Set where the radar is, for the map".into(),
+                })
+                .on_disabled_hover_text("The feed says where its radar is")
+                .clicked()
+            {
+                self.site_edit = Some(
+                    self.manual_site
+                        .map_or(String::new(), |s| format!("{:.6}, {:.6}", s.lat, s.lon)),
+                );
+            }
+            ui.separator();
             ui.checkbox(&mut self.labels, "Labels");
             ui.checkbox(&mut self.trails, "Trails");
             ui.checkbox(&mut self.declining, "Tracks in decline")
@@ -389,6 +474,7 @@ impl RadarScope {
             ui.label(format!("{:.0} NM", self.range))
                 .on_hover_text("Wheel zooms, drag pans, double-click re-centres");
         });
+        self.site_editor(ui);
         let table_h = (28.0 + 18.0 * v.tracks.len() as f32).min(200.0);
         if stations.is_empty() {
             let side = (ui.available_height() - table_h - 8.0)
@@ -473,6 +559,43 @@ impl RadarScope {
 
         let painter = painter.with_clip_rect(rect);
         painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(6, 14, 10));
+        if self.map_on
+            && let Some(site) = self.site_of(v)
+        {
+            let frame = Frame {
+                rect,
+                site,
+                to_screen: Box::new(move |x, y| {
+                    pos2(
+                        centre.x + (x as f32 - view.x) * px_per_nm,
+                        centre.y - (y as f32 - view.y) * px_per_nm,
+                    )
+                }),
+                from_screen: Box::new(move |p| {
+                    (
+                        f64::from((p.x - centre.x) / px_per_nm + view.x),
+                        f64::from(-(p.y - centre.y) / px_per_nm + view.y),
+                    )
+                }),
+                px_per_nm,
+            };
+            self.map.draw(
+                ui.ctx(),
+                &painter,
+                &frame,
+                self.map_style,
+                self.map_brightness,
+            );
+            if let Some(e) = &self.map.error {
+                painter.text(
+                    rect.left_top() + vec2(6.0, 6.0),
+                    Align2::LEFT_TOP,
+                    format!("map: {e}"),
+                    FontId::proportional(11.0),
+                    Color32::from_rgb(230, 170, 60),
+                );
+            }
+        }
         let grid = Color32::from_rgb(30, 70, 45);
         let grid_text = Color32::from_rgb(70, 130, 90);
         let origin = to_screen(0.0, 0.0);
@@ -623,6 +746,68 @@ impl RadarScope {
                 FontId::monospace(11.0),
                 grid_text,
             );
+        }
+    }
+}
+
+impl RadarScope {
+    /// Where the feed's radar is: as the feed says (ASTERIX), else as set
+    /// by hand for this VFO.
+    fn site_of(&self, v: &RadarView) -> Option<LatLon> {
+        v.site
+            .map(|s| LatLon {
+                lat: s.lat,
+                lon: s.lon,
+            })
+            .or(self.manual_site)
+    }
+
+    /// The radar-place editor, while open: latitude and longitude in any
+    /// form with the two numbers in that order.
+    fn site_editor(&mut self, ui: &mut Ui) {
+        let Some(text) = &mut self.site_edit else {
+            return;
+        };
+        let parsed = crate::radar_map::parse_lat_lon(text);
+        let mut close = false;
+        let mut set: Option<Option<LatLon>> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Radar at");
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .hint_text("lat, lon  (e.g. 12.3456, -45.6789)")
+                    .desired_width(220.0),
+            );
+            if ui
+                .add_enabled(parsed.is_some(), egui::Button::new("Set"))
+                .clicked()
+            {
+                set = Some(parsed);
+            }
+            if self.manual_site.is_some() && ui.button("Forget").clicked() {
+                set = Some(None);
+            }
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+            ui.label(
+                RichText::new("kept in your settings only, for this VFO's name")
+                    .weak()
+                    .small(),
+            );
+        });
+        if let Some(site) = set {
+            if let Some(vfo) = &self.site_vfo {
+                let _ = crate::prefs::set_radar_site(vfo, site.map(|p| (p.lat, p.lon)));
+            }
+            if site.is_some() {
+                self.map_on = true;
+            }
+            self.manual_site = site;
+            close = true;
+        }
+        if close {
+            self.site_edit = None;
         }
     }
 }

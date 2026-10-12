@@ -2589,3 +2589,18 @@ targets were drawn on the TPC VFO's scope, beside the station; PH-ML scans
 in 3.69 s while the pedestal reads ~4.0, consistent with their being
 different radars. The unattended GUI's `--decoder` takes a list, one per
 claimed carrier in frequency order (`--decoder cdm570,tpc`).
+
+## A map under the radar scope (2026-10-12)
+
+Rory asked for a map under a radar's PPI, the radar's place for him only.
+`radar_map.rs`: OpenStreetMap raster tiles in the scope's own frame (x/y
+taken as range and bearing from the radar: azimuthal equidistant, R =
+3440.065 NM; each tile bent through a 4 × 4 grid), fetched one at a time
+with the system's `curl` (no TLS stack in DecSAT: ring's licence and the
+GPL), cached for good under `%APPDATA%\DecSAT\tiles\osm`, credited on the
+map, named User-Agent. "Dark" = the same tiles with HSL lightness turned
+over (every channel + 255 − max − min); CARTO's dark basemap now answers
+"API key required". The radar's place: from the feed (ASTERIX I034/120),
+else **Site…** in the scope, saved as `radar_site.<VFO name>` in the
+user's prefs — never in the project (tests and hints use made-up places).
+Map on/off, style and brightness are prefs too.

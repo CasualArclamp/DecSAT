@@ -12,6 +12,7 @@ mod freq_display;
 mod freqplan;
 mod player;
 mod prefs;
+mod radar_map;
 mod radar_scope;
 mod radio;
 mod session;
