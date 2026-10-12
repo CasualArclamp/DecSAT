@@ -723,15 +723,36 @@ pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
         .flatten()
         .map(|s| format!(" · {s}"))
         .collect();
+        // Where: from the radar; ADS-B's own place, and what it is.
+        let (at, adsb) = match r.adsb {
+            Some(a) => {
+                use decsat_modem::asterix::{emergency_text, emitter_text};
+                let what: String = [
+                    a.emitter.map(|e| emitter_text(e).to_string()),
+                    a.field_monitor.then(|| "field monitor".into()),
+                    a.on_ground.then(|| "on the ground".into()),
+                    a.emergency
+                        .filter(|&e| e != 0)
+                        .map(|e| format!("EMERGENCY: {}", emergency_text(e))),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|s| format!(" · {s}"))
+                .collect();
+                (format!("{:8.4}, {:8.4}", a.lat, a.lon), what)
+            }
+            None => (
+                format!("{:5.1} NM at {:5.1}°", r.range(), r.bearing()),
+                String::new(),
+            ),
+        };
         println!(
-            "  track {:03X}{mode_s} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}{own}",
+            "  track {:03X}{mode_s} · squawk {} · {} · {} kt · {at} · heading {:3.0}° · {} reports{}{own}{adsb}",
             r.number,
             r.squawk.map_or("----".into(), |s| format!("{s:04}")),
             r.flight_level
                 .map_or("no Mode C".into(), |f| format!("FL{f:03}")),
             r.ground_speed.map_or("-".into(), |g| g.to_string()),
-            r.range(),
-            r.bearing(),
             r.track(),
             t.reports,
             if r.updated() { "" } else { " (in decline)" }

@@ -11,6 +11,12 @@
 //! The callsign ADS-B sends is the aircraft identification filed in its
 //! flight plan. A track keeps its name for [`KEEP`] after its last match,
 //! and only while its squawk stays the same.
+//!
+//! An ADS-B feed decoded here (ASTERIX CAT021 on another VFO, as the
+//! ML–PH trunk carries for the Perth area) does instead, when there is
+//! one: [`seen_from`] its aircraft, handed over with
+//! [`AdsbNames::set_local`]; then nothing is asked of the service, and a
+//! recording made with both carriers names its tracks too.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};
@@ -133,6 +139,44 @@ pub struct AdsbNames {
     latest_site: Option<LatLon>,
     names: HashMap<u16, Name>,
     pub error: Option<String>,
+    /// Aircraft from an ADS-B feed decoded here, when there is one.
+    local: Vec<Seen>,
+}
+
+/// The aircraft an ADS-B feed hears (ASTERIX CAT021, see
+/// `decsat_modem::asterix`) as the lookup sees aircraft: those with a
+/// callsign, their age the time since each was last heard by the feed's
+/// latest report.
+pub fn seen_from(v: &RadarView) -> Vec<Seen> {
+    v.tracks
+        .iter()
+        .filter_map(|t| {
+            let r = &t.last;
+            let a = r.adsb.filter(|a| !a.field_monitor)?;
+            Some(Seen {
+                callsign: r.callsign.clone()?,
+                squawk: r.squawk,
+                at: LatLon {
+                    lat: a.lat,
+                    lon: a.lon,
+                },
+                alt_ft: r
+                    .flight_level
+                    .filter(|_| !a.on_ground)
+                    .map(|f| f64::from(f) * 100.0),
+                gs: r.ground_speed.map_or(0.0, f64::from),
+                // Round midnight the short way: a report a little out of
+                // time order is not a day old.
+                age: v.tod.map_or(0.0, |now| {
+                    ((now - t.seen + 43_200.0).rem_euclid(86_400.0) - 43_200.0).clamp(0.0, 60.0)
+                }),
+                registration: None,
+                kind: a
+                    .emitter
+                    .map(|e| decsat_engine::radar::emitter_text(e).to_string()),
+            })
+        })
+        .collect()
 }
 
 fn fetch(lat: f64, lon: f64) -> Result<Vec<Seen>, String> {
@@ -158,10 +202,25 @@ fn fetch(lat: f64, lon: f64) -> Result<Vec<Seen>, String> {
 }
 
 impl AdsbNames {
-    /// Ask the service when due, take its answer when in, and name the
-    /// tracks of `v` (the radar at `site`).
+    /// Aircraft from an ADS-B feed decoded here ([`seen_from`]); while any
+    /// are given, tracks are named from them and the service is not asked.
+    pub fn set_local(&mut self, seen: Vec<Seen>) {
+        self.local = seen;
+    }
+
+    /// Ask the service when due (unless an ADS-B feed here says), take its
+    /// answer when in, and name the tracks of `v` (the radar at `site`).
     pub fn update(&mut self, site: LatLon, v: &RadarView) {
-        if let Some(rx) = &self.pending
+        if !self.local.is_empty() {
+            self.latest = self
+                .local
+                .iter()
+                .map(|s| (s.clone(), to_nm(site, s.at)))
+                .collect();
+            self.latest_at = Some(Instant::now());
+            self.latest_site = Some(site);
+            self.error = None;
+        } else if let Some(rx) = &self.pending
             && let Ok(r) = rx.try_recv()
         {
             self.pending = None;
@@ -181,7 +240,10 @@ impl AdsbNames {
                 Err(e) => self.error = Some(e),
             }
         }
-        if self.pending.is_none() && self.asked.is_none_or(|t| t.elapsed() >= EVERY) {
+        if self.local.is_empty()
+            && self.pending.is_none()
+            && self.asked.is_none_or(|t| t.elapsed() >= EVERY)
+        {
             self.asked = Some(Instant::now());
             let (tx, rx) = channel();
             // Rounded: the service needs the area, not the radar's place.
@@ -246,6 +308,13 @@ impl AdsbNames {
 
     /// For the scope's corner: what the lookup is doing.
     pub fn status(&self) -> String {
+        if !self.local.is_empty() {
+            return format!(
+                "callsigns: ADS-B decoded here · {} aircraft, {} tracks named",
+                self.local.len(),
+                self.names.len()
+            );
+        }
         match (&self.error, self.latest_at) {
             (Some(e), _) => format!("callsigns: {e}"),
             (None, None) => "callsigns: asking adsb.lol…".into(),

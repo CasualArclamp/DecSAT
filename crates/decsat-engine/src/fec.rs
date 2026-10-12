@@ -1414,6 +1414,9 @@ struct IpStage {
     /// (`decsat_ip::rcms`), and the signal clock its times are on (s).
     rcms: Option<decsat_ip::rcms::RcmsRx>,
     clock: f64,
+    /// ASTERIX found in UDP datagrams (the ML–PH trunk's ADS-B), for the
+    /// radar stage to take.
+    asterix: Vec<decsat_modem::radar::Message>,
 }
 
 impl IpStage {
@@ -1436,6 +1439,7 @@ impl IpStage {
             frags: Reassembler::new(),
             rcms: None,
             clock: 0.0,
+            asterix: Vec::new(),
             gse: GseIp::new(),
             stats: IpStats::default(),
             packets: Vec::new(),
@@ -1600,6 +1604,14 @@ impl IpStage {
             };
             let rx = self.rcms.get_or_insert_with(decsat_ip::rcms::RcmsRx::new);
             rx.udp(flow, payload, self.clock);
+            // ASTERIX data blocks (their lengths must tile the datagram),
+            // for the modem chain's radar stage; at most 10 000 wait where
+            // nothing takes them (the DVB chains).
+            if let Some(ms) = decsat_modem::asterix::datagram(payload)
+                && self.asterix.len() < 10_000
+            {
+                self.asterix.extend(ms);
+            }
         }
         if (self.audio_want.is_some() || self.record_want.is_some())
             && let Some((payload, _, dport)) = udp_payload(data, info)
@@ -2297,13 +2309,23 @@ fn run(
                             let n = ipst.hdlc.map_or(0, |h| h.0);
                             ipst.hdlc = Some((n + 1, *fcs));
                             ipst.ip(pkt, &info);
-                        } else if let Some(ms) = decsat_modem::asterix::messages(frame) {
+                        } else if let Some(mut ms) = decsat_modem::asterix::messages(frame) {
                             // A radar feed in ASTERIX (the CDM-570 radar
                             // carriers).
                             let stage = radar.get_or_insert_with(crate::radar::RadarStage::new);
                             stage.follow(&o);
-                            stage.messages(&ms);
+                            stage.messages(&mut ms);
                         }
+                    }
+                    // ASTERIX in the IP (the ML–PH trunk's ADS-B) joins the
+                    // radar feed.
+                    if let Some(ipst) = &mut ip
+                        && !ipst.asterix.is_empty()
+                    {
+                        let stage = radar.get_or_insert_with(crate::radar::RadarStage::new);
+                        stage.follow(&o);
+                        stage.messages(&mut ipst.asterix);
+                        ipst.asterix.clear();
                     }
                 }
                 if let Some(stage) = &mut ts {
@@ -2796,6 +2818,33 @@ mod tests {
             assert!(st.is_voice(1), "G.728 found in timeslot 1");
             assert_eq!(st.view(Default::default()).playing, auto.then_some(MIX));
         }
+    }
+
+    /// ADS-B as the ML–PH trunk carries it: ASTERIX CAT021 in UDP
+    /// multicast, taken from the IP stage by the radar stage, its aircraft
+    /// numbered and placed.
+    #[test]
+    fn asterix_in_udp_joins_the_radar_feed() {
+        let rec: Vec<u8> = (0..QFA66.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&QFA66[i..i + 2], 16).unwrap())
+            .collect();
+        const QFA66: &str = "150031ff235ba604ab042a27069be9321c523e6e7c147402c0800700a8ffb804aa6b95446076da0820010005c0a07b0b9c";
+        let d = decsat_ip::packet::udp_v4([10, 0, 0, 1], [239, 1, 2, 3], 1028, 50000, &rec);
+        let mut ip = IpStage::new();
+        ip.ip(&d, &decsat_ip::parse(&d).unwrap());
+        // Another datagram that is not ASTERIX: nothing.
+        let other = decsat_ip::packet::udp_v4([10, 0, 0, 1], [239, 1, 2, 3], 1028, 50001, b"hello");
+        ip.ip(&other, &decsat_ip::parse(&other).unwrap());
+        assert_eq!(ip.asterix.len(), 1);
+        let mut radar = crate::radar::RadarStage::new();
+        radar.messages(&mut ip.asterix);
+        let v = radar.view().radar;
+        assert!(v.adsb);
+        assert_eq!(v.source, Some((4, 171)));
+        let r = &v.tracks[0].last;
+        assert_eq!((r.number, r.callsign.as_deref()), (1, Some("QFA66")));
+        assert!(r.adsb.is_some() && r.range() < 5.0);
     }
 
     #[test]

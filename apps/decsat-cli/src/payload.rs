@@ -9,7 +9,8 @@
 //! blocks are read as the PH-ML radar feed, HDLC frames of ASTERIX as the
 //! other radar feeds (`--radar-out`: a CSV, one line a track report). IP in
 //! HDLC frames is looked through for a radar station's monitoring traffic
-//! (`decsat_ip::rcms`). HDLC frames that check can be written out as hex
+//! (`decsat_ip::rcms`), and for ASTERIX (the ML–PH trunk's ADS-B, read with
+//! the radar feeds). HDLC frames that check can be written out as hex
 //! (`--hdlc-out`), for links whose content is not yet known.
 
 use std::path::PathBuf;
@@ -111,7 +112,8 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
                 );
             }
         }
-        // A radar station's monitoring traffic in the frames' IP.
+        // A radar station's monitoring traffic in the frames' IP, and
+        // ASTERIX (ADS-B) in its datagrams.
         let t = ((k + 1) * a.frame_bits) as f64 / a.bit_rate;
         for (f, _) in &out.frames {
             if let Some((pkt, info)) = decsat_engine::hdlc_ip(f)
@@ -123,6 +125,13 @@ pub fn run(a: &PayloadArgs) -> Result<()> {
                     port: dport,
                 };
                 stations.udp(flow, udp, t);
+                for m in radar.datagram(udp).unwrap_or_default() {
+                    radar_csv.extend(
+                        m.reports
+                            .iter()
+                            .map(|r| decsat_modem::radar::csv_line(&m, r)),
+                    );
+                }
             }
         }
         // ASTERIX radar data in the HDLC frames.

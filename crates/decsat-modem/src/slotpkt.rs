@@ -31,14 +31,21 @@
 //! they fit an E1's timeslots 1–31; what the equipment calls them is not
 //! known. Other packet types (`13h` aside) come now and then, in the same
 //! 30 + 8n bit shape, and a site with nothing to say sends just those,
-//! every two seconds. On the trunk, type `40h` (channel `58h`) carries IP
-//! from bit 125 on, LSB first: not read yet.
+//! every two seconds. On the trunk, type `40h` (channel `58h`, 5 % of the
+//! packets) carries IP: an IPv4 packet from bit 125 to the tail bit, its
+//! octets LSB first as HDLC sends them (225 of the recording's 226 such
+//! packets, every header checking). The 96 bits between the header and it
+//! are not read (a count among them steps one a packet). See
+//! [`SlotRx::ip`].
 
 /// Bits of a timeslot-data packet before its octets, and after them.
 const HEAD: usize = 29;
 const TAIL: usize = 1;
-/// The type byte of timeslot data.
+/// The type byte of timeslot data, and of IP.
 pub const TYPE_SLOTS: u8 = 0x13;
+pub const TYPE_IP: u8 = 0x40;
+/// Where the IP starts in an IP packet, bits.
+const IP_AT: usize = 125;
 /// The longest packet taken, bits.
 const MAX_BITS: usize = 8 * 2048;
 /// Packets that check needed to say the format is this.
@@ -157,6 +164,9 @@ pub struct SlotRx {
     packets: Vec<Vec<u8>>,
     seq: Option<u8>,
     pub stats: SlotStats,
+    /// IP packets (type `40h`) since last taken: each an IPv4 packet if
+    /// its first octet says so (version 4), for the IP stage to check.
+    pub ip: Vec<Vec<u8>>,
 }
 
 impl SlotRx {
@@ -183,6 +193,15 @@ impl SlotRx {
             self.stats.lost += u64::from(seq.wrapping_sub(prev).wrapping_sub(1) & 0x0F);
         }
         self.seq = Some(seq);
+        if byte(p, 2) == TYPE_IP && p.len() >= IP_AT + 20 * 8 {
+            let ip: Vec<u8> = (0..(p.len() - IP_AT) / 8)
+                .map(|i| byte(&p[IP_AT..], i))
+                .collect();
+            if ip[0] >> 4 == 4 {
+                self.ip.push(ip);
+            }
+            return;
+        }
         let octets = (p.len() - HEAD - TAIL) / 8;
         if byte(p, 2) != TYPE_SLOTS || !(p.len() - HEAD - TAIL).is_multiple_of(8) || octets == 0 {
             return;
@@ -231,6 +250,29 @@ pub fn packet_bits(seq: u8, ts: u8, octets: &[u8]) -> Vec<u8> {
         p.extend((0..8).rev().map(|k| o >> k & 1));
     }
     p.push(1);
+    on_the_line(p)
+}
+
+/// An IP packet as the trunk sends it (type `40h` on channel `58h`), for
+/// tests and test signals: the header, 96 bits not read (zeros here), the
+/// IP octets LSB first, a tail bit.
+pub fn ip_packet_bits(seq: u8, ip: &[u8]) -> Vec<u8> {
+    let lsb = |v: u8| (0..8).map(move |k| v >> k & 1);
+    let mut p: Vec<u8> = Vec::new();
+    p.extend(lsb(1 | (seq & 0x0F) << 1));
+    p.extend(lsb(0x58));
+    p.extend(lsb(TYPE_IP));
+    p.resize(IP_AT, 0);
+    for &o in ip {
+        p.extend(lsb(o));
+    }
+    p.push(1);
+    on_the_line(p)
+}
+
+/// A packet's bits with its FCS added, zero bits inserted, flags round it,
+/// all inverted: as the line carries it.
+fn on_the_line(mut p: Vec<u8>) -> Vec<u8> {
     let fcs = !fcs_remainder(&p);
     p.extend((0..16).map(|k| (fcs >> k & 1) as u8));
     // Zero-bit insertion, then the flags, all inverted.
@@ -314,6 +356,22 @@ mod tests {
         assert_eq!(out.len(), 4);
         assert!(out.iter().all(|(ts, o)| *ts == 3 && o.len() == 44));
         assert_eq!(rx.stats.channels, 1 << 3);
+    }
+
+    #[test]
+    fn ip_packets_come_out_as_ip() {
+        // A 20-octet IPv4 header and 4 octets, between two timeslot packets.
+        let mut ip = vec![0x45, 0, 0, 24];
+        ip.resize(24, 0xA5);
+        let mut line = packet_bits(0, 3, &[1; 44]);
+        line.extend(ip_packet_bits(1, &ip));
+        line.extend(packet_bits(2, 3, &[2; 44]));
+        let mut rx = SlotRx::new();
+        let mut out = Vec::new();
+        rx.push(&line, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(rx.ip, [ip]);
+        assert_eq!(rx.stats.lost, 0);
     }
 
     #[test]

@@ -871,6 +871,10 @@ impl PayloadRx {
             }
             Format::Slots => {
                 self.slots.push(&bits, &mut out.slots);
+                // IP in the packets (the ML–PH trunk's type 40h): on as
+                // frames, for the IP stage to find (their FCS checked).
+                out.frames
+                    .extend(self.slots.ip.drain(..).map(|ip| (ip, Fcs::Crc16)));
                 self.stats.slots = Some(self.slots.stats.clone());
                 // Any other HDLC on the same line (IP, a radar feed): whole
                 // frames whose FCS checks. The timeslot packets are not

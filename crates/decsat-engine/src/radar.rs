@@ -1,7 +1,8 @@
 //! The radar track feed in a modem's BSC blocks (see
-//! `decsat_modem::radar`) or its HDLC frames of ASTERIX (see
-//! `decsat_modem::asterix`): its track table for the GUI's scope and the
-//! command line, and while recording a CSV log, one line a track report.
+//! `decsat_modem::radar`), its HDLC frames of ASTERIX, or ASTERIX in UDP
+//! (the ADS-B multicast on the ML–PH trunk; see `decsat_modem::asterix`):
+//! its track table for the GUI's scope and the command line, and while
+//! recording a CSV log, one line a track report.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,10 +11,12 @@ use std::time::SystemTime;
 use decsat_modem::bsc::Block;
 use decsat_modem::radar::{CSV_HEADER, Message, RadarRx, csv_line};
 // For the GUI, which reaches the modem crate through the engine.
-pub use decsat_modem::radar::{RadarView, Report, SECTORS, Site, Track, tod_string};
-// The Mode S registers' fields and their wording, and what saw a target
-// (ASTERIX), for the scope.
-pub use decsat_modem::asterix::detection;
+pub use decsat_modem::radar::{
+    Adsb, RadarView, Report, SECTORS, Site, Track, east_north_nm, tod_string,
+};
+// The Mode S registers' fields and their wording, what saw a target
+// (ASTERIX), and what an ADS-B target is, for the scope.
+pub use decsat_modem::asterix::{detection, emergency_text, emitter_text};
 pub use decsat_modem::mode_s;
 
 use crate::fec::FecOutput;
@@ -89,8 +92,9 @@ impl RadarStage {
         self.flush();
     }
 
-    /// An HDLC frame's ASTERIX messages (`decsat_modem::asterix::messages`).
-    pub(crate) fn messages(&mut self, ms: &[Message]) {
+    /// ASTERIX messages: an HDLC frame's (`decsat_modem::asterix::messages`)
+    /// or a datagram's. ADS-B reports are numbered and placed in them.
+    pub(crate) fn messages(&mut self, ms: &mut [Message]) {
         for m in ms {
             self.rx.message(m);
             self.log(m);

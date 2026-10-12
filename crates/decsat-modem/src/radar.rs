@@ -38,7 +38,11 @@
 //!
 //! The other radar feeds on the band are ASTERIX in HDLC frames
 //! ([`crate::asterix`]); they come here as the same [`Message`]s, so one
-//! track table and one scope serve both.
+//! track table and one scope serve both. So do ADS-B reports (ASTERIX
+//! CAT021, in IP on the ML–PH trunk): they carry WGS-84 positions instead
+//! of a place from a radar, and no track number — [`RadarRx`] numbers each
+//! aircraft by its address and places it east and north of a point near
+//! the first one heard ([`RadarView::origin`]).
 
 use std::collections::BTreeMap;
 
@@ -97,8 +101,50 @@ pub struct Report {
     /// The report as sent (BSC: the 24 octets; ASTERIX: the record).
     pub raw: Vec<u8>,
     /// The Mode S registers it brought (ASTERIX I048/250) and the flight
-    /// status (I048/230).
+    /// status (I048/230); for ADS-B, the same fields from its own items.
     pub mode_s: crate::mode_s::ModeS,
+    /// ADS-B (ASTERIX CAT021): where the aircraft says it is, and the rest
+    /// a radar does not give.
+    pub adsb: Option<Adsb>,
+}
+
+/// What an ADS-B report says beyond what a radar's does.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Adsb {
+    /// WGS-84, degrees (I021/130).
+    pub lat: f64,
+    pub lon: f64,
+    /// Geometric (GNSS) altitude, ft (I021/140).
+    pub geo_alt_ft: Option<i32>,
+    /// Emitter category (I021/020: see [`crate::asterix::emitter_text`]).
+    pub emitter: Option<u8>,
+    /// Target status (I021/200): 0 none, 1 general emergency, 2 medical,
+    /// 3 minimum fuel, 4 no communications, 5 unlawful interference.
+    pub emergency: Option<u8>,
+    /// I021/040: a ground station's field monitor (RAB), and on the ground
+    /// (GBS).
+    pub field_monitor: bool,
+    pub on_ground: bool,
+    /// The octet in FRN 27 (spare in edition 0.23; edition 0.26 has the
+    /// signal amplitude, I021/131, there — this feed's varies 50–150).
+    pub level: Option<u8>,
+}
+
+/// NM east and north of `from` to (`lat`, `lon`), degrees: azimuthal
+/// equidistant on a sphere of the Earth's mean radius, as the scope's map
+/// draws (within ~0.2 NM of a stereographic system plane at 250 NM).
+pub fn east_north_nm(from: (f64, f64), lat: f64, lon: f64) -> (f64, f64) {
+    const R_NM: f64 = 3440.065;
+    let (p0, l0) = (from.0.to_radians(), from.1.to_radians());
+    let (p1, l1) = (lat.to_radians(), lon.to_radians());
+    let dl = l1 - l0;
+    let cos_c = (p0.sin() * p1.sin() + p0.cos() * p1.cos() * dl.cos()).clamp(-1.0, 1.0);
+    let c = cos_c.acos();
+    let k = if c < 1e-12 { 1.0 } else { c / c.sin() };
+    (
+        R_NM * k * p1.cos() * dl.sin(),
+        R_NM * k * (p0.cos() * p1.sin() - p0.sin() * p1.cos() * dl.cos()),
+    )
 }
 
 impl Report {
@@ -203,6 +249,7 @@ impl Report {
             tick_flags: ticks & !0x1FF,
             raw: r[..REPORT].to_vec(),
             mode_s: Default::default(),
+            adsb: None,
         })
     }
 }
@@ -291,13 +338,23 @@ pub struct RadarView {
     /// ASTERIX: the radar's SAC and SIC, and its place when it says.
     pub source: Option<(u8, u8)>,
     pub site: Option<Site>,
+    /// ADS-B reports have come (ASTERIX CAT021): positions are the
+    /// aircraft's own, there is no radar and no beam.
+    pub adsb: bool,
+    /// Where the ADS-B reports' x and y are measured from: the first
+    /// aircraft's place rounded to 0.1°.
+    pub origin: Option<Site>,
 }
 
 impl RadarView {
     /// Which radar, for display: `SAC 4 SIC 20 · 34.9524°S 138.5320°E,
-    /// 30 m` (ASTERIX feeds; `None` for the BSC one, which does not say).
+    /// 30 m` (ASTERIX feeds; `None` for the BSC one, which does not say);
+    /// `SAC 4 SIC 171 · ADS-B` for ADS-B.
     pub fn source_label(&self) -> Option<String> {
         let (sac, sic) = self.source?;
+        if self.adsb && self.site.is_none() {
+            return Some(format!("SAC {sac} SIC {sic} · ADS-B"));
+        }
         let at = self.site.map_or(String::new(), |s| {
             format!(
                 " · {:.4}°{} {:.4}°{}, {} m",
@@ -320,6 +377,9 @@ pub struct RadarRx {
     /// Per heading (the once-a-scan `19 40` messages carry 18h where the
     /// `0C 40` ones count sectors).
     sectors: BTreeMap<Vec<u8>, Sectors>,
+    /// ADS-B: the number given each aircraft address, and the next to give.
+    numbers: BTreeMap<u32, u16>,
+    next_number: u16,
 }
 
 /// One heading's sector count.
@@ -339,26 +399,63 @@ impl RadarRx {
 
     /// A BSC block in; the message if it was one.
     pub fn block(&mut self, heading: &[u8], text: &[u8]) -> Option<Message> {
-        let Some(m) = Message::parse(heading, text) else {
+        let Some(mut m) = Message::parse(heading, text) else {
             self.view.unknown += 1;
             return None;
         };
-        self.message(&m);
+        self.message(&mut m);
         Some(m)
     }
 
     /// An HDLC frame in: ASTERIX radar data (see [`crate::asterix`]); its
     /// messages, or `None` if it was not that.
     pub fn asterix(&mut self, frame: &[u8]) -> Option<Vec<Message>> {
-        let ms = crate::asterix::messages(frame)?;
-        for m in &ms {
+        let mut ms = crate::asterix::messages(frame)?;
+        for m in &mut ms {
             self.message(m);
         }
         Some(ms)
     }
 
-    /// A message, from either kind of feed.
-    pub fn message(&mut self, m: &Message) {
+    /// A UDP datagram in: ASTERIX (as the ML–PH trunk's ADS-B multicast);
+    /// its messages, or `None` if it was not that.
+    pub fn datagram(&mut self, payload: &[u8]) -> Option<Vec<Message>> {
+        let mut ms = crate::asterix::datagram(payload)?;
+        for m in &mut ms {
+            self.message(m);
+        }
+        Some(ms)
+    }
+
+    /// ADS-B reports numbered (by address) and placed (east and north of
+    /// the origin, set from the first).
+    fn place(&mut self, m: &mut Message) {
+        for r in &mut m.reports {
+            let (Some(a), Some(address)) = (r.adsb, r.address) else {
+                continue;
+            };
+            self.view.adsb = true;
+            let o = *self.view.origin.get_or_insert(Site {
+                lat: (a.lat * 10.0).round() / 10.0,
+                lon: (a.lon * 10.0).round() / 10.0,
+                height_m: 0,
+            });
+            let (x, y) = east_north_nm((o.lat, o.lon), a.lat, a.lon);
+            (r.x, r.y) = (x as f32, y as f32);
+            let next = &mut self.next_number;
+            r.number = *self.numbers.entry(address).or_insert_with(|| {
+                // Rust note: `max(1)` skips 0 once the count wraps.
+                *next = next.wrapping_add(1).max(1);
+                *next
+            });
+        }
+    }
+
+    /// A message, from any kind of feed: ADS-B reports are numbered and
+    /// placed in it first.
+    pub fn message(&mut self, m: &mut Message) {
+        self.place(m);
+        let m = &*m;
         self.view.messages += 1;
         // A north marker's time may run ahead of the sector messages (it
         // is sent before the beam gets there): the latest time is the
@@ -469,7 +566,8 @@ pub const CSV_HEADER: &str = "time_utc,sector,track,track_flags,status,x_nm,y_nm
                               flight_level,squawk,ground_speed_kt,track_deg,vx_kt,vy_kt,other,\
                               north_ticks,raw,mode_s,callsign,selected_alt_ft,fms_alt_ft,qnh_hpa,\
                               mag_heading_deg,ias_kt,mach,tas_kt,roll_deg,track_rate_dps,\
-                              baro_rate_fpm,inertial_rate_fpm,flight_status";
+                              baro_rate_fpm,inertial_rate_fpm,flight_status,lat,lon,geo_alt_ft,\
+                              emitter";
 
 pub fn csv_line(m: &Message, r: &Report) -> String {
     let opt = |v: Option<u16>| v.map_or(String::new(), |v| v.to_string());
@@ -497,6 +595,11 @@ pub fn csv_line(m: &Message, r: &Report) -> String {
         cell(h.baro_rate_fpm),
         cell(h.inertial_rate_fpm),
         cell(ms.flight_status),
+        // ADS-B's own.
+        cell(r.adsb.map(|a| format!("{:.5}", a.lat))),
+        cell(r.adsb.map(|a| format!("{:.5}", a.lon))),
+        cell(r.adsb.and_then(|a| a.geo_alt_ft)),
+        cell(r.adsb.and_then(|a| a.emitter)),
     ]
     .join(",");
     format!(

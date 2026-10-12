@@ -290,6 +290,15 @@ impl RadarScope {
             self.manual_site = crate::prefs::radar_site(name).map(|(lat, lon)| LatLon { lat, lon });
             self.site_edit = None;
         }
+        // Callsigns from an ADS-B feed decoded on another VFO, when there
+        // is one (see `crate::adsb_names`).
+        self.names.set_local(
+            inp.feeds
+                .iter()
+                .filter(|f| f.2.radar.adsb)
+                .flat_map(|f| crate::adsb_names::seen_from(&f.2.radar))
+                .collect(),
+        );
         let mut open = true;
         egui::Window::new(format!("Radar scope — {name}"))
             .id(egui::Id::new("radar_scope"))

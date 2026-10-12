@@ -2731,3 +2731,56 @@ at 64 kbit/s): "large carrier with radar maybe more stuff in it", then
   bits (V.35 taps 3/20 + differential + K = 7 ½, QPSK 64 kS/s, scratch
   generator not committed): 103 of 105 frames, all 143 reports, the rows
   and labels as above.
+
+## ADS-B on the ML–PH trunk: ASTERIX CAT021 edition 0.23 (2026-10-12)
+
+Rory: "add the CAT021 decoding". The ASA176 trunk's packets of type 40h
+(channel 58h, 5 %) carry IPv4 from bit 125 to the tail bit, LSB first;
+the 96 bits before it are not read (a count among them steps one a
+packet). Most of that IP is an ADS-B multicast (SAC 4 SIC 171, ~4
+datagrams a second) of ASTERIX Cat 021: the Perth area's traffic (PH is
+Perth: the positions sit around 32°S 116°E), 36 aircraft in 23 s —
+QFA66 descending to 4000 ft set, VOZ1859, NWK and JST jets, VH- GA
+squawking 1200 and 3000, RSAF "EGLE" PC-21s out of Pearce, the ground
+station's field monitor (KMDB, RAB and GBS set).
+
+- **Edition 0.23** (2003, the 6-octet I021/130 at 180/2²³°), with FRNs
+  27 and 28, spare in that edition, in use: FRN 27 one octet (50–150 on
+  every record; edition 0.26 has I021/131 signal amplitude there), FRN 28
+  two octets — the Mode 3/A code in I021/070's layout (the VFR squawks
+  say so; 0.26 has /070 at 27, the other way round). All 709 records
+  parse to their blocks' ends.
+- `slotpkt`: type 40h → `SlotRx::ip`, handed on as frames, so the IP
+  stage takes them as it takes IP from HDLC (`ip_packet_bits` builds one
+  for tests). `asterix`: the Cat 021 UAP (a `Spare` item kind refuses a
+  record that sets a spare FRN), `cat021` → reports with an `Adsb` block
+  (WGS-84, geometric altitude, emitter category, emergency, field
+  monitor, on ground, FRN 27), the selected altitude (I021/146 by its
+  source, /148), air data, heading, rates and roll in the `ModeS` fields
+  the Mode S registers fill, so the scope shows them alike; `datagram()`
+  for UDP payloads; `emitter_text`, `emergency_text`.
+- `RadarRx` numbers ADS-B aircraft by address (1, 2, … as first heard)
+  and places them east and north of `RadarView::origin`, the first
+  aircraft's place rounded to 0.1° (`east_north_nm`, the map's
+  projection); `RadarView::adsb`; `source_label` "SAC 4 SIC 171 · ADS-B".
+  `RadarRx::message` takes `&mut Message` (it numbers and places them);
+  the CSV gains `lat,lon,geo_alt_ft,emitter`.
+- Engine: the IP stage tries ASTERIX on every UDP datagram (block
+  lengths must tile it) and the modem chain's radar stage takes what it
+  finds, so the trunk's VFO gets a radar feed and its scope. `decsat
+  payload` lists the aircraft (lat/lon, category, emergencies) and
+  `--radar-out` writes them.
+- Callsigns: `adsb_names::seen_from` turns an ADS-B feed's aircraft into
+  the lookup's, and `AdsbNames::set_local` (fed by the scope from every
+  other VFO's ADS-B feed) names radar tracks from them instead of asking
+  adsb.lol — offline, and on recordings made alongside.
+- Checked: the recording (`payload … --bit-rate 1024000 --radar-out`),
+  and a synthetic 682.7 kS/s TPC carrier from its bits through the live
+  chain (CLI and GUI): the same aircraft; the scope draws them with their
+  callsigns, squawks, levels and selected altitudes. Tests: records of
+  the recording (an airliner, one without FRN 28, the field monitor),
+  numbering and placing, IP out of a type 40h packet, CAT021 in UDP to
+  the radar stage.
+- Open (the scope, in the PH-BN session's hands): ADS-B targets placed
+  round a site keyed by SAC/SIC, the map under an ADS-B feed (its origin
+  is no radar), the details box's "seen by" and "from radar" for ADS-B.
