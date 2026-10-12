@@ -12,11 +12,15 @@ use decsat_modem::bsc::Block;
 use decsat_modem::radar::{CSV_HEADER, Message, RadarRx, csv_line};
 // For the GUI, which reaches the modem crate through the engine.
 pub use decsat_modem::radar::{
-    Adsb, RadarView, Report, SECTORS, Site, Track, east_north_nm, tod_string,
+    Adsb, BSC_STATUS, RadarView, Report, SECTORS, Site, Track, bsc_status_text, east_north_nm,
+    tod_string,
 };
 // The Mode S registers' fields and their wording, what saw a target
-// (ASTERIX), and what an ADS-B target is, for the scope.
-pub use decsat_modem::asterix::{detection, emergency_text, emitter_text};
+// (ASTERIX), what an ADS-B target is, and the status words said field by
+// field, for the scope.
+pub use decsat_modem::asterix::{
+    StatusField, detection, emergency_text, emitter_text, status_fields,
+};
 pub use decsat_modem::mode_s;
 
 use crate::fec::FecOutput;

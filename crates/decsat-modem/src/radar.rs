@@ -169,6 +169,28 @@ impl Report {
     }
 }
 
+/// The BSC report's status words seen (octets 2–3), and what each was read
+/// to mean off the recording; its bits' own meanings are not known.
+pub const BSC_STATUS: [(&str, &str); 3] = [
+    ("8270h", "updated this scan"),
+    ("8260h", "updated (seen once)"),
+    (
+        "83n0h",
+        "in decline: n counts 1–4 as its speed falls and x/y jitter",
+    ),
+];
+
+/// What a BSC status word was read to mean (see [`BSC_STATUS`]).
+pub fn bsc_status_text(status: u16) -> String {
+    match status {
+        0x8270 => "updated this scan".into(),
+        0x8260 => "updated (seen once)".into(),
+        s if s & 0xFF0F == 0x8300 => format!("in decline, count {}", s >> 4 & 0xF),
+        s if s & 0xFF0F == 0x8200 => "updated (a word not seen before)".into(),
+        _ => "not seen before".into(),
+    }
+}
+
 /// Where the radar is (WGS-84; ASTERIX I034/120).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Site {
@@ -642,6 +664,13 @@ mod tests {
         0xFF, 0x18, 0x82, 0x70, 0x01, 0x70, 0x06, 0x37, 0x03, 0xF9, 0xE1, 0xFE, 0x31, 0x05, 0x18,
         0xC4, 0x00, 0x00, 0x03, 0x50, 0x01, 0xA0, 0xE8, 0x4A,
     ];
+
+    #[test]
+    fn bsc_status_words_said() {
+        assert_eq!(bsc_status_text(0x8270), "updated this scan");
+        assert_eq!(bsc_status_text(0x8330), "in decline, count 3");
+        assert_eq!(bsc_status_text(0x1234), "not seen before");
+    }
 
     #[test]
     fn reads_a_track_report() {

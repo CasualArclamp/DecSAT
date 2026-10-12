@@ -3011,3 +3011,26 @@ full but one:
 - ASA148 LT-ML (TPC 2964, 128 kS/s, a CDM-570L pair): idle flags.
 
 So no ADS-B or radar in clear on any Q-Flex recorded so far.
+
+## Radar status words said field by field; fast or high tracks purple (2026-10-12)
+
+Rory asked what a track's "Status A846h" meant, then for every field's
+meaning beside it. `asterix::status_fields` re-reads the report's record
+and says each field of its status items, with every value it can take:
+I048/020 (TYP, SIM, RDP, SPI, RAB; the first extension's TST, ERR, XPP,
+ME, MI, FOE/FRI; the second's ADSB, SCN and PAI bits) and I048/170 (CNF,
+RAD, DOU, MAH, CDM; TRE, GHO, SUP, TCC), tables from Cat 048 edition 1.32,
+and I021/040 from Cat 021 edition 0.23 for ADS-B. An item the record
+leaves out gives no rows, rather than its fields read as zeros from the
+packed word. The scope's details box lists them under each item's name,
+a field a row; hovering a row lists every value it can take. The BSC feed's
+words are said by what each was seen to mean (`radar::bsc_status_text`).
+A846h is Mode S roll-call, RDP chain 2, a confirmed SSR/Mode S track,
+climb mode unknown. PH-BN's track 1A9 (E800h, roll-call + PSR on a
+combined track) checked unattended.
+
+Rory: purple for "something that is going very fast or very high, likely
+military". The scope colours a track purple, ahead of its height colour
+but behind coasted yellow, at a ground speed of 650 kt or more, FL450 or
+above, or over 350 kt below FL100 (civil traffic keeps to 250 kt IAS
+there); the legend says so. A business jet above FL450 turns purple too.

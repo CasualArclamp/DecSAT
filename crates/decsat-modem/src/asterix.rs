@@ -342,6 +342,311 @@ pub fn detection(descriptor: u8) -> &'static str {
     }
 }
 
+/// One field of a status item, read: the item (`I048/020`) and its title,
+/// the field's name in the standard (`TYP`), its value, and what every
+/// value it can take means, by value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatusField {
+    pub item: &'static str,
+    pub title: &'static str,
+    pub name: &'static str,
+    pub value: u8,
+    pub values: &'static [&'static str],
+}
+
+impl StatusField {
+    /// What this field's value means.
+    pub fn meaning(&self) -> &'static str {
+        // Rust note: `.copied()` turns the `Option<&&str>` that `get` gives
+        // into an `Option<&str>`.
+        self.values
+            .get(usize::from(self.value))
+            .copied()
+            .unwrap_or("not defined")
+    }
+}
+
+/// A field of a status octet: its name, its top bit (8 the octet's first,
+/// as the standard numbers bits), its width in bits, and its values'
+/// meanings.
+type Spec = (&'static str, u8, u8, &'static [&'static str]);
+
+/// A status item: its name and title, and its octets' fields — the first
+/// octet's, then each FX extension's, as far as they are read here (octets
+/// beyond are not said).
+struct StatusItem {
+    item: &'static str,
+    title: &'static str,
+    octets: &'static [&'static [Spec]],
+}
+
+const ABSENT_PRESENT: [&str; 2] = ["absent", "present"];
+
+/// I048/020, from Cat 048 edition 1.32 (2024). Older editions leave the
+/// first extension's ERR and XPP bits spare (read 0: "no") and have no
+/// second extension.
+const I048_020: StatusItem = StatusItem {
+    item: "I048/020",
+    title: "Target Report Descriptor",
+    octets: &[
+        &[
+            (
+                "TYP",
+                8,
+                3,
+                &[
+                    "no detection",
+                    "single PSR detection",
+                    "single SSR detection",
+                    "SSR + PSR detection",
+                    "single Mode S all-call",
+                    "single Mode S roll-call",
+                    "Mode S all-call + PSR",
+                    "Mode S roll-call + PSR",
+                ],
+            ),
+            (
+                "SIM",
+                5,
+                1,
+                &["actual target report", "simulated target report"],
+            ),
+            (
+                "RDP",
+                4,
+                1,
+                &["report from RDP chain 1", "report from RDP chain 2"],
+            ),
+            (
+                "SPI",
+                3,
+                1,
+                &["absence of SPI", "special position identification"],
+            ),
+            (
+                "RAB",
+                2,
+                1,
+                &[
+                    "report from aircraft transponder",
+                    "report from field monitor (fixed transponder)",
+                ],
+            ),
+        ],
+        &[
+            ("TST", 8, 1, &["real target report", "test target report"]),
+            (
+                "ERR",
+                7,
+                1,
+                &["no extended range", "extended range present"],
+            ),
+            ("XPP", 6, 1, &["no X-pulse present", "X-pulse present"]),
+            ("ME", 5, 1, &["no military emergency", "military emergency"]),
+            (
+                "MI",
+                4,
+                1,
+                &["no military identification", "military identification"],
+            ),
+            (
+                "FOE/FRI",
+                3,
+                2,
+                &[
+                    "no Mode 4 interrogation",
+                    "friendly target",
+                    "unknown target",
+                    "no reply",
+                ],
+            ),
+        ],
+        // On-site ADS-B, surveillance cluster network and passive
+        // acquisition interface information: each an "element populated"
+        // bit, then whether it is available.
+        &[
+            ("ADSB EP", 8, 1, &ABSENT_PRESENT),
+            ("ADSB VAL", 7, 1, &["not available", "available"]),
+            ("SCN EP", 6, 1, &ABSENT_PRESENT),
+            ("SCN VAL", 5, 1, &["not available", "available"]),
+            ("PAI EP", 4, 1, &ABSENT_PRESENT),
+            ("PAI VAL", 3, 1, &["not available", "available"]),
+        ],
+    ],
+};
+
+/// I048/170, from Cat 048 edition 1.32.
+const I048_170: StatusItem = StatusItem {
+    item: "I048/170",
+    title: "Track Status",
+    octets: &[
+        &[
+            ("CNF", 8, 1, &["confirmed track", "tentative track"]),
+            (
+                "RAD",
+                7,
+                2,
+                &["combined track", "PSR track", "SSR/Mode S track", "invalid"],
+            ),
+            (
+                "DOU",
+                5,
+                1,
+                &[
+                    "normal confidence",
+                    "low confidence in plot-to-track association",
+                ],
+            ),
+            (
+                "MAH",
+                4,
+                1,
+                &[
+                    "no horizontal manoeuvre sensed",
+                    "horizontal manoeuvre sensed",
+                ],
+            ),
+            (
+                "CDM",
+                3,
+                2,
+                &["maintaining", "climbing", "descending", "unknown"],
+            ),
+        ],
+        &[
+            (
+                "TRE",
+                8,
+                1,
+                &[
+                    "track still alive",
+                    "end of track lifetime (last report for this track)",
+                ],
+            ),
+            ("GHO", 7, 1, &["true target track", "ghost target track"]),
+            (
+                "SUP",
+                6,
+                1,
+                &[
+                    "not from a neighbouring node",
+                    "kept with track information from a neighbouring node B on the cluster or network",
+                ],
+            ),
+            (
+                "TCC",
+                5,
+                1,
+                &[
+                    "tracked in the radar plane (no slant-range correction or projection)",
+                    "slant-range corrected and projected onto a 2D plane tangent to the earth at the radar",
+                ],
+            ),
+        ],
+    ],
+};
+
+/// I021/040, from Cat 021 edition 0.23: two octets, fixed (bit 1 of each
+/// is spare, not FX).
+const I021_040: StatusItem = StatusItem {
+    item: "I021/040",
+    title: "Target Report Descriptor",
+    octets: &[
+        &[
+            (
+                "DCR",
+                8,
+                1,
+                &["no differential correction", "differential correction"],
+            ),
+            ("GBS", 7, 1, &["ground bit not set", "ground bit set"]),
+            (
+                "SIM",
+                6,
+                1,
+                &["actual target report", "simulated target report"],
+            ),
+            ("TST", 5, 1, &["default", "test target"]),
+            (
+                "RAB",
+                4,
+                1,
+                &[
+                    "report from target transponder",
+                    "report from field monitor (fixed transponder)",
+                ],
+            ),
+            (
+                "SAA",
+                3,
+                1,
+                &[
+                    "equipment can give the selected altitude",
+                    "equipment cannot give the selected altitude",
+                ],
+            ),
+            (
+                "SPI",
+                2,
+                1,
+                &["absence of SPI", "special position identification"],
+            ),
+        ],
+        &[
+            (
+                "ATP",
+                8,
+                3,
+                &[
+                    "non-unique address",
+                    "24-bit ICAO address",
+                    "surface vehicle address",
+                    "anonymous address",
+                    "reserved",
+                    "reserved",
+                    "reserved",
+                    "reserved",
+                ],
+            ),
+            ("ARC", 5, 2, &["unknown", "25 ft", "100 ft"]),
+        ],
+    ],
+};
+
+/// The status items of one ASTERIX record (`raw`, as [`Report::raw`] keeps
+/// it: FSPEC and items) of `category`, read field by field: I048/020 and
+/// I048/170 for a Cat 048 target report, I021/040 for Cat 021. An item
+/// the record leaves out gives no fields; another category gives none.
+pub fn status_fields(category: u8, raw: &[u8]) -> Vec<StatusField> {
+    // (Index 2 is FRN 3, and so on.)
+    let (uap, items): (&[Item], &[(usize, &StatusItem)]) = match category {
+        48 => (&CAT048, &[(2, &I048_020), (13, &I048_170)]),
+        21 => (&CAT021, &[(1, &I021_040)]),
+        _ => return Vec::new(),
+    };
+    let Some(rec) = records(uap, raw).and_then(|v| v.into_iter().next()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for &(frn, s) in items {
+        let Some(octets) = rec.0[frn] else { continue };
+        // Rust note: `zip` stops at the shorter: octets beyond the layout,
+        // or a layout beyond the octets sent, are left.
+        for (specs, &o) in s.octets.iter().zip(octets) {
+            for &(name, top, width, values) in specs.iter() {
+                out.push(StatusField {
+                    item: s.item,
+                    title: s.title,
+                    name,
+                    value: (o >> (top - width)) & ((1 << width) - 1),
+                    values,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The radar messages in one HDLC frame of ASTERIX data: the frame with
 /// its address and control octets (as the feeds send it) or without.
 /// `None` if it is not ASTERIX in categories 034/048/021.
@@ -755,6 +1060,87 @@ mod tests {
         assert!((t.track_deg.unwrap() - r.track()).abs() < 2.0);
         assert!(t.ground_speed_kt.unwrap().abs_diff(r.ground_speed.unwrap()) <= 4);
         assert_eq!(r.callsign, None);
+    }
+
+    /// The fields of `category`'s record `raw`, as (name, value) pairs.
+    fn fields(category: u8, raw: &[u8]) -> Vec<(&'static str, u8)> {
+        status_fields(category, raw)
+            .iter()
+            .map(|f| (f.name, f.value))
+            .collect()
+    }
+
+    #[test]
+    fn a_status_word_field_by_field() {
+        // FSPEC 21 02: FRN 3 (I048/020) and FRN 14 (I048/170) alone; then
+        // A8h and 46h, the status word A846h.
+        let f = status_fields(48, &[0x21, 0x02, 0xA8, 0x46]);
+        let said: Vec<_> = f.iter().map(|f| (f.name, f.value, f.meaning())).collect();
+        assert_eq!(
+            said,
+            [
+                ("TYP", 5, "single Mode S roll-call"),
+                ("SIM", 0, "actual target report"),
+                ("RDP", 1, "report from RDP chain 2"),
+                ("SPI", 0, "absence of SPI"),
+                ("RAB", 0, "report from aircraft transponder"),
+                ("CNF", 0, "confirmed track"),
+                ("RAD", 2, "SSR/Mode S track"),
+                ("DOU", 0, "normal confidence"),
+                ("MAH", 0, "no horizontal manoeuvre sensed"),
+                ("CDM", 3, "unknown"),
+            ]
+        );
+        assert_eq!((f[0].item, f[5].item), ("I048/020", "I048/170"));
+        // I048/020 extended (FX), its first extension a test target's; no
+        // I048/170, so none of its fields.
+        assert_eq!(
+            fields(48, &[0x20, 0xA9, 0x80])[5..],
+            [
+                ("TST", 1),
+                ("ERR", 0),
+                ("XPP", 0),
+                ("ME", 0),
+                ("MI", 0),
+                ("FOE/FRI", 0),
+            ]
+        );
+        // A BSC report is none of these.
+        assert!(status_fields(0, &[0xFF, 0x18]).is_empty());
+    }
+
+    #[test]
+    fn a_recorded_status_word() {
+        // PH-BN's airliner: the word's two octets, field by field.
+        let m = messages(&hex(MODE_S)).unwrap();
+        let r = &m[0].reports[0];
+        let f = fields(48, &r.raw);
+        let (hi, lo) = ((r.status >> 8) as u8, r.status as u8);
+        assert_eq!(f[0], ("TYP", hi >> 5));
+        assert_eq!(f[4], ("RAB", hi >> 1 & 1));
+        let cnf = f.iter().position(|&(n, _)| n == "CNF").unwrap();
+        assert_eq!(f[cnf], ("CNF", lo >> 7));
+        assert_eq!(f[cnf + 4], ("CDM", lo >> 1 & 3));
+    }
+
+    #[test]
+    fn an_adsb_descriptor() {
+        // FSPEC 40: FRN 2 (I021/040) alone; ground bit set, then a 24-bit
+        // ICAO address and 25 ft altitude reporting.
+        assert_eq!(
+            fields(21, &[0x40, 0x40, 0x28]),
+            [
+                ("DCR", 0),
+                ("GBS", 1),
+                ("SIM", 0),
+                ("TST", 0),
+                ("RAB", 0),
+                ("SAA", 0),
+                ("SPI", 0),
+                ("ATP", 1),
+                ("ARC", 1),
+            ]
+        );
     }
 
     #[test]

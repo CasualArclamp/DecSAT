@@ -30,7 +30,8 @@ use std::time::Instant;
 
 use decsat_engine::radar::mode_s::{ModeS, altitude_text, flight_status_text};
 use decsat_engine::radar::{
-    Adsb, RadarView, Report, SECTORS, Track, detection, emergency_text, emitter_text, tod_string,
+    Adsb, BSC_STATUS, RadarView, Report, SECTORS, StatusField, Track, bsc_status_text, detection,
+    emergency_text, emitter_text, status_fields, tod_string,
 };
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
@@ -291,13 +292,38 @@ const MID: Color32 = Color32::from_rgb(140, 230, 120);
 const HIGH: Color32 = Color32::from_rgb(110, 200, 255);
 const NO_MODE_C: Color32 = Color32::from_gray(150);
 const COASTED: Color32 = Color32::from_rgb(255, 240, 60);
+const FAST_HIGH: Color32 = Color32::from_rgb(200, 120, 255);
 const NO_ADSB: Color32 = Color32::from_rgb(255, 80, 70);
 
+/// Faster or higher than airliners go, so likely military: a ground speed
+/// of 650 kt or more (an airliner's cruise with the strongest jet stream
+/// behind it stays under), FL450 or above (airliners top out at FL410–431;
+/// a business jet up there turns purple too), or over 350 kt below FL100
+/// (where civil traffic keeps to 250 kt IAS: 290 kt true at FL090, plus
+/// some tailwind).
+const FAST_KT: u16 = 650;
+const HIGH_FL: i16 = 450;
+const LOW_FL: i16 = 100;
+const LOW_FAST_KT: u16 = 350;
+
+fn fast_or_high(r: &Report) -> bool {
+    let gs = r.ground_speed.unwrap_or(0);
+    gs >= FAST_KT
+        || match r.flight_level {
+            Some(fl) => fl >= HIGH_FL || (fl < LOW_FL && gs > LOW_FAST_KT),
+            None => false,
+        }
+}
+
 /// A track's colour: coasted (no plot this scan) yellow, whatever its
-/// height; else by height, low traffic warm, high cool; no Mode C grey.
+/// height; then fast or high (likely military) purple; else by height,
+/// low traffic warm, high cool; no Mode C grey.
 fn colour(t: &Track) -> Color32 {
     if !t.last.updated() {
         return COASTED;
+    }
+    if fast_or_high(&t.last) {
+        return FAST_HIGH;
     }
     match t.last.flight_level {
         None => NO_MODE_C,
@@ -311,6 +337,9 @@ fn colour(t: &Track) -> Color32 {
 fn colour_on_light(t: &Track) -> Color32 {
     if !t.last.updated() {
         return Color32::from_rgb(140, 120, 0);
+    }
+    if fast_or_high(&t.last) {
+        return Color32::from_rgb(120, 40, 170);
     }
     match t.last.flight_level {
         None => Color32::from_gray(70),
@@ -331,6 +360,12 @@ fn legend(ui: &mut Ui, red: bool) {
             (MID, "FL100–249", "FL100 to FL249"),
             (HIGH, "≥ FL250", "FL250 and above"),
             (NO_MODE_C, "no Mode C", "No flight level reported"),
+            (
+                FAST_HIGH,
+                "fast / high",
+                "Faster or higher than airliners go, so likely military: \
+                 650 kt or more, FL450 or above, or over 350 kt below FL100",
+            ),
             (
                 COASTED,
                 "coasted ↓",
@@ -1457,19 +1492,7 @@ impl RadarScope {
                                     age.map_or(String::new(), |a| format!(" · last {a:.1} s ago"))
                                 ),
                             );
-                            row(
-                                ui,
-                                "Status",
-                                format!(
-                                    "{:04X}h{}",
-                                    r.status,
-                                    if r.updated() {
-                                        ""
-                                    } else {
-                                        " (no plot this scan)"
-                                    }
-                                ),
-                            );
+                            status_rows(ui, r, v.source.is_some());
                         });
                     ui.label(
                         RichText::new(
@@ -1881,6 +1904,79 @@ fn selected_text(ms: &ModeS) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// The details box's status rows: the status word, then each field of the
+/// items it is read from — under each item's name, a field a row, its value
+/// and what it means; every value the field can take on hover. `asterix`:
+/// the report came from an ASTERIX radar feed, not the BSC one (whose
+/// words are known only by what each was seen to mean).
+fn status_rows(ui: &mut Ui, r: &Report, asterix: bool) {
+    // In the box's style: the name weak, the value monospace.
+    let key = |ui: &mut Ui, k: &str| ui.label(RichText::new(k).weak());
+    let val = |ui: &mut Ui, v: String| ui.label(RichText::new(v).monospace());
+    let suffix = if r.updated() {
+        ""
+    } else {
+        " (no plot this scan)"
+    };
+    let category = match (r.adsb.is_some(), asterix) {
+        (true, _) => 21,
+        (false, true) => 48,
+        (false, false) => {
+            key(ui, "Status");
+            val(
+                ui,
+                format!("{:04X}h · {}{suffix}", r.status, bsc_status_text(r.status)),
+            )
+            .on_hover_ui(|ui| {
+                ui.label(RichText::new("Status words seen on the BSC feed").strong());
+                ui.label("Read off recordings; the bits' own meanings are not known.");
+                egui::Grid::new("bsc_status_values").show(ui, |ui| {
+                    for (word, meaning) in BSC_STATUS {
+                        ui.label(RichText::new(word).monospace());
+                        ui.label(meaning);
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.end_row();
+            return;
+        }
+    };
+    key(ui, "Status");
+    val(ui, format!("{:04X}h{suffix}", r.status));
+    ui.end_row();
+    let mut item = "";
+    for f in status_fields(category, &r.raw) {
+        if f.item != item {
+            item = f.item;
+            key(ui, f.item);
+            ui.label(RichText::new(f.title).weak().small());
+            ui.end_row();
+        }
+        key(ui, &format!("  {}", f.name));
+        val(ui, format!("{} {}", f.value, f.meaning())).on_hover_ui(|ui| field_values(ui, &f));
+        ui.end_row();
+    }
+}
+
+/// Every value a status field can take, what each means, its own marked.
+fn field_values(ui: &mut Ui, f: &StatusField) {
+    ui.label(RichText::new(format!("{} {} · {}", f.item, f.name, f.title)).strong());
+    egui::Grid::new("status_field_values").show(ui, |ui| {
+        for (v, meaning) in f.values.iter().enumerate() {
+            let own = v == usize::from(f.value);
+            let text = |s: String| {
+                let t = RichText::new(s);
+                if own { t.strong() } else { t.weak() }
+            };
+            // (Hack, the monospace font, has the arrow.)
+            ui.label(text(format!("{}{v}", if own { "→ " } else { "  " })).monospace());
+            ui.label(text((*meaning).to_string()));
+            ui.end_row();
+        }
+    });
+}
+
 /// The details box's ADS-B rows (ASTERIX CAT021): where the aircraft says
 /// it is, and what it is.
 fn adsb_rows(ui: &mut Ui, a: &Adsb, row: &dyn Fn(&mut Ui, &str, String)) {
@@ -2045,5 +2141,29 @@ mod tests {
             let n = range / ring_step(range);
             assert!((2.0..=6.0).contains(&n), "{range}: {n}");
         }
+    }
+
+    #[test]
+    fn fast_or_high_is_purple() {
+        // A BSC report (FL380, 514 kt), then its level and speed changed.
+        let mut r = Report::parse(&[
+            0xFF, 0x18, 0x82, 0x70, 0x00, 0x8A, 0, 0, 0, 0, 0, 0, 0x33, 0x80, 0x18, 0xC4, 0, 0,
+            0x05, 0x14, 0, 0, 0, 0,
+        ])
+        .unwrap();
+        let mut at = |fl: Option<i16>, kt: u16| {
+            (r.flight_level, r.ground_speed) = (fl, Some(kt));
+            fast_or_high(&r)
+        };
+        // An airliner: cruising, in a jet stream, on approach.
+        assert!(!at(Some(380), 514));
+        assert!(!at(Some(410), 640));
+        assert!(!at(Some(40), 180));
+        // Fast, high, or fast and low; fast with no Mode C.
+        assert!(at(Some(300), 650));
+        assert!(at(Some(450), 400));
+        assert!(at(Some(20), 420));
+        assert!(at(None, 700));
+        assert!(!at(None, 400));
     }
 }
