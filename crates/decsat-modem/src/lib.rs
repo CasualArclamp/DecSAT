@@ -15,6 +15,8 @@
 //!   bits of a timeslot (the CDM-600L's Drop & Insert voice).
 //! - [`bsc`]: IBM bisync (BSC) blocks; [`radar`]: the radar track feed
 //!   they carry on PH-ML.
+//! - [`asterix`]: the other radar feeds' ASTERIX; [`mode_s`]: the Mode S
+//!   registers (selected altitude, air data) their reports carry.
 
 pub mod asterix;
 pub mod bsc;
@@ -27,6 +29,7 @@ pub mod fastlink;
 pub mod g728;
 pub mod ibs;
 pub mod interleave;
+pub mod mode_s;
 pub mod paradise;
 pub mod payload;
 pub mod radar;

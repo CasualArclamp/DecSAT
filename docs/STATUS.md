@@ -2682,3 +2682,52 @@ continuous 64 kbit/s timeslot (4100 packets of 44 octets in 22.6 s).
   NMS, PIM, ICMP and an ESP tunnel. Neither the packets' IP nor CAT021
   is read by DecSAT yet. CAT021 carries callsigns (I021/170): a local
   source for the radar scope's names.
+
+## PH-BN: a sixth ASTERIX radar, and the Mode S registers in its reports (2026-10-12)
+
+Rory's Viterbi data recording of the PH-BN carrier (12 325.82 MHz, 12.6 s
+at 64 kbit/s): "large carrier with radar maybe more stuff in it", then
+"ADS-B might be on the carrier".
+
+- **The line carries one radar and nothing else.** HDLC on an inverted
+  line, 105 frames, no bad FCS; the frames and the flags between them are
+  99.9 % of the bits (the rest the recording's ragged ends). Every frame is
+  address 03h UI, ASTERIX from SAC 4 SIC 22: category 034 (102 sector
+  crossings, 3 north markers with the radar's place and a 3.961 s scan)
+  and 048 (145 target reports, 39 Mode S aircraft). **No ADS-B**: no
+  category 021 (nor any other category or address), and ADS-B reports come
+  about once a second an aircraft, so 12 s would have shown them.
+- **The "more" is Mode S, inside the radar's reports**: I048/250 (Mode S
+  MB data) in 78 of the 145, the registers the radar reads from each
+  transponder — the enhanced-surveillance set BDS 4,0 (selected altitude,
+  altimeter setting, autopilot modes), 5,0 (roll, true track, ground
+  speed, track rate, TAS) and 6,0 (magnetic heading, IAS, Mach, baro and
+  inertial vertical rates) from 23 aircraft; 1,0 (sent as 0,0) and E,1
+  from the site's test transponders. Layouts from ICAO Doc 9871, checked
+  against the radar's own tracks: true track within 2° of the radar's,
+  ground speed within 4 kt, aircraft holding at FL380 with 38 000 ft
+  selected, 1013.2 hPa set above the transition and the local 1021 below,
+  baro rates agreeing with the climbs and descents. I048/230 (flight
+  status) said "airborne" for all. No BDS 2,0 or I048/240 in 12 s, so still
+  no callsigns from the feed (both are read when they come). The AD-BN and
+  MTBB-BN feeds recorded on 2026-10-11 carry 4,0/5,0/6,0 too, but at that
+  hour only from their test transponders.
+- **Built**: `decsat_modem::mode_s` (registers 2,0, 4,0, 5,0, 6,0; a 4,0
+  with reserved bits set is refused; `selected_level`, `to_go_ft` reading
+  Mode C on the altimeter setting the aircraft reports, 27 ft an hPa);
+  ASTERIX reads I048/250 and I048/230 into `Report::mode_s`, and a track
+  keeps each register's latest (`Track::mode_s`, as a radar need not read
+  every register every scan); `asterix::detection` names I048/020's TYP.
+  Scope: details box rows Selected (MCP, FMS when it differs, VNAV / ALT
+  HOLD / APP), Altimeter, Air data, Heading (magnetic, bank, turn rate),
+  flight status when not plain airborne, "Seen by" (Mode S roll-call +
+  PSR …); the vertical rate the aircraft's own when it gives one; the PPI
+  label shows `060↓030` while the selected altitude is 300 ft or more away;
+  a Sel column in the table; the hover tip's Selected row. CSV: 12 columns
+  appended (selected_alt_ft … flight_status); `decsat payload`/`decode`
+  track lines end with the selected altitude, QNH, IAS, Mach and rate.
+- Checked on unit tests with the recording's registers and one whole
+  record, and in the GUI on a synthetic carrier made from the recording's
+  bits (V.35 taps 3/20 + differential + K = 7 ½, QPSK 64 kS/s, scratch
+  generator not committed): 103 of 105 frames, all 143 reports, the rows
+  and labels as above.

@@ -84,7 +84,8 @@ pub struct Report {
     /// Ground speed, kt.
     pub ground_speed: Option<u16>,
     /// Mode S: the aircraft's 24-bit address and its identification
-    /// (callsign), when the feed gives them (ASTERIX).
+    /// (callsign), when the feed gives them (ASTERIX: I048/240, else the
+    /// BDS 2,0 register).
     pub address: Option<u32>,
     pub callsign: Option<String>,
     /// The field not understood (BSC octets 20–21).
@@ -95,6 +96,9 @@ pub struct Report {
     pub tick_flags: u16,
     /// The report as sent (BSC: the 24 octets; ASTERIX: the record).
     pub raw: Vec<u8>,
+    /// The Mode S registers it brought (ASTERIX I048/250) and the flight
+    /// status (I048/230).
+    pub mode_s: crate::mode_s::ModeS,
 }
 
 impl Report {
@@ -198,6 +202,7 @@ impl Report {
             north_ticks: ticks & 0x1FF,
             tick_flags: ticks & !0x1FF,
             raw: r[..REPORT].to_vec(),
+            mode_s: Default::default(),
         })
     }
 }
@@ -249,6 +254,9 @@ pub struct Track {
     /// Flight levels with their times of day, oldest first, as long as the
     /// trail: for the climb or descent rate.
     pub levels: Vec<(f64, i16)>,
+    /// The Mode S registers reported so far, each the latest (a radar need
+    /// not read every register every scan).
+    pub mode_s: crate::mode_s::ModeS,
 }
 
 impl Track {
@@ -406,8 +414,10 @@ impl RadarRx {
                 flagged: 0,
                 trail: Vec::new(),
                 levels: Vec::new(),
+                mode_s: Default::default(),
             });
             t.last = r.clone();
+            t.mode_s.merge(&r.mode_s);
             t.seen = m.tod;
             t.reports += 1;
             t.flagged += u64::from(r.number_flags != 0);
@@ -457,12 +467,40 @@ pub fn tod_string(tod: f64) -> String {
 /// The CSV log's header line, and a report as a line of it.
 pub const CSV_HEADER: &str = "time_utc,sector,track,track_flags,status,x_nm,y_nm,range_nm,bearing_deg,\
                               flight_level,squawk,ground_speed_kt,track_deg,vx_kt,vy_kt,other,\
-                              north_ticks,raw,mode_s,callsign";
+                              north_ticks,raw,mode_s,callsign,selected_alt_ft,fms_alt_ft,qnh_hpa,\
+                              mag_heading_deg,ias_kt,mach,tas_kt,roll_deg,track_rate_dps,\
+                              baro_rate_fpm,inertial_rate_fpm,flight_status";
 
 pub fn csv_line(m: &Message, r: &Report) -> String {
     let opt = |v: Option<u16>| v.map_or(String::new(), |v| v.to_string());
+    // Rust note: `impl Display` takes any printable type, so one helper
+    // serves the integer and the float fields.
+    fn cell(v: Option<impl std::fmt::Display>) -> String {
+        v.map_or(String::new(), |v| v.to_string())
+    }
+    let ms = &r.mode_s;
+    let (i, t, h) = (
+        ms.intent.unwrap_or_default(),
+        ms.track_turn.unwrap_or_default(),
+        ms.heading_speed.unwrap_or_default(),
+    );
+    let mode_s = [
+        cell(i.mcp_ft),
+        cell(i.fms_ft),
+        cell(i.qnh_hpa.map(|q| format!("{q:.1}"))),
+        cell(h.heading_deg.map(|d| format!("{d:.1}"))),
+        cell(h.ias_kt),
+        cell(h.mach.map(|m| format!("{m:.3}"))),
+        cell(t.tas_kt),
+        cell(t.roll_deg.map(|d| format!("{d:.1}"))),
+        cell(t.track_rate_dps.map(|d| format!("{d:.2}"))),
+        cell(h.baro_rate_fpm),
+        cell(h.inertial_rate_fpm),
+        cell(ms.flight_status),
+    ]
+    .join(",");
     format!(
-        "{},{},{:03X},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{},{},{}",
+        "{},{},{:03X},{:04X},{:04X},{:.3},{:.3},{:.2},{:.1},{},{},{},{:.0},{:.1},{:.1},{:04X},{},{},{},{},{mode_s}",
         tod_string(m.tod),
         // ASTERIX target reports belong to no sector message.
         if m.sector < SECTORS {
@@ -597,11 +635,20 @@ mod tests {
             flagged: 0,
             trail: Vec::new(),
             levels: vec![(86_390.0, 105)],
+            mode_s: Default::default(),
         };
         assert_eq!(t.vertical_rate(), None);
         // 1000 ft lower 30 s on, across midnight.
         t.levels.push((20.0, 95));
         assert_eq!(t.vertical_rate(), Some(-2000.0));
+    }
+
+    #[test]
+    fn csv_lines_fit_the_header() {
+        let m = Message::parse(&[0x0C, 0x40], &SECTOR_5).unwrap();
+        let line = csv_line(&m, &m.reports[0]);
+        assert!(!CSV_HEADER.contains(char::is_whitespace));
+        assert_eq!(CSV_HEADER.split(',').count(), line.split(',').count());
     }
 
     #[test]

@@ -699,8 +699,32 @@ pub(crate) fn print_radar(v: &decsat_modem::radar::RadarView) {
             (Some(c), None) => format!(" · {c}"),
             (None, None) => String::new(),
         };
+        // What the aircraft says of itself (Mode S registers): where it is
+        // going and its air data.
+        let ms = &t.mode_s;
+        let own: String = [
+            ms.intent
+                .and_then(|i| i.mcp_ft.filter(|&f| f > 0))
+                .map(|f| format!("sel {}", decsat_modem::mode_s::altitude_text(f))),
+            ms.intent
+                .and_then(|i| i.qnh_hpa)
+                .map(|q| format!("{q:.0} hPa")),
+            ms.heading_speed
+                .and_then(|h| h.ias_kt)
+                .map(|v| format!("IAS {v}")),
+            ms.heading_speed
+                .and_then(|h| h.mach)
+                .map(|m| format!("M{m:.3}")),
+            ms.vertical_rate()
+                .filter(|v| v.abs() >= 150)
+                .map(|v| format!("{v:+} ft/min")),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| format!(" · {s}"))
+        .collect();
         println!(
-            "  track {:03X}{mode_s} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}",
+            "  track {:03X}{mode_s} · squawk {} · {} · {} kt · {:5.1} NM at {:5.1}° · heading {:3.0}° · {} reports{}{own}",
             r.number,
             r.squawk.map_or("----".into(), |s| format!("{s:04}")),
             r.flight_level

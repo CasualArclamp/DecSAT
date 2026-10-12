@@ -28,7 +28,8 @@
 
 use std::time::Instant;
 
-use decsat_engine::radar::{RadarView, Report, SECTORS, Track, tod_string};
+use decsat_engine::radar::mode_s::{ModeS, altitude_text, flight_status_text};
+use decsat_engine::radar::{RadarView, Report, SECTORS, Track, detection, tod_string};
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
@@ -833,8 +834,9 @@ impl RadarScope {
                     None => r.squawk.map_or("----".into(), |s| format!("{s:04}")),
                 };
                 let line2 = format!(
-                    "{} {}",
+                    "{}{} {}",
                     r.flight_level.map_or("---".into(), |f| format!("{f:03}")),
+                    selected_tag(&t.mode_s, r.flight_level),
                     r.ground_speed.map_or("-".into(), |g| format!("{g}"))
                 );
                 painter.text(
@@ -978,17 +980,24 @@ impl RadarScope {
                                     format!("FL{f:03} ({} ft)", i32::from(f) * 100)
                                 }),
                             );
-                            if let Some(rate) = t.vertical_rate() {
+                            // Climb or descent: the aircraft's own (Mode S),
+                            // else from the levels kept.
+                            let rate = t
+                                .mode_s
+                                .vertical_rate()
+                                .map(|v| (f32::from(v), " (Mode S)"))
+                                .or(t.vertical_rate().map(|v| (v, "")));
+                            if let Some((rate, from)) = rate {
                                 let rounded = (rate / 100.0).round() * 100.0;
                                 row(
                                     ui,
                                     "Vertical",
                                     if rounded.abs() < 150.0 {
-                                        "level".into()
+                                        format!("level{from}")
                                     } else if rounded > 0.0 {
-                                        format!("climbing {rounded:.0} ft/min")
+                                        format!("climbing {rounded:.0} ft/min{from}")
                                     } else {
-                                        format!("descending {:.0} ft/min", -rounded)
+                                        format!("descending {:.0} ft/min{from}", -rounded)
                                     },
                                 );
                             }
@@ -996,11 +1005,15 @@ impl RadarScope {
                                 ui,
                                 "Speed",
                                 format!(
-                                    "{} · heading {:03.0}°",
+                                    "{} · track {:03.0}°",
                                     r.ground_speed.map_or("-".into(), |g| format!("{g} kt")),
                                     r.track()
                                 ),
                             );
+                            mode_s_rows(ui, &t.mode_s, &row);
+                            if v.source.is_some() {
+                                row(ui, "Seen by", detection((r.status >> 8) as u8).into());
+                            }
                             row(
                                 ui,
                                 "From radar",
@@ -1256,12 +1269,15 @@ fn track_tip(ui: &mut Ui, t: &Track, names: Option<&AdsbNames>) {
                 format!("FL{f:03} ({} ft)", i32::from(f) * 100)
             }),
         );
+        if let Some(sel) = selected_text(&t.mode_s) {
+            row(ui, "Selected", sel);
+        }
         row(
             ui,
             "Ground speed",
             r.ground_speed.map_or("-".into(), |g| format!("{g} kt")),
         );
-        row(ui, "Heading", format!("{:03.0}°", r.track()));
+        row(ui, "Track", format!("{:03.0}°", r.track()));
         row(
             ui,
             "Position",
@@ -1303,20 +1319,107 @@ fn track_tip(ui: &mut Ui, t: &Track, names: Option<&AdsbNames>) {
     });
 }
 
+/// The PPI label's arrow and selected level (`↑370`) while the aircraft's
+/// selected altitude is 300 ft or more from where it is; else nothing.
+fn selected_tag(ms: &ModeS, flight_level: Option<i16>) -> String {
+    match (
+        ms.selected_level(),
+        flight_level.and_then(|f| ms.to_go_ft(f)),
+    ) {
+        (Some(l), Some(d)) if d >= 300 => format!("↑{l:03}"),
+        (Some(l), Some(d)) if d <= -300 => format!("↓{l:03}"),
+        _ => String::new(),
+    }
+}
+
+/// The selected altitudes (BDS 4,0): the autopilot panel's, the FMS's when
+/// it differs, and the modes engaged.
+fn selected_text(ms: &ModeS) -> Option<String> {
+    let i = ms.intent?;
+    let mut parts = Vec::new();
+    if let Some(ft) = i.mcp_ft.filter(|&f| f > 0) {
+        parts.push(altitude_text(ft));
+    }
+    if let Some(ft) = i.fms_ft.filter(|&f| f > 0 && Some(f) != i.mcp_ft) {
+        parts.push(format!("FMS {}", altitude_text(ft)));
+    }
+    if let Some(m) = i.modes {
+        for (on, name) in [
+            (m.vnav, "VNAV"),
+            (m.alt_hold, "ALT HOLD"),
+            (m.approach, "APP"),
+        ] {
+            if on {
+                parts.push(name.to_string());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The details box's Mode S rows: what the aircraft says of itself.
+fn mode_s_rows(ui: &mut Ui, ms: &ModeS, row: &dyn Fn(&mut Ui, &str, String)) {
+    if let Some(sel) = selected_text(ms) {
+        row(ui, "Selected", sel);
+    }
+    if let Some(q) = ms.intent.and_then(|i| i.qnh_hpa) {
+        row(ui, "Altimeter", format!("{q:.1} hPa"));
+    }
+    let (h, t) = (
+        ms.heading_speed.unwrap_or_default(),
+        ms.track_turn.unwrap_or_default(),
+    );
+    let air: Vec<String> = [
+        h.ias_kt.map(|v| format!("IAS {v} kt")),
+        h.mach.map(|m| format!("Mach {m:.3}")),
+        t.tas_kt.map(|v| format!("TAS {v} kt")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !air.is_empty() {
+        row(ui, "Air data", air.join(" · "));
+    }
+    let mut attitude: Vec<String> = Vec::new();
+    if let Some(hdg) = h.heading_deg {
+        attitude.push(format!("{hdg:03.0}° magnetic"));
+    }
+    if let Some(roll) = t.roll_deg.filter(|r| r.abs() >= 0.5) {
+        let side = if roll > 0.0 { "right" } else { "left" };
+        attitude.push(format!("bank {:.0}° {side}", roll.abs()));
+    }
+    if let Some(rate) = t.track_rate_dps.filter(|r| r.abs() >= 0.1) {
+        let side = if rate > 0.0 { "right" } else { "left" };
+        attitude.push(format!("turning {:.1}°/s {side}", rate.abs()));
+    }
+    if !attitude.is_empty() {
+        row(ui, "Heading", attitude.join(" · "));
+    }
+    if let Some(st) = ms.flight_status.filter(|&s| s != 0) {
+        row(ui, "Flight status", flight_status_text(st).into());
+    }
+}
+
 /// The tracks, nearest first; a click on a track's number picks it.
 fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>, names: Option<&AdsbNames>) {
     let mut tracks: Vec<&Track> = v.tracks.iter().collect();
     tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
     egui::Grid::new("radar_table")
-        .num_columns(9)
+        .num_columns(10)
         .striped(true)
         .spacing([14.0, 2.0])
         .show(ui, |ui| {
             for h in [
-                "Track", "Callsign", "Mode A", "FL", "GS kt", "Range NM", "Bearing", "Heading",
-                "Reports",
+                "Track", "Callsign", "Mode A", "FL", "Sel", "GS kt", "Range NM", "Bearing",
+                "Heading", "Reports",
             ] {
-                ui.label(RichText::new(h).strong());
+                let l = ui.label(RichText::new(h).strong());
+                if h == "Sel" {
+                    l.on_hover_text(
+                        "The level the aircraft is going to: its autopilot's selected \
+                         altitude (Mode S), hundreds of feet",
+                    );
+                }
             }
             ui.end_row();
             for t in tracks {
@@ -1342,6 +1445,12 @@ fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>, names: Option<&
                 cell(
                     ui,
                     r.flight_level.map_or("---".into(), |f| format!("{f:03}")),
+                );
+                cell(
+                    ui,
+                    t.mode_s
+                        .selected_level()
+                        .map_or(String::new(), |l| format!("{l:03}")),
                 );
                 cell(ui, r.ground_speed.map_or("-".into(), |g| g.to_string()));
                 cell(ui, format!("{:.1}", r.range()));

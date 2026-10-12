@@ -4,7 +4,10 @@
 //! or more ASTERIX data blocks. Found on five 64 kbit/s carriers
 //! (2026-10-12, Viterbi ½ + V.35 + differential, HDLC on an inverted
 //! line): sector messages (category 034) and target reports (category
-//! 048) from five radars, SAC 4, SICs 18, 19, 20, 48, 63.
+//! 048) from five radars, SAC 4, SICs 18, 19, 20, 48, 63; a sixth, SIC 22,
+//! on PH-BN (12325.82 MHz), whose reports also carry Mode S registers
+//! (I048/250, read by [`crate::mode_s`]). Nothing else rides PH-BN's line:
+//! its 12.6 s recording was 105 frames, all ASTERIX, and flags between.
 //!
 //! The layout is the published standard's: EUROCONTROL ASTERIX Part 2b
 //! (Cat 034, "Transmission of Monoradar Service Messages") and Part 4 (Cat
@@ -24,6 +27,7 @@
 //! ground speed 2⁻¹⁴ NM/s; heading 360/2¹⁶ °; rotation period 1/128 s;
 //! WGS-84 latitude and longitude 180/2²³ °.
 
+use crate::mode_s::ModeS;
 use crate::radar::{Message, Report, SECTORS, Site};
 
 /// How an item's length is found (ASTERIX's item formats).
@@ -225,19 +229,23 @@ fn s24(b: &[u8]) -> i32 {
     (i32::from(b[0] as i8) << 16) | i32::from(b[1]) << 8 | i32::from(b[2])
 }
 
-/// I048/240: eight 6-bit ICAO characters (A–Z 1–26, space 32, digits
-/// 48–57), trailing spaces dropped.
+/// I048/240: eight 6-bit ICAO characters, trailing spaces dropped.
 fn callsign(b: &[u8]) -> Option<String> {
-    let v = b.iter().fold(0u64, |a, &x| a << 8 | u64::from(x));
-    let s: String = (0..8)
-        .map(|k| match (v >> (42 - 6 * k)) & 63 {
-            c @ 1..=26 => char::from(b'A' + c as u8 - 1),
-            c @ 48..=57 => char::from(c as u8),
-            _ => ' ',
-        })
-        .collect();
-    let s = s.trim().to_string();
-    (!s.is_empty()).then_some(s)
+    crate::mode_s::icao_chars(b.iter().fold(0u64, |a, &x| a << 8 | u64::from(x)), 8)
+}
+
+/// I048/020's TYP (its first octet's top 3 bits): what saw the target.
+pub fn detection(descriptor: u8) -> &'static str {
+    match descriptor >> 5 {
+        0 => "no plot (coasted)",
+        1 => "primary (PSR)",
+        2 => "SSR",
+        3 => "SSR + PSR",
+        4 => "Mode S all-call",
+        5 => "Mode S roll-call",
+        6 => "Mode S all-call + PSR",
+        _ => "Mode S roll-call + PSR",
+    }
 }
 
 /// The radar messages in one HDLC frame of ASTERIX data: the frame with
@@ -358,6 +366,19 @@ fn cat048(r: &Record, raw: &[u8]) -> Option<Message> {
     });
     // TYP 0: no detection — a coasted track.
     let descriptor = r[2].map_or(0, |b| b[0]);
+    // Mode S registers (I048/250: a count, then 7 octets of register and
+    // its number each) and the flight status (I048/230's STAT, bits 13–11).
+    let mut mode_s = ModeS::default();
+    if let Some(b) = r[9] {
+        // Rust note: `as_chunks::<8>()` views the octets as whole `[u8; 8]`
+        // arrays; `first_chunk::<7>()` gives one's first 7 as a `[u8; 7]`.
+        for e in b[1..].as_chunks::<8>().0 {
+            if let Some(mb) = e.first_chunk::<7>() {
+                mode_s.register(e[7], mb);
+            }
+        }
+    }
+    mode_s.flight_status = r[20].map(|b| (b[0] >> 2) & 7);
     m.reports.push(Report {
         status: u16::from(descriptor) << 8 | u16::from(status.map_or(0, |s| s[0])),
         number,
@@ -371,11 +392,13 @@ fn cat048(r: &Record, raw: &[u8]) -> Option<Message> {
         squawk,
         ground_speed,
         address: r[7].map(|b| u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2])),
-        callsign: r[8].and_then(callsign),
+        // I048/240, else BDS 2,0.
+        callsign: r[8].and_then(callsign).or_else(|| mode_s.ident.clone()),
         other: 0,
         north_ticks: 0,
         tick_flags: 0,
         raw: raw.to_vec(),
+        mode_s,
     });
     Some(m)
 }
@@ -399,6 +422,9 @@ mod tests {
     const TWO_TRACKS: &str = "0303300065ffbf02041461fd36a2aefac74b2fc93fd86001b97cf78a0100000000000000e1025ea9ea0f91001611674020a0ffbf02041461fd37a2bdfbc7440fd13fd86002b87cf78b0200000000000000e100100000000000e20034a28610dd000e15654020a0220010f404140261fd38c89400202000";
     /// A track ended, then a sector message, in one frame.
     const ENDED: &str = "030330000fe112041461fdb120048427c0220010f404140261fdb7089400202000";
+    /// PH-BN (SIC 22), 2026-10-12 05:42 UTC: an airliner's report with
+    /// its Mode S registers 6,0, 4,0 and 5,0 (I048/250) and I048/230.
+    const MODE_S: &str = "0303300040ffbf020416281595a86b1e32f308bd05f06003b47c718103d5a9b72be0040060ca3e51f0a8014540fffa492a6004cc50008532d410e10606a5354020fd";
 
     #[test]
     fn a_sector_crossing() {
@@ -449,6 +475,25 @@ mod tests {
         assert_eq!(m[0].ended, vec![0x484]);
         assert!(m[0].reports.is_empty());
         assert_eq!(m[1].kind, 34);
+    }
+
+    #[test]
+    fn mode_s_registers() {
+        let m = messages(&hex(MODE_S)).unwrap();
+        let r = &m[0].reports[0];
+        assert_eq!(m[0].source, Some((4, 22)));
+        assert_eq!(r.address, Some(0x7C7181));
+        assert_eq!((r.flight_level, r.squawk), (Some(380), Some(4275)));
+        assert_eq!(detection((r.status >> 8) as u8), "Mode S roll-call");
+        let ms = &r.mode_s;
+        assert_eq!(ms.flight_status, Some(0));
+        assert_eq!(ms.selected_level(), Some(380));
+        assert_eq!(ms.heading_speed.unwrap().ias_kt, Some(219));
+        // The aircraft's true track and ground speed against the radar's.
+        let t = ms.track_turn.unwrap();
+        assert!((t.track_deg.unwrap() - r.track()).abs() < 2.0);
+        assert!(t.ground_speed_kt.unwrap().abs_diff(r.ground_speed.unwrap()) <= 4);
+        assert_eq!(r.callsign, None);
     }
 
     #[test]
