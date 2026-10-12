@@ -2845,3 +2845,25 @@ the maps"): it governs the callsign lookup alone, and its first name read
 as if it cut the scope off the internet. The map's tiles and the airport
 data download whatever it says, as before; its setting keeps its key
 (`radar_internet`), so a tick made under the old name stays.
+
+## ADS-B over a radar's scope (2026-10-12)
+
+Rory: "show ADS-B targets on the radar scope too". A radar's PPI now draws
+the aircraft an ADS-B feed on another VFO hears (the ML–PH trunk's
+CAT021): each at the place it reports, projected round the radar's site
+(the feed's trails, measured from its own origin, placed again); magenta
+diamonds — small for an aircraft the radar tracks too (the same Mode S
+address, else the same callsign), labelled with callsign, level (and the
+level it is going to) and speed, with trail and one-minute leader, for the
+rest; the hover tip gives its details. An "ADS-B" switch beside Trails,
+shown when a feed is there; a corner note counts them ("19 aircraft · 11
+tracked by the radar too"). A feed whose clock is more than a minute from
+the radar's is not drawn, and the note says so: a recording of another
+hour's sky would place aircraft where there are none. The same rule now
+holds for the callsigns local ADS-B gives radar tracks, which matched
+across clocks before (the PH-BN recording, nine minutes from the trunk's,
+took names from it). Checked on a mixed capture (the synthetic trunk
+carrier and the PH-BN carrier made from its recording, at −800 kHz,
+scratch tools not committed): the note "its feed's clock is 540 s from
+the radar's — not drawn" and no names; with the limit lifted in a scratch
+build, the diamonds as above (the same aircraft by address in both).

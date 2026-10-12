@@ -37,7 +37,7 @@ use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
 use crate::adsb_names::AdsbNames;
 use crate::prefs::RadarId;
-use crate::radar_map::{Frame, LatLon, MapLayer, Style};
+use crate::radar_map::{Frame, LatLon, MapLayer, Style, from_nm, to_nm};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
     pos2, vec2,
@@ -83,6 +83,10 @@ pub struct RadarScope {
     /// The track clicked (on the PPI or in the table): ringed, its details
     /// in a box over the PPI's corner.
     selected: Option<u16>,
+    /// ADS-B feeds decoded on other VFOs (taken each frame), their aircraft
+    /// drawn over a radar's PPI at their own places, and whether to.
+    overlay: Vec<AdsbFeed>,
+    adsb_on: bool,
     map_loaded: bool,
     /// The radar whose kept place is loaded (by the radar, not the VFO:
     /// see [`RadarId`]), that place, and the place editor's text while it
@@ -91,6 +95,31 @@ pub struct RadarScope {
     manual_site: Option<LatLon>,
     site_edit: Option<String>,
 }
+
+/// An ADS-B feed on another VFO, for drawing over a radar's PPI: where its
+/// reports' x and y are measured from, its latest time of day, its
+/// aircraft.
+struct AdsbFeed {
+    origin: LatLon,
+    tod: Option<f64>,
+    tracks: Vec<Track>,
+    /// Its aircraft for naming radar tracks (see `crate::adsb_names`).
+    seen: Vec<crate::adsb_names::Seen>,
+}
+
+impl AdsbFeed {
+    /// How far its clock is from a radar feed's at `tod`, s (round
+    /// midnight the short way); `None` if either is not known yet.
+    fn skew(&self, tod: Option<f64>) -> Option<f64> {
+        let (a, b) = (tod?, self.tod?);
+        Some(((a - b + 43_200.0).rem_euclid(86_400.0) - 43_200.0).abs())
+    }
+}
+
+/// An ADS-B feed whose clock is further than this from the radar's is not
+/// drawn over it, s: a recording of another hour's sky would put aircraft
+/// where there are none.
+const ADSB_SKEW_SECS: f64 = 60.0;
 
 /// What the scope shows for its VFO.
 pub struct ScopeInput<'a> {
@@ -224,6 +253,8 @@ impl Default for RadarScope {
             names: AdsbNames::default(),
             internet: false,
             selected: None,
+            overlay: Vec::new(),
+            adsb_on: true,
         }
     }
 }
@@ -293,15 +324,25 @@ impl RadarScope {
                 .unwrap_or_default();
             self.map_brightness = brightness;
         }
-        // Callsigns from an ADS-B feed decoded on another VFO, when there
-        // is one (see `crate::adsb_names`).
-        self.names.set_local(
-            inp.feeds
-                .iter()
-                .filter(|f| f.2.radar.adsb)
-                .flat_map(|f| crate::adsb_names::seen_from(&f.2.radar))
-                .collect(),
-        );
+        // ADS-B feeds on other VFOs: their aircraft over a radar's PPI.
+        self.overlay = inp
+            .feeds
+            .iter()
+            .filter(|f| f.2.radar.adsb)
+            .filter_map(|f| {
+                let v = &f.2.radar;
+                let o = v.origin?;
+                Some(AdsbFeed {
+                    origin: LatLon {
+                        lat: o.lat,
+                        lon: o.lon,
+                    },
+                    tod: v.tod,
+                    tracks: v.tracks.clone(),
+                    seen: crate::adsb_names::seen_from(v),
+                })
+            })
+            .collect();
         let mut open = true;
         egui::Window::new(format!("Radar scope — {name}"))
             .id(egui::Id::new("radar_scope"))
@@ -561,6 +602,20 @@ impl RadarScope {
             ui.separator();
             ui.checkbox(&mut self.labels, "Labels");
             ui.checkbox(&mut self.trails, "Trails");
+            if !self.overlay.is_empty() && !v.adsb {
+                ui.add_enabled(
+                    site.is_some(),
+                    egui::Checkbox::new(&mut self.adsb_on, "ADS-B"),
+                )
+                .on_hover_text(
+                    "The aircraft an ADS-B feed on another VFO hears (the ML–PH trunk's \
+                         ASTERIX CAT021), drawn at the places they report: diamonds, small for \
+                         those this radar tracks too (same Mode S address or callsign), \
+                         labelled for the rest. A feed whose clock is more than a minute from \
+                         the radar's is left out (a recording of another sky).",
+                )
+                .on_disabled_hover_text("Where is the radar? Set it with Site… to place them");
+            }
             ui.checkbox(&mut self.declining, "Tracks in decline")
                 .on_hover_text("Tracks reported with status 83n0h: no plot on this scan");
             ui.checkbox(&mut self.glow, "Beam glow")
@@ -667,6 +722,16 @@ impl RadarScope {
         // On the light map: dark rings, deep colours.
         let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
         let mut frame = None;
+        // Callsigns from ADS-B feeds decoded on other VFOs (see
+        // `crate::adsb_names`): those in step with this radar's clock only —
+        // another hour's sky would name tracks wrongly.
+        self.names.set_local(
+            self.overlay
+                .iter()
+                .filter(|f| !v.adsb && f.skew(v.tod).is_none_or(|d| d <= ADSB_SKEW_SECS))
+                .flat_map(|f| f.seen.iter().cloned())
+                .collect(),
+        );
         let naming = self.internet || self.names.has_local();
         if (self.map_on || self.airports_on || naming)
             && let Some(site) = self.site_of(v)
@@ -877,6 +942,126 @@ impl RadarScope {
                 }
             }
         }
+        // ADS-B aircraft from other VFOs, over the radar's own tracks.
+        let mut adsb_near: Option<(f32, Track, bool)> = None;
+        if self.adsb_on
+            && !v.adsb
+            && !self.overlay.is_empty()
+            && let Some(site) = self.site_of(v)
+        {
+            let col = if light {
+                Color32::from_rgb(150, 30, 150)
+            } else {
+                Color32::from_rgb(235, 130, 235)
+            };
+            // The aircraft this radar tracks too: by Mode S address, else by
+            // the callsign its track has (its own or the names').
+            let addresses: std::collections::HashSet<u32> =
+                v.tracks.iter().filter_map(|t| t.last.address).collect();
+            let calls: std::collections::HashSet<String> = v
+                .tracks
+                .iter()
+                .filter_map(|t| call(&t.last, Some(&self.names)))
+                .collect();
+            let (mut shown, mut tracked_n, mut skewed) = (0, 0, None);
+            for feed in &self.overlay {
+                if let Some(d) = feed.skew(v.tod).filter(|&d| d > ADSB_SKEW_SECS) {
+                    skewed = Some(d);
+                    continue;
+                }
+                for t in &feed.tracks {
+                    let r = &t.last;
+                    let Some(a) = r.adsb.filter(|a| !a.field_monitor) else {
+                        continue;
+                    };
+                    let (x, y) = to_nm(
+                        site,
+                        LatLon {
+                            lat: a.lat,
+                            lon: a.lon,
+                        },
+                    );
+                    let p = to_screen(x as f32, y as f32);
+                    if !rect.expand(40.0).contains(p) {
+                        continue;
+                    }
+                    let tracked = r.address.is_some_and(|ad| addresses.contains(&ad))
+                        || r.callsign.as_ref().is_some_and(|c| calls.contains(c));
+                    shown += 1;
+                    tracked_n += usize::from(tracked);
+                    if !tracked {
+                        if self.trails {
+                            // Its trail is from the feed's origin: placed again
+                            // round this radar.
+                            let n = t.trail.len();
+                            for (i, &(tx, ty)) in
+                                t.trail.iter().enumerate().take(n.saturating_sub(1))
+                            {
+                                let ll = from_nm(feed.origin, f64::from(tx), f64::from(ty));
+                                let (sx, sy) = to_nm(site, ll);
+                                let alpha = 0.25 + 0.5 * i as f32 / n.max(1) as f32;
+                                painter.circle_filled(
+                                    to_screen(sx as f32, sy as f32),
+                                    1.3,
+                                    col.gamma_multiply(alpha),
+                                );
+                            }
+                        }
+                        let lead = to_screen(x as f32 + r.vx / 60.0, y as f32 + r.vy / 60.0);
+                        painter.line_segment([p, lead], Stroke::new(1.0, col.gamma_multiply(0.8)));
+                    }
+                    let k = if tracked { 3.0 } else { 4.5 };
+                    painter.add(egui::Shape::closed_line(
+                        vec![
+                            p + vec2(0.0, -k),
+                            p + vec2(k, 0.0),
+                            p + vec2(0.0, k),
+                            p + vec2(-k, 0.0),
+                        ],
+                        Stroke::new(1.3, col.gamma_multiply(if tracked { 0.7 } else { 1.0 })),
+                    ));
+                    if self.labels && !tracked {
+                        let line1 = r
+                            .callsign
+                            .clone()
+                            .or_else(|| r.address.map(|ad| format!("{ad:06X}")))
+                            .unwrap_or_else(|| "ADS-B".into());
+                        let line2 = format!(
+                            "{}{} {}",
+                            r.flight_level.map_or("---".into(), |f| format!("{f:03}")),
+                            selected_tag(&t.mode_s, r.flight_level),
+                            r.ground_speed.map_or("-".into(), |g| format!("{g}"))
+                        );
+                        painter.text(
+                            p + vec2(7.0, -7.0),
+                            Align2::LEFT_BOTTOM,
+                            format!("{line1}\n{line2}"),
+                            FontId::monospace(10.5),
+                            col,
+                        );
+                    }
+                    if let Some(q) = pointer {
+                        let d = q.distance(p);
+                        if d < 10.0 && adsb_near.as_ref().is_none_or(|(e, ..)| d < *e) {
+                            adsb_near = Some((d, t.clone(), tracked));
+                        }
+                    }
+                }
+            }
+            let text = match skewed {
+                Some(d) if shown == 0 => {
+                    format!("ADS-B: its feed's clock is {d:.0} s from the radar's — not drawn")
+                }
+                _ => format!("ADS-B: {shown} aircraft · {tracked_n} tracked by the radar too"),
+            };
+            painter.text(
+                rect.right_bottom() + vec2(-6.0, -6.0),
+                Align2::RIGHT_BOTTOM,
+                text,
+                FontId::proportional(11.0),
+                col,
+            );
+        }
         // A click on a track picks it (again: lets it go); on nothing, lets
         // go.
         if resp.clicked() {
@@ -893,6 +1078,8 @@ impl RadarScope {
         if let Some((_, t)) = nearest {
             let names = Some(&self.names);
             resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t, names));
+        } else if let Some((_, t, tracked)) = adsb_near {
+            resp.on_hover_ui_at_pointer(|ui| adsb_tip(ui, &t, tracked));
         } else if let Some(q) = pointer
             && rect.contains(q)
         {
@@ -1314,6 +1501,63 @@ fn name_rows(
             row(ui, "Aircraft", what.join(" · "));
         }
     }
+}
+
+/// An ADS-B aircraft drawn over a radar's PPI, under the pointer.
+fn adsb_tip(ui: &mut Ui, t: &Track, tracked: bool) {
+    let r = &t.last;
+    let name = r.callsign.clone().unwrap_or_else(|| "ADS-B".into());
+    ui.label(RichText::new(format!("{name} · ADS-B")).strong());
+    egui::Grid::new("radar_adsb_tip")
+        .num_columns(2)
+        .show(ui, |ui| {
+            let row = |ui: &mut Ui, k: &str, v: String| {
+                ui.label(k);
+                ui.label(v);
+                ui.end_row();
+            };
+            if let Some(a) = r.address {
+                row(ui, "Mode S", format!("{a:06X}"));
+            }
+            row(
+                ui,
+                "Mode A",
+                r.squawk.map_or("none".into(), |s| format!("{s:04}")),
+            );
+            row(
+                ui,
+                "Level",
+                r.flight_level
+                    .map_or("none".into(), |f| format!("FL{f:03}")),
+            );
+            if let Some(sel) = selected_text(&t.mode_s) {
+                row(ui, "Selected", sel);
+            }
+            row(
+                ui,
+                "Ground speed",
+                r.ground_speed.map_or("-".into(), |g| format!("{g} kt")),
+            );
+            row(ui, "Track", format!("{:03.0}°", r.track()));
+            if let Some(a) = r.adsb {
+                row(ui, "Lat, lon", format!("{:.4}, {:.4}", a.lat, a.lon));
+                if let Some(e) = a.emitter {
+                    row(ui, "Emitter", emitter_text(e).into());
+                }
+                if let Some(e) = a.emergency.filter(|&e| e != 0) {
+                    row(ui, "Emergency", emergency_text(e).into());
+                }
+            }
+            row(
+                ui,
+                "Radar",
+                if tracked {
+                    "tracks it too".into()
+                } else {
+                    "no track of it".into()
+                },
+            );
+        });
 }
 
 fn track_tip(ui: &mut Ui, t: &Track, names: Option<&AdsbNames>) {
