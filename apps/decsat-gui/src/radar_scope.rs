@@ -30,8 +30,9 @@ use std::time::Instant;
 
 use decsat_engine::radar::mode_s::{ModeS, altitude_text, flight_status_text};
 use decsat_engine::radar::{
-    Adsb, BSC_STATUS, RadarView, Report, SECTORS, StatusField, Track, bsc_status_text, detection,
-    emergency_text, emitter_text, status_fields, tod_string,
+    Adsb, BSC_PLOT_FLAGS, BSC_STATUS, RadarView, Report, SECTORS, StatusField, Track,
+    bsc_plot_azimuth, bsc_seen_by, bsc_status_text, detection, emergency_text, emitter_text,
+    status_fields, tod_string,
 };
 use decsat_engine::{RadarStageView, VfoId};
 use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
@@ -1534,7 +1535,7 @@ impl RadarScope {
                                     age.map_or(String::new(), |a| format!(" · last {a:.1} s ago"))
                                 ),
                             );
-                            status_rows(ui, r, v.source.is_some());
+                            status_rows(ui, r, v.source.is_some(), v.scan_secs);
                         });
                     ui.label(
                         RichText::new(
@@ -1951,7 +1952,7 @@ fn selected_text(ms: &ModeS) -> Option<String> {
 /// what it means; on hover, its item and every value it can take. `asterix`:
 /// the report came from an ASTERIX radar feed, not the BSC one (whose
 /// words are known only by what each was seen to mean).
-fn status_rows(ui: &mut Ui, r: &Report, asterix: bool) {
+fn status_rows(ui: &mut Ui, r: &Report, asterix: bool, scan_secs: Option<f64>) {
     // In the box's style: the name weak, the value monospace.
     let key = |ui: &mut Ui, k: &str| ui.label(RichText::new(k).weak());
     let val = |ui: &mut Ui, v: String| ui.label(RichText::new(v).monospace());
@@ -1980,6 +1981,48 @@ fn status_rows(ui: &mut Ui, r: &Report, asterix: bool) {
                     }
                 });
             });
+            ui.end_row();
+            // The ping: when and where the beam saw the plot, what saw it,
+            // how strong (read off the PH-ML recording, not known).
+            if r.updated() {
+                let scan = scan_secs.unwrap_or(472.0 / 128.0);
+                key(ui, "Ping");
+                val(
+                    ui,
+                    format!(
+                        "beam at {:05.1}° · {:.3} s after north",
+                        bsc_plot_azimuth(r, scan),
+                        f64::from(r.north_ticks) / 128.0
+                    ),
+                )
+                .on_hover_text(
+                    "When the radar's beam saw the plot (octets 22–23: 1/128 s after \
+                     north), as an azimuth through the scan time: it agrees with the \
+                     track's bearing to within the beam's step",
+                );
+                ui.end_row();
+            }
+            key(ui, "Seen by");
+            val(ui, format!("{}  ({:02X}h)", bsc_seen_by(r), r.other >> 8)).on_hover_ui(|ui| {
+                ui.label(RichText::new("The plot's flags (octet 20)").strong());
+                ui.label(
+                    "As seen on the PH-ML recording, with what each came with; read off \
+                     it, not known.",
+                );
+                egui::Grid::new("bsc_plot_flags").show(ui, |ui| {
+                    for (word, meaning) in BSC_PLOT_FLAGS {
+                        ui.label(RichText::new(word).monospace());
+                        ui.label(meaning);
+                        ui.end_row();
+                    }
+                });
+            });
+            ui.end_row();
+            key(ui, "Strength?");
+            val(ui, format!("{}", r.other & 0xFF)).on_hover_text(
+                "Octet 21: a value falling with range (169 at 15 NM, 90 at 195 NM) — the \
+                 plot's amplitude, perhaps",
+            );
             ui.end_row();
             return;
         }

@@ -12,8 +12,8 @@ use decsat_modem::bsc::Block;
 use decsat_modem::radar::{CSV_HEADER, Message, RadarRx, csv_line};
 // For the GUI, which reaches the modem crate through the engine.
 pub use decsat_modem::radar::{
-    Adsb, BSC_STATUS, RadarView, Report, SECTORS, Site, Track, bsc_status_text, east_north_nm,
-    tod_string,
+    Adsb, BSC_PLOT_FLAGS, BSC_STATUS, RadarView, Report, SECTORS, Site, Track, bsc_plot_azimuth,
+    bsc_seen_by, bsc_status_text, east_north_nm, tod_string,
 };
 // The Mode S registers' fields and their wording, what saw a target
 // (ASTERIX), what an ADS-B target is, and the status words said field by

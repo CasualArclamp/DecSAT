@@ -29,7 +29,7 @@
 //! | 14–15  | Mode A: 4 octal digits in the low 12 bits, bit 12 set (`18C4` = 4304) |
 //! | 16–17  | `00 00`                                                       |
 //! | 18–19  | ground speed, kt, BCD (514 at FL390; 100 at 1100 ft)          |
-//! | 20–21  | not known: a flag in bit 8 (set on most climbing or descending tracks) and a value falling with range (169 at 15 NM, 90 at 195 NM: plot amplitude?) |
+//! | 20–21  | the plot's flags (high octet) and a value falling with range (low octet: 169 at 15 NM, 90 at 195 NM — plot amplitude?); see [`BSC_PLOT_FLAGS`] |
 //! | 22–23  | low 9 bits: when the plot was seen, 1/128 s after north (472 a scan: 3.6875 s, 16.3 rpm); the top bits flags |
 //!
 //! Ranges reach 247 NM (a co-mounted MSSR's coverage); an aircraft on a
@@ -183,6 +183,44 @@ pub const BSC_STATUS: [(&str, &str); 3] = [
         "in decline: n counts 1–4 as its speed falls and x/y jitter",
     ),
 ];
+
+/// The BSC report's plot flags (octet 20) seen on the 37 s PH-ML recording,
+/// with what each came with — read off it, not known: 0Ch on every report
+/// with neither Mode A nor Mode C (40: primary-only plots), 0Dh on the
+/// primary-only tracks in decline; 00h and 01h with Mode A and C (97, 67:
+/// secondary replies; 01h on most climbing or descending tracks), 08h and
+/// 0Ah (8) with them too. So 08h reads as "the primary radar saw it", 04h
+/// as "no secondary reply", 01h as a vertical flag.
+pub const BSC_PLOT_FLAGS: [(&str, &str); 6] = [
+    ("00h", "secondary reply (Mode A and C)"),
+    (
+        "01h",
+        "secondary reply; set on most climbing or descending tracks",
+    ),
+    ("08h", "secondary and primary? (with Mode A and C)"),
+    ("0Ah", "secondary and primary? (seen twice)"),
+    ("0Ch", "primary only (no Mode A, no Mode C)"),
+    ("0Dh", "primary only, in decline"),
+];
+
+/// What saw a BSC report's plot, as its flags (octet 20) read (see
+/// [`BSC_PLOT_FLAGS`]): primary only, secondary and primary, or secondary.
+pub fn bsc_seen_by(r: &Report) -> &'static str {
+    let flags = r.other >> 8;
+    if flags & 0x0C == 0x0C {
+        "primary only (no reply)"
+    } else if flags & 0x08 != 0 {
+        "secondary + primary?"
+    } else {
+        "secondary (SSR reply)"
+    }
+}
+
+/// Where a BSC report's plot was seen: the beam's azimuth then (degrees),
+/// from its time after north (octets 22–23, 1/128 s) and the scan time.
+pub fn bsc_plot_azimuth(r: &Report, scan_secs: f64) -> f64 {
+    (f64::from(r.north_ticks) / 128.0 / scan_secs * 360.0).rem_euclid(360.0)
+}
 
 /// What a BSC status word was read to mean (see [`BSC_STATUS`]).
 pub fn bsc_status_text(status: u16) -> String {
@@ -695,6 +733,23 @@ mod tests {
         assert!((r.bearing() - 57.4).abs() < 0.1, "{}", r.bearing());
         assert!((r.track() - 266.3).abs() < 0.5, "{}", r.track());
         assert!((r.vx.hypot(r.vy) - 350.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn the_plot_as_the_beam_saw_it() {
+        let m = Message::parse(&[0x0C, 0x40], &SECTOR_5).unwrap();
+        let r = &m.reports[0];
+        // Seen 74/128 s after north in a 472/128 s scan: 56.4°, the
+        // track's own bearing 57.4° within the beam's step.
+        let az = bsc_plot_azimuth(r, 472.0 / 128.0);
+        assert!((az - 56.44).abs() < 0.05, "{az}");
+        assert!((az - f64::from(r.bearing())).abs() < 1.5);
+        // Octet 20 is 01h: a secondary reply.
+        assert_eq!(r.other >> 8, 0x01);
+        assert_eq!(bsc_seen_by(r), "secondary (SSR reply)");
+        let mut primary = r.clone();
+        primary.other = 0x0C00 | (primary.other & 0xFF);
+        assert_eq!(bsc_seen_by(&primary), "primary only (no reply)");
     }
 
     #[test]

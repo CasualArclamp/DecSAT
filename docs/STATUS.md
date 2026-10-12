@@ -3144,3 +3144,22 @@ CDM-570L Viterbi with radar, CDM-570L trunk with ADS-B and voice) and on a
 live 8 MS/s capture (Oct 11, 1745 MHz centre): 26 of 29 decoded in under
 three minutes, two at a time — Q-Flex FastLinks, CDM-570L TPC carriers,
 one with radar.
+
+## The BSC feed's ping in the details box (2026-10-12)
+
+Rory, on the PH-ML scope: "the radar ping status info is not showing on
+here". ASTERIX tracks list their detection fields (I048/020's TYP: PSR,
+SSR, Mode S); the BSC feed's track showed only its status word. Its
+reports carry the ping all the same, read off the 37 s PH-ML recording
+(234 reports): octets 22–23's low 9 bits, the plot's time after north,
+give the beam's azimuth then (ticks / 128 / scan × 360°, within 1° of the
+track's bearing every time); octet 20 the plot's flags — 0Ch on all 40
+reports with neither Mode A nor C (primary-only plots), 0Dh on primary-only
+tracks in decline, 00h/01h with Mode A and C (97/67; 01h on most climbing
+or descending tracks), 08h/0Ah with them too (8: primary and secondary?);
+octet 21 a value falling with range (plot strength?). `radar::bsc_seen_by`,
+`bsc_plot_azimuth`, `BSC_PLOT_FLAGS`; the details box's BSC rows: Ping
+("beam at 148.0° · 1.516 s after north"), Seen by ("primary only (no
+reply) (0Ch)", every flag value seen on hover), Strength?. All marked as
+read off the recording, not known. Checked unattended on the recording:
+track 103, primary only, beam 148.0° against its bearing 148.1°.
