@@ -21,10 +21,10 @@ use eframe::egui::{self, Color32, RichText};
 use crate::carrier_caps::{self, Caps};
 
 /// Identify's answer is waited for this long, s.
-const IDENTIFY_SECS: f64 = 12.0;
+pub const IDENTIFY_SECS: f64 = 12.0;
 /// A provisional answer (too short a listen to rule DVB-S2 out) is taken
 /// after this long, s.
-const PROVISIONAL_SECS: f64 = 6.0;
+pub const PROVISIONAL_SECS: f64 = 6.0;
 /// A carrier that has locked is watched this long more, s: what it carries
 /// shows.
 pub const DWELL_SECS: f64 = 6.0;
@@ -156,8 +156,9 @@ impl Default for Survey {
     }
 }
 
-/// The decoder for what Identify saw, or why there is none.
-fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
+/// The decoder for what Identify saw, or why there is none (also what a
+/// carrier claimed from its bracket switches to: `auto_pick`).
+pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
     use decsat_engine::ConstellationGuess;
     match &ident.verdict {
         Verdict::NoSignal => Err(Outcome::NoSignal),

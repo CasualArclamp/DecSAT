@@ -87,7 +87,8 @@ On the waterfall:
 | **right- or middle-drag** | pan; past the span's edge (or at full span) with the HackRF live, it tunes the radio — the spectrum follows the mouse |
 | **drag on empty space** | draw a new VFO |
 | **double-click** | drop a VFO |
-| **click a green bracket** | claim a detected carrier with a VFO sized to fit |
+| **click a green bracket** | claim a detected carrier with a VFO sized to fit, on the decoder it is known to need, else found as the Survey finds it (Identify, then DVB-S2 or the Comtech *type found*) |
+| **shift-click a green bracket** | claim it with the decoder *New VFOs run* instead |
 | **drag a VFO** / **its edge** | move it / resize it |
 | **click** (VFO selected) | tune it there |
 | **✕** on a VFO's label, or **Delete** | remove it |
@@ -496,6 +497,17 @@ puts a kept VFO on a decoded one, **Save CSV** writes the table to the
 output folder. The waterfall's ADS-B and RADAR tags learn as it goes, and a
 retune stops it. `--survey` runs one unattended (with `--screenshot` to
 keep the picture).
+
+A click on one carrier's green bracket does the same for that carrier
+alone, and keeps the VFO: it starts on Identify and switches to the
+decoder for what Identify saw, on the centre and rate it measured (a
+DVB-S2 carrier whose frames turn out to be TS-mode moves on to the
+MPEG-TS decoder; one with no decoder here stays on Identify). The status
+bar says what it picked. A carrier already decoded once (here or by a
+survey) gets that decoder straight away, and a tool chosen in *New VFOs
+run* (IQ recorder, spectrum, symbols, carrier ID) is kept. Shift-click gives the carrier the decoder *New
+VFOs run* instead; `--claim-auto` claims every carrier this way
+unattended.
 
 ### Frequency plan
 

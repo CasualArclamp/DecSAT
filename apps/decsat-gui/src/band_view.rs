@@ -6,7 +6,10 @@
 //! - **drag a VFO** moves it; **drag its edge** resizes it symmetrically;
 //! - **drag on empty space** draws a new VFO; **double-click** drops one;
 //! - **click** with a VFO selected tunes it there; **click a VFO** selects it;
-//! - **click a detected carrier's bracket** claims it with a VFO sized to fit.
+//! - **click a detected carrier's bracket** claims it with a VFO sized to fit,
+//!   on the decoder the carrier is known to need, else found as the survey
+//!   finds it (Identify, then the decoder for what it is: `auto_pick`);
+//!   **shift-click** gives it the decoder new VFOs run instead.
 //!
 //! Painted directly rather than with `egui_plot`, which cannot host the
 //! waterfall texture under draggable VFO boxes.
@@ -34,6 +37,9 @@ pub enum Action {
     Select(Option<VfoId>),
     Update(VfoId, VfoSettings),
     Create(VfoSettings),
+    /// A VFO on a detected carrier, made on Identify, then switched to the
+    /// decoder for what Identify saw (`auto_pick`).
+    Claim(VfoSettings),
     Remove(VfoId),
     /// Move the radio's centre frequency by this many Hz.
     Retune(f64),
@@ -86,6 +92,19 @@ fn decoder_over(inp: &BandInput, lo: f64, hi: f64) -> (DecoderKind, bool) {
     }
     inp.caps
         .decoder_for(inp.rf_center + lo, inp.rf_center + hi, inp.new_decoder)
+}
+
+/// The decoder a click on a carrier's bracket over `lo..hi` makes its VFO
+/// with, and whether it is what the carrier is known to need: the known
+/// one, or the tool new VFOs run; `None` for auto (Identify, then the
+/// decoder for what it saw: `auto_pick`). Shift held: what new VFOs run,
+/// as chosen.
+fn bracket_decoder(inp: &BandInput, lo: f64, hi: f64, shift: bool) -> Option<(DecoderKind, bool)> {
+    if shift {
+        return Some((inp.new_decoder, false));
+    }
+    let (dec, known) = decoder_over(inp, lo, hi);
+    (known || crate::carrier_caps::is_tool(inp.new_decoder)).then_some((dec, known))
 }
 
 /// Small tags (the modem, ADS-B, RADAR) in a row centred on `x`, from `y`
@@ -1023,30 +1042,35 @@ impl BandView {
             }
             if let Some(i) = carrier_hit {
                 let c = &inp.front.carriers[i];
-                let (dec, known) = decoder_over(
+                let shift = ui.input(|i| i.modifiers.shift);
+                let what = match bracket_decoder(
                     inp,
                     c.center_hz - c.bandwidth_hz / 2.0,
                     c.center_hz + c.bandwidth_hz / 2.0,
-                );
-                let what = if known {
-                    format!(
+                    shift,
+                ) {
+                    Some((dec, true)) => format!(
                         "{} (known)",
                         crate::carrier_caps::model_tag(dec).unwrap_or(dec.short())
-                    )
+                    ),
+                    Some((dec, false)) => dec.short().to_string(),
+                    None => "auto".into(),
+                };
+                // What shift gives, unless held.
+                let or = if shift {
+                    String::new()
                 } else {
-                    dec.short().to_string()
+                    format!(" (shift: {})", inp.new_decoder.short())
                 };
                 text = if c.narrow {
                     format!(
-                        "click: {} on narrow line at {} ({:.0} dB) — a CW, a spur, or a slow carrier",
-                        what,
+                        "click: {what} on narrow line at {} ({:.0} dB) — a CW, a spur, or a slow carrier",
                         format::freq(inp.rf_center + c.center_hz),
                         c.snr_db
                     )
                 } else {
                     format!(
-                        "click: {} on {} carrier, ~{}, {:.0} dB S/N",
-                        what,
+                        "click: {what} on {} carrier, ~{}, {:.0} dB S/N{or}",
                         format::freq(inp.rf_center + c.center_hz),
                         format::rate(c.symbol_rate_hz),
                         c.snr_db
@@ -1243,14 +1267,24 @@ impl BandView {
                     c.suggested_vfo_bandwidth()
                 };
                 let bw = c.fit_among(want, &inp.front.carriers);
+                let made = bracket_decoder(
+                    inp,
+                    c.center_hz - bw / 2.0,
+                    c.center_hz + bw / 2.0,
+                    ui.input(|i| i.modifiers.shift),
+                );
                 let mut s = VfoSettings::new(
                     name_at(c.center_hz, bw),
                     c.center_hz,
                     bw.max(min_vfo),
-                    decoder_over(inp, c.center_hz - bw / 2.0, c.center_hz + bw / 2.0).0,
+                    made.map_or(DecoderKind::Identify, |(k, _)| k),
                 );
                 s.record_dir = default_record_dir();
-                actions.push(Action::Create(s));
+                actions.push(if made.is_some() {
+                    Action::Create(s)
+                } else {
+                    Action::Claim(s)
+                });
             } else if let Some((id, _)) = hit_vfo(p) {
                 actions.push(Action::Select(Some(id)));
             } else if let Some(sel) = inp.selected.and_then(find) {

@@ -16,6 +16,9 @@ pub struct Options {
     pub after: Option<f64>,
     /// Claim every detected carrier with the default decoder.
     pub claim_carriers: bool,
+    /// Claim them as a click on their bracket does: Identify, then the
+    /// decoder for what it saw (`auto_pick`).
+    pub claim_auto: bool,
     /// Select the n-th VFO (1-based) once claimed.
     pub select: Option<usize>,
     /// Start the HackRF tuned here, MHz (receive only).
@@ -68,6 +71,10 @@ impl Options {
                     );
                 }
                 Some("--claim-carriers") => o.claim_carriers = true,
+                Some("--claim-auto") => {
+                    o.claim_carriers = true;
+                    o.claim_auto = true;
+                }
                 Some("--ts-viewer") => o.ts_viewer = true,
                 Some("--radar-scope") => o.radar_scope = true,
                 Some("--radar-track") => {
@@ -177,6 +184,7 @@ pub struct Automation {
     screenshot: Option<PathBuf>,
     requested_at: Option<Instant>,
     pub claim_carriers: bool,
+    pub claim_auto: bool,
     pub claimed: bool,
     /// Start the survey once the carriers are found (see `--survey`).
     pub survey: bool,
@@ -200,6 +208,7 @@ impl Automation {
             screenshot: o.screenshot.clone(),
             requested_at: None,
             claim_carriers: o.claim_carriers,
+            claim_auto: o.claim_auto,
             survey: o.survey,
             claimed: false,
             select: o.select,

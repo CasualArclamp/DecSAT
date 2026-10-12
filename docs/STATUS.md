@@ -3301,3 +3301,29 @@ Open: the word's first two bytes; the compressed flags 40h/20h (and the
 A0h/A2h bit); what the one-byte packets are; ED-137's signalling in the RTP
 extension. The 8PSK carrier loop reads "not locked" while the TPC decodes
 — not looked into yet.
+
+## Auto on a carrier's bracket (2026-10-13)
+
+Rory: "when pressing the green estimated symbol rate above the signal can
+you make it the 'auto mode' like the survey doing a scan then choosing the
+right mode". A click on a detected carrier's bracket (the green rate
+label above it) now sends `Action::Claim`: the VFO, sized as before, starts
+on Identify and `auto_pick.rs` watches it — once Identify answers (for the
+offset the VFO is at; a provisional answer after the survey's 6 s; 30 s
+before it gives up and leaves it on Identify) the survey's `pick` chooses
+the decoder (DVB-S2 → GSE/IP; TPC 2964, FastLink, DVB-S-like, plain
+BPSK/QPSK → the Comtech type-found model), set on Identify's centre and
+symbol rate. A DVB-S2 VFO is watched on: when most good frames are
+TS-mode it moves to DVB-S2 → MPEG-TS. No decoder (bursts, an 8PSK without
+TPC, a CW): it stays on Identify. Unlike the survey's, the VFO is kept;
+the status bar names what was picked. A decoder changed by hand, or the
+VFO deleted, ends the watch. A carrier already known (`decoder_for`, from
+the "known carrier takes its decoder" change) still gets its known decoder
+at once, and a tool chosen for new VFOs (IQ recorder, spectrum, symbols,
+CID) is kept: auto is for the carriers not known yet
+(`band_view::bracket_decoder`). Shift-click gives exactly the decoder *New
+VFOs run*. Unattended: `--claim-auto` (claims as `--claim-carriers` does,
+each the way a bracket click would). Checked on the 8 MS/s test scene: VFO 1 DVB-S2 → GSE/IP
+(locked, IP and the test radio), VFO 2 TPC carrier → "auto TPC", VFO 3
+DVB-S2 32APSK → GSE/IP → TS-mode frames → MPEG-TS, VFO 4 → "auto 570
+VIT 3/4"; all locked.

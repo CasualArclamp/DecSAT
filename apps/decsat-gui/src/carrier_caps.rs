@@ -229,13 +229,7 @@ impl CarrierCaps {
     /// decoder (the IQ recorder, the spectrum, symbols, the carrier ID),
     /// which is kept. The second value says it came from what is known.
     pub fn decoder_for(&self, lo: f64, hi: f64, chosen: DecoderKind) -> (DecoderKind, bool) {
-        let tool = matches!(
-            chosen,
-            DecoderKind::IqRecord
-                | DecoderKind::Spectrum
-                | DecoderKind::PskSymbols
-                | DecoderKind::CarrierId
-        );
+        let tool = is_tool(chosen);
         let centre = (lo + hi) / 2.0;
         let known = self
             .known
@@ -248,6 +242,18 @@ impl CarrierCaps {
             _ => (chosen, false),
         }
     }
+}
+
+/// A tool rather than a decoder (the IQ recorder, the spectrum, symbols,
+/// the carrier ID): when new VFOs run one, a VFO made on a carrier keeps it.
+pub fn is_tool(k: DecoderKind) -> bool {
+    matches!(
+        k,
+        DecoderKind::IqRecord
+            | DecoderKind::Spectrum
+            | DecoderKind::PskSymbols
+            | DecoderKind::CarrierId
+    )
 }
 
 #[cfg(test)]

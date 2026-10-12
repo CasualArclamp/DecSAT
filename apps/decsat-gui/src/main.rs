@@ -5,6 +5,7 @@
 //! running a decoder of your choice.
 
 mod adsb_names;
+mod auto_pick;
 mod automation;
 mod band_view;
 mod carrier_caps;
@@ -54,7 +55,7 @@ fn main() -> eframe::Result {
             eprintln!("decsat-gui: {e}");
             eprintln!(
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
-                 [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
+                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel]"
             );
@@ -140,6 +141,8 @@ struct App {
     carrier_caps: carrier_caps::CarrierCaps,
     /// Every carrier in the span tried in turn.
     survey: survey::Survey,
+    /// Carriers claimed from their brackets: Identify, then their decoder.
+    auto_pick: auto_pick::AutoPick,
     selected: Option<VfoId>,
     new_decoder: DecoderKind,
     names: u32,
@@ -205,6 +208,7 @@ impl Default for App {
             statuses: BTreeMap::new(),
             carrier_caps: carrier_caps::CarrierCaps::load(),
             survey: Default::default(),
+            auto_pick: Default::default(),
             selected: None,
             new_decoder: DecoderKind::Identify,
             names: 1,
@@ -618,6 +622,16 @@ impl App {
                     self.vfos.push(UiVfo { id, settings: s });
                     self.selected = Some(id);
                     self.names += 1;
+                }
+            }
+            Action::Claim(s) => {
+                let before = self.vfos.len();
+                self.apply(Action::Create(s));
+                if self.vfos.len() > before
+                    && let Some(v) = self.vfos.last()
+                {
+                    self.auto_pick.watch(v.id);
+                    self.note = format!("{}: auto — Identify, then its decoder", v.settings.name);
                 }
             }
             Action::Remove(id) => {
@@ -1260,6 +1274,14 @@ impl eframe::App for App {
                 .survey
                 .tick(&self.statuses, &self.vfos, self.rf_center());
             self.apply_survey(reqs);
+            // Claimed carriers: their decoder, once Identify has answered.
+            let (updates, note) = self.auto_pick.tick(&self.statuses, &self.vfos);
+            for (id, s) in updates {
+                self.apply(Action::Update(id, s));
+            }
+            if let Some(n) = note {
+                self.note = n;
+            }
             // What each VFO's carrier carries, learnt by its RF.
             let centre = self.rf_center();
             if centre > 0.0 {
@@ -1348,33 +1370,43 @@ impl eframe::App for App {
                 // `--decoder a,b`: this carrier's, the last for any more;
                 // none given, the one the carrier is known to need, as a
                 // click on its bracket takes.
+                let half = c.bandwidth_hz / 2.0;
+                let (known_decoder, known) = if rf > 0.0 {
+                    self.carrier_caps.decoder_for(
+                        rf + c.center_hz - half,
+                        rf + c.center_hz + half,
+                        self.new_decoder,
+                    )
+                } else {
+                    (self.new_decoder, false)
+                };
                 let decoder = self
                     .automation
                     .decoders
                     .get(k)
                     .or(self.automation.decoders.last())
                     .copied()
-                    .unwrap_or_else(|| {
-                        let half = c.bandwidth_hz / 2.0;
-                        if rf > 0.0 {
-                            self.carrier_caps
-                                .decoder_for(
-                                    rf + c.center_hz - half,
-                                    rf + c.center_hz + half,
-                                    self.new_decoder,
-                                )
-                                .0
-                        } else {
-                            self.new_decoder
-                        }
-                    });
+                    .unwrap_or(known_decoder);
                 let bw = if c.narrow {
                     c.fit_among(20e3, &all)
                 } else {
                     c.vfo_bandwidth_among(&all)
                 };
-                let s = decsat_engine::VfoSettings::new(self.next_name(), c.center_hz, bw, decoder);
-                self.apply(Action::Create(s));
+                // `--claim-auto`: as a click on its bracket, auto unless the
+                // carrier is known.
+                if self.automation.claim_auto && !known {
+                    let s = decsat_engine::VfoSettings::new(
+                        self.next_name(),
+                        c.center_hz,
+                        bw,
+                        DecoderKind::Identify,
+                    );
+                    self.apply(Action::Claim(s));
+                } else {
+                    let s =
+                        decsat_engine::VfoSettings::new(self.next_name(), c.center_hz, bw, decoder);
+                    self.apply(Action::Create(s));
+                }
             }
             let n = self.automation.select.unwrap_or(1).max(1);
             self.selected = self.vfos.get(n - 1).map(|v| v.id);
