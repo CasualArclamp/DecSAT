@@ -338,17 +338,17 @@ pub struct KnownRadar {
 
 /// Stations whose radar is known, by multicast group and port.
 ///
-/// The one on the 12335.13 MHz CDM-570L trunk: Rory (2026-10-12) says it
-/// is the CB-BN radar and that radar is ASTERIX SIC 20 (SAC 4, as all the
-/// band's radars). The recordings of 2026-10-11 do not agree on the name:
-/// the carrier at 12335.24 MHz (the plan's CB-BN) sent SIC 19, whose north
-/// marker is near Canberra at 903 m, while SIC 20 came on 12346.74 MHz
-/// (the plan's AD-BN slot) with Adelaide Airport's place. SIC 20 is what
-/// was asked for; the GUI's scope keeps another choice if one is made.
+/// The one on the 12335.13 MHz CDM-570L trunk is the CB-BN radar, Canberra
+/// (Rory, 2026-10-12): ASTERIX SAC 4 SIC 19, whose north marker puts it at
+/// 35.2376°S 149.1823°E, 903 m, and whose feed is the plan's CB-BN carrier
+/// (12335.22 MHz; 12335.24 as received on 2026-10-11). Rory first said SIC
+/// 20, the radar the AD-BN slot (12346.74 MHz) carries, at Adelaide
+/// Airport; the recordings settled it. The GUI's scope keeps another choice
+/// if one is made.
 const KNOWN: [(IpAddr, u16, KnownRadar); 1] = [(
     IpAddr::V4(std::net::Ipv4Addr::new(233, 71, 15, 145)),
     4021,
-    KnownRadar { sac: 4, sic: 20 },
+    KnownRadar { sac: 4, sic: 19 },
 )];
 
 /// The radar of the station sending as `flow`, when known.
@@ -360,7 +360,7 @@ pub fn known_radar(flow: &Flow) -> Option<KnownRadar> {
 }
 
 impl KnownRadar {
-    /// `SAC 4 SIC 20`.
+    /// `SAC 4 SIC 19`.
     pub fn label(&self) -> String {
         format!("SAC {} SIC {}", self.sac, self.sic)
     }
@@ -737,8 +737,8 @@ mod tests {
         let v = rx.view();
         assert_eq!(v.len(), 1);
         let s = &v[0];
-        // The CB-BN radar's station, by its group and port.
-        assert_eq!(s.radar.map(|r| (r.sac, r.sic)), Some((4, 20)));
+        // The CB-BN radar's station (Canberra), by its group and port.
+        assert_eq!(s.radar.map(|r| (r.sac, r.sic)), Some((4, 19)));
         assert_eq!(s.units[0].label(), "PEDESTAL (D2h)");
         assert_eq!(s.units[0].category, Some(3));
         assert_eq!(s.units[1].label(), "UCS_SSR (AEh)");
