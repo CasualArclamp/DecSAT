@@ -41,6 +41,13 @@ pub enum DecoderKind {
     /// Intelsat IESS-315 turbo product code `tpc_2964` (BPSK/QPSK): frame
     /// structure, scrambling and payload (HDLC/IP or MPEG-TS) found blind.
     Tpc2964,
+    /// A Comtech CDM modem, its type found: the chain picked from Identify's
+    /// first look (TPC 2964's unique word, else a K = 7 code; a FastLink if
+    /// that is what it is), the next tried if that one has not locked its
+    /// code in [`AUTO_LOCK_SECS`]; the model then read off what the payload
+    /// turns out to be ([`VfoStatus::cdm_model`]). Voice plays when G.728
+    /// speech is found, as the voice models do.
+    CdmAuto,
     /// A Comtech CDM-600(L)'s voice: the TPC 2964 chain to its Drop &
     /// Insert (or E1) timeslots, with the G.728 voice found in them played
     /// as soon as it is found.
@@ -77,11 +84,12 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 14] = [
+    pub const ALL: [DecoderKind; 15] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
         DecoderKind::DvbsTs,
+        DecoderKind::CdmAuto,
         DecoderKind::Tpc2964,
         DecoderKind::Cdm600Voice,
         DecoderKind::Cdm570,
@@ -100,6 +108,7 @@ impl DecoderKind {
             DecoderKind::Dvbs2Ip => "DVB-S2/S2X → GSE/IP (PCAP)",
             DecoderKind::Dvbs2Ts => "DVB-S2/S2X → MPEG-TS",
             DecoderKind::DvbsTs => "DVB-S → MPEG-TS",
+            DecoderKind::CdmAuto => "Comtech CDM modem (type found)",
             DecoderKind::Tpc2964 => "TPC 2964 (IESS-315) → IP / TS",
             DecoderKind::Cdm600Voice => "Comtech CDM-600 voice (TPC → D&I → G.728)",
             DecoderKind::Cdm570 => "Comtech CDM-570L (Viterbi K=7 → data)",
@@ -121,6 +130,7 @@ impl DecoderKind {
             DecoderKind::Dvbs2Ip => "dvbs2-ip",
             DecoderKind::Dvbs2Ts => "dvbs2-ts",
             DecoderKind::DvbsTs => "dvbs-ts",
+            DecoderKind::CdmAuto => "cdm-auto",
             DecoderKind::Tpc2964 => "tpc2964",
             DecoderKind::Cdm600Voice => "cdm600-voice",
             DecoderKind::Cdm570 => "cdm570",
@@ -141,7 +151,8 @@ impl DecoderKind {
 
     /// The decoder chain a preset runs: the CDM-600 voice and CDM-570L
     /// trunk presets are TPC 2964's, the CDM-570L's the Viterbi; every other
-    /// kind its own.
+    /// kind its own (the CDM type-found model's is picked as it runs:
+    /// [`VfoStatus::chain`]).
     pub fn chain(self) -> DecoderKind {
         match self {
             DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk => DecoderKind::Tpc2964,
@@ -153,7 +164,8 @@ impl DecoderKind {
     /// The Comtech CDM modems: one entry in the decoder menu
     /// ([`DecoderKind::CDM_MENU`]), the model chosen in a second menu.
     /// The first is what choosing the entry gives.
-    pub const CDM: [DecoderKind; 4] = [
+    pub const CDM: [DecoderKind; 5] = [
+        DecoderKind::CdmAuto,
         DecoderKind::Tpc2964,
         DecoderKind::Cdm600Voice,
         DecoderKind::Cdm570,
@@ -171,7 +183,10 @@ impl DecoderKind {
     pub fn plays_voice(self) -> bool {
         matches!(
             self,
-            DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk | DecoderKind::FastLink
+            DecoderKind::Cdm600Voice
+                | DecoderKind::Cdm570Trunk
+                | DecoderKind::CdmAuto
+                | DecoderKind::FastLink
         )
     }
 
@@ -188,6 +203,7 @@ impl DecoderKind {
             DecoderKind::Cdm570Trunk => {
                 "CDM-570L trunk (TPC 2964 → G.728 voice + IP: ADS-B, radar)"
             }
+            DecoderKind::CdmAuto => "Type found (TPC 2964 or Viterbi; the model from its data)",
             k => k.label(),
         }
     }
@@ -200,6 +216,7 @@ impl DecoderKind {
             DecoderKind::Dvbs2Ts
                 | DecoderKind::DvbsTs
                 | DecoderKind::Tpc2964
+                | DecoderKind::CdmAuto
                 | DecoderKind::FastLink
                 | DecoderKind::Viterbi
         )
@@ -214,6 +231,7 @@ impl DecoderKind {
                 | DecoderKind::Dvbs2Ts
                 | DecoderKind::DvbsTs
                 | DecoderKind::Tpc2964
+                | DecoderKind::CdmAuto
                 | DecoderKind::FastLink
                 | DecoderKind::Viterbi
                 | DecoderKind::PskSymbols
@@ -226,6 +244,7 @@ impl DecoderKind {
             DecoderKind::Dvbs2Ip => "S2→IP",
             DecoderKind::Dvbs2Ts => "S2→TS",
             DecoderKind::DvbsTs => "S→TS",
+            DecoderKind::CdmAuto => "CDM?",
             DecoderKind::Tpc2964 => "TPC",
             DecoderKind::Cdm600Voice => "CDM",
             DecoderKind::Cdm570 => "570",
@@ -377,6 +396,12 @@ pub struct VfoStatus {
     /// Points for the constellation view.
     pub scatter: Vec<Iq>,
     pub identification: Option<Identification>,
+    /// A coded modem's chain running (TPC 2964, the Viterbi, FastLink):
+    /// for the CDM type-found model, the one it picked.
+    pub chain: Option<DecoderKind>,
+    /// The CDM type-found model: the model its carrier turned out to be
+    /// (from the chain, then what the payload carries).
+    pub cdm_model: Option<DecoderKind>,
     /// 0..1 while gathering signal for Identify or DVB-S2 acquisition.
     pub progress: f32,
     /// Identify's last answer came from too short a listen to rule DVB-S2
@@ -652,6 +677,8 @@ enum Decoder {
         /// The FEC (Viterbi and Reed–Solomon, or the turbo product code),
         /// the payload and its outputs on the FEC thread.
         fec: Option<FecWorker>,
+        /// The CDM type-found model: how its chain is being picked.
+        auto: Option<AutoPick>,
     },
     /// DVB-CID: Identify's first look gives the host carrier's centre and
     /// rate, then the despreader runs on its own thread.
@@ -677,6 +704,87 @@ enum Decoder {
         /// making a byte.
         pack: SymbolPacker,
     },
+}
+
+/// The CDM type-found model's search: the chains tried that did not lock
+/// their code, and the signal (samples) the one running has had.
+#[derive(Default)]
+struct AutoPick {
+    failed: Vec<DecoderKind>,
+    samples: usize,
+    /// Its code locked: the chain stays.
+    settled: bool,
+}
+
+/// Signal a chain picked by the CDM type-found model has to lock its code
+/// before the next is tried, s: TPC 2964's blind structure search takes a
+/// few seconds at the slow rates; the Viterbi's rate search less.
+pub const AUTO_LOCK_SECS: f64 = 10.0;
+
+/// The chains the CDM type-found model may run.
+const AUTO_CHAINS: [DecoderKind; 3] = [
+    DecoderKind::Tpc2964,
+    DecoderKind::Viterbi,
+    DecoderKind::FastLink,
+];
+
+/// The chain to try on a carrier Identify saw so: TPC 2964 when it found its
+/// unique word, a FastLink when it named one, else the K = 7 code (what the
+/// CDM-570L radar carriers run); one that failed before last, unless all
+/// have.
+fn auto_chain(id: &Identification, failed: &[DecoderKind]) -> DecoderKind {
+    let hint = match &id.verdict {
+        Verdict::NotDvbS2 { hint } => hint.as_str(),
+        _ => "",
+    };
+    use DecoderKind::{FastLink, Tpc2964, Viterbi};
+    let order: [DecoderKind; 3] = if hint.contains("TPC 2964") {
+        [Tpc2964, Viterbi, FastLink]
+    } else if hint.contains("FastLink") {
+        [FastLink, Tpc2964, Viterbi]
+    } else {
+        [Viterbi, Tpc2964, FastLink]
+    };
+    order
+        .into_iter()
+        .find(|k| !failed.contains(k))
+        .unwrap_or(order[0])
+}
+
+/// A chain has locked its code: TPC 2964 frames decoded, the K = 7 code's
+/// rate found, FastLink codewords decoded.
+fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
+    match kind {
+        DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| t.decoded > 0),
+        DecoderKind::Viterbi => f.viterbi.as_ref().is_some_and(|v| v.rate.is_some()),
+        DecoderKind::FastLink => f.fastlink.as_ref().is_some_and(|x| x.decoded > 0),
+        _ => true,
+    }
+}
+
+/// The Comtech model a carrier is, from the chain it runs and what its data
+/// carry: Drop & Insert (or E1) timeslots → the CDM-600L's voice; HDLC
+/// packets carrying timeslots → a CDM-570L trunk (voice beside its IP);
+/// anything else on TPC 2964 → a CDM-570L's data; the K = 7 code → a
+/// CDM-570L's (the radar carriers); a FastLink is a Q-Flex.
+pub fn cdm_model(chain: DecoderKind, f: Option<&crate::fec::FecStats>) -> DecoderKind {
+    let p = f.and_then(|f| f.payload.as_ref());
+    match chain {
+        DecoderKind::Tpc2964 => {
+            if p.is_some_and(|p| p.dandi.is_some() || p.e1.is_some()) {
+                DecoderKind::Cdm600Voice
+            } else if p
+                .and_then(|p| p.slots.as_ref())
+                .is_some_and(|s| s.slot_packets > 0)
+            {
+                DecoderKind::Cdm570Trunk
+            } else {
+                DecoderKind::Tpc2964
+            }
+        }
+        DecoderKind::Viterbi => DecoderKind::Cdm570,
+        k => k,
+    }
 }
 
 /// Symbols into the .bin: a byte each, or their bits packed MSB first.
@@ -839,12 +947,14 @@ impl Worker {
             | DecoderKind::Cdm600Voice
             | DecoderKind::Cdm570
             | DecoderKind::Cdm570Trunk
+            | DecoderKind::CdmAuto
             | DecoderKind::FastLink
             | DecoderKind::Viterbi => Decoder::Modem {
                 kind: s.decoder.chain(),
                 buf: Vec::new(),
                 demod: None,
                 fec: None,
+                auto: (s.decoder == DecoderKind::CdmAuto).then(AutoPick::default),
             },
             DecoderKind::CarrierId => Decoder::Cid {
                 buf: Vec::new(),
@@ -1226,6 +1336,7 @@ impl Worker {
                 buf,
                 demod,
                 fec,
+                auto,
             } => match demod {
                 Some(d) => {
                     self.syms.clear();
@@ -1233,11 +1344,42 @@ impl Worker {
                     if let Some(w) = fec {
                         offer_symbols(w, *kind, d.modulation(), &self.syms);
                     }
+                    // The CDM type-found model: a chain that has not locked
+                    // its code in time gives way to the next (a fresh first
+                    // look picks it).
+                    if let Some(a) = auto.as_mut().filter(|a| !a.settled) {
+                        a.samples += self.bb.len();
+                        if a.samples as f64 >= AUTO_LOCK_SECS * out_rate {
+                            let locked =
+                                fec.as_ref().is_some_and(|w| code_locked(*kind, &w.stats()));
+                            if locked {
+                                a.settled = true;
+                            } else {
+                                a.failed.push(*kind);
+                                if AUTO_CHAINS.iter().all(|k| a.failed.contains(k)) {
+                                    a.failed.clear();
+                                }
+                                a.samples = 0;
+                                if let Some(w) = fec.take() {
+                                    w.quit();
+                                }
+                                *demod = None;
+                                buf.clear();
+                                *kind = DecoderKind::CdmAuto;
+                            }
+                        }
+                    }
                 }
                 None => {
                     buf.extend_from_slice(&self.bb);
                     if buf.len() >= first_look(out_rate) {
                         let id = identify_in(buf, out_rate, Some(self.settings.bandwidth_hz));
+                        // The CDM type-found model: its chain, from what
+                        // Identify saw.
+                        if let Some(a) = auto.as_mut() {
+                            *kind = auto_chain(&id, &a.failed);
+                            a.samples = 0;
+                        }
                         let rs = self.settings.symbol_rate.or(id.symbol_rate);
                         let alpha = id.roll_off.map_or(0.35, |r| r.as_f64());
                         let usable = !matches!(id.verdict, Verdict::NoSignal);
@@ -1460,6 +1602,8 @@ impl Worker {
             st.level_db = l;
         }
         st.identification = self.identification.clone();
+        st.chain = None;
+        st.cdm_model = None;
         st.modcods = self.modcods.clone();
         st.last_modcod = self.last_modcod;
         st.progress = 0.0;
@@ -1614,6 +1758,7 @@ impl Worker {
                 buf,
                 demod,
                 fec,
+                auto,
             } => match demod {
                 None => {
                     st.progress = buf.len() as f32 / first_look(out_rate) as f32;
@@ -1629,6 +1774,8 @@ impl Worker {
                     st.symbol_rate = Some(d.symbol_rate());
                     st.scatter = d.recent();
                     let f = fec.as_ref().map(|w| w.stats());
+                    st.chain = Some(*kind);
+                    st.cdm_model = auto.as_ref().map(|_| cdm_model(*kind, f.as_ref()));
                     let carrier = CarrierState {
                         locked: d.locked(),
                         mer_db: d.mer_db(),
@@ -1886,6 +2033,7 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
                 s.decoder.chain(),
                 DecoderKind::Dvbs2Ip
                     | DecoderKind::Tpc2964
+                    | DecoderKind::CdmAuto
                     | DecoderKind::FastLink
                     | DecoderKind::Viterbi
             ),
@@ -2089,6 +2237,95 @@ mod tests {
     use super::*;
     use decsat_fec::Constellation;
     use decsat_mod::Shaper;
+
+    /// The CDM type-found model on a TPC 2964 carrier: Identify's unique
+    /// word picks TPC 2964, the code locks, and HDLC carrying IP (no
+    /// timeslot packets, no D&I) names a CDM-570L's data.
+    #[test]
+    fn cdm_type_found_runs_tpc_2964_and_names_the_model() {
+        let x = tpc_test_carrier();
+        let settings = VfoSettings::new("A", 40_000.0, 190_000.0, DecoderKind::CdmAuto);
+        let status = Arc::new(Mutex::new(VfoStatus::default()));
+        let mut wk = Worker::new(
+            500_000.0,
+            settings,
+            status.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        feed(&mut wk, &x, 65_536);
+        let t0 = Instant::now();
+        loop {
+            wk.publish(0);
+            {
+                let st = status.lock().unwrap();
+                let decoded = st
+                    .fec
+                    .as_ref()
+                    .and_then(|f| f.tpc.as_ref())
+                    .is_some_and(|t| t.decoded > 0);
+                let found = st
+                    .fec
+                    .as_ref()
+                    .and_then(|f| f.payload.as_ref())
+                    .is_some_and(|p| p.found.is_some());
+                if decoded && found {
+                    assert_eq!(st.chain, Some(DecoderKind::Tpc2964));
+                    assert_eq!(st.cdm_model, Some(DecoderKind::Tpc2964));
+                    break;
+                }
+                assert!(
+                    t0.elapsed().as_secs() < 30,
+                    "not decoded: {} / {:?}",
+                    st.message,
+                    st.chain
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn cdm_models_from_what_the_data_carry() {
+        use crate::fec::FecStats;
+        use decsat_modem::payload::PayloadStats;
+        let with = |p: PayloadStats| FecStats {
+            payload: Some(p),
+            ..Default::default()
+        };
+        assert_eq!(cdm_model(DecoderKind::Viterbi, None), DecoderKind::Cdm570);
+        assert_eq!(
+            cdm_model(DecoderKind::FastLink, None),
+            DecoderKind::FastLink
+        );
+        assert_eq!(cdm_model(DecoderKind::Tpc2964, None), DecoderKind::Tpc2964);
+        let di = with(PayloadStats {
+            dandi: Some(Default::default()),
+            ..Default::default()
+        });
+        assert_eq!(
+            cdm_model(DecoderKind::Tpc2964, Some(&di)),
+            DecoderKind::Cdm600Voice
+        );
+        let slots = |n| {
+            with(PayloadStats {
+                slots: Some(decsat_modem::slotpkt::SlotStats {
+                    slot_packets: n,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            cdm_model(DecoderKind::Tpc2964, Some(&slots(40))),
+            DecoderKind::Cdm570Trunk
+        );
+        // Plain HDLC on the inverted line (the 12335.13 MHz trunk's Frame
+        // Relay): a CDM-570L's data.
+        assert_eq!(
+            cdm_model(DecoderKind::Tpc2964, Some(&slots(0))),
+            DecoderKind::Tpc2964
+        );
+    }
 
     #[test]
     fn the_cdm_570l_trunk_preset() {
@@ -2998,13 +3235,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tpc2964_vfo_finds_the_code_and_the_ip_in_it() {
+    /// A TPC 2964 QPSK carrier, 125 kBd at 40 kHz in a 500 kS/s band,
+    /// carrying a multicast radio over Cisco HDLC, tuned in mid-frame.
+    fn tpc_test_carrier() -> Vec<Iq> {
         use decsat_mod::Shaper;
         use decsat_mod::fec::TestRadio;
         use decsat_modem::tpc2964::{Structure, TpcHdlcTx, modulate};
-        // A TPC 2964 QPSK carrier, 125 kBd at 40 kHz in a 500 kS/s band,
-        // carrying a multicast radio over Cisco HDLC.
         let mut tx = TpcHdlcTx::new(Structure::TEST);
         let mut radio = TestRadio::new([239, 1, 2, 3], "TPC radio");
         let mut bits = Vec::new();
@@ -3027,6 +3263,13 @@ mod tests {
             let ph = w * n as f64 + 0.7;
             *v *= Iq::new(ph.cos() as f32, ph.sin() as f32);
         }
+        x
+    }
+
+    #[test]
+    fn tpc2964_vfo_finds_the_code_and_the_ip_in_it() {
+        use decsat_modem::tpc2964::Structure;
+        let x = tpc_test_carrier();
         let settings = VfoSettings::new("T", 40_000.0, 190_000.0, DecoderKind::Tpc2964);
         let status = Arc::new(Mutex::new(VfoStatus::default()));
         let mut wk = Worker::new(

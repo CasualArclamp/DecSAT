@@ -183,16 +183,32 @@ pub fn voice_active(st: Option<&VfoStatus>) -> bool {
 /// The colour a VFO lights up in while voice is active on it.
 const SPEECH: Color32 = Color32::from_rgb(90, 235, 120);
 
+/// A VFO's decoder, short, for its label: the CDM type-found model's as
+/// found ("CDM?" until then, "auto" marking what it found).
+pub fn short(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
+    match st.and_then(|st| st.cdm_model) {
+        Some(m) if s.decoder == DecoderKind::CdmAuto => format!("auto {}", m.short()),
+        _ => s.decoder.short().into(),
+    }
+}
+
 /// A short status badge for a VFO's label.
 pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
     let Some(st) = st else { return "…".into() };
     if !s.enabled {
         return "off".into();
     }
-    if matches!(
-        s.decoder,
-        DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk
-    ) {
+    // The CDM type-found model: badged as the model it found (until then,
+    // as it acquires).
+    let model = st.cdm_model.unwrap_or(s.decoder);
+    if model == DecoderKind::CdmAuto {
+        return if st.carrier.is_some() {
+            "finding its type".into()
+        } else {
+            format!("acq {:.0} %", st.progress * 100.0)
+        };
+    }
+    if matches!(model, DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk) {
         let lock = if st.carrier.is_some_and(|c| c.locked) {
             "LOCK"
         } else {
@@ -211,7 +227,7 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             (Some(_), None) => format!("{lock} · voice?"),
         };
     }
-    match s.decoder.chain() {
+    match st.chain.unwrap_or(s.decoder.chain()) {
         DecoderKind::Identify if st.provisional => {
             let rs = st.symbol_rate.map(format::rate).unwrap_or_default();
             format!("{rs}? {:.0} %", st.progress * 100.0)
@@ -275,7 +291,11 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             (Some(c), _) => format!("{} · rate?", if c.locked { "LOCK" } else { "no lock" }),
             (None, _) => format!("acq {:.0} %", st.progress * 100.0),
         },
-        DecoderKind::Tpc2964 | DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk => {
+        // (A type-found model is badged above until its chain runs.)
+        DecoderKind::Tpc2964
+        | DecoderKind::Cdm600Voice
+        | DecoderKind::Cdm570Trunk
+        | DecoderKind::CdmAuto => {
             let t = st.fec.as_ref().and_then(|f| f.tpc.as_ref().map(|t| (f, t)));
             match (&st.carrier, t) {
                 (Some(c), Some((f, t))) if t.structure.is_some() => format!(
@@ -670,7 +690,7 @@ impl BandView {
                 "{}{} · {} · {}",
                 if speaking { "🔊 " } else { "" },
                 s.name,
-                s.decoder.short(),
+                short(s, inp.statuses.get(&v.id)),
                 badge(s, inp.statuses.get(&v.id))
             );
             let font = FontId::proportional(11.5);

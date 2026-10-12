@@ -100,7 +100,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             "{}{}  {}  {}",
             if speaking { "🔊 " } else { "" },
             v.settings.name,
-            v.settings.decoder.short(),
+            crate::band_view::short(&v.settings, st),
             badge(&v.settings, st)
         );
         ui.painter().text(
@@ -184,7 +184,24 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             ui.end_row();
             if s.decoder.is_cdm() {
                 ui.label("CDM model");
-                cdm_model_menu(ui, "vfo_cdm_model", &mut s.decoder);
+                ui.horizontal(|ui| {
+                    cdm_model_menu(ui, "vfo_cdm_model", &mut s.decoder);
+                    if s.decoder == DecoderKind::CdmAuto {
+                        let found = match (st.cdm_model, st.chain) {
+                            (Some(m), _) => format!("found: {}", m.cdm_model()),
+                            (None, _) if st.carrier.is_none() => "identifying…".into(),
+                            (None, _) => "finding its type…".into(),
+                        };
+                        ui.label(RichText::new(found).small().weak()).on_hover_text(
+                            "Picked from Identify's first look (TPC 2964's unique word, else \
+                             a K = 7 code; the next tried if one does not lock in 10 s); the \
+                             model from what its data carry: D&I++ or E1 timeslots a \
+                             CDM-600L's voice, timeslots in HDLC packets a CDM-570L trunk, \
+                             other TPC data a CDM-570L's, the K = 7 code a CDM-570L Viterbi \
+                             (the radar carriers)",
+                        );
+                    }
+                });
                 ui.end_row();
             }
 
@@ -392,7 +409,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
-            if s.decoder.chain() == DecoderKind::Tpc2964 {
+            if matches!(
+                s.decoder.chain(),
+                DecoderKind::Tpc2964 | DecoderKind::CdmAuto
+            ) {
                 ui.label("Modulation");
                 let txt = match s.psk_modulation {
                     Some(Modulation::Bpsk) => "BPSK",
@@ -465,7 +485,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 // A coded modem's raw data are recorded as well as the TS.
                 let tpc = matches!(
                     s.decoder.chain(),
-                    DecoderKind::Tpc2964 | DecoderKind::FastLink | DecoderKind::Viterbi
+                    DecoderKind::Tpc2964
+                        | DecoderKind::CdmAuto
+                        | DecoderKind::FastLink
+                        | DecoderKind::Viterbi
                 );
                 ui.label(if tpc { "Record" } else { "TS file" });
                 ui.horizontal(|ui| {
@@ -727,15 +750,19 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         cid_card(ui, c);
     }
 
+    // The chain running (the CDM type-found model's, once picked) and the
+    // model (the one found).
+    let chain = st.chain.unwrap_or(v.settings.decoder.chain());
+    let model = st.cdm_model.unwrap_or(v.settings.decoder);
     if matches!(
-        v.settings.decoder.chain(),
+        chain,
         DecoderKind::Tpc2964 | DecoderKind::FastLink | DecoderKind::Viterbi
     ) && let Some(c) = &st.carrier
     {
-        match v.settings.decoder.chain() {
+        match chain {
             DecoderKind::FastLink => fastlink_card(ui, c, &st),
-            DecoderKind::Viterbi => viterbi_card(ui, c, &st, v.settings.decoder),
-            _ => tpc_card(ui, c, &st, v.settings.decoder),
+            DecoderKind::Viterbi => viterbi_card(ui, c, &st, model),
+            _ => tpc_card(ui, c, &st, model),
         }
         if let Some(e) = st.fec.as_ref().and_then(|f| f.e1.as_ref()) {
             e1_card(ui, e, v, &mut actions);
@@ -2992,8 +3019,9 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
                     let r = ui
                         .selectable_label(decoder.is_cdm(), DecoderKind::CDM_MENU)
                         .on_hover_text(
-                            "CDM-570L TPC (IP), CDM-600L voice, CDM-570L Viterbi (radar), CDM-570L \
-                             trunk (voice + ADS-B): the model is chosen next",
+                            "Its type found by itself (TPC 2964 or Viterbi, and the model from its \
+                             data), or chosen next: CDM-570L TPC (IP), CDM-600L voice, CDM-570L \
+                             Viterbi (radar), CDM-570L trunk (voice + ADS-B)",
                         );
                     if r.clicked() && !decoder.is_cdm() {
                         *decoder = DecoderKind::CDM[0];

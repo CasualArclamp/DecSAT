@@ -3035,3 +3035,26 @@ military". The scope colours a track purple, ahead of its height colour
 but behind coasted yellow, at a ground speed of 650 kt or more, FL450 or
 above, or over 350 kt below FL100 (civil traffic keeps to 250 kt IAS
 there); the legend says so. A business jet above FL450 turns purple too.
+
+## The CDM type found by itself (2026-10-12)
+
+Rory: "is it possible to auto detect CDM type?" — "yes build it".
+`DecoderKind::CdmAuto`, now the Comtech entry's default ("Type found (TPC
+2964 or Viterbi; the model from its data)", key `cdm-auto`, `--decoder
+auto`): the Modem path's first-look Identify picks the chain — TPC 2964
+when it found the unique word, a FastLink when it named one, else the K = 7
+code (`auto_chain`); a chain that has not locked its code after
+`AUTO_LOCK_SECS` (10 s of signal: TPC frames decoded, the Viterbi's rate
+found, FastLink codewords decoded) is marked failed and a fresh first look
+takes the next. The model is read off what the data carry
+(`vfo::cdm_model`): D&I++ or E1 timeslots → CDM-600L voice; HDLC packets
+carrying timeslots → CDM-570L trunk; other TPC data (HDLC IP, Frame Relay,
+TS) → CDM-570L TPC; the K = 7 code → CDM-570L Viterbi; a FastLink stays
+one. `VfoStatus::chain` and `cdm_model` carry them to the GUI: cards by the
+chain running, titled by the model; the label "auto TRK", "auto 570" (CDM?
+until found); "found: …" beside the model menu. Voice plays by itself when
+G.728 speech is found, as for the voice models. Tests: the type-found
+model on the synthetic TPC carrier (Identify picks TPC 2964, the model is
+a CDM-570L's data), the model from each payload. Checked unattended (muted)
+on the mixed capture: PH-BN found as CDM-570L Viterbi, the ASA176 trunk as
+a CDM-570L trunk; and in the CLI on the PH-BN carrier.
