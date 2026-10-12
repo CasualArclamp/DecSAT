@@ -1291,6 +1291,9 @@ impl eframe::App for App {
                 if let Some(nm) = self.automation.radar_range {
                     self.radar_scope.set_range(nm);
                 }
+                if let Some(n) = self.automation.radar_track {
+                    self.radar_scope.select(n);
+                }
             }
         }
         if self.automation.play_audio

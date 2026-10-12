@@ -34,6 +34,8 @@ pub struct Options {
     /// Open the radar scope on the selected VFO, at this range (NM).
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
+    /// Pick this track (hex) on the radar scope.
+    pub radar_track: Option<u16>,
     /// Drop a VFO here (offset from the centre, Hz; and its width, Hz).
     pub vfo_at: Option<(f64, f64)>,
     /// Play the selected VFO's first multicast audio stream in the app.
@@ -65,6 +67,16 @@ impl Options {
                 Some("--claim-carriers") => o.claim_carriers = true,
                 Some("--ts-viewer") => o.ts_viewer = true,
                 Some("--radar-scope") => o.radar_scope = true,
+                Some("--radar-track") => {
+                    let v = args
+                        .next()
+                        .ok_or("--radar-track needs a track number (hex)")?;
+                    o.radar_track = Some(
+                        v.to_str()
+                            .and_then(|s| u16::from_str_radix(s, 16).ok())
+                            .ok_or("--radar-track needs a track number (hex)")?,
+                    );
+                }
                 Some("--radar-range") => {
                     let v = args.next().ok_or("--radar-range needs NM")?;
                     o.radar_range = Some(
@@ -164,6 +176,7 @@ pub struct Automation {
     pub ts_viewer: bool,
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
+    pub radar_track: Option<u16>,
     pub vfo_at: Option<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
@@ -184,6 +197,7 @@ impl Automation {
             ts_viewer: o.ts_viewer,
             radar_scope: o.radar_scope,
             radar_range: o.radar_range,
+            radar_track: o.radar_track,
             vfo_at: o.vfo_at,
             play_audio: o.play_audio,
             audio_started: false,

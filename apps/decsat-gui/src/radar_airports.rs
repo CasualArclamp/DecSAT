@@ -473,6 +473,18 @@ impl AirportLayer {
         }
     }
 
+    /// The airport with a code nearest a point NM east and north of the
+    /// radar: its code, the distance (NM) and the bearing from it (°).
+    pub fn nearest(&self, x: f64, y: f64) -> Option<(String, f64, f64)> {
+        let near = self.near.as_ref()?;
+        near.airports
+            .iter()
+            .filter_map(|(a, ax, ay)| Some((a.code.as_ref()?, x - ax, y - ay)))
+            .map(|(c, dx, dy)| (c, dx.hypot(dy), dx.atan2(dy).to_degrees().rem_euclid(360.0)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(c, d, b)| (c.clone(), d, b))
+    }
+
     /// The airport whose marker is nearest screen point `q`, within 8 px:
     /// its code and name, for a tooltip.
     pub fn at(&self, f: &Frame, q: egui::Pos2, range: f32) -> Option<String> {

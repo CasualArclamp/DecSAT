@@ -246,6 +246,19 @@ pub struct Track {
     pub flagged: u64,
     /// Positions, oldest first (the last one included).
     pub trail: Vec<(f32, f32)>,
+    /// Flight levels with their times of day, oldest first, as long as the
+    /// trail: for the climb or descent rate.
+    pub levels: Vec<(f64, i16)>,
+}
+
+impl Track {
+    /// Climb (+) or descent rate, ft/min, over the levels kept; `None`
+    /// with less than 10 s of them.
+    pub fn vertical_rate(&self) -> Option<f32> {
+        let (&(t0, f0), &(t1, f1)) = (self.levels.first()?, self.levels.last()?);
+        let dt = (t1 - t0).rem_euclid(86_400.0);
+        (dt >= 10.0).then(|| f32::from(f1 - f0) * 100.0 / (dt / 60.0) as f32)
+    }
 }
 
 /// What the feed has said, for display.
@@ -392,6 +405,7 @@ impl RadarRx {
                 reports: 0,
                 flagged: 0,
                 trail: Vec::new(),
+                levels: Vec::new(),
             });
             t.last = r.clone();
             t.seen = m.tod;
@@ -400,6 +414,12 @@ impl RadarRx {
             t.trail.push((r.x, r.y));
             if t.trail.len() > TRAIL {
                 t.trail.remove(0);
+            }
+            if let Some(fl) = r.flight_level {
+                t.levels.push((m.tod, fl));
+                if t.levels.len() > TRAIL {
+                    t.levels.remove(0);
+                }
             }
         }
         for n in &m.ended {
@@ -565,6 +585,23 @@ mod tests {
         let v = rx.view();
         assert_eq!(v.tracks.len(), 1);
         assert_eq!((v.tracks[0].reports, v.tracks[0].flagged), (5, 3));
+    }
+
+    #[test]
+    fn vertical_rate_from_the_levels_kept() {
+        let mut t = Track {
+            last: Report::parse(&SECTOR_5[HEADER..]).unwrap(),
+            seen: 0.0,
+            first: 0.0,
+            reports: 0,
+            flagged: 0,
+            trail: Vec::new(),
+            levels: vec![(86_390.0, 105)],
+        };
+        assert_eq!(t.vertical_rate(), None);
+        // 1000 ft lower 30 s on, across midnight.
+        t.levels.push((20.0, 95));
+        assert_eq!(t.vertical_rate(), Some(-2000.0));
     }
 
     #[test]

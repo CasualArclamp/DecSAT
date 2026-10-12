@@ -33,8 +33,8 @@ use decsat_ip::rcms::{SECTION_FLOAT, StationView, float_text};
 
 use crate::radar_map::{Frame, LatLon, MapLayer, Style};
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2, pos2,
-    vec2,
+    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
+    pos2, vec2,
 };
 
 /// Ranges the scope zooms between, NM.
@@ -69,6 +69,9 @@ pub struct RadarScope {
     /// Airports and runways over the map.
     airports: crate::radar_airports::AirportLayer,
     airports_on: bool,
+    /// The track clicked (on the PPI or in the table): ringed, its details
+    /// in a box over the PPI's corner.
+    selected: Option<u16>,
     map_loaded: bool,
     /// The VFO whose hand-set radar place is loaded, that place, and the
     /// place editor's text while it is open.
@@ -203,6 +206,7 @@ impl Default for RadarScope {
             site_edit: None,
             airports: Default::default(),
             airports_on: true,
+            selected: None,
         }
     }
 }
@@ -236,6 +240,11 @@ fn colour_on_light(t: &Track) -> Color32 {
 }
 
 impl RadarScope {
+    /// Pick a track, as a click on it would (unattended runs).
+    pub fn select(&mut self, number: u16) {
+        self.selected = Some(number);
+    }
+
     /// The range shown, NM centre to edge (unattended runs).
     pub fn set_range(&mut self, nm: f32) {
         self.range = nm.clamp(MIN_RANGE, MAX_RANGE);
@@ -520,7 +529,7 @@ impl RadarScope {
             egui::ScrollArea::vertical()
                 .id_salt("radar_tracks")
                 .max_height(table_h)
-                .show(ui, |ui| table(ui, v));
+                .show(ui, |ui| table(ui, v, &mut self.selected));
             return;
         }
         // The station beside the PPI; the track table under it when there
@@ -538,7 +547,7 @@ impl RadarScope {
                     egui::ScrollArea::vertical()
                         .id_salt("radar_tracks")
                         .max_height(table_h)
-                        .show(ui, |ui| table(ui, v));
+                        .show(ui, |ui| table(ui, v, &mut self.selected));
                 }
             });
             ui.separator();
@@ -726,8 +735,15 @@ impl RadarScope {
             }
         }
 
-        // Tracks, the nearest to the pointer remembered for its tooltip.
+        // Tracks, the nearest to the pointer remembered for its tooltip
+        // and for a click.
         let pointer = resp.hover_pos();
+        let ring = if light {
+            Color32::from_gray(10)
+        } else {
+            Color32::from_gray(235)
+        };
+        let mut picked_at = None;
         let mut nearest: Option<(f32, &Track)> = None;
         for t in &v.tracks {
             if !t.last.updated() && !self.declining {
@@ -745,6 +761,10 @@ impl RadarScope {
             // A one-minute leader.
             let lead = to_screen(t.last.x + t.last.vx / 60.0, t.last.y + t.last.vy / 60.0);
             painter.line_segment([p, lead], Stroke::new(1.0, col.gamma_multiply(0.8)));
+            if self.selected == Some(t.last.number) {
+                painter.circle_stroke(p, 10.0, Stroke::new(1.5, ring));
+                picked_at = Some(p);
+            }
             let box_ = Rect::from_center_size(p, vec2(6.0, 6.0));
             if t.last.updated() {
                 painter.rect_filled(box_, CornerRadius::ZERO, col);
@@ -783,6 +803,19 @@ impl RadarScope {
                 }
             }
         }
+        // A click on a track picks it (again: lets it go); on nothing, lets
+        // go.
+        if resp.clicked() {
+            let hit = nearest.map(|(_, t)| t.last.number);
+            self.selected = hit.filter(|&n| self.selected != Some(n));
+        }
+        // (Kept while its track is away: shown again if it comes back.)
+        if let Some(n) = self.selected
+            && let Some(t) = v.tracks.iter().find(|t| t.last.number == n)
+            && self.track_info(ui.ctx(), rect, picked_at, t, v)
+        {
+            self.selected = None;
+        }
         if let Some((_, t)) = nearest {
             resp.on_hover_ui_at_pointer(|ui| track_tip(ui, t));
         } else if let Some(q) = pointer
@@ -814,6 +847,165 @@ impl RadarScope {
 }
 
 impl RadarScope {
+    /// The picked track's details in a box over the PPI's corner away from
+    /// the track (drawn at `at`; top right when it is not on screen); true
+    /// when its × was clicked.
+    fn track_info(
+        &self,
+        ctx: &egui::Context,
+        rect: Rect,
+        at: Option<Pos2>,
+        t: &Track,
+        v: &RadarView,
+    ) -> bool {
+        let r = &t.last;
+        let mut close = false;
+        let title = match &r.callsign {
+            Some(c) => format!("{c} · track {:03X}", r.number),
+            None => format!("Track {:03X}", r.number),
+        };
+        // The quadrant across from the track.
+        let (right, top) = at.map_or((true, true), |p| {
+            (p.x < rect.center().x, p.y > rect.center().y)
+        });
+        let pivot = match (right, top) {
+            (true, true) => Align2::RIGHT_TOP,
+            (true, false) => Align2::RIGHT_BOTTOM,
+            (false, true) => Align2::LEFT_TOP,
+            (false, false) => Align2::LEFT_BOTTOM,
+        };
+        let corner = pos2(
+            if right {
+                rect.right() - 8.0
+            } else {
+                rect.left() + 8.0
+            },
+            if top {
+                rect.top() + 8.0
+            } else {
+                rect.bottom() - 8.0
+            },
+        );
+        egui::Area::new(egui::Id::new("radar_track_info"))
+            .order(egui::Order::Foreground)
+            .pivot(pivot)
+            .fixed_pos(corner)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(title).strong().color(colour(t)));
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Let the track go (or click it again)")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                    egui::Grid::new("radar_track_info_rows")
+                        .num_columns(2)
+                        .spacing([10.0, 2.0])
+                        .show(ui, |ui| {
+                            let row = |ui: &mut Ui, k: &str, val: String| {
+                                ui.label(RichText::new(k).weak());
+                                ui.label(RichText::new(val).monospace());
+                                ui.end_row();
+                            };
+                            if let Some(a) = r.address {
+                                row(ui, "Mode S", format!("{a:06X}"));
+                            }
+                            row(
+                                ui,
+                                "Mode A",
+                                r.squawk.map_or("none".into(), |s| format!("{s:04}")),
+                            );
+                            row(
+                                ui,
+                                "Mode C",
+                                r.flight_level.map_or("none".into(), |f| {
+                                    format!("FL{f:03} ({} ft)", i32::from(f) * 100)
+                                }),
+                            );
+                            if let Some(rate) = t.vertical_rate() {
+                                let rounded = (rate / 100.0).round() * 100.0;
+                                row(
+                                    ui,
+                                    "Vertical",
+                                    if rounded.abs() < 150.0 {
+                                        "level".into()
+                                    } else if rounded > 0.0 {
+                                        format!("climbing {rounded:.0} ft/min")
+                                    } else {
+                                        format!("descending {:.0} ft/min", -rounded)
+                                    },
+                                );
+                            }
+                            row(
+                                ui,
+                                "Speed",
+                                format!(
+                                    "{} · heading {:03.0}°",
+                                    r.ground_speed.map_or("-".into(), |g| format!("{g} kt")),
+                                    r.track()
+                                ),
+                            );
+                            row(
+                                ui,
+                                "From radar",
+                                format!("{:.1} NM at {:05.1}°", r.range(), r.bearing()),
+                            );
+                            if let Some((code, d, b)) =
+                                self.airports.nearest(f64::from(r.x), f64::from(r.y))
+                            {
+                                row(ui, "From airport", format!("{d:.1} NM {b:03.0}° of {code}"));
+                            }
+                            if let Some(site) = self.site_of(v) {
+                                let p =
+                                    crate::radar_map::from_nm(site, f64::from(r.x), f64::from(r.y));
+                                row(ui, "Lat, lon", format!("{:.4}, {:.4}", p.lat, p.lon));
+                            }
+                            let age = v.tod.map(|now| (now - t.seen).rem_euclid(86_400.0));
+                            row(
+                                ui,
+                                "Reports",
+                                format!(
+                                    "{} since {} UTC{}",
+                                    t.reports,
+                                    tod_string(t.first),
+                                    age.map_or(String::new(), |a| format!(" · last {a:.1} s ago"))
+                                ),
+                            );
+                            row(
+                                ui,
+                                "Status",
+                                format!(
+                                    "{:04X}h{}",
+                                    r.status,
+                                    if r.updated() {
+                                        ""
+                                    } else {
+                                        " (no plot this scan)"
+                                    }
+                                ),
+                            );
+                        });
+                    ui.label(
+                        RichText::new(
+                            r.raw
+                                .iter()
+                                .map(|b| format!("{b:02X}"))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        )
+                        .monospace()
+                        .small()
+                        .weak(),
+                    );
+                });
+            });
+        close
+    }
+
     /// Where the feed's radar is: as the feed says (ASTERIX), else as set
     /// by hand for this VFO.
     fn site_of(&self, v: &RadarView) -> Option<LatLon> {
@@ -1032,7 +1224,8 @@ fn track_tip(ui: &mut Ui, t: &Track) {
     });
 }
 
-fn table(ui: &mut Ui, v: &RadarView) {
+/// The tracks, nearest first; a click on a track's number picks it.
+fn table(ui: &mut Ui, v: &RadarView, selected: &mut Option<u16>) {
     let mut tracks: Vec<&Track> = v.tracks.iter().collect();
     tracks.sort_by(|a, b| a.last.range().total_cmp(&b.last.range()));
     egui::Grid::new("radar_table")
@@ -1052,7 +1245,18 @@ fn table(ui: &mut Ui, v: &RadarView) {
                 let cell = |ui: &mut Ui, s: String| {
                     ui.label(RichText::new(s).monospace().color(col));
                 };
-                cell(ui, format!("{:03X}", r.number));
+                let picked = *selected == Some(r.number);
+                if ui
+                    .selectable_label(
+                        picked,
+                        RichText::new(format!("{:03X}", r.number))
+                            .monospace()
+                            .color(col),
+                    )
+                    .clicked()
+                {
+                    *selected = (!picked).then_some(r.number);
+                }
                 cell(ui, r.squawk.map_or("----".into(), |s| format!("{s:04}")));
                 cell(
                     ui,

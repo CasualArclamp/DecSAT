@@ -2616,3 +2616,13 @@ ICAO code; small ones inside 120 NM (codes inside 40); runway numbers
 inside 25 NM; heliports, seaplane bases and closed ones left out; an
 airport's name on hover. "Airports" switch beside the map's. Unattended
 runs: `--radar-range NM`.
+
+**Click a track** (Rory): a click on a track on the PPI, or on its number
+in the table, picks it — ringed, its row lit, its details in a box in the
+PPI's corner across from it (Mode S/A/C, climb or descent rate from the
+levels kept with the trail, speed and heading, range/bearing from the
+radar and from the nearest airport, latitude/longitude when the radar's
+place is known, reports, status, raw octets). Again, ×, or a click on
+nothing lets it go; a pick waits while its track is away.
+`--radar-track HEX` for unattended runs. `Track::levels`,
+`Track::vertical_rate` in the modem.
