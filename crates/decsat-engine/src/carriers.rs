@@ -212,18 +212,50 @@ fn detrended_std(v: &[f32]) -> f32 {
     var.sqrt()
 }
 
+/// Edges of the span this far below its strong part (90th percentile), and
+/// this rough (detrended standard deviation, dB), are outside the
+/// recording's passband: a filter's stopband. An averaged noise floor is
+/// smooth (under 2 dB); a digital filter's stopband is a comb of sidelobes
+/// and nulls (seen: about 10 dB).
+const STOPBAND_DB: f32 = 30.0;
+const STOPBAND_ROUGH_DB: f32 = 4.0;
+
+/// The span's passband, as inclusive bins: all of it, but for edges that
+/// are a filter's stopband. Seen: a VFO recording at 227 kS/s, its filter
+/// edge at ±68 kHz and a stopband 85–120 dB down with sidelobes every
+/// 4 kHz — each reported as a carrier against a floor taken from the
+/// stopband, and the real carrier as 104 dB above it rather than 13.
+fn passband(s: &[f32]) -> (usize, usize) {
+    let n = s.len();
+    let cut = quantile(s, 0.9) - STOPBAND_DB;
+    let lo = s.iter().position(|&x| x >= cut).unwrap_or(0);
+    let hi = s.iter().rposition(|&x| x >= cut).unwrap_or(n - 1);
+    let stopband = |r: &[f32]| r.len() >= NARROW_BINS && detrended_std(r) > STOPBAND_ROUGH_DB;
+    (
+        if stopband(&s[..lo]) { lo } else { 0 },
+        if stopband(&s[hi + 1..]) { hi } else { n - 1 },
+    )
+}
+
 /// Detect carriers in an FFT-shifted dB spectrum (bin 0 = −rate/2).
 ///
 /// `min_snr_db` is how far above the floor a carrier's peak must stand. The
 /// floor is the 20th percentile rather than the median, so a busy span — a
-/// transponder mostly full of carriers — still finds the true noise.
+/// transponder mostly full of carriers — still finds the true noise; and it
+/// is taken over the passband only (see [`passband`]), where carriers are
+/// looked for too.
 pub fn detect_carriers(spectrum_db: &[f32], rate: f64, min_snr_db: f32) -> Vec<Carrier> {
-    let s = spectrum_db;
+    let full = spectrum_db.len();
+    if full < 16 {
+        return Vec::new();
+    }
+    let bin_hz = rate / full as f64;
+    let (lo, hi) = passband(spectrum_db);
+    let s = &spectrum_db[lo..=hi];
     let n = s.len();
     if n < 16 {
         return Vec::new();
     }
-    let bin_hz = rate / n as f64;
     let floor = quantile(s, 0.2);
     let above = |k: usize, margin: f32| s[k] > floor + margin;
 
@@ -294,8 +326,10 @@ pub fn detect_carriers(spectrum_db: &[f32], rate: f64, min_snr_db: f32) -> Vec<C
 
     // 4. Describe each region.
     let floor_lin = 10f64.powf(floor as f64 / 10.0);
-    let dc = n / 2;
-    let freq = |k: usize| (k as f64 / n as f64 - 0.5) * rate;
+    // DC, and frequencies, in the whole span's terms (bin `k` of the
+    // passband is bin `lo + k` of the span).
+    let dc = (full / 2).saturating_sub(lo);
+    let freq = |k: usize| ((lo + k) as f64 / full as f64 - 0.5) * rate;
     let mut out = Vec::new();
     for (a, b) in merged {
         let width = b - a + 1;
@@ -576,6 +610,45 @@ mod tests {
         assert!((b.center_hz - 3.5e6).abs() < 3.0 * bin, "{b:?}");
         assert!((b.symbol_rate_hz - 500e3).abs() / 500e3 < 0.05, "{b:?}");
         assert!(b.snr_db > 20.0);
+    }
+
+    /// A VFO recording: 64 kS/s QPSK 13 dB above the receiver's noise,
+    /// the VFO's filter edge at ±68 kHz of 227 kS/s, and beyond it a
+    /// stopband 85 dB and more below the carrier — a comb of sidelobes
+    /// every 4 kHz with nulls between. One carrier, 13 dB up; no sidelobe
+    /// a carrier.
+    #[test]
+    fn a_vfo_filters_stopband_is_not_carriers() {
+        let rate = 227_273.0;
+        let n = 4096;
+        let mut s = spectrum(n, rate, &[(0.0, 64e3, 0.35, -67.0)], false);
+        for (k, v) in s.iter_mut().enumerate() {
+            let f = (k as f64 / n as f64 - 0.5) * rate;
+            if f.abs() > 68e3 {
+                let lobe = (std::f64::consts::PI * f / 4.1e3).sin().abs().max(1e-2);
+                *v = (-152.0 - 0.6 * (f.abs() - 68e3) / 1e3 + 20.0 * lobe.log10()) as f32;
+            }
+        }
+        jitter(&mut s, 0.3, 11);
+        let found = detect_carriers(&s, rate, 6.0);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        let c = found[0];
+        assert!(c.center_hz.abs() < 1e3, "{c:?}");
+        assert!((c.symbol_rate_hz - 64e3).abs() / 64e3 < 0.05, "{c:?}");
+        assert!((c.snr_db - 13.0).abs() < 1.5, "{c:?}");
+    }
+
+    /// A carrier 60 dB over a smooth floor is not a filter's passband: the
+    /// floor beside it stays the floor.
+    #[test]
+    fn a_very_strong_carrier_keeps_its_floor() {
+        let rate = 2e6;
+        let n = 4096;
+        let mut s = spectrum(n, rate, &[(0.2e6, 500e3, 0.35, -20.0)], false);
+        jitter(&mut s, 0.5, 3);
+        let found = detect_carriers(&s, rate, 6.0);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].snr_db > 55.0, "{:?}", found[0]);
     }
 
     #[test]

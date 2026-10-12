@@ -511,6 +511,10 @@ const PROBE_UNITS: u64 = 3;
 /// (idle fill) that names the scrambler when no framing does: random data
 /// sit at 0.5.
 const IDLE_SHARE: f64 = 0.75;
+/// The share above which the line is nothing but its fill (the
+/// descrambler's first bits and the odd error aside): an idle link, not one
+/// with bursts between its fill (ASA253 MAL-BN, 15 s of nothing).
+const IDLE_ONLY: f64 = 0.99;
 
 /// Finds the descrambler and format of a modem's data, then follows them.
 pub struct PayloadRx {
@@ -602,6 +606,9 @@ impl PayloadRx {
         let held_bits: u64 = self.held.iter().map(|f| f.len() as u64).sum();
         // The most idle-looking descrambling, should nothing frame.
         let mut idle: Option<(f64, Descrambler, bool)> = None;
+        // The idle choice below: nothing but fill, rather than fill between
+        // bursts.
+        let mut idle_only = false;
         // Plain first: with differential decoding it must do strictly
         // better to win; skewed rails (unscrambled only) last of all.
         let skews: &[i8] = if self.rail_skews { &RAIL_SKEWS } else { &[] };
@@ -756,6 +763,7 @@ impl PayloadRx {
             && share >= IDLE_SHARE
         {
             best = Some((0, kind, diff, 0, Format::Idle, Fcs::Crc16, 0));
+            idle_only = share >= IDLE_ONLY;
         }
         if let Some((_, kind, diff, skew, fmt, fcs, octets)) = best {
             if fmt == Format::ParadiseEsc {
@@ -787,6 +795,9 @@ impl PayloadRx {
                 (Format::Slots, _) if slots_plain.is_some() => "HDLC on an inverted line".into(),
                 (Format::Slots, _) => "64 kbit/s timeslots in HDLC packets (inverted line)".into(),
                 (Format::Bsc, _) => "IBM bisync (BSC) blocks".into(),
+                (Format::Idle, _) if idle_only => {
+                    "idle: nothing but its fill so far (no traffic to tell the format by)".into()
+                }
                 (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
                 (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)".into(),
                 (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
@@ -1197,8 +1208,33 @@ mod tests {
             inner.append(&mut out.inner);
         }
         assert_eq!(rx.format(), Some(Format::Idle), "{:?}", rx.stats);
-        assert!(rx.stats.found.as_ref().unwrap().contains("taps 3, 20"));
+        let found = rx.stats.found.as_ref().unwrap();
+        assert!(
+            found.contains("taps 3, 20") && found.contains("between bursts"),
+            "{found}"
+        );
         assert!(!inner.is_empty());
+    }
+
+    #[test]
+    fn a_line_of_nothing_but_fill_is_idle() {
+        // All ones (a marking idle), V.35-scrambled: the scrambler is found,
+        // and the line called idle rather than fill between bursts.
+        const L: usize = 4096;
+        let bits = vec![1u8; 40 * L];
+        let kind = Descrambler::SelfSync(&[3, 20]);
+        let sent = scramble(kind, L, &bits);
+        let mut rx = PayloadRx::new(L);
+        let mut out = PayloadOut::default();
+        for f in sent.as_chunks::<L>().0 {
+            rx.push(f, &mut out);
+        }
+        assert_eq!(rx.format(), Some(Format::Idle), "{:?}", rx.stats);
+        let found = rx.stats.found.as_ref().unwrap();
+        assert!(
+            found.starts_with("idle: nothing but its fill") && found.contains("taps 3, 20"),
+            "{found}"
+        );
     }
 
     #[test]

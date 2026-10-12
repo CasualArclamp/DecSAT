@@ -2499,3 +2499,28 @@ the tuning, not the signal — fractional-N spurs or noise sidebands of the
 HackRF's LOs at particular IF offsets, as the 1725/1742/1743 cases before.
 The remedy is still to retune a few MHz; a map of the bad (centre, offset)
 pairs would let the GUI pick its tuning. Open.
+
+## A VFO recording's filter sidelobes were "carriers"; an idle line named so (2026-10-12)
+
+Rory's VFO recording of ASA253 MAL-BN (12346.5443 MHz, cf32 at 227 kS/s,
+15 s): `decsat scan` listed eight carriers — the link, 104 dB up, and
+seven 2–3 kS/s "carriers" at ±73–86 kHz. The link is QPSK 64 kS/s,
+Viterbi K = 7 rate ½, V.35 scrambling, Es/N0 13.4 dB, no channel errors;
+its data, descrambled, are one constant for all 15 s (the descrambler's
+first 45 bits and a 16-bit glitch aside): an idle line.
+
+- **The seven were the VFO's filter** (`carriers.rs`): beyond its edge at
+  ±68 kHz, a stopband 85–120 dB down with sidelobes every 4 kHz. The
+  floor is the spectrum's 20th percentile — here inside the stopband, so
+  each sidelobe stood "above the floor" and the link read 104 dB. Now the
+  span's edges that sit 30 dB below its 90th percentile *and* are rough
+  (detrended spread over 4 dB: a filter's comb of sidelobes and nulls; an
+  averaged noise floor stays under 2 dB) are left out, of the floor and
+  of the search. Six VFO recordings now give one carrier each at a
+  believable level (11–20 dB) and better rates (the 95 kBd FastLinks 95.3
+  kS/s, was 99–100; the CDM-600 42.7, was 49.2); the 4 MS/s HackRF
+  capture's 17 carriers are unchanged. A carrier 60 dB over a smooth
+  floor keeps its floor (test).
+- **"idle fill between bursts" said of a line with no bursts**
+  (`payload.rs`): above 99 % fill the payload now reads "idle: nothing but
+  its fill so far (no traffic to tell the format by)".
