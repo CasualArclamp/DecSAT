@@ -219,6 +219,16 @@ fn colour(t: &Track) -> Color32 {
     }
 }
 
+/// The same, deep enough to read on the light map.
+fn colour_on_light(t: &Track) -> Color32 {
+    match t.last.flight_level {
+        None => Color32::from_gray(70),
+        Some(fl) if fl < 100 => Color32::from_rgb(190, 90, 0),
+        Some(fl) if fl < 250 => Color32::from_rgb(20, 120, 30),
+        Some(_) => Color32::from_rgb(15, 70, 190),
+    }
+}
+
 impl RadarScope {
     pub fn open(&mut self, vfo: VfoId) {
         if self.vfo != Some(vfo) {
@@ -417,14 +427,14 @@ impl RadarScope {
                     "Where is the radar? This feed does not say: set it with Site…",
                 );
             if self.map_on && site.is_some() {
-                egui::ComboBox::from_id_salt("radar_map_style")
-                    .width(70.0)
-                    .selected_text(self.map_style.label())
-                    .show_ui(ui, |ui| {
-                        for s in Style::ALL {
-                            ui.selectable_value(&mut self.map_style, s, s.label());
-                        }
-                    });
+                let mut light = self.map_style == Style::Osm;
+                if ui
+                    .checkbox(&mut light, "Light")
+                    .on_hover_text("OpenStreetMap as it is; off, the same map dark")
+                    .changed()
+                {
+                    self.map_style = if light { Style::Osm } else { Style::Dark };
+                }
                 ui.add(
                     egui::Slider::new(&mut self.map_brightness, 0.1..=1.0)
                         .show_value(false)
@@ -596,8 +606,17 @@ impl RadarScope {
                 );
             }
         }
-        let grid = Color32::from_rgb(30, 70, 45);
-        let grid_text = Color32::from_rgb(70, 130, 90);
+        // On the light map: dark rings, deep colours.
+        let light = self.map_on && self.map_style == Style::Osm && self.site_of(v).is_some();
+        let (grid, grid_text) = if light {
+            (Color32::from_rgb(40, 90, 60), Color32::from_rgb(20, 70, 40))
+        } else {
+            (
+                Color32::from_rgb(30, 70, 45),
+                Color32::from_rgb(70, 130, 90),
+            )
+        };
+        let colour = if light { colour_on_light } else { colour };
         let origin = to_screen(0.0, 0.0);
         // Range rings out to the corners' reach.
         let reach = self.range * std::f32::consts::SQRT_2 + view.length();
@@ -652,7 +671,14 @@ impl RadarScope {
             }
             painter.line_segment(
                 [origin, at(beam)],
-                Stroke::new(1.5, Color32::from_rgba_unmultiplied(110, 255, 150, 170)),
+                Stroke::new(
+                    1.5,
+                    if light {
+                        Color32::from_rgba_unmultiplied(0, 120, 50, 200)
+                    } else {
+                        Color32::from_rgba_unmultiplied(110, 255, 150, 170)
+                    },
+                ),
             );
         }
         painter.circle_filled(origin, 3.0, grid_text);

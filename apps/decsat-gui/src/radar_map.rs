@@ -353,7 +353,11 @@ impl MapLayer {
             Align2::RIGHT_BOTTOM,
             style.credit(),
             FontId::proportional(10.0),
-            Color32::from_gray(140),
+            if style == Style::Osm {
+                Color32::from_gray(60)
+            } else {
+                Color32::from_gray(140)
+            },
         );
     }
 }
