@@ -34,6 +34,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | Carrier detection: every carrier marked with its symbol rate; slow ones (a 9.6 kS/s link in a 20 MS/s span) told from CW tones and spurs by a finer look | ✅ |
 | VFOs: draw, drag, resize, click a carrier to claim it; one thread each | ✅ |
 | **Identify** — blind symbol rate, roll-off, constellation, DVB-S2/S2X detection | ✅ |
+| **Survey**: every clean carrier in the span tried in turn, a few at a time — Identify, then its decoder with a time to lock — with the outcome, the model, what it carries and its payload listed, and saved as CSV | ✅ |
 | DVB-S2/S2X PL demodulation: frame lock, MODCOD per frame (ACM) | ✅ |
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
@@ -461,6 +462,24 @@ the same ▶, ● and *play when G.728 speech is found* as the slower links'
 A carrier too slow to show three frames in the first look is marked
 *provisional* while it listens longer. Between identifications it keeps
 demodulating with what it found, so the constellation and Es/N0 stay live.
+
+### Survey
+
+**Survey…** in the toolbar tries every clean carrier the receiver sees, in
+frequency order, a few at a time (*At once*, 1–4): each gets a VFO of its
+own for Identify, then the decoder for what it is — DVB-S2 to GSE/IP, the
+modem carriers through the Comtech entry's *type found* (TPC 2964, the
+K = 7 code, a FastLink); bursts, 8PSK and the rest have no decoder yet — and
+a time to lock (*give up after*, 40 s by default). One that locks is
+watched a few seconds more so what it carries shows, then its VFO goes and
+the next carrier takes its turn; nothing plays or records meanwhile. The
+window lists each carrier's frequency, S/N and rate, the outcome (decoded,
+no lock, no decoder, no signal), what it decoded as, what it carries
+(ADS-B, radar, voice) and its payload or the decoder's last word; **VFO**
+puts a kept VFO on a decoded one, **Save CSV** writes the table to the
+output folder. The waterfall's ADS-B and RADAR tags learn as it goes, and a
+retune stops it. `--survey` runs one unattended (with `--screenshot` to
+keep the picture).
 
 ### Frequency plan
 
