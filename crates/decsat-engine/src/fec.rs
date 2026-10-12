@@ -379,6 +379,10 @@ pub struct CallVoiceView {
     pub error: Option<String>,
 }
 
+/// How long an ED-137 stream counts as talking after its last packet of
+/// sound with PTT or squelch on (they come every 20 ms), s.
+const RADIO_TALK_HOLD: f64 = 0.3;
+
 /// A Q-Flex call's G.728 voice (decoded by the TDM receiver, at any of the
 /// links' rates) through the multicast-audio player and recorder as RTP
 /// A-law, as an E1 timeslot goes: 8000 samples a second by the stream's
@@ -1232,6 +1236,9 @@ pub struct GseView {
     /// ED-137 radio over IP, once any is seen: each stream's PTT and
     /// squelch, the SIP dialogs, the log of changes.
     pub radio: Option<decsat_ip::ed137::RadioView>,
+    /// Its voice, played and recorded as a call's is (▶ and ● set
+    /// `tdm_play` and `tdm_record`; `voice_auto` plays it once it talks).
+    pub radio_voice: Option<CallVoiceView>,
 }
 
 /// Where and whether a VFO's FEC writes its output.
@@ -1488,6 +1495,13 @@ struct IpStage {
     rcms: Option<decsat_ip::rcms::RcmsRx>,
     /// ED-137 radio over IP's signalling and SIP (`decsat_ip::ed137`).
     radio: decsat_ip::ed137::RadioRx,
+    /// Its voice: the player and recorder, the sound of the stream heard
+    /// waiting for them, that stream, and until when (signal time) it
+    /// counts as talking.
+    radio_voice: Option<CallVoice>,
+    radio_pcm: Vec<f32>,
+    radio_heard: Option<String>,
+    radio_talk_until: f64,
     clock: f64,
     /// ASTERIX found in UDP datagrams (the ML–PH trunk's ADS-B), for the
     /// radar stage to take.
@@ -1514,6 +1528,10 @@ impl IpStage {
             frags: Reassembler::new(),
             rcms: None,
             radio: decsat_ip::ed137::RadioRx::new(),
+            radio_voice: None,
+            radio_pcm: Vec::new(),
+            radio_heard: None,
+            radio_talk_until: f64::NEG_INFINITY,
             clock: 0.0,
             asterix: Vec::new(),
             gse: GseIp::new(),
@@ -1533,6 +1551,13 @@ impl IpStage {
     /// recording), and start or stop playing audio to match `o.audio_play`.
     fn follow(&mut self, o: &FecOutput) {
         self.gse.forced = o.gse_variant;
+        // ED-137 voice: once a radio is heard, its player and recorder
+        // follow ▶ and ●, and the voice preset plays it once it talks.
+        if self.radio.active() {
+            let v = self.radio_voice.get_or_insert_with(CallVoice::new);
+            v.follow(o, self.radio.talked());
+            self.radio.want_voice(v.wants_pcm());
+        }
         if o.audio_play != self.audio_want || o.audio_external != self.audio_external {
             self.audio_want = o.audio_play;
             self.audio_external = o.audio_external;
@@ -1679,6 +1704,16 @@ impl IpStage {
             // ED-137 radio over IP: its RTP's signalling, its SIP.
             self.radio
                 .udp((info.src, sport), (info.dst, dport), payload, self.clock);
+            // One stream heard at a time: the one talking keeps it until
+            // it has been quiet a moment.
+            for c in self.radio.take_voice() {
+                let free = self.clock > self.radio_talk_until;
+                if free || self.radio_heard.as_deref() == Some(c.stream.as_str()) {
+                    self.radio_heard = Some(c.stream);
+                    self.radio_pcm.extend_from_slice(&c.pcm);
+                    self.radio_talk_until = self.clock + RADIO_TALK_HOLD;
+                }
+            }
             let flow = decsat_ip::rcms::Flow {
                 src: info.src,
                 group: info.dst,
@@ -1719,6 +1754,12 @@ impl IpStage {
     fn tick(&mut self, secs: f64) {
         self.mcast.tick(secs);
         self.clock += secs;
+        // The radio's voice to its player and recorder, silence between
+        // talk spurts, on the signal's clock (8 kHz).
+        if let Some(v) = &mut self.radio_voice {
+            let talking = self.clock <= self.radio_talk_until;
+            v.feed(&mut self.radio_pcm, talking, (self.clock * 8000.0) as u64);
+        }
         self.win.1 += secs;
         if self.win.1 >= 2.0 || (self.ip_bps == 0.0 && self.win.1 > 0.2) {
             self.ip_bps = self.win.0 * 8.0 / self.win.1;
@@ -1799,6 +1840,7 @@ impl IpStage {
             text: self.text.view(),
             radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
             radio: self.radio.active().then(|| self.radio.view()),
+            radio_voice: self.radio_voice.as_ref().map(|v| v.view()),
         }
     }
 
@@ -2906,6 +2948,84 @@ mod tests {
             assert!(st.is_voice(1), "G.728 found in timeslot 1");
             assert_eq!(st.view(Default::default()).playing, auto.then_some(MIX));
         }
+    }
+
+    /// ED-137 radio over IP: a second of PTT with sound between seconds of
+    /// keep-alives, through the IP stage to the call recorder — the sound
+    /// where the PTT was, silence either side.
+    #[test]
+    fn ed137_voice_is_recorded_while_ptt_is_on() {
+        let dir = std::env::temp_dir().join(format!("decsat-ed137-{}", std::process::id()));
+        let o = |record: bool| FecOutput {
+            tdm_record: record,
+            dir: dir.clone(),
+            name: "ed137".into(),
+            ..FecOutput::default()
+        };
+        // An RTP packet with an ED-137A header extension (one word).
+        let packet = |pt: u8, seq: u16, ext: u16, payload: &[u8]| -> Vec<u8> {
+            let mut p = vec![0x90, pt];
+            p.extend_from_slice(&seq.to_be_bytes());
+            p.extend_from_slice(&(u32::from(seq) * 160).to_be_bytes());
+            p.extend_from_slice(&0xA594_4A87u32.to_be_bytes());
+            p.extend_from_slice(&[0x01, 0x67, 0x00, 0x01]);
+            p.extend_from_slice(&ext.to_be_bytes());
+            p.extend_from_slice(&[0, 0]);
+            p.extend_from_slice(payload);
+            p
+        };
+        let ptt: u16 = 1 << 13 | 4 << 6; // normal PTT, id 4
+        let mut ip = IpStage::new();
+        for k in 0..150u16 {
+            let talk = (50..100).contains(&k);
+            let rtp = if talk {
+                let tone: Vec<u8> = (0..160)
+                    .map(|i| {
+                        let n = f32::from(k) * 160.0 + i as f32;
+                        decsat_modem::e1::alaw_encode(
+                            0.5 * (std::f32::consts::TAU * 400.0 * n / 8000.0).sin(),
+                        )
+                    })
+                    .collect();
+                packet(8, k, ptt, &tone)
+            } else {
+                packet(decsat_ip::ed137::PT_R2S, k, 0, &[0; 4])
+            };
+            let d =
+                decsat_ip::packet::udp_v4([172, 16, 82, 28], [10, 26, 185, 112], 8602, 8580, &rtp);
+            ip.ip(&d, &decsat_ip::parse(&d).unwrap());
+            ip.follow(&o(true));
+            ip.tick(0.02);
+        }
+        // Stopping the recording finishes the file.
+        ip.follow(&o(false));
+        let v = ip.view();
+        let (path, _) = v
+            .radio_voice
+            .and_then(|r| r.record_file)
+            .expect("a recording");
+        let wav = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let s: Vec<f64> = wav[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f64::from(i16::from_le_bytes(*c)) / 32768.0)
+            .collect();
+        let rms = |a: f64, b: f64| {
+            let w = &s[(a * 8000.0) as usize..(b * 8000.0) as usize];
+            (w.iter().map(|x| x * x).sum::<f64>() / w.len() as f64).sqrt()
+        };
+        assert!(
+            (2.9..3.0).contains(&(s.len() as f64 / 8000.0)),
+            "{}",
+            s.len()
+        );
+        assert!(rms(0.2, 0.8) < 0.01, "{}", rms(0.2, 0.8));
+        assert!((rms(1.2, 1.8) - 0.35).abs() < 0.05, "{}", rms(1.2, 1.8));
+        assert!(rms(2.3, 2.8) < 0.01, "{}", rms(2.3, 2.8));
+        let st = &v.radio.unwrap().streams[0];
+        assert_eq!((st.talk_packets, st.ptt_on), (50, 1));
     }
 
     /// ADS-B as the ML–PH trunk carries it: ASTERIX CAT021 in UDP

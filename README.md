@@ -252,7 +252,11 @@ keep-alive period, best-signal method) and whether the call was refused or
 accepted (one direction tells it by the ACK's transaction). The field
 layout follows Wireshark's ED-137 dissector, and agrees with tshark packet
 for packet on a live recording. `decsat pcap … --radio-csv` writes every
-packet's signalling.
+packet's signalling. **The voice is heard**: the sound (G.711, A- or
+µ-law) of packets whose PTT or squelch is on plays in the **Radio voice**
+card as a call's does — by itself under the voice preset, one stream and
+one talker at a time across the app, ▶ to listen regardless, ● to record a
+`.wav` — with silence between transmissions.
 
 ### Voice over E1 (G.704, Comtech D&I++)
 

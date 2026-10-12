@@ -28,7 +28,9 @@
 //! radio remote control (ED-137B), 4 CLIMAX dynamic delay compensation;
 //! 11–15 are the vendors'. Payload type 123 is the R2S keep-alive (the
 //! SDP's `a=rtpmap:123 R2S/8000`): signalling and no sound; voice goes as
-//! PCMA or PCMU (8, 0).
+//! PCMA or PCMU (8, 0). The voice of packets whose PTT or squelch is on is
+//! decoded (G.711) and handed on in [`VoiceChunk`]s, for the receiver to
+//! play; voice with neither on is counted, not played.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -38,6 +40,43 @@ pub const PROFILE_ED137A: u16 = 0x0167;
 pub const PROFILE_ED137: u16 = 0x0067;
 /// The R2S keep-alive payload type.
 pub const PT_R2S: u8 = 123;
+/// G.711's payload types (RFC 3551 Table 4): µ-law, A-law.
+pub const PT_PCMU: u8 = 0;
+pub const PT_PCMA: u8 = 8;
+
+/// G.711 A-law to linear (ITU-T G.711 Table 1a: even bits inverted, a
+/// sign, a 3-bit segment, a 4-bit step), 16-bit scale.
+pub fn alaw_to_linear(a: u8) -> i16 {
+    let a = a ^ 0x55;
+    let seg = (a >> 4) & 0x07;
+    let mut v = i16::from(a & 0x0F) << 4;
+    v += if seg == 0 { 8 } else { 0x108 };
+    if seg > 1 {
+        v <<= seg - 1;
+    }
+    if a & 0x80 != 0 { v } else { -v }
+}
+
+/// G.711 µ-law to linear (ITU-T G.711 Table 2a: bits inverted, a sign, a
+/// 3-bit segment, a 4-bit step, bias 132), 16-bit scale.
+pub fn ulaw_to_linear(u: u8) -> i16 {
+    let u = !u;
+    let t = ((i16::from(u & 0x0F) << 3) + 0x84) << ((u >> 4) & 0x07);
+    if u & 0x80 != 0 { 0x84 - t } else { t - 0x84 }
+}
+
+/// Sound out of a stream's packet whose PTT or squelch was on: for the
+/// receiver to play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceChunk {
+    /// The stream's label (as its [`StreamView::label`]).
+    pub stream: String,
+    /// G.711 decoded, 8000 samples a second, full scale ±1.
+    pub pcm: Vec<f32>,
+}
+
+/// Voice chunks held for the taker, at most (about 10 s of 20 ms packets).
+const VOICE_HELD: usize = 500;
 /// SIP's port.
 pub const SIP_PORT: u16 = 5060;
 
@@ -500,6 +539,10 @@ pub struct StreamView {
     pub squelch_secs: f64,
     /// Feature kinds seen.
     pub feature_kinds: Vec<u8>,
+    /// Packets of sound while PTT or squelch was on (handed on to play),
+    /// and their seconds.
+    pub talk_packets: u64,
+    pub talk_secs: f64,
 }
 
 impl StreamView {
@@ -519,6 +562,8 @@ impl StreamView {
             squelch_on: 0,
             squelch_secs: 0.0,
             feature_kinds: Vec::new(),
+            talk_packets: 0,
+            talk_secs: 0.0,
         }
     }
 
@@ -611,9 +656,31 @@ pub struct RadioRx {
     sessions: VecDeque<SessionView>,
     session_count: u64,
     events: VecDeque<Event>,
+    /// Voice for the taker, while it wants it.
+    want_voice: bool,
+    voice: Vec<VoiceChunk>,
 }
 
 impl RadioRx {
+    /// Hold the voice of talking packets for [`Self::take_voice`] (else it
+    /// is only counted).
+    pub fn want_voice(&mut self, on: bool) {
+        self.want_voice = on;
+        if !on {
+            self.voice.clear();
+        }
+    }
+
+    /// The voice held since last time, oldest first.
+    pub fn take_voice(&mut self) -> Vec<VoiceChunk> {
+        std::mem::take(&mut self.voice)
+    }
+
+    /// Whether any stream has talked yet (sound with PTT or squelch on).
+    pub fn talked(&self) -> bool {
+        self.streams.iter().any(|s| s.talk_packets > 0)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -709,9 +776,37 @@ impl RadioRx {
                 .into(),
             );
         }
+        // Sound, when PTT or squelch is on: G.711 decoded for the taker.
+        let talking = s.ptt.on() || s.squelch;
+        let law = match r.pt {
+            PT_PCMA => Some(alaw_to_linear as fn(u8) -> i16),
+            PT_PCMU => Some(ulaw_to_linear as fn(u8) -> i16),
+            _ => None,
+        };
+        let mut chunk = None;
+        if talking && let Some(law) = law {
+            st.talk_packets += 1;
+            st.talk_secs += r.payload.len() as f64 / 8000.0;
+            if self.want_voice {
+                chunk = Some(VoiceChunk {
+                    stream: st.label(),
+                    pcm: r
+                        .payload
+                        .iter()
+                        .map(|&b| f32::from(law(b)) / 32768.0)
+                        .collect(),
+                });
+            }
+        }
         st.now = s;
         st.last_time = t;
         let label = st.label();
+        if let Some(c) = chunk {
+            if self.voice.len() == VOICE_HELD {
+                self.voice.remove(0);
+            }
+            self.voice.push(c);
+        }
         for what in events {
             self.event(t, label.clone(), what);
         }
@@ -949,6 +1044,78 @@ mod tests {
         plain[12] = 0xBE;
         assert!(!rx.udp((a, 1), (b, 2), &plain, 1.0));
         assert!(!rx.udp((a, 161), (b, 162), &[0x30, 0x35, 2, 1, 1], 1.0));
+    }
+
+    /// G.711 against values from the standard's tables.
+    #[test]
+    fn g711_decodes() {
+        assert_eq!((alaw_to_linear(0xD5), alaw_to_linear(0x55)), (8, -8));
+        assert_eq!(
+            (alaw_to_linear(0xAA), alaw_to_linear(0x2A)),
+            (32256, -32256)
+        );
+        assert_eq!((ulaw_to_linear(0xFF), ulaw_to_linear(0x7F)), (0, 0));
+        assert_eq!(
+            (ulaw_to_linear(0x80), ulaw_to_linear(0x00)),
+            (32124, -32124)
+        );
+        // The A-law decoder the E1 stage has always used agrees.
+        for b in 0..=255u8 {
+            let e1 = {
+                let a = b ^ 0x55;
+                let seg = (a >> 4) & 7;
+                let mant = i32::from(a & 0x0F);
+                let mag = if seg == 0 {
+                    (mant << 4) + 8
+                } else {
+                    ((mant << 4) + 0x108) << (seg - 1)
+                };
+                if a & 0x80 != 0 { mag } else { -mag }
+            };
+            assert_eq!(i32::from(alaw_to_linear(b)), e1, "{b:02X}");
+        }
+    }
+
+    /// Voice is handed on only while PTT or squelch is on, G.711 decoded.
+    #[test]
+    fn hands_on_the_voice_of_talking_packets() {
+        let a: IpAddr = [172, 16, 82, 28].into();
+        let b: IpAddr = [10, 26, 185, 112].into();
+        let mut rx = RadioRx::new();
+        rx.want_voice(true);
+        let sq = (1u16 << 12).to_be_bytes();
+        let sq = [sq[0], sq[1], 0, 0];
+        let off = [0u8; 4];
+        let mut seq = 0u16;
+        let mut send = |rx: &mut RadioRx, pt: u8, ext: &[u8], payload: &[u8]| {
+            seq += 1;
+            rx.udp(
+                (a, 8602),
+                (b, 8580),
+                &packet(pt, seq, ext, payload),
+                f64::from(seq) * 0.02,
+            );
+        };
+        send(&mut rx, PT_PCMA, &off, &[0xD5; 160]); // no PTT, no squelch
+        send(&mut rx, PT_PCMA, &sq, &[0xAA; 160]);
+        send(&mut rx, PT_PCMU, &sq, &[0x80; 160]);
+        send(&mut rx, PT_R2S, &sq, &[0; 4]); // a keep-alive: no sound
+        let v = rx.take_voice();
+        assert_eq!(v.len(), 2);
+        assert!(
+            v[0].pcm
+                .iter()
+                .all(|&x| (x - 32256.0 / 32768.0).abs() < 1e-6)
+        );
+        assert!(
+            v[1].pcm
+                .iter()
+                .all(|&x| (x - 32124.0 / 32768.0).abs() < 1e-6)
+        );
+        let s = &rx.view().streams[0];
+        assert_eq!((s.voice, s.talk_packets), (3, 2));
+        assert!((s.talk_secs - 0.04).abs() < 1e-9);
+        assert!(rx.take_voice().is_empty());
     }
 
     #[test]

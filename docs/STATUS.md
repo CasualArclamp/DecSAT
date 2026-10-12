@@ -3386,3 +3386,30 @@ oracle: it dissects ED-137, ED-137A, B and C.
 Open: the voice (PCMA/PCMU when PTT or squelch is on) is counted, not
 played; the 40h byte's meaning; the other direction (radio → VCS, its
 squelch and receive audio) is on the paired carrier.
+
+## ED-137 voice played (2026-10-13)
+
+Rory: "play the ED-137 voice when PTT or squelch is on".
+
+- `decsat-ip::ed137`: G.711 decoding (`alaw_to_linear`, `ulaw_to_linear`,
+  ITU-T G.711 Tables 1a/2a; A-law checked against the E1 stage's decoder on
+  all 256 codes); a packet of PT 8 or 0 whose signalling has PTT or squelch
+  on is a `VoiceChunk` (decoded, 8 kHz) for the taker, while one wants it
+  (`want_voice`, `take_voice`); `talk_packets`/`talk_secs` per stream. Sound
+  with neither on is counted, not played; keep-alives (PT 123) never are.
+- Engine: the IP stage keeps a `CallVoice` (the Q-Flex calls' player,
+  recorder and voice-floor gate) for the radio, made once ED-137 is seen;
+  ▶/● are the call-voice settings (`tdm_play`, `tdm_record`), the voice
+  preset (`voice_auto`) plays it once a stream has talked. One stream is
+  heard at a time: the one talking keeps it until 0.3 s without a talking
+  packet; its PCM goes to the `CallVoice`, which `tick` feeds on the signal
+  clock — silence between talk spurts, the floor deciding whether it is
+  heard (one talker across the app). `GseView.radio_voice` for the GUI.
+- GUI: the call-voice card takes a title (and seconds of speech) and shows
+  **Radio voice (ED-137)** on a VFO with ED-137 streams: speech · on air /
+  waiting / silent, what is on (e.g. "normal PTT on 172.16.82.28:8602 →
+  …"), ▶ ●, the recording.
+- Test: a second of PTT with a 400 Hz PCMA tone between seconds of
+  keep-alives, through `IpStage` to the call recorder: the `.wav` is
+  silence (RMS < 0.01), the tone (0.35), silence. Rory's recordings hold no
+  voice (an idle radio, VCS → radio side), so not yet heard live.

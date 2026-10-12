@@ -816,8 +816,9 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 .map(|c| c.to_string())
                 .collect();
             let call = CallShown {
+                title: "Call voice (G.728)",
                 talking: voice.talking,
-                talk_blocks: voice.talk_blocks,
+                talk_secs: voice.talk_blocks as f64 * 0.04,
                 place: format!("channels {}", channels.join(", ")),
                 about: "G.728 LD-CELP at 16 kbit/s spread over four TDM channels, two bits a \
                         TDM word. Where each channel's bits go is learnt from the voice \
@@ -834,8 +835,9 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 String::new()
             };
             let call = CallShown {
+                title: "Call voice (G.728)",
                 talking: c.talking,
-                talk_blocks: c.talk_blocks,
+                talk_secs: c.talk_blocks as f64 * 0.04,
                 place: format!(
                     "bits {}–{} of a 64 kbit/s timeslot{others}",
                     c.bit,
@@ -845,6 +847,40 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                         timeslot, found by the voice equipment's silence fill.",
             };
             call_voice_card(ui, &call, f.call_voice.as_ref(), v, &mut actions);
+        } else if let Some(f) = &st.fec
+            && let Some(g) = &f.gse
+            && let Some(r) = g.radio.as_ref().filter(|r| !r.streams.is_empty())
+        {
+            let talking: Vec<String> = r
+                .streams
+                .iter()
+                .filter(|s| s.now.ptt.on() || s.now.squelch)
+                .map(|s| {
+                    let what = if s.now.ptt.on() {
+                        s.now.ptt.name()
+                    } else {
+                        "squelch open".into()
+                    };
+                    format!("{what} on {}", s.label())
+                })
+                .collect();
+            let call = CallShown {
+                title: "Radio voice (ED-137)",
+                talking: !talking.is_empty(),
+                talk_secs: r.streams.iter().map(|s| s.talk_secs).sum(),
+                place: if talking.is_empty() {
+                    format!(
+                        "{} stream{}",
+                        r.streams.len(),
+                        if r.streams.len() == 1 { "" } else { "s" }
+                    )
+                } else {
+                    talking.join(", ")
+                },
+                about: "The radio's sound (G.711, A- or µ-law) in ED-137 RTP, played while \
+                        PTT or squelch is on — one stream at a time — and silence between.",
+            };
+            call_voice_card(ui, &call, g.radio_voice.as_ref(), v, &mut actions);
         }
         if let Some(f) = &st.fec {
             if let Some(g) = &f.gse {
@@ -933,11 +969,14 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
 /// one recorded to a `.wav`.
 /// A call's G.728 voice in a Q-Flex's TDM multiplex: which channels, whether
 /// it is speaking, and ▶ / ● for it.
-/// A Q-Flex call as the call-voice card shows it, whichever multiplex it
-/// came from.
+/// A call as the call-voice card shows it, whichever multiplex (or radio
+/// over IP) it came from.
 struct CallShown {
+    /// The card's title.
+    title: &'static str,
     talking: bool,
-    talk_blocks: u64,
+    /// Seconds of speech so far.
+    talk_secs: f64,
     /// Where it is carried, and how it was found (the hover text).
     place: String,
     about: &'static str,
@@ -952,7 +991,7 @@ fn call_voice_card(
 ) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Call voice (G.728)").strong())
+        ui.label(RichText::new(voice.title).strong())
             .on_hover_text(voice.about);
         if out.is_some_and(|o| o.playing) {
             volume_control(ui);
@@ -977,8 +1016,7 @@ fn call_voice_card(
         ui.label(
             RichText::new(format!(
                 "{} · {:.1} s of speech so far",
-                voice.place,
-                voice.talk_blocks as f64 * 0.04
+                voice.place, voice.talk_secs
             ))
             .small()
             .weak(),
