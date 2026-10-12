@@ -3117,3 +3117,30 @@ the ASA176 trunk reads "CDM-570L trunk"), else the one kept for its
 carrier (`carrier_caps::vfo_model`); shown where it fits before the CPU
 reading, explained on hover. Checked unattended on the mixed capture: VFO
 1 (type found) "CDM-570L Viterbi", VFO 2 (TPC chosen) "CDM-570L trunk".
+
+## Survey: every carrier in the span tried in turn (2026-10-12)
+
+Rory: "a 'survey' button that tests all carriers sequentially on a
+satellite that it sees … a time out for bad decode and don't do too many
+at once". Toolbar **Survey…** opens `survey.rs`'s window: ▶ snapshots the
+front end's clean carriers in the whole span (by frequency) and tries them
+`parallel` at a time (1–4, default 2), each on a VFO of its own named
+"Survey <MHz>" (voice not played, nothing recorded, kept out of the saved
+session, made without taking the selection). Identify first (12 s; a
+provisional answer taken after 6 s), then the decoder for what it is
+(`pick`: DVB-S2 → GSE/IP; TPC 2964, FastLink, DVB-S-like or plain
+BPSK/QPSK → the Comtech type-found model; bursts, 8PSK and the rest → "no
+decoder"), given `give_up_secs` (default 40) to lock — DVB-S2 frames
+decoded, a modem's code locked (and TPC's payload known) — then watched
+`DWELL_SECS` (6 s) for what it carries before its VFO goes and the next
+carrier starts. Results stay in the window: MHz, SNR, rate, outcome
+(decoded / no lock / no decoder / no signal / VFO gone), what it decoded
+as (the CDM model, Q-Flex, DVB-S2), what it carries (ADS-B, radar, voice)
+and the payload or the decoder's last word; "VFO" makes a kept VFO on a
+decoded one; Save CSV writes `decsat-survey-<stamp>.csv` to the output
+folder. The waterfall's carrier tags learn as it goes. A retune stops it.
+Unattended: `--survey`. Checked on the mixed capture (2 of 2 decoded:
+CDM-570L Viterbi with radar, CDM-570L trunk with ADS-B and voice) and on a
+live 8 MS/s capture (Oct 11, 1745 MHz centre): 26 of 29 decoded in under
+three minutes, two at a time — Q-Flex FastLinks, CDM-570L TPC carriers,
+one with radar.

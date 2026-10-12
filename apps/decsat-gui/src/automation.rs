@@ -45,6 +45,8 @@ pub struct Options {
     pub plan: Option<PathBuf>,
     /// Open the transmit panel (for screenshots: it is never armed).
     pub tx_panel: bool,
+    /// Open the survey and start it once the carriers are found.
+    pub survey: bool,
 }
 
 impl Options {
@@ -115,6 +117,7 @@ impl Options {
                     o.plan = Some(PathBuf::from(args.next().ok_or("--plan needs a file")?));
                 }
                 Some("--tx-panel") => o.tx_panel = true,
+                Some("--survey") => o.survey = true,
                 Some("--select") => {
                     let v = args.next().ok_or("--select needs a VFO number")?;
                     o.select = Some(
@@ -175,6 +178,8 @@ pub struct Automation {
     requested_at: Option<Instant>,
     pub claim_carriers: bool,
     pub claimed: bool,
+    /// Start the survey once the carriers are found (see `--survey`).
+    pub survey: bool,
     pub select: Option<usize>,
     pub ts_viewer: bool,
     pub radar_scope: bool,
@@ -195,6 +200,7 @@ impl Automation {
             screenshot: o.screenshot.clone(),
             requested_at: None,
             claim_carriers: o.claim_carriers,
+            survey: o.survey,
             claimed: false,
             select: o.select,
             ts_viewer: o.ts_viewer,

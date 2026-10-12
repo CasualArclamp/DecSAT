@@ -20,6 +20,7 @@ mod radar_scope;
 mod radio;
 mod session;
 mod side_panel;
+mod survey;
 mod transmit;
 mod ts_viewer;
 mod waterfall;
@@ -55,7 +56,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio]"
+                 [--radar-track HEX] [--play-audio] [--survey]"
             );
             std::process::exit(2);
         }
@@ -137,6 +138,8 @@ struct App {
     statuses: BTreeMap<VfoId, VfoStatus>,
     /// What carriers have been heard to carry (ADS-B, radar), by RF.
     carrier_caps: carrier_caps::CarrierCaps,
+    /// Every carrier in the span tried in turn.
+    survey: survey::Survey,
     selected: Option<VfoId>,
     new_decoder: DecoderKind,
     names: u32,
@@ -201,6 +204,7 @@ impl Default for App {
             vfos: Vec::new(),
             statuses: BTreeMap::new(),
             carrier_caps: carrier_caps::CarrierCaps::load(),
+            survey: Default::default(),
             selected: None,
             new_decoder: DecoderKind::Identify,
             names: 1,
@@ -293,10 +297,33 @@ impl App {
                 ("radio.lnb_lo_mhz".to_string(), r.lnb_lo_mhz.to_string()),
             ]);
         }
-        for (i, v) in self.vfos.iter().enumerate() {
+        let surveying = self.survey.vfo_ids();
+        let kept = self.vfos.iter().filter(|v| !surveying.contains(&v.id));
+        for (i, v) in kept.enumerate() {
             p.push((format!("vfo.{i}"), session::vfo_text(&v.settings)));
         }
         p
+    }
+
+    /// What the survey asks: its VFOs made, changed and removed (made without
+    /// taking the selection), and a VFO kept on a result.
+    fn apply_survey(&mut self, reqs: Vec<survey::Request>) {
+        for r in reqs {
+            match r {
+                survey::Request::Create(i, s) => {
+                    let (sel, before) = (self.selected, self.vfos.len());
+                    self.apply(Action::Create(s));
+                    let id = (self.vfos.len() > before)
+                        .then(|| self.vfos.last().map(|v| v.id))
+                        .flatten();
+                    self.selected = sel;
+                    self.survey.created(i, id);
+                }
+                survey::Request::Update(id, s) => self.apply(Action::Update(id, s)),
+                survey::Request::Remove(id) => self.apply(Action::Remove(id)),
+                survey::Request::Keep(s) => self.apply(Action::Create(s)),
+            }
+        }
     }
 
     /// Take back the session saved last time. The VFOs wait in the list for
@@ -877,6 +904,21 @@ impl App {
             {
                 self.tx.open = !self.tx.open;
             }
+            let survey_label = if self.survey.running() {
+                RichText::new("Surveying…").color(egui::Color32::from_rgb(110, 220, 110))
+            } else {
+                RichText::new("Survey…")
+            };
+            if ui
+                .button(survey_label)
+                .on_hover_text(
+                    "Try every carrier the receiver sees in turn, a few at a time: what each \
+                     is, whether it decodes, what it carries",
+                )
+                .clicked()
+            {
+                self.survey.open = !self.survey.open;
+            }
             let r = ui.button("📋 Plan…").on_hover_text(plan_tip);
             if r.clicked()
                 && let Some(p) = rfd::FileDialog::new()
@@ -1213,6 +1255,11 @@ impl eframe::App for App {
                     self.statuses.insert(v.id, s);
                 }
             }
+            // The survey: its carriers' VFOs looked at, the next started.
+            let reqs = self
+                .survey
+                .tick(&self.statuses, &self.vfos, self.rf_center());
+            self.apply_survey(reqs);
             // What each VFO's carrier carries, learnt by its RF.
             let centre = self.rf_center();
             if centre > 0.0 {
@@ -1251,6 +1298,15 @@ impl eframe::App for App {
         // Unattended: claim the carriers once the detector has settled — the
         // eight strongest that are not rough lumps, in frequency order.
         // (`--vfo-at` drops one VFO where asked instead.)
+        // Unattended: the survey, once the detector has settled.
+        if self.automation.survey && self.front.row_seq > 40 {
+            self.automation.survey = false;
+            self.survey.open = true;
+            let reqs = self
+                .survey
+                .start_now(&self.front.carriers, self.rf_center());
+            self.apply_survey(reqs);
+        }
         if (self.automation.claim_carriers || !self.automation.vfo_at.is_empty())
             && !self.automation.claimed
             && self.front.row_seq > 40
@@ -1408,6 +1464,13 @@ impl eframe::App for App {
             });
 
         // The transmit panel; starting the HackRF takes it over from receive.
+        let reqs = self.survey.show(
+            ui.ctx(),
+            &self.front.carriers,
+            self.rf_center(),
+            self.engine.is_some(),
+        );
+        self.apply_survey(reqs);
         if let Some(req) = self.tx.show(ui.ctx()) {
             match req {
                 #[cfg(feature = "hackrf")]
