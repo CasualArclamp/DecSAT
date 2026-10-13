@@ -222,6 +222,12 @@ impl DecoderKind {
         )
     }
 
+    /// IP can come out of the decoder: GSE, MPE in a transport stream, or
+    /// a modem's link layer (HDLC, bridged Ethernet).
+    pub fn carries_ip(self) -> bool {
+        self.chain() == DecoderKind::Dvbs2Ip || self.outputs_ts()
+    }
+
     /// The decoder locks a carrier and decodes it: its own state leads the
     /// side panel, and Identify's view folds away.
     pub fn demodulates(self) -> bool {
@@ -299,10 +305,15 @@ pub struct VfoSettings {
     /// positive). The CID decoder resamples to the corrected chip rate, so
     /// its long searches see no drift. It is what the CID card measures.
     pub clock_ppm: f64,
-    /// Write the decoder's output to a file: symbols (generic PSK) or IP
-    /// packets as PCAP (DVB-S2 → GSE/IP). Off by default — the decoder shows
-    /// what it finds until recording is asked for.
+    /// Write the decoder's output to a file: symbols (generic PSK), a
+    /// modem's data (.bin), the TS (.ts). Off by default — the decoder
+    /// shows what it finds until recording is asked for.
     pub record: bool,
+    /// Write the IP packets to a PCAP file.
+    pub pcap: bool,
+    /// Feed the IP packets live to Wireshark: each new number starts a
+    /// new one (`FecOutput::wireshark`), `None` stops feeding.
+    pub wireshark: Option<u32>,
     /// DVB-S2 → GSE/IP: read GSE this way; `None` detects it from the data.
     pub gse_variant: Option<decsat_gse::Variant>,
     /// DVB-S2 → MPEG-TS: send the TS by UDP to `ts_udp` ("host:port").
@@ -357,6 +368,8 @@ impl VfoSettings {
             cid_low_snr: false,
             clock_ppm: 0.0,
             record: false,
+            pcap: false,
+            wireshark: None,
             gse_variant: None,
             // Local only: a player on this machine. Point them elsewhere on
             // purpose to stream to the network.
@@ -2041,6 +2054,8 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
                     | DecoderKind::Viterbi
             ),
         record_on_activity: s.record_on_activity && s.decoder == DecoderKind::FastLink,
+        pcap: s.pcap && s.decoder.carries_ip(),
+        wireshark: s.wireshark.filter(|_| s.decoder.carries_ip()),
         dir: s.record_dir.clone(),
         name: s.name.clone(),
         carrier_hz: ddc.offset_hz(),
@@ -2784,7 +2799,7 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("decsat-pcap-vfo-{}", std::process::id()));
         let mut settings = VfoSettings::new("IP", 40_000.0, 190_000.0, DecoderKind::Dvbs2Ip);
-        settings.record = true;
+        settings.pcap = true;
         settings.record_dir = dir.clone();
         let status = Arc::new(Mutex::new(VfoStatus::default()));
         let mut wk = Worker::new(

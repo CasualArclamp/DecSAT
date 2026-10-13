@@ -3493,8 +3493,8 @@ Rory closed the GUI: "record it". The 477.9 kS/s 8PSK (12347.08 MHz), live:
 
 ## Both directions for 15 minutes: PTT summation, no voice (2026-10-13)
 
-15 min of IQ at 1748 MHz, 4 MS/s, LNA 24, VGA 20, RF amp (7.2 GB, in the
-session's scratchpad pair/long/), both carriers decoded offline:
+15 min of IQ at 1748 MHz, 4 MS/s, LNA 24, VGA 20, RF amp (7.2 GB, deleted
+once decoded), both carriers decoded offline:
 
 - **VCS → radio (238.96k)**: 217 499 of 217 650 frames; its stream
   (172.16.82.28:8602 → 10.26.185.112:8580) keep-alives only, 4.9/s, PTT
@@ -3510,3 +3510,27 @@ session's scratchpad pair/long/), both carriers decoded offline:
   109061002 that stays signalling only; the controllers' audio, and any
   aircraft's, take other paths. The VCS's attempts at more sessions are
   declined (603, max UAs 1).
+
+## PCAP on its own button; IP live into Wireshark (2026-10-13)
+
+Rory: a separate record-PCAP button, and IP live in Wireshark.
+
+- **PCAP** (`VfoSettings::pcap`, `FecOutput::pcap`): the IP stage's file
+  follows its own switch, no longer the modem's ● Record (which keeps the
+  `.bin` and `.ts`). Shown for every decoder that carries IP
+  (`DecoderKind::carries_ip`: GSE, the modems, and a TS decoder once MPE
+  brings IP). `decsat decode --out` writes both, as before.
+- **Wireshark ▶ Live** (`decsat_engine::wireshark`): Wireshark is started
+  with `-k -i -` and captures from its standard input (through dumpcap —
+  tested on Windows with tshark first), which a thread of its own writes
+  as a PCAP stream (`PcapWriter` is now generic over its sink) behind a
+  4096-packet queue: a Wireshark that falls behind loses packets, counted,
+  never the decoder's time. `--enable-heuristic rtp_udp`: ED-137's RTP on
+  8580/8602 otherwise shows as data when the capture starts mid-session
+  (with it, the ED-137A extension — PTT, squelch, SQI — is dissected).
+  Each ▶ is a new ask (`Option<u32>`, a counter), so a Wireshark that was
+  closed can be opened again; ⏹ drops the feed and Wireshark keeps what it
+  has. `decsat decode … --wireshark` for the CLI.
+- Checked: the VFO_103 capture (8PSK TPC → EDMAC → bridged Ethernet)
+  decoded with `--wireshark --out`: 201 packets in Wireshark's own capture
+  file, 201 in the PCAP, the same protocols.

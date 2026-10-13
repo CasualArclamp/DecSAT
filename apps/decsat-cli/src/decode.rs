@@ -49,6 +49,8 @@ pub struct DecodeArgs {
     pub bits: bool,
     /// DVB-S2: append the good BBFRAMEs here.
     pub bbframes: Option<PathBuf>,
+    /// Feed the IP live to a Wireshark started for it.
+    pub wireshark: bool,
 }
 
 fn decoder_by_name(name: &str) -> Result<DecoderKind> {
@@ -163,10 +165,12 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     s.clock_ppm = a.clock_ppm;
     s.psk_bits = a.bits;
     s.bbframes = a.bbframes.clone();
+    s.wireshark = a.wireshark.then_some(1);
     if let Some(dir) = &a.out {
         // Record throughout, or (--record-on-activity) only while a channel
         // of a FastLink's multiplex is active.
         s.record = !a.record_on_activity;
+        s.pcap = s.record;
         s.record_on_activity = a.record_on_activity;
         s.record_dir = dir.clone();
     } else if a.record_on_activity {

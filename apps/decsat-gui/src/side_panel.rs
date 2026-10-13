@@ -536,8 +536,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                         (true, true) => ("⏹ Stop", "Close the files"),
                         (false, true) => (
                             "● Record",
-                            "Write the decoded data to a .bin file, and what it carries: \
-                             IP packets to a .pcap, an MPEG-TS to a .ts",
+                            "Write the decoded data to a .bin file, and an MPEG-TS it \
+                             carries to a .ts (its IP: PCAP, below)",
                         ),
                     };
                     if ui
@@ -605,9 +605,20 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                     });
                 ui.end_row();
 
+            }
+
+            // The IP out: to a PCAP file, and live to Wireshark. A TS
+            // decoder shows them once IP turns up in it (MPE).
+            let ip = st.fec.as_ref().and_then(|f| f.gse.as_ref());
+            let shows_ip = s.decoder.carries_ip()
+                && (!matches!(
+                    s.decoder.chain(),
+                    DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
+                ) || ip.is_some_and(|g| g.packets > 0));
+            if shows_ip {
                 ui.label("PCAP");
                 ui.horizontal(|ui| {
-                    let (label, tip) = if s.record {
+                    let (label, tip) = if s.pcap {
                         ("⏹ Stop", "Close the PCAP file")
                     } else {
                         (
@@ -615,22 +626,62 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                             "Write the IP packets to a PCAP file (raw IP, Wireshark reads it)",
                         )
                     };
-                    let b = egui::Button::new(label).selected(s.record);
+                    let b = egui::Button::new(label).selected(s.pcap);
                     if ui.add(b).on_hover_text(tip).clicked() {
-                        s.record = !s.record;
+                        s.pcap = !s.pcap;
                     }
-                    let active = st
-                        .fec
-                        .as_ref()
-                        .and_then(|f| f.gse.as_ref())
-                        .is_some_and(|g| g.pcap_active);
-                    if s.record && !active {
+                    if s.pcap && !ip.is_some_and(|g| g.pcap_active) {
                         ui.label(
-                            RichText::new("starts with the first GSE frame")
+                            RichText::new("starts with the first IP packet")
                                 .weak()
                                 .small(),
                         );
                     }
+                });
+                ui.end_row();
+
+                ui.label("Wireshark");
+                ui.horizontal(|ui| {
+                    let live = ip.and_then(|g| g.wireshark);
+                    let feeding = s.wireshark.is_some() && live.is_some();
+                    let (label, tip) = if feeding {
+                        (
+                            "⏹ Stop",
+                            "Stop feeding Wireshark: its capture stops, the packets it has stay",
+                        )
+                    } else {
+                        (
+                            "▶ Live",
+                            "Open Wireshark and feed it the IP packets as they are decoded",
+                        )
+                    };
+                    let b = egui::Button::new(label).selected(feeding);
+                    if ui.add(b).on_hover_text(tip).clicked() {
+                        // Each ▶ is a new ask, so a Wireshark that was
+                        // closed can be opened again.
+                        s.wireshark = if feeding {
+                            None
+                        } else {
+                            Some(s.wireshark.map_or(1, |n| n.wrapping_add(1)))
+                        };
+                    }
+                    let note = if let Some(e) = ip.and_then(|g| g.wireshark_error.as_ref()) {
+                        RichText::new(e).color(Color32::from_rgb(230, 110, 110))
+                    } else if let Some((n, dropped)) = live {
+                        let lost = if dropped > 0 {
+                            format!(", {dropped} dropped")
+                        } else {
+                            String::new()
+                        };
+                        RichText::new(format!("{n} packets{lost}")).weak()
+                    } else if s.wireshark.is_some() && ip.is_none() {
+                        RichText::new("opens with the first IP packet").weak()
+                    } else if s.wireshark.is_some() {
+                        RichText::new("closed").weak()
+                    } else {
+                        RichText::new("")
+                    };
+                    ui.label(note.small());
                 });
                 ui.end_row();
             }
@@ -3496,6 +3547,19 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
             ui.end_row();
             ui.label("");
             ui.label(RichText::new(path.display().to_string()).small());
+            ui.end_row();
+        }
+        if let Some((n, dropped)) = g.wireshark {
+            ui.label("Wireshark");
+            let lost = if dropped > 0 {
+                format!(", {dropped} dropped (it fell behind)")
+            } else {
+                String::new()
+            };
+            ui.colored_label(
+                Color32::from_rgb(110, 190, 120),
+                format!("▶ {n} packets live{lost}"),
+            );
             ui.end_row();
         }
     });

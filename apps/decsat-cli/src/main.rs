@@ -212,6 +212,10 @@ enum Command {
         /// u16 little-endian; PLS MODCOD, one byte; the BBFRAME).
         #[arg(long)]
         bbframes: Option<PathBuf>,
+        /// Open Wireshark and feed it the IP packets as they are decoded
+        /// (it captures from its standard input).
+        #[arg(long)]
+        wireshark: bool,
     },
 }
 
@@ -343,6 +347,7 @@ fn main() -> Result<()> {
             clock_ppm,
             bits,
             bbframes,
+            wireshark,
         } => decode::decode(decode::DecodeArgs {
             file,
             hackrf,
@@ -367,6 +372,7 @@ fn main() -> Result<()> {
             clock_ppm,
             bits,
             bbframes,
+            wireshark,
         }),
     }
 }

@@ -13,8 +13,11 @@ const LINKTYPE_RAW: u32 = 101;
 /// Longest packet stored whole.
 const SNAPLEN: u32 = 65_535;
 
-pub struct PcapWriter {
-    out: BufWriter<File>,
+/// Writes to a file by default; `W` can be any byte sink — Wireshark's
+/// standard input, for a live capture (a type parameter with a default:
+/// plain `PcapWriter` is the file writer).
+pub struct PcapWriter<W: Write = BufWriter<File>> {
+    out: W,
     packets: u64,
     bytes: u64,
 }
@@ -22,7 +25,13 @@ pub struct PcapWriter {
 impl PcapWriter {
     /// Create `path` and write the global header.
     pub fn create(path: &Path) -> io::Result<Self> {
-        let mut out = BufWriter::new(File::create(path)?);
+        PcapWriter::new(BufWriter::new(File::create(path)?))
+    }
+}
+
+impl<W: Write> PcapWriter<W> {
+    /// Write the global header to `out`; packets follow.
+    pub fn new(mut out: W) -> io::Result<Self> {
         // Magic (microsecond timestamps, little-endian), version 2.4,
         // GMT offset 0, accuracy 0, snaplen, link type.
         out.write_all(&0xA1B2_C3D4u32.to_le_bytes())?;

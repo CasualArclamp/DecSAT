@@ -117,6 +117,14 @@ stream, IP packet and byte counts, the IP rate, protocols and the busiest
 flows; press **● Record** next to *PCAP* to write the packets to a `.pcap`
 (raw IP, opens in Wireshark).
 
+**▶ Live** next to *Wireshark* opens Wireshark and feeds it the packets as
+they are decoded: it is started capturing from its standard input
+(`-k -i -`), which DecSAT writes as a PCAP stream, with its RTP heuristic on
+so ED-137 streams show their PTT and squelch without the SIP that set them
+up. **⏹ Stop**, or closing Wireshark, ends it; Wireshark keeps what it has.
+Every decoder that carries IP has both buttons (a TS decoder once IP turns
+up in it, by MPE); `decsat decode … --wireshark` does the same.
+
 Real links do not all follow the standard. As in
 [dontlookup](https://github.com/ucsdsysnet/dontlookup), DecSAT reads every
 data field four ways at once — GSE_LENGTH counting the 2-byte header or not,
@@ -220,8 +228,9 @@ carries it, or anything with the packet after a short header) gets the same
 statistics, PCAP and multicast audio as GSE — a flow whose UDP checksums all
 fail while its headers check is marked **encrypted** in transit, and the
 audio sniffer leaves it alone; a transport stream gets the TS outputs.
-**● Record** also writes the decoded data to a `.bin`, and `decsat pcap`
-reads a recorded PCAP back. Identify recognises the carrier by its unique
+**● Record** writes the decoded data to a `.bin` (the IP has its own
+*PCAP* and *Wireshark* buttons), and `decsat pcap` reads a recorded PCAP
+back. Identify recognises the carrier by its unique
 word. What each search found is shown, so you can tell a finding from a
 default. It is confirmed on live Comtech CDM-600L and CDM-570L carriers.
 
@@ -599,6 +608,7 @@ decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   #
 decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf   # a DVB-S2 carrier, its good BBFRAMEs kept
 decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
 decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
+decsat decode --hackrf 1748 --rate 4000000 --decoder tpc --offset -915e3 --bandwidth 640e3 --wireshark   # a modem's IP live in Wireshark
 decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back
 decsat pcap recording.pcap --radio-csv radio.csv   # ED-137 radio signalling, packet by packet
 decsat payload link.bin --frame-bits 2223 --bit-rate 537665 --pcap-out ip.pcap   # a data recording's IP, decoded again

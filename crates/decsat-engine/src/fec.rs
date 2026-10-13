@@ -1200,6 +1200,10 @@ pub struct GseView {
     pub pcap: Option<(PathBuf, u64)>,
     pub pcap_active: bool,
     pub pcap_error: Option<String>,
+    /// Wireshark capturing the IP live: packets written to it and dropped
+    /// (it fell behind); and why it could not start.
+    pub wireshark: Option<(u64, u64)>,
+    pub wireshark_error: Option<String>,
     /// IP that came by MPE from a transport stream rather than GSE.
     pub mpe: Option<MpeStats>,
     /// IP that came in link-layer frames (HDLC), and how: for display.
@@ -1244,8 +1248,13 @@ pub struct GseView {
 /// Where and whether a VFO's FEC writes its output.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FecOutput {
-    /// Write IP packets to a PCAP file.
+    /// Write a modem's data to a `.bin` file (and the TS to a `.ts`).
     pub record: bool,
+    /// Write IP packets to a PCAP file.
+    pub pcap: bool,
+    /// Feed IP packets live to a Wireshark started for them: each new
+    /// number is a new ask (a new Wireshark), `None` stops feeding.
+    pub wireshark: Option<u32>,
     /// A modem's data: record them, the last 10 s included, while a channel
     /// of the TDM multiplex inside is active (and 10 s after).
     pub record_on_activity: bool,
@@ -1464,6 +1473,11 @@ struct IpStage {
     pcap: Option<PcapWriter>,
     path: Option<PathBuf>,
     error: Option<String>,
+    /// Wireshark capturing the IP live (`crate::wireshark`), the ask it
+    /// answers, and why it could not start.
+    wireshark: Option<crate::wireshark::Live>,
+    wireshark_ask: Option<u32>,
+    wireshark_error: Option<String>,
     /// IP rate window: bytes and signal seconds.
     win: (f64, f64),
     ip_bps: f64,
@@ -1540,6 +1554,9 @@ impl IpStage {
             pcap: None,
             path: None,
             error: None,
+            wireshark: None,
+            wireshark_ask: None,
+            wireshark_error: None,
             win: (0.0, 0.0),
             ip_bps: 0.0,
             last_top: Instant::now(),
@@ -1547,10 +1564,24 @@ impl IpStage {
         }
     }
 
-    /// Open or close the PCAP to match `o.record` (a new file per
-    /// recording), and start or stop playing audio to match `o.audio_play`.
+    /// Open or close the PCAP to match `o.pcap` (a new file per
+    /// recording), start Wireshark or stop feeding it to match
+    /// `o.wireshark`, and start or stop playing audio to match
+    /// `o.audio_play`.
     fn follow(&mut self, o: &FecOutput) {
         self.gse.forced = o.gse_variant;
+        if o.wireshark != self.wireshark_ask {
+            self.wireshark_ask = o.wireshark;
+            self.wireshark = None;
+            self.wireshark_error = None;
+            if o.wireshark.is_some() {
+                let title = format!("DecSAT {} {}", o.name, crate::rf::freq_tag(o.carrier_hz));
+                match crate::wireshark::Live::start(&title) {
+                    Ok(w) => self.wireshark = Some(w),
+                    Err(e) => self.wireshark_error = Some(e),
+                }
+            }
+        }
         // ED-137 voice: once a radio is heard, its player and recorder
         // follow ▶ and ●, and the voice preset plays it once it talks.
         if self.radio.active() {
@@ -1619,7 +1650,7 @@ impl IpStage {
                 Err(e) => self.record_error = Some(format!("{}: {e}", st.name())),
             }
         }
-        match (o.record, self.pcap.is_some()) {
+        match (o.pcap, self.pcap.is_some()) {
             (true, false) if self.error.is_none() => {
                 let stamp = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -1680,6 +1711,11 @@ impl IpStage {
         {
             self.error = Some(e.to_string());
             self.pcap = None;
+        }
+        if let Some(w) = &mut self.wireshark
+            && !w.send(SystemTime::now(), data)
+        {
+            self.wireshark = None;
         }
         // `Cow`: borrowed when the packet was whole, owned when rebuilt.
         let Some(whole) = self.frags.push(data, info) else {
@@ -1780,6 +1816,9 @@ impl IpStage {
         }
         // Few flows, cheap to list: always current.
         self.audio = self.mcast.streams();
+        if self.wireshark.as_mut().is_some_and(|w| !w.alive()) {
+            self.wireshark = None;
+        }
 
         GseView {
             source: self.gse.source(),
@@ -1800,6 +1839,8 @@ impl IpStage {
                 .map(|p| (p, self.pcap.as_ref().map_or(0, |w| w.packets()))),
             pcap_active: self.pcap.is_some(),
             pcap_error: self.error.clone(),
+            wireshark: self.wireshark.as_ref().map(|w| (w.written(), w.dropped)),
+            wireshark_error: self.wireshark_error.clone(),
             mpe: self.mpe.clone(),
             link: self.hdlc.map(|(n, fcs)| {
                 let link = match fcs {
