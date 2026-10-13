@@ -416,12 +416,19 @@ pub(crate) fn report(st: &VfoStatus) {
             println!("  payload {:.1} kbit/s (DFL)", f.payload_bps / 1e3);
         }
         if let Some(g) = &f.gse {
+            if g.trailers > 0 {
+                println!(
+                    "  vendor CRC-32 at the end of the data field (over BBHEADER and field, \
+                     from 0): {} frames",
+                    g.trailers
+                );
+            }
             for v in &g.variants {
                 let s = &v.stats;
                 if s.packets + s.errors > 0 {
                     println!(
                         "  gse {:?}: {} packets ({} whole, {} start, {} middle, {} end, {} padding), \
-                         {} errors, {} reassembled, CRC {} ok / {} bad, {} IP",
+                         {} errors, {} reassembled, CRC {} ok / {} bad{}, {} IP",
                         v.variant,
                         s.packets,
                         s.whole,
@@ -433,6 +440,11 @@ pub(crate) fn report(st: &VfoStatus) {
                         s.reassembled,
                         s.crc_ok,
                         s.crc_bad,
+                        if s.vouched > 0 {
+                            format!(" / {} by the frame CRC", s.vouched)
+                        } else {
+                            String::new()
+                        },
                         v.ip_packets
                     );
                 }

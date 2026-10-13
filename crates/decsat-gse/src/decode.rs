@@ -19,6 +19,12 @@
 //! Two deviations seen on real links are handled as variants (after
 //! dontlookup's parsers, MIT): GSE_LENGTH counting the 2-byte header too,
 //! and a frag-id byte that is a 6-bit id plus a 2-bit counter.
+//!
+//! A data field the caller has checked by other means (a vendor's CRC over
+//! the whole BBFRAME, see `auto::frame_trailer`) is "verified": a PDU
+//! reassembled only from verified fields, its split counters running on,
+//! is passed on even when its own total length and CRC-32 follow a rule of
+//! the vendor's that this decoder does not know.
 
 use std::collections::HashMap;
 
@@ -167,6 +173,9 @@ pub struct GseStats {
     pub collisions: u64,
     pub crc_ok: u64,
     pub crc_bad: u64,
+    /// Reassembled PDUs passed on the strength of their fields' own CRC
+    /// (their GSE CRC-32 or total length not the standard's).
+    pub vouched: u64,
 }
 
 struct Partial {
@@ -177,6 +186,11 @@ struct Partial {
     /// Bytes the CRC covers: total length, protocol type, label, PDU.
     crc_input: Vec<u8>,
     fragments: u32,
+    /// Every fragment so far came in a verified field, and (split ids) the
+    /// counters ran on: none is missing.
+    verified: bool,
+    /// The last fragment's split counter.
+    counter: u8,
 }
 
 /// A GSE decoder for one variant.
@@ -184,6 +198,8 @@ pub struct GseDecoder {
     pub variant: Variant,
     partial: HashMap<u8, Partial>,
     pub stats: GseStats,
+    /// The field being parsed was verified by the caller.
+    verified: bool,
 }
 
 /// Longest PDU reassembled (GSE's total length is 16 bits).
@@ -203,11 +219,19 @@ impl GseDecoder {
             variant,
             partial: HashMap::new(),
             stats: GseStats::default(),
+            verified: false,
         }
     }
 
     /// Parse one BBFRAME data field, appending completed PDUs to `out`.
     pub fn data_field(&mut self, field: &[u8], out: &mut Vec<Pdu>) {
+        self.data_field_verified(field, false, out);
+    }
+
+    /// [`Self::data_field`] for a field whose integrity the caller has
+    /// checked (`verified`) or not.
+    pub fn data_field_verified(&mut self, field: &[u8], verified: bool, out: &mut Vec<Pdu>) {
+        self.verified = verified;
         let mut i = 0;
         // Label type 3 re-uses the previous packet's label in this field.
         let mut last_label = Label::None;
@@ -299,6 +323,8 @@ impl GseDecoder {
             data: b[5 + n..].to_vec(),
             crc_input: b[1..].to_vec(),
             fragments: 1,
+            verified: self.verified,
+            counter: b[0] & 3,
         };
         if self.partial.insert(key, p).is_some() {
             self.stats.collisions += 1;
@@ -312,11 +338,13 @@ impl GseDecoder {
         }
         self.stats.middle += 1;
         let key = self.variant.frag_key(b[0]);
+        let (verified, split) = (self.verified, self.variant.frag == FragMode::Split);
         match self.partial.get_mut(&key) {
             Some(p) if p.data.len() + b.len() <= MAX_PDU => {
                 p.data.extend_from_slice(&b[1..]);
                 p.crc_input.extend_from_slice(&b[1..]);
                 p.fragments += 1;
+                p.follow(b[0], verified, split);
             }
             Some(_) => {
                 self.partial.remove(&key);
@@ -336,18 +364,25 @@ impl GseDecoder {
             self.stats.orphans += 1;
             return true;
         };
+        p.follow(b[0], self.verified, self.variant.frag == FragMode::Split);
         let data = &b[1..b.len() - 4];
         p.data.extend_from_slice(data);
         p.crc_input.extend_from_slice(data);
         let sent = u32::from_be_bytes(b[b.len() - 4..].try_into().unwrap());
         let crc_ok = crc32_mpeg2(&p.crc_input) == sent;
+        // The total length covers everything after its own field.
+        let length_ok = p.total_length + 2 == p.crc_input.len();
         if crc_ok {
             self.stats.crc_ok += 1;
+        } else if p.verified {
+            // Seen live: a vendor whose total length reads 9 short and whose
+            // CRC-32 is none of the usual, every BBFRAME carrying a CRC of
+            // its own (`auto::frame_trailer`) — the PDUs are whole and right.
+            self.stats.vouched += 1;
         } else {
             self.stats.crc_bad += 1;
         }
-        // The total length covers everything after its own field.
-        if p.total_length + 2 != p.crc_input.len() && !crc_ok {
+        if !crc_ok && !length_ok && !p.verified {
             return true;
         }
         self.stats.reassembled += 1;
@@ -356,8 +391,21 @@ impl GseDecoder {
             label: p.label,
             data: p.data,
             fragments: p.fragments + 1,
-            crc_ok: Some(crc_ok),
+            // Vouched for by the fields, not by its own CRC.
+            crc_ok: (crc_ok || !p.verified).then_some(crc_ok),
         });
         true
+    }
+}
+
+impl Partial {
+    /// A further fragment (frag-id byte `id`) arrived, in a `verified`
+    /// field or not: the PDU stays verified only if it did, and, with
+    /// split ids, its counter is the next.
+    fn follow(&mut self, id: u8, verified: bool, split: bool) {
+        let counter = id & 3;
+        let next = !split || counter == (self.counter + 1) & 3;
+        self.verified &= verified && next;
+        self.counter = counter;
     }
 }

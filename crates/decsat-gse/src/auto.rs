@@ -6,6 +6,7 @@
 //! When no variant has produced IP for a while, a blind IPv4 search over the
 //! data fields takes over, for links whose encapsulation is none of these.
 
+use decsat_core::crc::crc32_msb;
 use decsat_ip::{IpInfo, blind_ipv4_search, parse};
 
 use crate::decode::{GseDecoder, GseStats, Pdu, Variant};
@@ -23,6 +24,21 @@ const BRIDGED: u16 = 0x0001;
 
 /// Non-IP PDU bytes seen before their byte entropy is judged.
 const ENTROPY_BYTES: u64 = 32 * 1024;
+/// BBHEADER length, bytes (EN 302 307-1 §5.1.6).
+const BBHEADER_LEN: usize = 10;
+
+/// A vendor's CRC at the end of a data field: the last 4 bytes of
+/// `bbframe` (BBHEADER, then the data field up to DFL) are the CRC-32 of
+/// everything before them — g(x) = 04C11DB7h, MSB first, register from 0,
+/// no final XOR, sent big-endian. Seen live on four ACM outbounds of one
+/// network (1.0, 1.2 and 2.7 MS/s, 9268 frames, every one fitting), whose
+/// GSE counts the header in GSE_LENGTH: packets tile the field to exactly
+/// these 4 bytes. A chance fit is 1 in 2³².
+pub fn frame_trailer(bbframe: &[u8]) -> bool {
+    let n = bbframe.len();
+    n >= BBHEADER_LEN + 4 && crc32_msb(&bbframe[..n - 4], 0).to_be_bytes() == bbframe[n - 4..]
+}
+
 /// Bits per byte above which non-IP PDUs are called encrypted. Uniform bytes
 /// read 8 − 255 / (2 N ln 2) ≈ 7.99 at N = 32 KiB; headers, counters, text
 /// or fill pull a stream well under 7.9 (the 1 MS/s outbounds' timing and
@@ -83,6 +99,8 @@ pub struct GseIp {
     pub other_protocols: std::collections::BTreeMap<u16, u64>,
     /// Byte histogram of those PDUs, to tell ciphertext from a format.
     other_bytes: [u64; 256],
+    /// Data fields that ended in a vendor CRC (`frame_trailer`).
+    trailers: u64,
 }
 
 impl Default for GseIp {
@@ -104,7 +122,24 @@ impl GseIp {
             blind_packets: 0,
             other_protocols: Default::default(),
             other_bytes: [0; 256],
+            trailers: 0,
         }
+    }
+
+    /// Data fields that ended in a vendor's CRC-32 (`frame_trailer`), which
+    /// was taken off before GSE.
+    pub fn trailers(&self) -> u64 {
+        self.trailers
+    }
+
+    /// The variant whose packets fit the data fields best — fewest that
+    /// overrun a field, fragments with no start or a start colliding —
+    /// the standard on a tie: how to read a link that carries no IP.
+    fn best_fit(&self) -> usize {
+        let misfit = |d: &GseDecoder| d.stats.errors + d.stats.orphans + d.stats.collisions;
+        (0..self.decoders.len())
+            .min_by_key(|&k| (misfit(&self.decoders[k]), k))
+            .unwrap_or(0)
     }
 
     /// Shannon entropy of the non-IP PDUs' bytes, in bits per byte, once
@@ -183,15 +218,34 @@ impl GseIp {
         self.blind_packets
     }
 
+    /// Decode one good BBFRAME given as its BBHEADER and data field (up to
+    /// DFL): a vendor CRC at the end of the field (`frame_trailer`) is
+    /// checked and taken off, the rest goes to [`Self::data_field`].
+    pub fn bbframe(&mut self, bbframe: &[u8], out: &mut Vec<IpPacket>) {
+        let Some(field) = bbframe.get(BBHEADER_LEN..) else {
+            return;
+        };
+        if frame_trailer(bbframe) {
+            self.trailers += 1;
+            self.field(&field[..field.len() - 4], true, out);
+        } else {
+            self.field(field, false, out);
+        }
+    }
+
     /// Decode one BBFRAME data field; IP packets of the chosen variant (or
     /// the blind search) go to `out`.
     pub fn data_field(&mut self, field: &[u8], out: &mut Vec<IpPacket>) {
+        self.field(field, false, out);
+    }
+
+    fn field(&mut self, field: &[u8], verified: bool, out: &mut Vec<IpPacket>) {
         self.fields += 1;
         let mut any_ip = false;
         for (k, dec) in self.decoders.iter_mut().enumerate() {
             let pdus = &mut self.pdus[k];
             pdus.clear();
-            dec.data_field(field, pdus);
+            dec.data_field_verified(field, verified, pdus);
             let valid = pdus.iter().filter(|p| ip_of(p).is_some()).count();
             self.scores[k] = self.scores[k] * DECAY + valid as f64;
             self.ip_counts[k] += valid as u64;
@@ -201,9 +255,10 @@ impl GseIp {
 
         // Borrowed out of `self` for the loop, so `self.other` (which takes
         // `&mut self`) can be called inside it; put back after.
-        let k = self
-            .chosen()
-            .map_or(0, |v| Variant::ALL.iter().position(|&x| x == v).unwrap());
+        let k = match self.chosen() {
+            Some(v) => Variant::ALL.iter().position(|&x| x == v).unwrap(),
+            None => self.best_fit(),
+        };
         let pdus = std::mem::take(&mut self.pdus[k]);
         if self.chosen().is_some() {
             for p in &pdus {
@@ -216,10 +271,11 @@ impl GseIp {
                 }
             }
         } else {
-            // No IP from any variant yet: say what standard GSE carries
-            // instead — a link may carry none (seen live: every PDU of a
-            // 2.7 MS/s ACM outbound had type 0005h, an unregistered
-            // mandatory extension header, TS 102 606-1 §4.2 / RFC 4326 §5).
+            // No IP from any variant yet: say what the GSE carries instead,
+            // read by the variant that fits the fields best — a link may
+            // carry none (seen live: every PDU of a 2.7 MS/s ACM outbound had
+            // type 0005h, an unregistered mandatory extension header, TS
+            // 102 606-1 §4.2 / RFC 4326 §5).
             for p in &pdus {
                 self.other(p);
             }
@@ -344,6 +400,114 @@ mod tests {
         // Judged within ~32 KiB of PDUs: about a second of the 1.2 MS/s
         // outbound.
         assert!(judged_at.is_some_and(|n| n <= 60), "{judged_at:?}");
+    }
+
+    /// A BBFRAME as the live vendor sends them: BBHEADER, GSE packets whose
+    /// GSE_LENGTH counts their own header, and the CRC-32 (from zero) of
+    /// all that as the field's last 4 bytes.
+    fn vendor_frame(sync: u8, packets: &[Vec<u8>]) -> Vec<u8> {
+        let field: Vec<u8> = packets.concat();
+        let dfl_bits = ((field.len() + 4) * 8) as u16;
+        let mut f = vec![0x42, 0x00, 0x00, 0x00];
+        f.extend_from_slice(&dfl_bits.to_be_bytes());
+        f.extend_from_slice(&[sync, 0x00, 0x00, 0x00]);
+        f.extend_from_slice(&field);
+        let crc = crc32_msb(&f, 0);
+        f.extend_from_slice(&crc.to_be_bytes());
+        f
+    }
+
+    /// A GSE packet: S, E, label type, body; GSE_LENGTH counting the header.
+    fn vendor_packet(s: bool, e: bool, lt: u8, body: &[u8]) -> Vec<u8> {
+        let len = body.len() + 2;
+        let h = (u16::from(s) << 15) | (u16::from(e) << 14) | (u16::from(lt) << 12) | len as u16;
+        let mut p = h.to_be_bytes().to_vec();
+        p.extend_from_slice(body);
+        p
+    }
+
+    #[test]
+    fn a_vendor_crc_trailer_is_checked_and_its_pdus_reassembled() {
+        // The live 1 MS/s outbound: a whole 8-byte type-0001h PDU (the hub
+        // clock), then a type-0002h PDU to label 00:ff:ff:10:0c:10 split
+        // over two frames — split frag ids 0x3f/0 then 0x3f/1, a total
+        // length 9 short of the standard's and a CRC-32 that is none of the
+        // usual: only the frames' own CRC vouches for it.
+        let label = [0x00, 0xff, 0xff, 0x10, 0x0c, 0x10];
+        let table: Vec<u8> = (0..300u32).map(|k| (k * 7) as u8).collect();
+        let clock = |t: u64| {
+            let mut b = vec![0x00, 0x01];
+            b.extend_from_slice(&t.to_be_bytes());
+            vendor_packet(true, true, 2, &b)
+        };
+        let mut start = vec![0xfc];
+        let total = (2 + 6 + table.len()) as u16 - 9;
+        start.extend_from_slice(&total.to_be_bytes());
+        start.extend_from_slice(&[0x00, 0x02]);
+        start.extend_from_slice(&label);
+        start.extend_from_slice(&table[..100]);
+        let mut end = vec![0xfd];
+        end.extend_from_slice(&table[100..]);
+        end.extend_from_slice(&[0xf7, 0x6f, 0xfe, 0x85]);
+        let frames = [
+            vendor_frame(0, &[clock(1_000), vendor_packet(true, false, 0, &start)]),
+            vendor_frame(1, &[vendor_packet(false, true, 0, &end), clock(2_000)]),
+        ];
+        assert!(frames.iter().all(|f| frame_trailer(f)));
+
+        let mut g = GseIp::new();
+        let mut got = Vec::new();
+        for f in &frames {
+            g.bbframe(f, &mut got);
+        }
+        assert_eq!(g.trailers(), 2);
+        assert!(got.is_empty());
+        assert_eq!(
+            g.other_protocols.get(&0x0001),
+            Some(&2),
+            "{:?}",
+            g.other_protocols
+        );
+        assert_eq!(
+            g.other_protocols.get(&0x0002),
+            Some(&1),
+            "{:?}",
+            g.other_protocols
+        );
+        let fit = &g.decoders[g.best_fit()];
+        assert_eq!(fit.variant.label(), "length incl. header, split frag id");
+        assert_eq!((fit.stats.errors, fit.stats.vouched), (0, 1));
+
+        // Unchecked, the same PDU has nothing to vouch for it.
+        let mut dec = GseDecoder::new(fit.variant);
+        let mut pdus = Vec::new();
+        for f in &frames {
+            dec.data_field(&f[10..f.len() - 4], &mut pdus);
+        }
+        assert!(pdus.iter().all(|p| p.protocol == 0x0001));
+        assert_eq!(dec.stats.crc_bad, 1);
+    }
+
+    #[test]
+    fn a_lost_fragment_is_not_vouched_for() {
+        // Fragments 0 and 2 of one PDU with 1 lost between them: the split
+        // counter skips, and nothing is passed on.
+        let mut start = vec![0x10, 0x00, 0x20, 0x00, 0x02];
+        start.extend_from_slice(&[7; 20]);
+        let mut end = vec![0x12];
+        end.extend_from_slice(&[9; 24]);
+        let mut g = GseIp::new();
+        let mut got = Vec::new();
+        g.bbframe(
+            &vendor_frame(0, &[vendor_packet(true, false, 2, &start)]),
+            &mut got,
+        );
+        g.bbframe(
+            &vendor_frame(2, &[vendor_packet(false, true, 2, &end)]),
+            &mut got,
+        );
+        assert_eq!(g.trailers(), 2);
+        assert!(g.other_protocols.is_empty(), "{:?}", g.other_protocols);
     }
 
     #[test]

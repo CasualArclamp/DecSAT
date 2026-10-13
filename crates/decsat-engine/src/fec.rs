@@ -1187,6 +1187,8 @@ pub struct GseView {
     pub other_entropy: Option<f64>,
     /// …and it is that of random bytes: the PDUs are encrypted.
     pub other_encrypted: bool,
+    /// Data fields that ended in a vendor's CRC-32 over the BBFRAME.
+    pub trailers: u64,
     pub packets: u64,
     pub bytes: u64,
     pub ipv4: u64,
@@ -1682,11 +1684,11 @@ impl IpStage {
         }
     }
 
-    /// One good GS-mode frame's data field.
-    fn data_field(&mut self, field: &[u8]) {
+    /// One good GS-mode frame: its BBHEADER and data field (up to DFL).
+    fn bbframe(&mut self, bbframe: &[u8]) {
         let mut packets = std::mem::take(&mut self.packets);
         packets.clear();
-        self.gse.data_field(field, &mut packets);
+        self.gse.bbframe(bbframe, &mut packets);
         for p in &packets {
             self.ip(&p.data, &p.info);
         }
@@ -1830,6 +1832,7 @@ impl IpStage {
             other_protocols: self.gse.other_protocols.clone(),
             other_entropy: self.gse.other_entropy(),
             other_encrypted: self.gse.other_encrypted(),
+            trailers: self.gse.trailers(),
             packets: self.stats.packets,
             bytes: self.stats.bytes,
             ipv4: self.stats.ipv4,
@@ -2668,18 +2671,19 @@ fn run(
         }
 
         // GSE/IP on good generic-stream frames (UPL 0: continuous; GSE also
-        // turns up flagged as packetized with UPL 0).
+        // turns up flagged as packetized with UPL 0). The header goes too:
+        // a vendor's CRC at the end of the field covers it.
         let gs = out.as_ref().and_then(|b| match &b.header {
             Ok(h) if b.ok() && h.format != StreamFormat::Transport && h.upl == 0 => {
                 let end = (BBHEADER_LEN + h.dfl as usize / 8).min(b.bytes.len());
-                Some(&b.bytes[BBHEADER_LEN..end])
+                Some(&b.bytes[..end])
             }
             _ => None,
         });
-        if let Some(field) = gs {
+        if let Some(bbframe) = gs {
             let stage = ip.get_or_insert_with(IpStage::new);
             stage.follow(&output.lock().unwrap());
-            stage.data_field(field);
+            stage.bbframe(bbframe);
         }
         if let Some(stage) = &mut ip {
             stage.tick(secs);

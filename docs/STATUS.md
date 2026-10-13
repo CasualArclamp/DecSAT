@@ -3575,3 +3575,52 @@ the GSE PDUs are encrypted" and a Contents row (bits/byte, with a tip),
 the CLI a "non-IP PDU bytes" line. The survey capture says so after 2 s;
 the 1 MS/s outbound (type 0001h timing PDUs) is not flagged. Test
 `random_pdus_are_called_encrypted`.
+
+## The 1 MS/s outbounds: one vendor's framing, hub clock, tables (2026-10-13)
+
+12381.26 and 12506.25 MHz (LO 10600), 1000 kS/s, pilots, short frames;
+from the 2026-10-11 survey captures (10 s each).
+
+- **Not the demodulator**: Es/N0 from the spectrum (signal over the floor
+  beside it) 6.3 and 8.7 dB — the demod's pilot estimate says 6.5 — and
+  32APSK 3/4 needs ~10.2: its frames (≈ 44 % of the air time) are 1.5–4 dB
+  short at this dish. (The 1.2 MS/s carrier: 19.1 dB by spectrum, 17.0 dB
+  by pilots.)
+- **One framing on all four outbounds** (these and the encrypted 1.2/2.7
+  MS/s ones; 9268 frames, every one fits): GSE_LENGTH counts its own 2-byte
+  header; split frag ids (6-bit id, 2-bit counter running 0,1,2,3,0…); the
+  last 4 bytes of each data field are a CRC-32 of the BBHEADER and field
+  (04C11DB7h, MSB first, register from 0, no final XOR, big-endian). This
+  corrects the entry above: the "2 bytes past the packet" were half this
+  trailer, the length counting the header. Fragmented PDUs' total length
+  reads 9 under the bytes after it and their end CRC-32 fits nothing tried
+  (7 polynomials × init × reflection × final XOR × ranges, rebuilt headers):
+  a rule of the vendor's; the frame CRC vouches for them.
+- **Two streams**: SYNC counts only the QPSK 1/4 frames, which say ISI 0;
+  the 32APSK 3/4 and 4/5 frames are another stream (MATYPE's multiple-
+  stream flag; its ISI unknown until one decodes).
+- **ISI 0 is the hub's signalling**, no IP and no clear text:
+  - every frame starts with a whole type-0001h PDU, no label, 8 bytes: a
+    big-endian counter running **46.08 counts a symbol** — the deltas
+    1157090, 1326194, 1482920, 1542716 are 3×8370, 8370 + 6×3402, 8370 +
+    7×3402 and 4×8370 symbols (QPSK 1/4 and 32APSK 3/4 short frames with
+    pilots): a network clock reference for TDMA returns;
+  - type-0002h PDUs to label 00:ff:ff:10:0c:10, then tag-length-value
+    records (1-byte tag, 2-byte length) from the label's last byte, 10h:
+    tag 10h (276 bytes: 0038h, a 32-bit value, then **45 × [16-bit id,
+    32-bit 0]**, a different id moved to the front each time — the
+    terminals, likely), then one of tags 11h (6–18 bytes), 15h (168–880
+    bytes of packed 16-bit pairs), 16h, 25h, and tag 17h (60 nn 7c, nn a
+    counter). 0001h/0002h are registered ULE next-headers (bridged frame,
+    TS-Concat) but used for neither here.
+- **Decoder** (`decsat-gse`): `GseIp::bbframe` takes the BBHEADER too,
+  checks `frame_trailer` and strips it (a chance fit: 1 in 2³²); fields
+  that passed are *verified*, and a reassembled PDU whose fields all were,
+  with split counters running on, is passed on whatever its own total
+  length and CRC (`GseStats::vouched`). With no IP, the non-IP report uses
+  the variant that fits the fields best (fewest overruns, orphans,
+  collisions) instead of the standard's. Results: 297 of 299 and 292 of
+  293 fragmented PDUs reassembled; the report reads 0001h ×314, 0002h ×324
+  (5.5 bits/byte, structured); the encrypted carrier now parses with no
+  errors. GUI: a "Framing" row, "reassembled (n by frame CRC)" in GSE
+  variants; CLI: a trailer line. Tests build the vendor's frames by hand.

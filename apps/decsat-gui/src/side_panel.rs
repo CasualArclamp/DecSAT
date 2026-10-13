@@ -3431,6 +3431,13 @@ const ENCRYPTED_TIP: &str = "Every UDP checksum in this flow fails while the IP 
      them, by an encryptor on the way. Their contents cannot be read (the Q-Flex sites' \
      networks: SNMP and the 233.71.15.x:50000 multicast, random data in 16-byte blocks).";
 
+/// The vendor CRC at the end of each data field.
+const VENDOR_TRAILER_TIP: &str = "The last 4 bytes of each data field are a CRC-32 of the \
+     BBHEADER and the field (04C11DB7h, from 0, no final XOR), taken off before GSE. Seen on \
+     one network's four ACM outbounds (1.0, 1.2, 2.7 MS/s), whose GSE length counts its own \
+     header; its fragmented PDUs' own total length and CRC are not the standard's, so they \
+     are passed on when every frame they came in passed this CRC and no fragment is missing.";
+
 /// What the non-IP PDUs' byte entropy says.
 const PDU_ENTROPY_TIP: &str = "Byte entropy of the PDUs that are not IP. Random bytes read \
      8.00 bits/byte; headers, counters, text or fill read well under 7.9. Random PDUs are \
@@ -3535,6 +3542,15 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
             .on_hover_text(ENCRYPTED_TIP);
             ui.end_row();
         }
+        if g.trailers > 0 {
+            ui.label("Framing");
+            ui.label(format!(
+                "vendor CRC-32 on every data field ({})",
+                g.trailers
+            ))
+            .on_hover_text(VENDOR_TRAILER_TIP);
+            ui.end_row();
+        }
         if !g.other_protocols.is_empty() {
             ui.label("Not IP");
             let v: Vec<String> = g
@@ -3632,7 +3648,12 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                 for r in &g.variants {
                     ui.label(RichText::new(r.variant.label()).small());
                     ui.label(RichText::new(r.ip_packets.to_string()).small());
-                    ui.label(RichText::new(r.stats.reassembled.to_string()).small());
+                    let reassembled = if r.stats.vouched > 0 {
+                        format!("{} ({} by frame CRC)", r.stats.reassembled, r.stats.vouched)
+                    } else {
+                        r.stats.reassembled.to_string()
+                    };
+                    ui.label(RichText::new(reassembled).small());
                     ui.label(
                         RichText::new(format!("{} / {}", r.stats.crc_ok, r.stats.crc_bad)).small(),
                     );
