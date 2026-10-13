@@ -84,7 +84,7 @@ On the waterfall:
 | | |
 |---|---|
 | **wheel** | zoom about the cursor |
-| **right- or middle-drag** | pan; past the span's edge (or at full span) with the HackRF live, it tunes the radio — the spectrum follows the mouse |
+| **right- or middle-drag** | pan; past the span's edge (or at full span) with the HackRF live, it tunes the radio — the spectrum follows the mouse, and the VFOs stay on their carriers, decoding on (one retuned out of the span idles until **Tune to it** in its settings brings it back) |
 | **drag on empty space** | draw a new VFO |
 | **double-click** | drop a VFO |
 | **click a green bracket** | claim a detected carrier with a VFO sized to fit, on the decoder it is known to need, else found as the Survey finds it (Identify, then DVB-S2 or the Comtech *type found*) |
