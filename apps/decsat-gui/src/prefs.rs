@@ -233,20 +233,16 @@ fn carrier_caps_hz(key: &str) -> Option<f64> {
     Some(khz * 1e3)
 }
 
-/// Forget the carriers kept within RF `range` (Hz), or all of them.
-pub fn forget_carrier_caps(range: Option<(f64, f64)>) -> std::io::Result<()> {
+/// Forget every carrier kept (see [`carrier_caps`]).
+pub fn forget_carrier_caps() -> std::io::Result<()> {
     let mut all = read_all();
-    drop_carrier_caps(&mut all, range);
+    drop_carrier_caps(&mut all);
     write_all(&all)
 }
 
 /// [`forget_carrier_caps`] on the settings in hand: the other keys stay.
-fn drop_carrier_caps(all: &mut Vec<(String, String)>, range: Option<(f64, f64)>) {
-    // Rust note: `is_none_or` is true for `None` (not a carrier's key: kept)
-    // or when the closure is true (outside the range forgotten).
-    all.retain(|(k, _)| {
-        carrier_caps_hz(k).is_none_or(|hz| range.is_some_and(|(lo, hi)| hz < lo || hz > hi))
-    });
+fn drop_carrier_caps(all: &mut Vec<(String, String)>) {
+    all.retain(|(k, _)| carrier_caps_hz(k).is_none());
 }
 
 /// Keep what the carrier at `rf_hz` carries (see [`carrier_caps`]).
@@ -495,12 +491,7 @@ mod tests {
             ("carrier_caps.rf12310000khz", "adsb,model=tpc2964"),
             ("carrier_caps.rf12400000khz", "radar"),
         ]);
-        drop_carrier_caps(&mut all, Some((12_295e6, 12_315e6)));
-        assert_eq!(
-            all,
-            kept(&[("volume", "0.800"), ("carrier_caps.rf12400000khz", "radar")])
-        );
-        drop_carrier_caps(&mut all, None);
+        drop_carrier_caps(&mut all);
         assert_eq!(all, kept(&[("volume", "0.800")]));
     }
 

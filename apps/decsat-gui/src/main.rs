@@ -326,11 +326,18 @@ impl App {
                 survey::Request::Update(id, s) => self.apply(Action::Update(id, s)),
                 survey::Request::Remove(id) => self.apply(Action::Remove(id)),
                 survey::Request::Keep(s) => self.apply(Action::Create(s)),
-                survey::Request::Forget(range) => {
-                    self.carrier_caps.forget(range);
-                }
+                survey::Request::ResetLabels => self.reset_labels(),
             }
         }
+    }
+
+    /// Every carrier label on the waterfall gone (what is known of the
+    /// carriers, kept between runs), and the survey's results with them.
+    fn reset_labels(&mut self) {
+        let n = self.carrier_caps.forget_all();
+        self.survey.found.clear();
+        self.note = format!("Labels reset: {n} carriers forgotten.");
+        self.survey.note = Some(self.note.clone());
     }
 
     /// Take back the session saved last time. The VFOs wait in the list for
@@ -936,6 +943,17 @@ impl App {
             {
                 self.survey.open = !self.survey.open;
             }
+            if ui
+                .add_enabled(
+                    self.carrier_caps.count() > 0,
+                    egui::Button::new("Reset labels"),
+                )
+                .on_hover_text(survey::RESET_TIP)
+                .on_disabled_hover_text("No carrier labels kept")
+                .clicked()
+            {
+                self.reset_labels();
+            }
             let r = ui.button("📋 Plan…").on_hover_text(plan_tip);
             if r.clicked()
                 && let Some(p) = rfd::FileDialog::new()
@@ -1522,9 +1540,9 @@ impl eframe::App for App {
         let reqs = self.survey.show(
             ui.ctx(),
             &self.front.carriers,
-            (self.rf_center(), self.front.sample_rate),
+            self.rf_center(),
             self.engine.is_some(),
-            &self.carrier_caps,
+            self.carrier_caps.count(),
         );
         self.apply_survey(reqs);
         if let Some(req) = self.tx.show(ui.ctx()) {

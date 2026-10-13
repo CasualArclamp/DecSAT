@@ -515,11 +515,11 @@ no lock, no decoder, no signal), what it decoded as, what it carries
 puts a kept VFO on a decoded one, **Save CSV** writes the table to the
 output folder. The waterfall's ADS-B and RADAR tags learn as it goes, and a
 retune stops it. `--survey` runs one unattended (with `--screenshot` to
-keep the picture). **Forget found carriers…** clears what is known of the
-carriers — the waterfall's modem, ADS-B and RADAR tags, kept between runs
-— and the table, for the span in view or every band: after false decodes,
-or once the satellite's carriers have moved. A carrier with a VFO still
-decoding on it is learnt again.
+keep the picture). **Reset labels** (in the toolbar beside *Survey…*, and
+in its window) removes every carrier label on the waterfall — the modem,
+ADS-B and RADAR tags, kept between runs — and the survey's results, in one
+click: after false decodes, or once the satellite's carriers have moved. A
+carrier with a VFO still decoding on it is labelled again.
 
 A click on one carrier's green bracket does the same for that carrier
 alone, and keeps the VFO: it starts on Identify and switches to the
