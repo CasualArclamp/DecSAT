@@ -3490,3 +3490,23 @@ Rory closed the GUI: "record it". The 477.9 kS/s 8PSK (12347.08 MHz), live:
   PTT-id 50, 8.7 s) — its sound travels VCS → radio, on the other carrier.
   597 SIP dialogs: four VCS addresses calling ~20 radios (109051001–022 at
   10.26.189.111/.121, 109061002), every one declined (603, max UAs 1).
+
+## Both directions for 15 minutes: PTT summation, no voice (2026-10-13)
+
+15 min of IQ at 1748 MHz, 4 MS/s, LNA 24, VGA 20, RF amp (7.2 GB, in the
+session's scratchpad pair/long/), both carriers decoded offline:
+
+- **VCS → radio (238.96k)**: 217 499 of 217 650 frames; its stream
+  (172.16.82.28:8602 → 10.26.185.112:8580) keep-alives only, 4.9/s, PTT
+  never on: this VCS never transmitted. 84 SIP dialogs.
+- **Radio → VCS (477.9k)**: 240 715 of 435 013 frames (55 %; 74 % in the
+  10 min live run before); keep-alives only (two thirds lost with the
+  failed frames). The radio reports other positions' transmissions in them
+  (ED-137's PTT summation): 16 in 15 min, 110 s — PTT-id 50 normal PTT
+  most of it, PTT-id 4 priority PTT at the end of several, 32 and 36
+  coupling once each — and squelch open once, 0.4 s, inside one of them.
+- No sound on either stream (the call recordings: silence throughout).
+  This satellite pair carries a session between one VCS and radio
+  109061002 that stays signalling only; the controllers' audio, and any
+  aircraft's, take other paths. The VCS's attempts at more sessions are
+  declined (603, max UAs 1).
