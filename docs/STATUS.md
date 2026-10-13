@@ -3431,3 +3431,30 @@ the way to clear them. Tests: `carriers_are_forgotten_in_a_span_or_all`,
 `carriers_are_forgotten_and_the_rest_kept`. The button checked on screen
 in an unattended `--survey` run (enabled once the survey finished); its
 confirm row not clicked unattended.
+
+## The ED-137 link's other direction: 477.9 kS/s 8PSK (2026-10-13)
+
+Rory: "decode the paired carrier for the aircraft side". The pair, found
+in survey captures: **12347.08 MHz, 477.9 kS/s 8PSK, TPC 2964** (right below
+the 238.96 kS/s one at 12347.58: 1075 kbit/s = 1024 k × 21/20, EDMAC), the
+other direction of the same routed link: 10.26.x → 172.16.x, the MAC pair
+reversed.
+
+- 8 s at 1744 MHz (Oct 12 00:11, probably LNA 40 — that night's overload):
+  Identify reads 8PSK + the TPC word; 878 of 3196 frames decode (179 slips,
+  BER 4.7 %), EDMAC and the packet blocks found. In it: the radio side's
+  SIP answer to the VCS's INVITEs — **603 Decline, `Reason: WG-67
+  ;cause=2008 ;text="limit exceeded"`, body "Max UAs (1) in any mode is
+  reached"**: the radio takes one session and has one, so the VCS's
+  attempt every 10 s is declined (as the ACKs on the other carrier said) —
+  and an R2S keep-alive from the radio (10.26.185.112 → 172.16.82.20).
+- 60 s at 1746 MHz (Oct 12 20:26, LNA 24): Identify reads it **BPSK** — on
+  the timing-recovered symbols a 28 dB line in s² at ~97 kHz, none in s⁴,
+  none in s⁸ (the 1744 capture: s⁸ only) — its loop is seeded there and
+  never locks; as 8PSK by hand it reaches 8.7 dB with no frame lock. Not
+  explained: not the in-band HackRF spur (1746.875 MHz, −32 to −44 dB), not
+  IQ imbalance (0.02 dB, 0.09°: image rejection 58 dB); an 8PSK lock tried
+  whenever the UW is missing found no word either (not kept).
+- So no aircraft voice yet: the HackRF was busy (Rory's GUI). For a good
+  look: LNA 24, a centre a few MHz away (1744 MHz put the pair at +3.1/+3.6
+  MHz and read it right), a VFO on 12347.08 with the Comtech decoder.
