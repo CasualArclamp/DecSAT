@@ -522,7 +522,7 @@ demodulating with what it found, so the constellation and Es/N0 stay live.
 frequency order, a few at a time (*At once*, 1–4): each gets a VFO of its
 own for Identify, then the decoder for what it is — DVB-S2 to GSE/IP, the
 modem carriers through the Comtech entry's *type found* (TPC 2964, the
-K = 7 code, a FastLink); bursts, 8PSK and the rest have no decoder yet — and
+K = 7 code, a FastLink); bursts, and anything Identify cannot name, have no decoder yet — and
 a time to lock (*give up after*, 40 s by default). One that locks is
 watched a few seconds more so what it carries shows, then its VFO goes and
 the next carrier takes its turn; nothing plays or records meanwhile. The
