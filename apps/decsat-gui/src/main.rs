@@ -172,6 +172,10 @@ struct App {
     /// Live controls while the HackRF is the source.
     #[cfg(feature = "hackrf")]
     hackrf: Option<decsat_io::HackRfControl>,
+    /// The radio's tuning the VFOs were last placed against (`None` until
+    /// the first frame), to carry them along when it changes.
+    #[cfg(feature = "hackrf")]
+    tuned_hz: Option<u64>,
     /// Keep the session (radio, source, VFOs) for next time; what was last
     /// written, and when it was last looked at.
     remember: bool,
@@ -229,6 +233,8 @@ impl Default for App {
             radio: radio::RadioPanel::default(),
             #[cfg(feature = "hackrf")]
             hackrf: None,
+            #[cfg(feature = "hackrf")]
+            tuned_hz: None,
             remember: false,
             session_saved: String::new(),
             session_at: std::time::Instant::now(),
@@ -766,6 +772,31 @@ impl App {
         }
     }
 
+    /// Keep the VFOs on their carriers when the radio is retuned — dragging
+    /// the band past its edge, the frequency bar, the HackRF panel: each
+    /// moves by the retune's opposite, as in SDR++, and its decoder carries
+    /// on. (They used to keep their place in the span and sweep across the
+    /// band, learning their last carrier's findings onto every carrier they
+    /// crossed.) A file's centre only labels its axis: nothing moves.
+    #[cfg(feature = "hackrf")]
+    fn carry_vfos(&mut self) {
+        let now = self.radio.settings.center_hz;
+        // `Option::replace` stores the new value and hands back the old.
+        let Some(was) = self.tuned_hz.replace(now) else {
+            return;
+        };
+        if was == now || self.path.is_some() {
+            return;
+        }
+        let by = was as f64 - now as f64;
+        for v in &mut self.vfos {
+            v.settings.offset_hz += by;
+            if let Some(e) = &self.engine {
+                e.carry_vfo(v.id, v.settings.clone(), by);
+            }
+        }
+    }
+
     /// The source is a running HackRF, so the view can tune it.
     fn can_retune(&self) -> bool {
         #[cfg(feature = "hackrf")]
@@ -1259,6 +1290,9 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // First, before anything reads a VFO's RF.
+        #[cfg(feature = "hackrf")]
+        self.carry_vfos();
         self.sync_clock_ppm();
         // Recordings are named by the RF they hold (tuning + LO + trim).
         decsat_engine::rf::set_rf_center(self.rf_center());
@@ -1308,11 +1342,18 @@ impl eframe::App for App {
             if let Some(n) = note {
                 self.note = n;
             }
-            // What each VFO's carrier carries, learnt by its RF.
+            // What each VFO's carrier carries, learnt by its RF — only from
+            // a status of the carrier it is on: one from before the VFO
+            // moved (until its worker takes the move) is the last
+            // carrier's, and was learnt onto each carrier a dragged VFO
+            // crossed. Nor from one out of the span, given no signal.
             let centre = self.rf_center();
             if centre > 0.0 {
                 for v in &self.vfos {
-                    if let Some(st) = self.statuses.get(&v.id) {
+                    if let Some(st) = self.statuses.get(&v.id)
+                        && st.vfo_offset_hz == v.settings.offset_hz
+                        && !st.out_of_span
+                    {
                         self.carrier_caps.learn(
                             centre + v.settings.offset_hz,
                             carrier_caps::Caps::of(&v.settings, st),
@@ -1516,6 +1557,8 @@ impl eframe::App for App {
                         statuses: &self.statuses,
                         selected: self.selected,
                         rf_center: self.rf_center(),
+                        span: self.band.span(),
+                        can_retune: self.can_retune(),
                         view_center: (self.band.lo + self.band.hi) / 2.0,
                         view_width: self.band.hi - self.band.lo,
                         next_name: self.next_name(),

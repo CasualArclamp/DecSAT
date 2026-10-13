@@ -34,6 +34,10 @@ pub struct SideInput<'a> {
     pub statuses: &'a BTreeMap<VfoId, VfoStatus>,
     pub selected: Option<VfoId>,
     pub rf_center: f64,
+    /// The full span, Hz.
+    pub span: f64,
+    /// A live radio is the source, which "Tune to it" can retune.
+    pub can_retune: bool,
     /// Visible span centre, where "New VFO" drops one.
     pub view_center: f64,
     pub view_width: f64,
@@ -193,7 +197,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             && resp.hover_pos().is_some_and(|p| r.contains(p))
         {
             resp.on_hover_text(
-                "The modem, as its decoder found it once its code locked (the CDM model                  from what its data carry), or as kept for this carrier",
+                "The modem, as its decoder found it once its code locked (the CDM model \
+                 from what its data carry), or as kept for this carrier",
             );
         }
     }
@@ -244,18 +249,44 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             }
 
             ui.label("Centre");
-            let mut abs_mhz = (inp.rf_center + s.offset_hz) / 1e6;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut abs_mhz)
-                        .speed(0.001)
-                        .max_decimals(6)
-                        .suffix(" MHz"),
-                )
-                .changed()
-            {
-                s.offset_hz = abs_mhz * 1e6 - inp.rf_center;
-            }
+            ui.horizontal(|ui| {
+                let mut abs_mhz = (inp.rf_center + s.offset_hz) / 1e6;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut abs_mhz)
+                            .speed(0.001)
+                            .max_decimals(6)
+                            .suffix(" MHz"),
+                    )
+                    .changed()
+                {
+                    s.offset_hz = abs_mhz * 1e6 - inp.rf_center;
+                }
+                // Retuned away from: idle until the radio comes back.
+                if st.out_of_span {
+                    ui.label(
+                        RichText::new("out of the span")
+                            .color(Color32::from_rgb(255, 190, 80)),
+                    );
+                    if inp.can_retune
+                        && ui
+                            .small_button("Tune to it")
+                            .on_hover_text(
+                                "Retune the radio just far enough to bring this VFO back \
+                                 into the span, a tenth of it in from the edge",
+                            )
+                            .clicked()
+                    {
+                        // Where it lands: on its side of the centre, its band
+                        // a tenth of the span in from the edge (or the centre,
+                        // for a VFO too wide for that).
+                        let room = (inp.span / 2.0 - s.bandwidth_hz / 2.0 - 0.1 * inp.span)
+                            .max(0.0);
+                        let to = s.offset_hz.signum() * room;
+                        actions.push(Action::Retune(s.offset_hz - to));
+                    }
+                }
+            });
             ui.end_row();
 
             ui.label("Bandwidth");
@@ -1584,7 +1615,8 @@ fn payload_rows(ui: &mut Ui, f: Option<&FecStats>) {
                 if b.inverted { " · line inverted" } else { "" }
             ))
             .on_hover_text(format!(
-                "IBM bisync: SYN SYN, SOH heading, DLE STX text DLE ETX, a 16-bit BCC                  ({}). Differential decoding plus an inverted line = NRZI.",
+                "IBM bisync: SYN SYN, SOH heading, DLE STX text DLE ETX, a 16-bit BCC \
+                 ({}). Differential decoding plus an inverted line = NRZI.",
                 b.bcc.map_or("none yet", |c| c.describe())
             ));
             ui.end_row();
@@ -3350,7 +3382,8 @@ fn radar_station_card(ui: &mut Ui, st: &decsat_ip::rcms::StationView) {
                 }
             ))
             .on_hover_text(
-                "The station names its units in a table it sends every 10 s; the others                  (keep-alives, the table's sender) are listed by number",
+                "The station names its units in a table it sends every 10 s; the others \
+                 (keep-alives, the table's sender) are listed by number",
             );
             ui.end_row();
         });

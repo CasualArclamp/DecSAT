@@ -400,6 +400,10 @@ pub struct VfoStatus {
     /// followed beyond it (Hz) — for the GUI to move the VFO by.
     pub vfo_offset_hz: f64,
     pub follow_hz: f64,
+    /// The VFO's centre is outside what the receiver takes in (the radio
+    /// was retuned away from its carrier): it is given no signal, and idles
+    /// until the radio comes back.
+    pub out_of_span: bool,
     /// Fraction of real time the worker spends processing (1.0 = can't keep up).
     pub load: f32,
     pub dropped: u64,
@@ -502,10 +506,24 @@ pub(crate) enum VfoMsg {
     Wake,
 }
 
+/// The mailbox slot: the latest settings not yet taken, and how much of
+/// their offset's move since the worker last looked was the radio
+/// retuning under the VFO rather than the VFO moving (see
+/// [`VfoHandle::post_carried`]). The two travel together so the worker
+/// can tell them apart however many posts it missed.
+#[derive(Default)]
+pub(crate) struct Mail {
+    settings: Option<VfoSettings>,
+    carried_hz: f64,
+}
+
 /// The engine's handle on a running VFO.
 pub(crate) struct VfoHandle {
     tx: SyncSender<VfoMsg>,
     lossless: bool,
+    /// The receiver's sample rate: a VFO centred beyond ±half of it is out
+    /// of the span and given nothing.
+    in_rate: f64,
     pub status: Arc<Mutex<VfoStatus>>,
     pub settings: VfoSettings,
     dropped: Arc<AtomicU64>,
@@ -513,7 +531,7 @@ pub(crate) struct VfoHandle {
     /// CID's, stand zeros in for them).
     lost: Arc<AtomicU64>,
     /// Latest settings not yet taken by the worker.
-    mailbox: Arc<Mutex<Option<VfoSettings>>>,
+    mailbox: Arc<Mutex<Mail>>,
     stop: Arc<AtomicBool>,
     /// Stop without working through what is queued (here and on the FEC
     /// and CID threads).
@@ -528,7 +546,7 @@ impl VfoHandle {
     /// Queue a block; drop it (and count) if the worker is behind — or,
     /// lossless, wait for it.
     pub fn offer(&self, block: &Arc<Vec<Iq>>) {
-        if !self.settings.enabled {
+        if !self.settings.enabled || out_of_span(&self.settings, self.in_rate) {
             return;
         }
         self.pending.add();
@@ -547,8 +565,21 @@ impl VfoHandle {
 
     /// Hand the worker new settings without ever blocking the caller.
     pub fn post_settings(&mut self, settings: VfoSettings) {
+        self.post_carried(settings, 0.0);
+    }
+
+    /// The radio was retuned and the VFO's offset moved by `by` Hz (the
+    /// retune's opposite) to stay on its carrier: the same signal at
+    /// another offset, so the worker moves its down-converter and its
+    /// decoder carries on. Anything else changed in `settings` applies as
+    /// with [`post_settings`](Self::post_settings).
+    pub fn post_carried(&mut self, settings: VfoSettings, by: f64) {
         self.settings = settings.clone();
-        *self.mailbox.lock().unwrap() = Some(settings);
+        {
+            let mut m = self.mailbox.lock().unwrap();
+            m.settings = Some(settings);
+            m.carried_hz += by;
+        }
         // If the queue is full the worker is busy and will see the mailbox
         // with its next block anyway.
         let _ = self.tx.try_send(VfoMsg::Wake);
@@ -591,6 +622,12 @@ impl VfoHandle {
 /// Blocks a worker may have queued before new ones are dropped.
 const QUEUE_DEPTH: usize = 8;
 
+/// A VFO centred outside what a receiver at `in_rate` takes in (±half the
+/// rate about its centre).
+fn out_of_span(s: &VfoSettings, in_rate: f64) -> bool {
+    s.offset_hz.abs() > in_rate / 2.0
+}
+
 /// `lossless`: wait for the worker rather than dropping blocks (a file
 /// played as fast as possible).
 pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoHandle {
@@ -598,7 +635,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
     let status = Arc::new(Mutex::new(VfoStatus::default()));
     let dropped = Arc::new(AtomicU64::new(0));
     let lost = Arc::new(AtomicU64::new(0));
-    let mailbox = Arc::new(Mutex::new(None));
+    let mailbox = Arc::new(Mutex::new(Mail::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let quit = Arc::new(AtomicBool::new(false));
     let pending = crate::fec::Pending::default();
@@ -627,6 +664,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
     VfoHandle {
         tx,
         lossless,
+        in_rate,
         status,
         settings,
         dropped,
@@ -987,11 +1025,16 @@ impl Worker {
         }
     }
 
-    fn apply(&mut self, new: VfoSettings) {
+    /// Take new settings. `carried`: how much of the offset's move was the
+    /// radio retuning under the VFO (see [`VfoHandle::post_carried`]).
+    fn apply(&mut self, new: VfoSettings, carried: f64) {
         let rebuild_ddc = new.bandwidth_hz != self.settings.bandwidth_hz;
+        // What the VFO itself moved: its offset's move less what carried it
+        // along with a retune (a millihertz allows for the rounding).
+        let moved = new.offset_hz - self.settings.offset_hz - carried;
+        let moved = if moved.abs() < 1e-3 { 0.0 } else { moved };
         // The GUI moving the VFO by drift this worker followed (see
         // `follow`): the down-converter is there already, so nothing restarts.
-        let moved = new.offset_hz - self.settings.offset_hz;
         let absorbed = moved != 0.0
             && self.followed != 0.0
             && moved.signum() == self.followed.signum()
@@ -1013,6 +1056,17 @@ impl Worker {
         } else if retuned {
             // Retune in place: the filter keeps its history, so dragging is smooth.
             self.ddc.set_offset(new.offset_hz);
+        } else if carried != 0.0 {
+            // Carried with the radio: the carrier sits where it did in the
+            // down-converter's output (the drift followed included), so
+            // the demodulator sees no step — bar the moment the radio's
+            // samples take to arrive at the new tuning.
+            self.ddc.set_offset(self.ddc.offset_hz() + carried);
+            // Where a symbols file's name says the carrier is (its offset,
+            // made RF with the radio's new tuning).
+            if let Decoder::Psk { carrier_hz, .. } = &mut self.decoder {
+                *carrier_hz += carried;
+            }
         }
         // An enable/disable or a rename changes nothing about the signal; a
         // retune does. Without the reset an Identify VFO dragged onto another
@@ -1086,7 +1140,7 @@ impl Worker {
     fn run(
         mut self,
         rx: Receiver<VfoMsg>,
-        mailbox: Arc<Mutex<Option<VfoSettings>>>,
+        mailbox: Arc<Mutex<Mail>>,
         stop: Arc<AtomicBool>,
         quit: Arc<AtomicBool>,
     ) {
@@ -1102,7 +1156,7 @@ impl Worker {
     fn run_loop(
         &mut self,
         rx: &Receiver<VfoMsg>,
-        mailbox: &Arc<Mutex<Option<VfoSettings>>>,
+        mailbox: &Arc<Mutex<Mail>>,
         stop: &Arc<AtomicBool>,
     ) {
         loop {
@@ -1123,9 +1177,16 @@ impl Worker {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let pending = mailbox.lock().unwrap().take();
-            if let Some(s) = pending {
-                self.apply(s);
+            // `Option::map` on the settings taken; the carry is taken (and
+            // zeroed) with them.
+            let pending = {
+                let mut m = mailbox.lock().unwrap();
+                m.settings
+                    .take()
+                    .map(|s| (s, std::mem::take(&mut m.carried_hz)))
+            };
+            if let Some((s, carried)) = pending {
+                self.apply(s, carried);
                 self.publish(0);
             }
             match msg {
@@ -1609,6 +1670,7 @@ impl Worker {
         st.decimation = self.ddc.decimation();
         st.vfo_offset_hz = self.settings.offset_hz;
         st.follow_hz = self.followed;
+        st.out_of_span = out_of_span(&self.settings, self.in_rate);
         st.load = self.load;
         st.dropped = self.dropped.load(Ordering::Relaxed);
         if let Some(s) = spectrum_db {
@@ -2456,7 +2518,7 @@ mod tests {
         // runs: the demodulator carries on, the drift is taken in.
         let mut moved = wk.settings.clone();
         moved.offset_hz += st.follow_hz;
-        wk.apply(moved);
+        wk.apply(moved, 0.0);
         assert!(matches!(wk.decoder, Decoder::Psk { demod: Some(_), .. }));
         assert!(wk.followed.abs() < 1.0, "{}", wk.followed);
         // Without following it leaves the VFO.
@@ -2668,6 +2730,52 @@ mod tests {
     }
 
     #[test]
+    fn a_vfo_carried_with_a_retune_keeps_decoding() {
+        // QPSK at 40 kHz; the radio then retunes 100 kHz up, so the
+        // carrier comes in at -60 kHz, and the GUI moves the VFO with it.
+        let rs = 62_500.0;
+        let before = carrier(&Constellation::qpsk(), 60_000, 8, rs, 40_000.0, 0.0, 11);
+        let after = carrier(&Constellation::qpsk(), 60_000, 8, rs, -60_000.0, 0.0, 12);
+        let mut s = VfoSettings::new("carried", 40_000.0, 110_000.0, DecoderKind::PskSymbols);
+        s.symbol_rate = Some(rs);
+        s.psk_modulation = Some(decsat_core::Modulation::Qpsk);
+        let status = Arc::new(Mutex::new(VfoStatus::default()));
+        let mut wk = Worker::new(
+            500_000.0,
+            s.clone(),
+            status.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        feed(&mut wk, &before, 65_536);
+        assert!(status.lock().unwrap().carrier.is_some_and(|c| c.locked));
+
+        let mut moved = s.clone();
+        moved.offset_hz -= 100_000.0;
+        // The same move as the VFO's own (dragged) restarts its decoder...
+        let mut dragged = Worker::new(500_000.0, s, status.clone(), Arc::new(AtomicU64::new(0)));
+        feed(&mut dragged, &before[..65_536], 65_536);
+        dragged.apply(moved.clone(), 0.0);
+        assert!(matches!(dragged.decoder, Decoder::Psk { demod: None, .. }));
+        // ...carried with the radio it does not, and stays locked.
+        let was = wk.ddc.offset_hz();
+        wk.apply(moved, -100_000.0);
+        assert!(matches!(wk.decoder, Decoder::Psk { demod: Some(_), .. }));
+        // Moved with the radio, keeping whatever fine tuning it had found.
+        assert!((wk.ddc.offset_hz() - (was - 100_000.0)).abs() < 1e-6);
+        feed(&mut wk, &after, 65_536);
+        let st = status.lock().unwrap().clone();
+        assert!(st.carrier.is_some_and(|c| c.locked), "{}", st.message);
+        assert!(!st.out_of_span);
+
+        // Carried past the span's edge: out of it.
+        let mut gone = wk.settings.clone();
+        gone.offset_hz -= 300_000.0;
+        wk.apply(gone, -300_000.0);
+        wk.publish(0);
+        assert!(status.lock().unwrap().out_of_span);
+    }
+
+    #[test]
     fn psk_vfo_writes_nothing_until_record_is_pressed() {
         let rs = 62_500.0;
         let x = carrier(&Constellation::qpsk(), 150_000, 8, rs, 40_000.0, 0.0, 11);
@@ -2696,7 +2804,7 @@ mod tests {
 
         // Record: a file grows, without restarting the demodulator.
         settings.record = true;
-        wk.apply(settings.clone());
+        wk.apply(settings.clone(), 0.0);
         feed(&mut wk, &x[third..2 * third], 65_536);
         let (path, n) = {
             let st = status.lock().unwrap();
@@ -2707,7 +2815,7 @@ mod tests {
 
         // Stop: the file is closed; the last one stays on show.
         settings.record = false;
-        wk.apply(settings);
+        wk.apply(settings, 0.0);
         feed(&mut wk, &x[2 * third..], 65_536);
         let st = status.lock().unwrap().clone();
         assert!(!st.recording_active);

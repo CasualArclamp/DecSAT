@@ -218,6 +218,18 @@ impl Engine {
         }
     }
 
+    /// The radio was retuned and a VFO's offset moved by `by` Hz (the
+    /// retune's opposite) so that it stays on its carrier: its decoder
+    /// carries on rather than starting afresh, as it would for a VFO moved
+    /// to another carrier. Never blocks, as [`update_vfo`](Self::update_vfo).
+    pub fn carry_vfo(&self, id: VfoId, settings: VfoSettings, by: f64) {
+        if let Some(h) = self.shared.vfos.lock().unwrap().get_mut(&id)
+            && h.settings != settings
+        {
+            h.post_carried(settings, by);
+        }
+    }
+
     /// Delete a VFO. Returns at once: its threads stop after the block in
     /// hand and are joined in the background.
     pub fn remove_vfo(&self, id: VfoId) {

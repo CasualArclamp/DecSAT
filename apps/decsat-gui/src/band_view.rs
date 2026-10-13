@@ -236,6 +236,9 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
     if !s.enabled {
         return "off".into();
     }
+    if st.out_of_span {
+        return "out of the span".into();
+    }
     // The CDM type-found model: badged as the model it found (until then,
     // as it acquires).
     let model = st.cdm_model.unwrap_or(s.decoder);
@@ -438,6 +441,11 @@ impl BandView {
             self.lo = -span / 2.0;
             self.hi = span / 2.0;
         }
+    }
+
+    /// The full span, Hz (the source's sample rate).
+    pub fn span(&self) -> f64 {
+        self.span
     }
 
     pub fn reset_zoom(&mut self) {
