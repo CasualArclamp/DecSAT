@@ -222,6 +222,30 @@ impl CarrierCaps {
         &self.known
     }
 
+    /// The carriers known within RF `range` (Hz), or all of them.
+    pub fn count(&self, range: Option<(f64, f64)>) -> usize {
+        self.known
+            .iter()
+            .filter(|(hz, _)| within(*hz, range))
+            .count()
+    }
+
+    /// Forget the carriers known within RF `range` (Hz), or all of them —
+    /// after false decodes, or once the band's carriers have changed —
+    /// here and in the settings. A VFO still decoding one learns it again.
+    pub fn forget(&mut self, range: Option<(f64, f64)>) -> usize {
+        let n = self.drop_within(range);
+        let _ = crate::prefs::forget_carrier_caps(range);
+        n
+    }
+
+    /// [`CarrierCaps::forget`] without the settings: how many went.
+    fn drop_within(&mut self, range: Option<(f64, f64)>) -> usize {
+        let before = self.known.len();
+        self.known.retain(|(hz, _)| !within(*hz, range));
+        before - self.known.len()
+    }
+
     /// The decoder for a VFO made over RF `lo..hi` (Hz) while new VFOs run
     /// `chosen`: the one the carrier there is known to need — the modem it
     /// was found to be (a survey, an earlier decode), the known carrier
@@ -242,6 +266,11 @@ impl CarrierCaps {
             _ => (chosen, false),
         }
     }
+}
+
+/// `hz` lies within `range` (`None`: everywhere).
+fn within(hz: f64, range: Option<(f64, f64)>) -> bool {
+    range.is_none_or(|(lo, hi)| hz >= lo && hz <= hi)
 }
 
 /// A tool rather than a decoder (the IQ recorder, the spectrum, symbols,
@@ -336,6 +365,23 @@ mod tests {
             k.decoder_for(12_400_000_000.0, 12_400_100_000.0, DecoderKind::CdmAuto),
             (DecoderKind::CdmAuto, false)
         );
+    }
+
+    #[test]
+    fn carriers_are_forgotten_in_a_span_or_all() {
+        let caps = Caps {
+            radar: true,
+            ..Default::default()
+        };
+        let mut k = CarrierCaps {
+            known: vec![(12_300e6, caps), (12_310e6, caps), (12_400e6, caps)],
+        };
+        let span = Some((12_295e6, 12_315e6));
+        assert_eq!(k.count(span), 2);
+        assert_eq!(k.drop_within(span), 2);
+        assert_eq!(k.all(), &[(12_400e6, caps)]);
+        assert_eq!(k.drop_within(None), 1);
+        assert!(k.all().is_empty());
     }
 
     #[test]

@@ -219,15 +219,34 @@ pub fn radar_airports() -> bool {
 pub fn carrier_caps() -> Vec<(f64, String)> {
     read_all()
         .into_iter()
-        .filter_map(|(k, v)| {
-            let khz: f64 = k
-                .strip_prefix("carrier_caps.rf")?
-                .strip_suffix("khz")?
-                .parse()
-                .ok()?;
-            Some((khz * 1e3, v))
-        })
+        .filter_map(|(k, v)| Some((carrier_caps_hz(&k)?, v)))
         .collect()
+}
+
+/// The RF (Hz) a `carrier_caps.rf<kHz>khz` key keeps a carrier at.
+fn carrier_caps_hz(key: &str) -> Option<f64> {
+    let khz: f64 = key
+        .strip_prefix("carrier_caps.rf")?
+        .strip_suffix("khz")?
+        .parse()
+        .ok()?;
+    Some(khz * 1e3)
+}
+
+/// Forget the carriers kept within RF `range` (Hz), or all of them.
+pub fn forget_carrier_caps(range: Option<(f64, f64)>) -> std::io::Result<()> {
+    let mut all = read_all();
+    drop_carrier_caps(&mut all, range);
+    write_all(&all)
+}
+
+/// [`forget_carrier_caps`] on the settings in hand: the other keys stay.
+fn drop_carrier_caps(all: &mut Vec<(String, String)>, range: Option<(f64, f64)>) {
+    // Rust note: `is_none_or` is true for `None` (not a carrier's key: kept)
+    // or when the closure is true (outside the range forgotten).
+    all.retain(|(k, _)| {
+        carrier_caps_hz(k).is_none_or(|hz| range.is_some_and(|(lo, hi)| hz < lo || hz > hi))
+    });
 }
 
 /// Keep what the carrier at `rf_hz` carries (see [`carrier_caps`]).
@@ -466,6 +485,23 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn carriers_are_forgotten_and_the_rest_kept() {
+        let mut all = kept(&[
+            ("volume", "0.800"),
+            ("carrier_caps.rf12300000khz", "model=fastlink"),
+            ("carrier_caps.rf12310000khz", "adsb,model=tpc2964"),
+            ("carrier_caps.rf12400000khz", "radar"),
+        ]);
+        drop_carrier_caps(&mut all, Some((12_295e6, 12_315e6)));
+        assert_eq!(
+            all,
+            kept(&[("volume", "0.800"), ("carrier_caps.rf12400000khz", "radar")])
+        );
+        drop_carrier_caps(&mut all, None);
+        assert_eq!(all, kept(&[("volume", "0.800")]));
     }
 
     #[test]

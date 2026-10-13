@@ -3413,3 +3413,21 @@ Rory: "play the ED-137 voice when PTT or squelch is on".
   keep-alives, through `IpStage` to the call recorder: the `.wav` is
   silence (RMS < 0.01), the tone (0.35), silence. Rory's recordings hold no
   voice (an idle radio, VCS → radio side), so not yet heard live.
+
+## Survey: forget found carriers (2026-10-13)
+
+Rory, on a live 20 MS/s view crowded with modem and ADS-B tags (several
+Q-Flex tags over what the detector now brackets as one 483 kS/s carrier):
+"can you make a button to reset all the found carrier in survey it looks
+like there was a bunch of false decode or something". The Survey window's
+**Forget found carriers…** (off while a survey runs) asks: the N carriers
+known in the span (RF centre ± half the sample rate), or all M kept, or
+cancel. It drops them from `CarrierCaps` and their `carrier_caps.rf…`
+keys from the settings (`prefs::forget_carrier_caps`; the other keys stay)
+and clears the matching rows of the results table. A VFO still decoding
+a carrier learns it again. The tags are kept by RF for good, so carriers
+that have since gone (SCPC traffic changes) leave theirs behind; this is
+the way to clear them. Tests: `carriers_are_forgotten_in_a_span_or_all`,
+`carriers_are_forgotten_and_the_rest_kept`. The button checked on screen
+in an unattended `--survey` run (enabled once the survey finished); its
+confirm row not clicked unattended.

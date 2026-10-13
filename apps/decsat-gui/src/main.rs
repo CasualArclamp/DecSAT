@@ -326,6 +326,9 @@ impl App {
                 survey::Request::Update(id, s) => self.apply(Action::Update(id, s)),
                 survey::Request::Remove(id) => self.apply(Action::Remove(id)),
                 survey::Request::Keep(s) => self.apply(Action::Create(s)),
+                survey::Request::Forget(range) => {
+                    self.carrier_caps.forget(range);
+                }
             }
         }
     }
@@ -1519,8 +1522,9 @@ impl eframe::App for App {
         let reqs = self.survey.show(
             ui.ctx(),
             &self.front.carriers,
-            self.rf_center(),
+            (self.rf_center(), self.front.sample_rate),
             self.engine.is_some(),
+            &self.carrier_caps,
         );
         self.apply_survey(reqs);
         if let Some(req) = self.tx.show(ui.ctx()) {

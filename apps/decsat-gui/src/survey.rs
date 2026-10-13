@@ -119,6 +119,9 @@ pub enum Request {
     Remove(VfoId),
     /// A VFO on a result, kept (the user asked for it).
     Keep(VfoSettings),
+    /// Forget the carriers known (their waterfall tags) within this RF
+    /// range, Hz, or all of them.
+    Forget(Option<(f64, f64)>),
 }
 
 pub struct Survey {
@@ -136,6 +139,8 @@ pub struct Survey {
     started: Option<Instant>,
     pub note: Option<String>,
     saved: Option<PathBuf>,
+    /// "Forget found carriers…" clicked: asking, in the span or all.
+    forget_ask: bool,
 }
 
 impl Default for Survey {
@@ -152,6 +157,7 @@ impl Default for Survey {
             started: None,
             note: None,
             saved: None,
+            forget_ask: false,
         }
     }
 }
@@ -428,13 +434,15 @@ impl Survey {
         reqs
     }
 
-    /// The window; what its buttons ask of the app.
+    /// The window; what its buttons ask of the app. `span_hz` is the
+    /// band's width; `known` the carriers kept for the waterfall's tags.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         carriers: &[Carrier],
-        rf_center: f64,
+        (rf_center, span_hz): (f64, f64),
         have_source: bool,
+        known: &carrier_caps::CarrierCaps,
     ) -> Vec<Request> {
         let mut reqs = Vec::new();
         if !self.open {
@@ -506,7 +514,65 @@ impl Survey {
                             Err(e) => format!("Not saved: {e}"),
                         });
                     }
+                    if ui
+                        .add_enabled(
+                            !running && (known.count(None) > 0 || !self.found.is_empty()),
+                            egui::Button::new("Forget found carriers…"),
+                        )
+                        .on_hover_text(
+                            "Clear what is known of the carriers — the waterfall's modem, \
+                             ADS-B and RADAR tags, learnt by surveys and VFOs and kept for \
+                             next time — and this table: after false decodes, or once the \
+                             band's carriers have changed",
+                        )
+                        .on_disabled_hover_text("Nothing found yet, or the survey is running")
+                        .clicked()
+                    {
+                        self.forget_ask = true;
+                    }
                 });
+                if self.forget_ask && !self.running() {
+                    // The span in RF, when the RF is known.
+                    let span = (rf_center > 0.0 && span_hz > 0.0)
+                        .then(|| (rf_center - span_hz / 2.0, rf_center + span_hz / 2.0));
+                    let here = span.map_or(0, |r| known.count(Some(r)));
+                    let all = known.count(None);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "Forget? A carrier with a VFO decoding on it is learnt again.",
+                            )
+                            .small(),
+                        );
+                        if let Some(r) = span
+                            && ui
+                                .button(format!("{here} in the span"))
+                                .on_hover_text("The carriers in the band in view now")
+                                .clicked()
+                        {
+                            reqs.push(Request::Forget(Some(r)));
+                            // Rust note: `retain` keeps the rows the closure
+                            // is true of — here those outside the span.
+                            self.found
+                                .retain(|f| f.rf_hz > 0.0 && (f.rf_hz < r.0 || f.rf_hz > r.1));
+                            self.note = Some(format!("Forgot {here} carriers in the span."));
+                            self.forget_ask = false;
+                        }
+                        if ui
+                            .button(format!("All {all}"))
+                            .on_hover_text("Every carrier kept, on every band")
+                            .clicked()
+                        {
+                            reqs.push(Request::Forget(None));
+                            self.found.clear();
+                            self.note = Some(format!("Forgot all {all} carriers."));
+                            self.forget_ask = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.forget_ask = false;
+                        }
+                    });
+                }
                 if self.running() {
                     let done = self.total - self.queue.len() - self.active.len();
                     ui.add(
