@@ -192,6 +192,8 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     let t0 = Instant::now();
     let mut last_line = Instant::now();
     let mut ended_at: Option<Instant> = None;
+    // --wireshark: Wireshark has been fed, so its closing ends the run.
+    let mut wireshark_fed = false;
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let front = eng.front();
@@ -202,6 +204,21 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
             ended_at = Some(Instant::now());
         }
         let st = eng.vfo_status(id);
+        if a.wireshark {
+            let ip = st
+                .as_ref()
+                .and_then(|s| s.fec.as_ref())
+                .and_then(|f| f.gse.as_ref());
+            if let Some(e) = ip.and_then(|g| g.wireshark_error.as_ref()) {
+                bail!("{e}");
+            }
+            let feeding = ip.is_some_and(|g| g.wireshark.is_some());
+            if wireshark_fed && !feeding && ended_at.is_none() {
+                println!("Wireshark closed");
+                ended_at = Some(Instant::now());
+            }
+            wireshark_fed |= feeding;
+        }
         let every = Duration::from_secs(if live { 30 } else { 2 });
         if last_line.elapsed() >= every {
             if let Some(st) = &st {

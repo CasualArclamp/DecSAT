@@ -213,7 +213,7 @@ enum Command {
         #[arg(long)]
         bbframes: Option<PathBuf>,
         /// Open Wireshark and feed it the IP packets as they are decoded
-        /// (it captures from its standard input).
+        /// (it captures from its standard input); closing it ends the run.
         #[arg(long)]
         wireshark: bool,
     },
