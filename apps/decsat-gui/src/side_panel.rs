@@ -3431,6 +3431,13 @@ const ENCRYPTED_TIP: &str = "Every UDP checksum in this flow fails while the IP 
      them, by an encryptor on the way. Their contents cannot be read (the Q-Flex sites' \
      networks: SNMP and the 233.71.15.x:50000 multicast, random data in 16-byte blocks).";
 
+/// What the non-IP PDUs' byte entropy says.
+const PDU_ENTROPY_TIP: &str = "Byte entropy of the PDUs that are not IP. Random bytes read \
+     8.00 bits/byte; headers, counters, text or fill read well under 7.9. Random PDUs are \
+     ciphertext: a VSAT network's link encryption (seen on the 1.2 and 2.7 MS/s ACM \
+     outbounds: every frame full, one type-0005h PDU each, no counter, checksum or repeat). \
+     Nothing in them can be read.";
+
 /// IP out of GSE: where it comes from, how much, who is talking, and the
 /// PCAP.
 fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
@@ -3459,6 +3466,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
             (None, Some(m)) => {
                 let pids: Vec<String> = m.pids.keys().map(|p| format!("{p:#06x}")).collect();
                 format!("MPE on PID {} · {} datagrams", pids.join(", "), m.datagrams)
+            }
+            (None, None) if g.link.is_none() && g.other_encrypted => {
+                "none: the GSE PDUs are encrypted".into()
             }
             (None, None) => g.link.clone().unwrap_or_else(|| "no IP found yet".into()),
         };
@@ -3534,6 +3544,16 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                 .collect();
             ui.label(v.join(", "));
             ui.end_row();
+            if let Some(h) = g.other_entropy {
+                ui.label("Contents");
+                let r = if g.other_encrypted {
+                    ui.label(format!("random, {h:.2} bits/byte: encrypted"))
+                } else {
+                    ui.label(format!("{h:.2} bits/byte: structured"))
+                };
+                r.on_hover_text(PDU_ENTROPY_TIP);
+                ui.end_row();
+            }
         }
         if let Some((path, n)) = &g.pcap {
             ui.label("PCAP");

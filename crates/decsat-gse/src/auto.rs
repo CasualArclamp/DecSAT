@@ -21,6 +21,14 @@ const IPV6: u16 = 0x86DD;
 /// ULE/GSE "bridged frame" (RFC 4326): the PDU is an Ethernet frame.
 const BRIDGED: u16 = 0x0001;
 
+/// Non-IP PDU bytes seen before their byte entropy is judged.
+const ENTROPY_BYTES: u64 = 32 * 1024;
+/// Bits per byte above which non-IP PDUs are called encrypted. Uniform bytes
+/// read 8 − 255 / (2 N ln 2) ≈ 7.99 at N = 32 KiB; headers, counters, text
+/// or fill pull a stream well under 7.9 (the 1 MS/s outbounds' timing and
+/// fragment PDUs: about 6.4).
+pub const RANDOM_BITS_PER_BYTE: f64 = 7.95;
+
 /// Where an IP packet came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -73,6 +81,8 @@ pub struct GseIp {
     blind_packets: u64,
     /// PDUs whose protocol is not IP, by protocol type (chosen variant).
     pub other_protocols: std::collections::BTreeMap<u16, u64>,
+    /// Byte histogram of those PDUs, to tell ciphertext from a format.
+    other_bytes: [u64; 256],
 }
 
 impl Default for GseIp {
@@ -93,6 +103,44 @@ impl GseIp {
             fields_since_ip: 0,
             blind_packets: 0,
             other_protocols: Default::default(),
+            other_bytes: [0; 256],
+        }
+    }
+
+    /// Shannon entropy of the non-IP PDUs' bytes, in bits per byte, once
+    /// enough have been seen.
+    pub fn other_entropy(&self) -> Option<f64> {
+        let total: u64 = self.other_bytes.iter().sum();
+        if total < ENTROPY_BYTES {
+            return None;
+        }
+        let t = total as f64;
+        Some(
+            self.other_bytes
+                .iter()
+                .filter(|&&n| n > 0)
+                .map(|&n| {
+                    let p = n as f64 / t;
+                    -p * p.log2()
+                })
+                .sum(),
+        )
+    }
+
+    /// The non-IP PDUs are random bytes: ciphertext. Seen live on two ACM
+    /// outbounds (1.2 and 2.7 MS/s): one type-0005h PDU a BBFRAME, a constant
+    /// 81h, then 8.00 bits/byte — no counter, checksum, repeat or idle frame
+    /// in 4700 frames, every frame full: link encryption at a constant rate.
+    pub fn other_encrypted(&self) -> bool {
+        self.other_entropy()
+            .is_some_and(|h| h > RANDOM_BITS_PER_BYTE)
+    }
+
+    /// Count a non-IP PDU.
+    fn other(&mut self, p: &Pdu) {
+        *self.other_protocols.entry(p.protocol).or_default() += 1;
+        for &b in &p.data {
+            self.other_bytes[usize::from(b)] += 1;
         }
     }
 
@@ -151,15 +199,20 @@ impl GseIp {
         }
         self.fields_since_ip = if any_ip { 0 } else { self.fields_since_ip + 1 };
 
-        if let Some(v) = self.chosen() {
-            let k = Variant::ALL.iter().position(|&x| x == v).unwrap();
-            for p in &self.pdus[k] {
+        // Borrowed out of `self` for the loop, so `self.other` (which takes
+        // `&mut self`) can be called inside it; put back after.
+        let k = self
+            .chosen()
+            .map_or(0, |v| Variant::ALL.iter().position(|&x| x == v).unwrap());
+        let pdus = std::mem::take(&mut self.pdus[k]);
+        if self.chosen().is_some() {
+            for p in &pdus {
                 match ip_of(p) {
                     Some((ip, info)) => out.push(IpPacket {
                         data: ip.to_vec(),
                         info,
                     }),
-                    None => *self.other_protocols.entry(p.protocol).or_default() += 1,
+                    None => self.other(p),
                 }
             }
         } else {
@@ -167,10 +220,11 @@ impl GseIp {
             // instead — a link may carry none (seen live: every PDU of a
             // 2.7 MS/s ACM outbound had type 0005h, an unregistered
             // mandatory extension header, TS 102 606-1 §4.2 / RFC 4326 §5).
-            for p in &self.pdus[0] {
-                *self.other_protocols.entry(p.protocol).or_default() += 1;
+            for p in &pdus {
+                self.other(p);
             }
         }
+        self.pdus[k] = pdus;
         if self.chosen().is_none() && self.fields_since_ip >= BLIND_AFTER {
             for (at, info) in blind_ipv4_search(field) {
                 self.blind_packets += 1;
@@ -254,6 +308,42 @@ mod tests {
             "{:?}",
             g.other_protocols
         );
+        // Repeated bytes are a format, not ciphertext.
+        assert!(!g.other_encrypted(), "{:?}", g.other_entropy());
+    }
+
+    #[test]
+    fn random_pdus_are_called_encrypted() {
+        // As the live outbound: a constant 81h, then random bytes.
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut enc = GseEncapsulator::new(Variant::STANDARD);
+        for _ in 0..80 {
+            let mut pdu = vec![0x81];
+            pdu.extend((0..626).map(|_| {
+                // xorshift64
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            }));
+            enc.push(0x0005, Label::None, pdu);
+        }
+        let mut g = GseIp::new();
+        let mut got = Vec::new();
+        let mut judged_at = None;
+        let mut fields = 0;
+        while enc.queued() > 0 {
+            g.data_field(&enc.fill(633), &mut got);
+            fields += 1;
+            if judged_at.is_none() && g.other_entropy().is_some() {
+                judged_at = Some(fields);
+            }
+        }
+        let h = g.other_entropy().unwrap();
+        assert!(g.other_encrypted(), "{h:.3} bits/byte");
+        // Judged within ~32 KiB of PDUs: about a second of the 1.2 MS/s
+        // outbound.
+        assert!(judged_at.is_some_and(|n| n <= 60), "{judged_at:?}");
     }
 
     #[test]

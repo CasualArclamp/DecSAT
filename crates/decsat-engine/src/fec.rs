@@ -1183,6 +1183,10 @@ pub struct GseView {
     pub variants: Vec<VariantReport>,
     /// Non-IP PDUs by protocol type.
     pub other_protocols: BTreeMap<u16, u64>,
+    /// Their bytes' entropy, bits per byte, once enough have been seen.
+    pub other_entropy: Option<f64>,
+    /// …and it is that of random bytes: the PDUs are encrypted.
+    pub other_encrypted: bool,
     pub packets: u64,
     pub bytes: u64,
     pub ipv4: u64,
@@ -1824,6 +1828,8 @@ impl IpStage {
             source: self.gse.source(),
             variants: self.gse.reports(),
             other_protocols: self.gse.other_protocols.clone(),
+            other_entropy: self.gse.other_entropy(),
+            other_encrypted: self.gse.other_encrypted(),
             packets: self.stats.packets,
             bytes: self.stats.bytes,
             ipv4: self.stats.ipv4,

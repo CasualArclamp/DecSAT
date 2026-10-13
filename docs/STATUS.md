@@ -3544,3 +3544,34 @@ Rory: a separate record-PCAP button, and IP live in Wireshark.
   longer restores or saves the session, and its VFOs record to the output
   folder unless it is a screenshot run. The CLI run ends when its
   Wireshark is closed.
+
+## The 12667.565 MHz DVB-S2 outbound: encrypted (2026-10-13)
+
+Rory's VFO 24 (not in his plan): 1200.6 kS/s DVB-S2, α 0.20, pilots, short
+frames, every BBFRAME good. Looked at from the 2026-10-11 survey dump
+(1433 frames, 10 s; same format as the 2721.7 kS/s outbound, 3251 frames):
+
+- BBHEADER 42 00 0000 DFL SYNC 0000: generic continuous, multiple-stream
+  flag with only ISI 0, ACM. **SYNC is a frame counter** (+1 every frame,
+  mod 256) — continuous GS SYNC is "user private" from B9h up (EN 302 307-1
+  §5.1.6), so a vendor's own use of the field. No frame missing in 10 s.
+- QPSK 1/4 all the time, except a run of 3–4 QPSK 1/3 frames every ~4 s
+  (half the frames on the 2721.7k outbound). DFL fixed per MODCOD: 2888
+  bits (1/4, 13 bytes of the BBFRAME unused), 5064 (1/3, 11 unused).
+- Data field: E1 65 | 00 05 | 81 | 356 random bytes. Read as GSE that is
+  S = E = 1, no label, type 0005h, but its length (DFL − 4) leaves the
+  last 2 bytes outside the packet (each GSE variant counts a length error
+  a frame): GSE-like vendor framing, the length not counting the type.
+- After the constant 81h: 8.00 bits/byte, no field that counts, no CRC-16
+  in the last 2 bytes (15 polynomials × init/reflect/xorout, chance hits
+  only), no repeated PDU, no idle frame — every frame is full. Link
+  encryption at a constant rate (TRANSEC-style: hides even the traffic
+  volume). Nothing to decode; the vendor is not identifiable from this.
+
+**Now shown**: `GseIp` keeps a byte histogram of non-IP PDUs; past 32 KiB
+their entropy is judged (> 7.95 bits/byte = encrypted). The VFO status
+reads "GSE protocol type 0005h ×N, encrypted", the IP card's source "none:
+the GSE PDUs are encrypted" and a Contents row (bits/byte, with a tip),
+the CLI a "non-IP PDU bytes" line. The survey capture says so after 2 s;
+the 1 MS/s outbound (type 0001h timing PDUs) is not flagged. Test
+`random_pdus_are_called_encrypted`.

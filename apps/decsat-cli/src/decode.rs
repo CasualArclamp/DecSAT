@@ -444,6 +444,16 @@ pub(crate) fn report(st: &VfoStatus) {
                     .map(|(t, n)| format!("{t:04x}h ×{n}"))
                     .collect();
                 println!("  non-IP PDUs by protocol type: {}", p.join(", "));
+                if let Some(h) = g.other_entropy {
+                    println!(
+                        "  non-IP PDU bytes: {h:.2} bits/byte{}",
+                        if g.other_encrypted {
+                            " (random: encrypted)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
             }
         }
     }

@@ -1743,7 +1743,8 @@ impl Worker {
                                     // No IP: name what the GSE carries.
                                     match g.other_protocols.iter().max_by_key(|e| *e.1) {
                                         Some((t, n)) if g.packets == 0 => format!(
-                                            "0 IP packets · GSE protocol type {t:04x}h ×{n}"
+                                            "0 IP packets · GSE protocol type {t:04x}h ×{n}{}",
+                                            if g.other_encrypted { ", encrypted" } else { "" }
                                         ),
                                         _ => format!("{} IP packets", g.packets),
                                     }
