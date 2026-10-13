@@ -25,6 +25,8 @@ pub struct Options {
     pub hackrf_mhz: Option<f64>,
     /// HackRF sample rate, MS/s.
     pub rate_msps: Option<f64>,
+    /// HackRF RF amplifier on (+14 dB).
+    pub amp: bool,
     /// LNB LO for the axis, MHz.
     pub lo_mhz: Option<f64>,
     /// Decoder for claimed carriers (default Identify).
@@ -47,6 +49,8 @@ pub struct Options {
     pub vfo_at: Vec<(f64, f64)>,
     /// Play the selected VFO's first multicast audio stream in the app.
     pub play_audio: bool,
+    /// Feed the `--vfo-at` VFOs' IP live to Wireshark (▶ Live pressed).
+    pub wireshark: bool,
     /// A frequency plan to show (unattended runs do not read the saved one).
     pub plan: Option<PathBuf>,
     /// Open the transmit panel (for screenshots: it is never armed).
@@ -118,6 +122,8 @@ impl Options {
                     o.vfo_at.push((at, bw));
                 }
                 Some("--play-audio") => o.play_audio = true,
+                Some("--wireshark") => o.wireshark = true,
+                Some("--amp") => o.amp = true,
                 Some("--decoder") => {
                     let v = args.next().ok_or("--decoder needs a name")?;
                     let v = v.to_str().unwrap_or_default().to_ascii_lowercase();
@@ -208,6 +214,7 @@ pub struct Automation {
     pub vfo_at: Vec<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
+    pub wireshark: bool,
     /// Each claimed carrier's decoder (`--decoder a,b,…`).
     pub decoders: Vec<decsat_engine::DecoderKind>,
 }
@@ -232,6 +239,7 @@ impl Automation {
             vfo_at: o.vfo_at.clone(),
             play_audio: o.play_audio,
             audio_started: false,
+            wireshark: o.wireshark,
             decoders: o.decoders.clone(),
         }
     }

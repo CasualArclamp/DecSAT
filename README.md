@@ -123,7 +123,15 @@ they are decoded: it is started capturing from its standard input
 so ED-137 streams show their PTT and squelch without the SIP that set them
 up. **⏹ Stop**, or closing Wireshark, ends it; Wireshark keeps what it has.
 Every decoder that carries IP has both buttons (a TS decoder once IP turns
-up in it, by MPE); `decsat decode … --wireshark` does the same.
+up in it, by MPE); `decsat decode … --wireshark` does the same, and so does
+the GUI started on a carrier:
+
+```bash
+decsat-gui --hackrf 1748 --rate 4 --lo 10600 --amp --vfo-at -422000:300000 --decoder tpc --wireshark
+```
+
+(VFOs placed with `--vfo-at` make a one-off run: the session you had is
+neither restored nor overwritten.)
 
 Real links do not all follow the standard. As in
 [dontlookup](https://github.com/ucsdsysnet/dontlookup), DecSAT reads every

@@ -3534,3 +3534,13 @@ Rory: a separate record-PCAP button, and IP live in Wireshark.
 - Checked: the VFO_103 capture (8PSK TPC → EDMAC → bridged Ethernet)
   decoded with `--wireshark --out`: 201 packets in Wireshark's own capture
   file, 201 in the PCAP, the same protocols.
+- **Live on the carrier** (Rory, signal back after an outage — no satellite
+  traffic at all 1700–1800 MHz for a while, input −40 dBFS against −29):
+  the VCS side is at −422 kHz from 1748 MHz (12347.578 with the LO), not
+  −447. `decode --wireshark` and then the GUI
+  (`--hackrf 1748 --rate 4 --lo 10600 --amp --vfo-at -422000:300000
+  --decoder tpc --wireshark`; new `--amp` and `--wireshark`) fed Wireshark
+  ED-137 RTP, SIP, SNMP and BGP within seconds. A run with `--vfo-at` no
+  longer restores or saves the session, and its VFOs record to the output
+  folder unless it is a screenshot run. The CLI run ends when its
+  Wireshark is closed.

@@ -57,7 +57,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|rec|spec[,…]] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--wireshark]"
             );
             std::process::exit(2);
         }
@@ -84,9 +84,13 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_fonts(fonts);
             let mut app = App {
                 automation: automation::Automation::new(&opts),
-                // Unattended runs (screenshots, claimed carriers) neither
-                // take nor overwrite what the user last had.
-                remember: opts.screenshot.is_none() && opts.after.is_none() && !opts.claim_carriers,
+                // Unattended runs (screenshots, claimed carriers) and
+                // VFOs placed from the command line neither take nor
+                // overwrite what the user last had.
+                remember: opts.screenshot.is_none()
+                    && opts.after.is_none()
+                    && !opts.claim_carriers
+                    && opts.vfo_at.is_empty(),
                 ..App::default()
             };
             if app.remember {
@@ -114,6 +118,7 @@ fn main() -> eframe::Result {
                     app.radio.settings.sample_rate = (r * 1e6).round() as u32;
                 }
                 app.radio.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                app.radio.settings.gains.amp |= opts.amp;
                 app.start_hackrf();
             }
             Ok(Box::new(app))
@@ -1371,7 +1376,13 @@ impl eframe::App for App {
                     .or(self.automation.decoders.last())
                     .copied()
                     .unwrap_or(self.new_decoder);
-                let s = decsat_engine::VfoSettings::new(self.next_name(), at, bw, decoder);
+                let mut s = decsat_engine::VfoSettings::new(self.next_name(), at, bw, decoder);
+                s.wireshark = self.automation.wireshark.then_some(1);
+                // Watched, not a screenshot: what it records goes where
+                // the user's recordings go.
+                if !self.automation.active() {
+                    s.record_dir = prefs::output_dir();
+                }
                 self.apply(Action::Create(s));
             }
             picks.sort_by(|a, b| {
