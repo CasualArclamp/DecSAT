@@ -1127,6 +1127,50 @@ pub(crate) mod tests {
         }
     }
 
+    /// Frames decoded on 8PSK against Es/N0, for tuning the decoder (run by
+    /// hand: `cargo test --release -p decsat-modem waterfall_8psk -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn waterfall_8psk() {
+        let tx = TpcTx::new(Structure::TEST);
+        let lay = Layout::new(Structure::TEST);
+        let mut next = rng(77);
+        for esn0 in [8.4f32, 8.6, 8.8, 9.0, 9.2, 9.4] {
+            let sigma = (10f32.powf(-esn0 / 10.0) / 2.0).sqrt();
+            let mut n = gauss(esn0.to_bits() as u64);
+            let (mut ok, mut raw_err, mut raw_n, mut frames) = (0, 0usize, 0usize, 0);
+            for _ in 0..200 {
+                let d: Vec<u8> = (0..DATA).map(|_| (next() & 1) as u8).collect();
+                let mut bits = Vec::new();
+                tx.frame(&d, &mut bits);
+                let mut sym = Vec::new();
+                modulate(&bits, Modulation::Psk8, &mut sym);
+                let mut soft = Vec::new();
+                for s in sym {
+                    let y = s + Iq::new(sigma * n(), sigma * n());
+                    soft_bits(Mapper::Psk8, y, (0, false, false), &mut soft);
+                }
+                raw_err += soft
+                    .iter()
+                    .zip(&bits)
+                    .filter(|(v, b)| ((**v < 0.0) as u8) != **b)
+                    .count();
+                raw_n += bits.len();
+                let block = &soft[UW_LEN..FRAME];
+                let mut out = vec![0u8; DATA];
+                lay.code.decode(&lay.arrange(block), &mut out, ITERATIONS);
+                let sent: Vec<u8> = lay.data_order.iter().map(|&i| d[i]).collect();
+                let got: Vec<u8> = lay.data_order.iter().map(|&i| out[i]).collect();
+                ok += usize::from(got == sent);
+                frames += 1;
+            }
+            println!(
+                "Es/N0 {esn0:.1} dB: raw BER {:.2} %, {ok} of {frames} frames right",
+                100.0 * raw_err as f64 / raw_n as f64
+            );
+        }
+    }
+
     /// 8PSK at 9.5 dB Es/N0 (Eb/N0 6 dB at rate 3/4), a little under the
     /// live carrier's 10.6 dB: raw BER ~3 %, and every frame comes out clean.
     #[test]

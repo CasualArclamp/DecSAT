@@ -23,13 +23,18 @@ const RECENT: usize = 3000;
 /// The MER and lock readouts' smoothing, symbols.
 const SMOOTH_SYMBOLS: f32 = 2000.0;
 
-/// The carrier loop's noise bandwidth (Bn·T) for a symbol rate. 0.008 suits
-/// carriers of ~40 kBd and up; slower ones need the loop at least ~250 Hz
-/// wide to follow the LNB's phase noise: a 10.24 kBd QPSK carrier off a
-/// consumer LNB stayed a ring at 0.008 (MER 8 dB, i.e. unlocked) and locked at
-/// 0.02–0.04 (MER 15 dB).
+/// The carrier loop's noise bandwidth (Bn·T) for a symbol rate: 0.008 of
+/// the symbol rate, but never under ~250 Hz nor over ~1 kHz. Slower carriers
+/// need the loop at least ~250 Hz wide to follow the LNB's phase noise: a
+/// 10.24 kBd QPSK carrier off a consumer LNB stayed a ring at 0.008 (MER 8
+/// dB, i.e. unlocked) and locked at 0.02–0.04 (MER 15 dB). Faster ones want
+/// it no wider than ~1 kHz: a wider loop lets more noise and more wrong
+/// decisions through, and the 477.9 kS/s Comtech 8PSK at 9.6 dB slipped 135
+/// times in 6 s at 0.008 (3.8 kHz), 31 at 0.005 and none at 0.002; six fast
+/// QPSK TPC carriers (299–640 kS/s) decoded the same either way.
 fn pll_bandwidth(symbol_rate: f64) -> f64 {
-    (250.0 / symbol_rate).clamp(0.008, 0.04)
+    let hz = (0.008 * symbol_rate).clamp(250.0, 1000.0);
+    (hz / symbol_rate).min(0.04)
 }
 
 /// How the symbols written to a .bin file are numbered.

@@ -3459,3 +3459,34 @@ reversed.
 - So no aircraft voice yet: the HackRF was busy (Rory's GUI). For a good
   look: LNA 24, a centre a few MHz away (1744 MHz put the pair at +3.1/+3.6
   MHz and read it right), a VFO on 12347.08 with the Comtech decoder.
+
+## The radio side decoded live; the carrier loop no wider than 1 kHz (2026-10-13)
+
+Rory closed the GUI: "record it". The 477.9 kS/s 8PSK (12347.08 MHz), live:
+
+- **Why it failed before**: (1) my VFO widths — 560 kHz clipped this carrier
+  (it occupies ±300 kHz) and took in its neighbour when put on the 238.96k
+  one (the two are ~50 kHz apart edge to edge): 300 and 640 kHz fit; (2)
+  the carrier loop: Bn·T = 0.008 at 477.9 kS/s is 3.8 kHz, and the carrier
+  slipped 135 times in 6 s (31 at 0.005, none at 0.002); (3) SNR: 9.6–9.8
+  dB is at the code's threshold for this decoder (an AWGN waterfall: 57 %
+  of frames at 4.85 % raw BER) — the HackRF's **RF amp** (+14 dB, LNA 24,
+  VGA 20; input −21 dBFS) gave 10.5 dB and 97 % of frames in 6 s, with
+  neighbours (8PSK and QPSK TPC) unharmed. Tuning (1744/1747.4/1748/1750
+  MHz) made no difference once these were right.
+- **`pll_bandwidth`**: 0.008 of the symbol rate, kept between 250 Hz and
+  1 kHz (was 250/Rs clamped to 0.008–0.04, so ≥ 0.008 for every fast
+  carrier). Six fast QPSK TPC carriers (299–640 kS/s) decoded the same
+  either way; slow carriers unchanged.
+- **Chase–Pyndiah**: 6 least reliable positions instead of 4 decode 91 %
+  rather than 57 % at 4.85 % raw BER (iterations barely matter), but cost
+  4×: the decoder already runs 1.45× real time on this carrier when most
+  frames fail. Left at 4; `waterfall_8psk` (ignored) measures it.
+- **10 minutes live** (1748 MHz, 4 MS/s — `decode --hackrf` defaults to
+  2 MS/s, too narrow for a carrier at −915 kHz): 183 048 of 248 383 frames
+  (74 %), 5 slips, sync lost for a few seconds now and then (bursts of
+  errors); 7390 IP packets, 85 flows. The radio's stream: keep-alives only,
+  squelch never open; one controller transmission through it (normal PTT,
+  PTT-id 50, 8.7 s) — its sound travels VCS → radio, on the other carrier.
+  597 SIP dialogs: four VCS addresses calling ~20 radios (109051001–022 at
+  10.26.189.111/.121, 109061002), every one declined (603, max UAs 1).
