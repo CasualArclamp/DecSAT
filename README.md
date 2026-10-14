@@ -810,6 +810,9 @@ algorithms studied from and credited to:
 - [dontlookup](https://github.com/ucsdsysnet/dontlookup) (MIT) — GSE/IP
   de-encapsulation, including the proprietary header-length and split
   fragment-ID variants found on real carriers
+- [FFmpeg](https://ffmpeg.org) libavcodec's aptX decoder (© 2017 Aurelien
+  Jacobs, LGPL-2.1-or-later) — the apt-X tables, ADPCM and QMF, ported to
+  Rust and bit-exact against it
 - DecDRM — the waterfall's GPU ring texture
 
 The radar scope draws OpenStreetMap's tiles (© OpenStreetMap contributors,
