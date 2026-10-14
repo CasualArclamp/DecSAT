@@ -439,8 +439,9 @@ down-converter and matched filter; then, for each:
   (terminals with nothing to send repeat one burst);
 - the **slots** (length, guard time, how closely terminals are ranged), the
   **frame** they repeat in (from the silence that closes each), and the
-  **terminals**, told apart by power, carrier offset and where in its slot
-  each sends.
+  **terminals** — by the short field in the preamble when the bursts have
+  one (live, one value a terminal), else by power, carrier offset and where
+  in its slot each sends.
 
 The **burst map** shows the last quarter second, a row a carrier (brighter
 is stronger, idle fill dimmed). **● Record** writes each burst's data

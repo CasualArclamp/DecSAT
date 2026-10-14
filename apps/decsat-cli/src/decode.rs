@@ -1011,7 +1011,8 @@ pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
             println!("  terminals ({}):", c.terminals.len());
             for t in c.terminals.iter().take(12) {
                 println!(
-                    "    {:6} bursts ({:3.0} % idle)  {:+6.1} dB  {:+8.0} Hz  {:+.2} symbols into the slot",
+                    "    {:>8} {:6} bursts ({:3.0} % idle)  {:+6.1} dB  {:+8.0} Hz  {:+.2} symbols into the slot",
+                    t.id.as_deref().unwrap_or("-"),
                     t.bursts,
                     100.0 * t.idle as f64 / t.bursts.max(1) as f64,
                     t.power_db,

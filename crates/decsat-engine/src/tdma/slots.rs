@@ -296,8 +296,11 @@ fn find_frame(b: &[BurstTime], used: &[bool], slot: f64) -> Option<Frame> {
 }
 
 /// A terminal, as its bursts reveal it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Terminal {
+    /// The value of the field inside its bursts' preamble (its points'
+    /// numbers), when the layout has one: live, one value a terminal.
+    pub id: Option<String>,
     pub bursts: u64,
     pub idle: u64,
     pub power_db: f32,
@@ -317,6 +320,104 @@ const MAX_TERMINALS: usize = 96;
 #[derive(Default)]
 pub struct Terminals {
     list: Vec<Terminal>,
+}
+
+/// Terminals by the field in their bursts' preamble: a burst's value is
+/// taken as the commonest value seen within one symbol of it (a symbol
+/// misread now and then must not start a terminal of its own).
+#[derive(Default)]
+pub struct TerminalsById {
+    list: Vec<(Vec<u8>, Terminal)>,
+    adds: u64,
+}
+
+impl TerminalsById {
+    pub fn add(&mut self, field: &[u8], b: &BurstTime, grid: Option<&SlotGrid>) {
+        self.adds += 1;
+        if self.adds.is_multiple_of(500) {
+            self.consolidate();
+        }
+        let offset = grid.and_then(|g| g.place(b.t)).map_or(0.0, |p| p.1);
+        let near = |a: &[u8]| {
+            a.len() == field.len() && a.iter().zip(field).filter(|(x, y)| x != y).count() <= 1
+        };
+        let k = match self.list.iter().position(|(v, _)| v.as_slice() == field) {
+            Some(k) => Some(k),
+            None => (0..self.list.len())
+                .filter(|&k| near(&self.list[k].0) && self.list[k].1.bursts >= 10)
+                .max_by_key(|&k| self.list[k].1.bursts),
+        };
+        match k {
+            Some(k) => {
+                let t = &mut self.list[k].1;
+                let w = 1.0 / (t.bursts as f64 + 1.0).min(50.0);
+                t.power_db += (b.power_db - t.power_db) * w as f32;
+                t.freq_hz += (b.freq_hz - t.freq_hz) * w;
+                t.offset += (offset - t.offset) * w;
+                t.bursts += 1;
+                t.idle += b.idle as u64;
+            }
+            None => {
+                if self.list.len() >= 4 * MAX_TERMINALS
+                    && let Some(k) = (0..self.list.len()).min_by_key(|&k| self.list[k].1.bursts)
+                {
+                    self.list.swap_remove(k);
+                }
+                self.list.push((
+                    field.to_vec(),
+                    Terminal {
+                        id: Some(field.iter().map(|d| char::from(b'0' + d)).collect()),
+                        bursts: 1,
+                        idle: b.idle as u64,
+                        power_db: b.power_db,
+                        freq_hz: b.freq_hz,
+                        offset,
+                    },
+                ));
+            }
+        }
+    }
+
+    /// Values a symbol away from a far commoner one are that one misread
+    /// (taken before it had bursts enough to be matched): folded into it.
+    fn consolidate(&mut self) {
+        self.list.sort_by_key(|(_, t)| std::cmp::Reverse(t.bursts));
+        let mut k = 1;
+        while k < self.list.len() {
+            let (v, small) = (&self.list[k].0, self.list[k].1.bursts);
+            let into = (0..k).find(|&j| {
+                let w = &self.list[j].0;
+                w.len() == v.len()
+                    && w.iter().zip(v).filter(|(x, y)| x != y).count() <= 1
+                    && small * 10 < self.list[j].1.bursts * 3
+            });
+            match into {
+                Some(j) => {
+                    let (_, t) = self.list.remove(k);
+                    let big = &mut self.list[j].1;
+                    big.bursts += t.bursts;
+                    big.idle += t.idle;
+                }
+                None => k += 1,
+            }
+        }
+    }
+
+    pub fn list(&self, min: u64) -> Vec<Terminal> {
+        let mut v: Vec<Terminal> = self
+            .list
+            .iter()
+            .map(|(_, t)| t)
+            .filter(|t| t.bursts >= min)
+            .cloned()
+            .collect();
+        v.sort_by_key(|t| std::cmp::Reverse(t.bursts));
+        v
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
 }
 
 impl Terminals {
@@ -345,6 +446,7 @@ impl Terminals {
                     }
                 }
                 self.list.push(Terminal {
+                    id: None,
                     bursts: 1,
                     idle: b.idle as u64,
                     power_db: b.power_db,
@@ -360,8 +462,8 @@ impl Terminals {
         let mut v: Vec<Terminal> = self
             .list
             .iter()
-            .copied()
             .filter(|t| t.bursts >= min)
+            .cloned()
             .collect();
         v.sort_by_key(|t| std::cmp::Reverse(t.bursts));
         v

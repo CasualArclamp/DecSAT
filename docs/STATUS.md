@@ -3676,3 +3676,38 @@ Lessons on the way, each from the live capture:
 **Open**: the weakest carrier (6.9 dB over the floor) still breaks a third
 of its bursts — burst detection on the preamble is the fix; the coding in
 the data symbols (T3).
+
+## TDMA: inside the bursts (2026-10-14)
+
+From the `.bursts` file of the 4 s capture (Python in that session's
+scratchpad: `code1/2.py`, `ser.py`, `wht.py`, `hdr.py`):
+
+- **Idle fill is one codeword** on each carrier (1204 and 1240 bursts);
+  every busy burst is different from every other (1899 of 1903 unique), and
+  agrees with the fill only by chance (25 %): scrambled or coded all
+  through.
+- **The demodulator is near the channel's limit**: against the fill, the
+  symbol error rate is 6.6 % (best tenth 0.8 %), flat along the burst; that
+  is Es/N0 ≈ 5.3 dB, which the burst-over-floor reading agrees with once
+  the floor percentile's bias is taken off. The SNR, not the demod.
+- **Layout of a burst** (852 symbols): preamble with a 5-symbol field
+  (13–17), ~624 data symbols, the 18-symbol fixed word (704–721), ~123 data
+  symbols. On carrier 1 idle bursts keep the first part constant but the
+  trailer after the fixed word differs on every burst (3092 distinct of
+  3107) — per-burst information (a counter, an acknowledgement…) even when
+  idle.
+- **The 5-symbol field names the terminal**: ~17 values on carrier 1, idle
+  bursts using 7 and busy ones 10, each value always at one power
+  (`23112` at −32 dB: the strong idle-only terminal). Its 10 bits keep
+  strong parity checks (bits 0+1+4+5, 4+7, 6+9 with biases 0.85, 0.78,
+  0.52): a small block code. The decoder now lists terminals by it.
+- **No local structure in the main codeword**: no parity check inside any
+  14-bit window (biases ≤ 0.14 against 0.10 of noise, 1900 bursts, busy
+  XOR fill so a fixed scrambler cancels). Not a convolutional code in plain
+  order, not a short product code row by row: turbo, LDPC or an interleaved
+  product code. Weak structure at bits 1275–1285 (bias 0.30), where the
+  trailer begins.
+
+Next for the coding: a cleaner capture (more LNA/amp, the dish peaked) so
+rank-based code recognition works, and the network's outbound — its
+signalling names the system and may carry the burst plan.

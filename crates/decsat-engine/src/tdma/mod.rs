@@ -60,7 +60,7 @@ use crate::spectrum::Spectrum;
 use burst::{BurstDetector, Levels, RawBurst};
 use demod::{BurstSymbols, demod_burst, nearest, points};
 use layout::{Layout, commonest_length, find_layout, fit};
-use slots::{BurstTime, SlotGrid, Terminal, Terminals, find_grid};
+use slots::{BurstTime, SlotGrid, Terminal, Terminals, TerminalsById, find_grid};
 
 /// Signal looked at before the carriers are looked for, seconds.
 const FIRST_LOOK_S: f64 = 0.4;
@@ -267,6 +267,8 @@ struct Channel {
     grid: Option<SlotGrid>,
     times: VecDeque<BurstTime>,
     terminals: Terminals,
+    /// Terminals by the field in the preamble, when the layout has one.
+    by_id: TerminalsById,
     /// Carrier offsets within this of each other may be one terminal, Hz.
     freq_tol: f64,
     /// Where every burst's carrier is, cycles a symbol, when they agree.
@@ -330,6 +332,7 @@ impl Channel {
             grid: None,
             times: VecDeque::new(),
             terminals: Terminals::default(),
+            by_id: TerminalsById::default(),
             freq_tol: 60.0,
             freq_prior: None,
             bursts: 0,
@@ -455,19 +458,23 @@ impl Channel {
             }
         }
         let modulation_now = self.modulation.unwrap_or(b.modulation);
+        let mut field = Vec::new();
         let (t_sym, symbols, mer, idle, fitted) = match self.layout.as_ref().and_then(|l| {
             // Only bursts of the layout's length.
             ((len as f64 - l.len as f64).abs() <= l.len as f64 * 0.02 + 1.0)
                 .then(|| fit(l, &b.symbols))
                 .flatten()
         }) {
-            Some(f) => (
-                b.t0 / self.sps + f.lag as f64,
-                f.data,
-                f.mer_db,
-                f.idle,
-                true,
-            ),
+            Some(f) => {
+                field = f.field;
+                (
+                    b.t0 / self.sps + f.lag as f64,
+                    f.data,
+                    f.mer_db,
+                    f.idle,
+                    true,
+                )
+            }
             None => (b.t0 / self.sps, b.symbols, b.mer_db, false, false),
         };
         self.mer_db += (mer - self.mer_db) * if self.bursts == 1 { 1.0 } else { 0.02 };
@@ -513,7 +520,12 @@ impl Channel {
             }
             self.grid = g;
         }
-        if let Some(g) = &self.grid {
+        // A short field in the preamble names the terminal (live: ~17
+        // values, each at its own power); else they are told apart by
+        // power, carrier and slot offset.
+        if (1..=12).contains(&field.len()) {
+            self.by_id.add(&field, &time, self.grid.as_ref());
+        } else if let Some(g) = &self.grid {
             self.terminals.add(&time, g, self.freq_tol);
         }
         Some(Done {
@@ -566,7 +578,11 @@ impl Channel {
             idle_share: self.idle_share,
             layout: self.layout.clone(),
             grid: self.grid,
-            terminals: self.terminals.list(TERMINAL_MIN),
+            terminals: if self.by_id.is_empty() {
+                self.terminals.list(TERMINAL_MIN)
+            } else {
+                self.by_id.list(TERMINAL_MIN)
+            },
         }
     }
 }
@@ -895,7 +911,11 @@ mod tests {
                 k += 1;
                 if k % 12 != 5 {
                     let term = (k * 7 + c) % 3;
-                    let b = live_like(r, k.is_multiple_of(3), &fill, &fixed);
+                    let mut b = live_like(r, k.is_multiple_of(3), &fill, &fixed);
+                    // Each terminal's own value in the preamble's field.
+                    for (i, s) in b[13..18].iter_mut().enumerate() {
+                        *s = p[(term * 5 + i * 3 + c) % 4];
+                    }
                     let f = [0.0005, -0.0008, 0.0012][term];
                     let g = [1.0f32, 0.6, 1.4][term];
                     let x = shaped(&b, sps, f, 60.0, r);

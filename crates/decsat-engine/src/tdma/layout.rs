@@ -315,12 +315,7 @@ pub fn find_layout(bursts: &[&[Iq]], len: usize, modulation: Modulation) -> Opti
         (mean, None)
     };
 
-    let is_known: Vec<bool> = mean.iter().map(|m| m.norm() > KNOWN).collect();
-    let known: Vec<Option<Iq>> = mean
-        .iter()
-        .zip(&is_known)
-        .map(|(m, &k)| k.then(|| m / m.norm()))
-        .collect();
+    let mut is_known: Vec<bool> = mean.iter().map(|m| m.norm() > KNOWN).collect();
     let mut rs = runs(&is_known);
     // The preamble: the run starting near the front (the first symbol or
     // two may be lost to the ramp-up), extended over the runs that follow
@@ -333,7 +328,9 @@ pub fn find_layout(bursts: &[&[Iq]], len: usize, modulation: Modulation) -> Opti
         let mut p = rs.remove(0);
         while let Some(next) = rs.first() {
             let gap = next.start - p.end;
-            if gap <= 8 && p.len() >= 4 {
+            // (The first run may be cut short by the ramp-up: two fixed
+            // symbols and a run of more after a short gap still make one.)
+            if gap <= 8 && p.len() + next.len() >= 6 {
                 varying.push(p.end..next.start);
                 p.end = next.end;
                 rs.remove(0);
@@ -350,8 +347,56 @@ pub fn find_layout(bursts: &[&[Iq]], len: usize, modulation: Modulation) -> Opti
             }
         }
         varying = merged;
+        // A terminal sending most of the bursts can lift its own field
+        // values past `KNOWN` (live: half a field read as fixed): inside
+        // the preamble, a position well short of the preamble's own level
+        // is part of the field too.
+        let mut lv: Vec<f32> = p
+            .clone()
+            .filter(|&i| is_known[i])
+            .map(|i| mean[i].norm())
+            .collect();
+        if !lv.is_empty() {
+            lv.sort_by(f32::total_cmp);
+            let level = lv[lv.len() / 2];
+            for i in p.clone() {
+                if is_known[i] && mean[i].norm() < 0.75 * level {
+                    is_known[i] = false;
+                }
+            }
+            // Ends that went with it shorten the preamble.
+            let start = (p.start..p.end).find(|&i| is_known[i]).unwrap_or(p.start);
+            let end = (p.start..p.end)
+                .rev()
+                .find(|&i| is_known[i])
+                .map_or(p.end, |i| i + 1);
+            p = start..end;
+            varying = runs(&is_known[p.clone()])
+                .into_iter()
+                .map(|r| r.start + p.start..r.end + p.start)
+                .collect::<Vec<Run>>();
+            // The gaps between fixed runs, as above.
+            let fixed_runs = varying;
+            varying = Vec::new();
+            for w in fixed_runs.windows(2) {
+                varying.push(w[0].end..w[1].start);
+            }
+            let mut merged: Vec<Run> = Vec::new();
+            for v in varying {
+                match merged.last_mut() {
+                    Some(m) if v.start - m.end <= 2 => m.end = v.end,
+                    _ => merged.push(v),
+                }
+            }
+            varying = merged;
+        }
         preamble = Some(p);
     }
+    let known: Vec<Option<Iq>> = mean
+        .iter()
+        .zip(&is_known)
+        .map(|(m, &k)| k.then(|| m / m.norm()))
+        .collect();
     let postamble = if rs.last().is_some_and(|r| r.end + 3 >= len && r.len() >= 2) {
         rs.pop()
     } else {
@@ -458,6 +503,9 @@ pub struct Fitted {
     pub mer_db: f32,
     /// Idle fill (its data match the fill).
     pub idle: bool,
+    /// The symbols of the field inside the preamble (their constellation
+    /// points' numbers): live, a few values, one a terminal.
+    pub field: Vec<u8>,
 }
 
 /// Fit `sym` (a demodulated burst) to `layout`.
@@ -515,6 +563,13 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
     for &i in &layout.data {
         data_set[i] = true;
     }
+    let mut in_field = vec![false; layout.len];
+    for r in &layout.varying_in_preamble {
+        for i in r.clone() {
+            in_field[i] = true;
+        }
+    }
+    let mut field = Vec::new();
     for (i, v) in row.iter().enumerate() {
         let Some(v) = v else { continue };
         let ph = phase_at(i);
@@ -528,6 +583,9 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
         if data_set[i] {
             data.push(c);
         }
+        if in_field[i] {
+            field.push(nearest(c, pts) as u8);
+        }
     }
     let idle = layout.fill.as_ref().is_some_and(|f| {
         let n = f.len().min(data.len());
@@ -540,6 +598,7 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
         data,
         mer_db: (10.0 * (sig / err.max(1e-12)).log10()) as f32,
         idle,
+        field,
     })
 }
 

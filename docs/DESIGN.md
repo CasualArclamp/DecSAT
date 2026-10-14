@@ -171,10 +171,22 @@ group.
    **Terminals**: bursts grouped by power, carrier and offset in the slot
    (the carrier tolerance scaled to the measured scatter).
 
-Next (T3): the coding inside the bursts — the data symbols per burst are in
-the `.bursts` file; candidates are a turbo product code (Comtech, iDirect),
-DVB-RCS2's turbo code and LDPC. Weak carriers (≤ 7 dB) still fragment;
-detecting bursts on their preamble once the layout is known is the fix.
+6. **Terminals by field**: when the preamble holds a short varying field
+   (≤ 12 symbols), each burst's value (snapped to the commonest within a
+   symbol; small values a symbol from a far commoner one folded in) names
+   its terminal — live, one value a terminal, each at its own power.
+
+T3 so far (2026-10-14, the live group): a burst is preamble + a 5-symbol
+field (the terminal; 10 bits with strong short parity checks — a small
+block code) + a ~624-symbol main codeword + an 18-symbol fixed word + a
+~123-symbol trailer that differs on every burst, idle ones too. The main
+codeword shows no parity check within any 14-bit window (Walsh–Hadamard of
+every window's patterns over 1900 bursts, busy XOR the fill): a long code
+— turbo, LDPC or an interleaved product code. At ~5 dB Es/N0 (symbol error
+rate 6.6 % against the fill) blind rank methods fail; a cleaner capture, or
+the network's outbound to name the vendor, comes first. Weak carriers
+(≤ 7 dB) still fragment; detecting bursts on their preamble once the layout
+is known is the fix.
 
 ## 4. Workspace layout
 

@@ -4297,14 +4297,15 @@ fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: V
             .id_salt(("tdma_terms", id, i))
             .show(ui, |ui| {
                 egui::Grid::new(("tdma_terms_grid", id, i))
-                    .num_columns(5)
+                    .num_columns(6)
                     .striped(true)
                     .show(ui, |ui| {
-                        for h in ["bursts", "idle", "power", "carrier", "in slot"] {
+                        for h in ["field", "bursts", "idle", "power", "carrier", "in slot"] {
                             ui.label(RichText::new(h).small().weak());
                         }
                         ui.end_row();
                         for t in c.terminals.iter().take(24) {
+                            ui.label(RichText::new(t.id.as_deref().unwrap_or("–")).monospace());
                             ui.label(t.bursts.to_string());
                             ui.label(format!(
                                 "{:.0} %",
@@ -4318,10 +4319,12 @@ fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: V
                     });
                 ui.label(
                     RichText::new(
-                        "Told apart by power, carrier offset and where in its slot each \
-                         sends — a terminal's own hardware and ranging. Terminals locked to \
-                         the hub share a carrier offset; two at the same power and timing \
-                         look like one.",
+                        "When the bursts' preamble holds a short field that varies (live: \
+                         a handful of values, each at its own power), terminals are told \
+                         apart by it — the field's symbols as numbered points. Without one, \
+                         by power, carrier offset and where in its slot each sends; \
+                         terminals locked to the hub share a carrier offset, and two at the \
+                         same power and timing look like one.",
                     )
                     .small()
                     .weak(),
