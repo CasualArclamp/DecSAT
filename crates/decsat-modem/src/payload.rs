@@ -41,7 +41,7 @@ use crate::ethblock::{EthBlockRx, EthBlockStats};
 use crate::ibs::IbsRx;
 use crate::paradise::EscRx;
 use crate::slotpkt::SlotRx;
-use crate::tpc2964::additive_sequence;
+use crate::tpc2964::{PERIOD, additive_sequence_from};
 
 /// How the data might be scrambled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +50,14 @@ pub enum Descrambler {
     /// Self-synchronising: out = in ⊕ in[n−t₁] ⊕ in[n−t₂] … for the taps.
     SelfSync(&'static [usize]),
     /// The additive (2,3,9,12)/475h sequence, restarted every frame (see
-    /// [`additive_sequence`] for `last` and `reversed`).
+    /// [`additive_sequence`](crate::tpc2964::additive_sequence) for `last`
+    /// and `reversed`); `early`: the frame's first data bit takes the
+    /// sequence's last bit, the one before its first (Comtech TPC 7/8's
+    /// data; tpc_2964's start on the first).
     Additive {
         last: bool,
         reversed: bool,
+        early: bool,
     },
 }
 
@@ -63,9 +67,15 @@ impl Descrambler {
     pub fn all() -> Vec<Descrambler> {
         let mut v = vec![Descrambler::None];
         v.extend(SELF_SYNC.iter().map(|&t| Descrambler::SelfSync(t)));
-        for last in [false, true] {
-            for reversed in [false, true] {
-                v.push(Descrambler::Additive { last, reversed });
+        for early in [false, true] {
+            for last in [false, true] {
+                for reversed in [false, true] {
+                    v.push(Descrambler::Additive {
+                        last,
+                        reversed,
+                        early,
+                    });
+                }
             }
         }
         v
@@ -81,10 +91,15 @@ impl Descrambler {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Descrambler::Additive { last, reversed } => format!(
-                "additive (2,3,9,12)/475h per frame, output {}, preset {}",
+            Descrambler::Additive {
+                last,
+                reversed,
+                early,
+            } => format!(
+                "additive (2,3,9,12)/475h per frame, output {}, preset {}{}",
                 if *last { "stage 12" } else { "feedback" },
-                if *reversed { "reversed" } else { "as written" }
+                if *reversed { "reversed" } else { "as written" },
+                if *early { ", one bit early" } else { "" }
             ),
         }
     }
@@ -117,9 +132,16 @@ struct Running {
 impl Running {
     fn new(kind: Descrambler, diff: bool, skew: i8, frame_len: usize) -> Self {
         let seq = match kind {
-            Descrambler::Additive { last, reversed } => {
-                additive_sequence(last, reversed, frame_len)
-            }
+            Descrambler::Additive {
+                last,
+                reversed,
+                early,
+            } => additive_sequence_from(
+                last,
+                reversed,
+                if early { PERIOD - 1 } else { 0 },
+                frame_len,
+            ),
             _ => Vec::new(),
         };
         Running {
@@ -569,6 +591,11 @@ pub struct PayloadRx {
 }
 
 impl PayloadRx {
+    /// Data bits per modem frame, as made.
+    pub fn frame_len(&self) -> usize {
+        self.frame_len
+    }
+
     /// `frame_len`: data bits per modem frame (additive scramblers restart
     /// each frame).
     pub fn new(frame_len: usize) -> Self {
@@ -1024,8 +1051,13 @@ mod tests {
                 SelfSyncScrambler::new(taps).scramble(&mut b);
                 b
             }
-            Descrambler::Additive { last, reversed } => {
-                let seq = additive_sequence(last, reversed, frame_len);
+            Descrambler::Additive {
+                last,
+                reversed,
+                early,
+            } => {
+                let skip = if early { PERIOD - 1 } else { 0 };
+                let seq = additive_sequence_from(last, reversed, skip, frame_len);
                 bits.chunks(frame_len)
                     .flat_map(|c| c.iter().zip(&seq).map(|(b, s)| b ^ s).collect::<Vec<_>>())
                     .collect()

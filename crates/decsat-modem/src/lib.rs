@@ -7,7 +7,8 @@
 //! - [`interleave`]: Forney convolutional interleaving.
 //! - [`dvbs`]: the DVB-S transmitter and blind receiver.
 //! - [`tpc`]: turbo product codes (extended Hamming products, Chase–Pyndiah).
-//! - [`tpc2964`]: `tpc_2964` frames, their structure found from the signal.
+//! - [`tpc2964`]: `tpc_2964` frames, their structure found from the signal;
+//!   its receiver also takes [`tpc78`], Comtech's TPC 7/8 (16K block).
 //! - [`payload`]: what a modem's data carry (HDLC, MPEG-TS) and how they are
 //!   scrambled, found from the data.
 //! - [`edmac`]: Comtech EDMAC framing (21/20, its M&C channel);
@@ -45,3 +46,4 @@ pub mod tdmfast;
 pub mod text;
 pub mod tpc;
 pub mod tpc2964;
+pub mod tpc78;

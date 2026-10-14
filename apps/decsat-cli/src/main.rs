@@ -612,7 +612,7 @@ fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::Dec
         Verdict::NotDvbS2 { hint } => {
             // Rust note: the hint is a sentence for people; these are the
             // names Identify puts in it when a decoder can read the carrier.
-            if hint.contains("TPC 2964") {
+            if decsat_engine::names_tpc(hint) {
                 vec![DecoderKind::Tpc2964]
             } else if hint.contains("FastLink") {
                 vec![DecoderKind::FastLink]

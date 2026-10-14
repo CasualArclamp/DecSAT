@@ -20,11 +20,70 @@
 //! sent. What was found is reported, so a guess never passes for knowledge.
 //! What the data carry, and any scrambling of the data, is
 //! [`payload`](crate::payload)'s business.
+//!
+//! The receiver, [`TpcRx`], also takes Comtech's TPC 7/8 ([`crate::tpc78`]):
+//! it looks for either code's unique word and keeps to the one it finds.
 
 use decsat_core::{Iq, Modulation};
 
 use crate::payload::{SelfSyncScrambler, hdlc_frame};
 use crate::tpc::{ExtHamming, ProductCode};
+use crate::tpc78;
+
+/// The turbo product codes [`TpcRx`] receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Code {
+    /// IESS-315's rate 3/4: 2964-bit frames, structure found blind.
+    Tpc2964,
+    /// Comtech's rate 7/8: 16 320-bit frames ([`crate::tpc78`]).
+    Comtech78,
+}
+
+impl Code {
+    pub const ALL: [Code; 2] = [Code::Tpc2964, Code::Comtech78];
+
+    /// `as usize` on a field-less enum gives its declaration index (0, 1).
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn uw(self) -> u32 {
+        match self {
+            Code::Tpc2964 => UW,
+            Code::Comtech78 => tpc78::UW,
+        }
+    }
+
+    pub fn uw_len(self) -> usize {
+        match self {
+            Code::Tpc2964 => UW_LEN,
+            Code::Comtech78 => tpc78::UW_LEN,
+        }
+    }
+
+    /// Bits a frame, UW included.
+    pub fn frame(self) -> usize {
+        match self {
+            Code::Tpc2964 => FRAME,
+            Code::Comtech78 => tpc78::FRAME,
+        }
+    }
+
+    /// The user's data bits a frame (what [`TpcRx`] puts out).
+    pub fn data(self) -> usize {
+        match self {
+            Code::Tpc2964 => DATA,
+            Code::Comtech78 => tpc78::DATA,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Code::Tpc2964 => "TPC 2964 (IESS-315, rate 3/4)",
+            Code::Comtech78 => "Comtech TPC 7/8 (16K block)",
+        }
+    }
+}
 
 /// The unique word, 20 bits, sent MSB first (RCV-20x Table 3.2).
 pub const UW: u32 = 0xF_50B8;
@@ -65,6 +124,15 @@ pub fn additive_sequence(last: bool, reversed: bool, n: usize) -> Vec<u8> {
             out as u8
         })
         .collect()
+}
+
+/// The additive sequence's period: 1 + x² + x³ + x⁹ + x¹² is primitive.
+pub const PERIOD: usize = 4095;
+
+/// [`additive_sequence`] from `skip` bits in: `n` bits.
+pub fn additive_sequence_from(last: bool, reversed: bool, skip: usize, n: usize) -> Vec<u8> {
+    // `split_off(at)` cuts a Vec in two and returns the part from `at` on.
+    additive_sequence(last, reversed, skip + n).split_off(skip)
 }
 
 /// How the code bits might be scrambled.
@@ -244,13 +312,23 @@ impl Structure {
     }
 }
 
-/// A [`Structure`] made ready to use.
+/// A [`Structure`] made ready to use (or the TPC 7/8's fixed one).
 struct Layout {
     code: ProductCode,
+    /// For each product code bit, where in the block it was sent
+    /// ([`NOT_SENT`] if shortened away).
     air: Vec<usize>,
     seq: Vec<u8>,
+    /// The user's data bits (indices into the product code's data, row by
+    /// row) in the order they go on the air.
     data_order: Vec<usize>,
 }
+
+/// A shortened bit's place in [`Layout::air`]: not sent, known to be 0.
+const NOT_SENT: usize = usize::MAX;
+
+/// A shortened bit's soft value, over the block's mean magnitude: sure.
+const SURE: f32 = 8.0;
 
 impl Layout {
     fn new(st: Structure) -> Self {
@@ -263,13 +341,30 @@ impl Layout {
         }
     }
 
+    /// Comtech TPC 7/8: row by row from the first row's 97th bit, code
+    /// bits not scrambled, the user's data all but the last 24 data bits.
+    fn comtech78() -> Self {
+        Layout {
+            code: tpc78::code(),
+            // `checked_sub` is None below 0: the shortened bits.
+            air: (0..tpc78::SIDE * tpc78::SIDE)
+                .map(|i| i.checked_sub(tpc78::SHORTENED).unwrap_or(NOT_SENT))
+                .collect(),
+            seq: vec![0; tpc78::BLOCK],
+            data_order: (tpc78::SHORTENED..tpc78::SHORTENED + tpc78::DATA).collect(),
+        }
+    }
+
     /// One block's soft bits as sent, descrambled, in the product code's
     /// order.
     fn arrange(&self, block: &[f32]) -> Vec<f32> {
+        let sure = SURE * block.iter().map(|v| v.abs()).sum::<f32>() / block.len().max(1) as f32;
         self.air
             .iter()
             .map(|&p| {
-                if self.seq[p] == 0 {
+                if p == NOT_SENT {
+                    sure
+                } else if self.seq[p] == 0 {
                     block[p]
                 } else {
                     -block[p]
@@ -410,16 +505,17 @@ impl TpcHdlcTx {
     }
 }
 
-/// Whether carrier-locked `symbols` carry the tpc_2964 unique word every
-/// 2964 bits (under any orientation): for Identify.
-pub fn detect(symbols: &[Iq], modulation: Modulation) -> bool {
+/// Which code's unique word carrier-locked `symbols` carry, frame after
+/// frame (under any orientation): tpc_2964's every 2964 bits, or the
+/// Comtech TPC 7/8's every 16 320. For Identify.
+pub fn detect(symbols: &[Iq], modulation: Modulation) -> Option<Code> {
     let mut rx = TpcRx::new(modulation);
-    // Look all through the listen, a few frames at a time: the loop may
-    // slip somewhere in it.
+    // Look all through the listen, a few short frames at a time: the loop
+    // may slip somewhere in it.
     let per = rx.per();
-    symbols.chunks(FRAME * 4 / per).any(|c| {
-        rx.held.extend_from_slice(c);
-        rx.find_uw()
+    symbols.chunks(FRAME * 4 / per).find_map(|c| {
+        rx.add(c);
+        if rx.find_uw() { rx.code } else { None }
     })
 }
 
@@ -501,7 +597,9 @@ pub fn modulate(bits: &[u8], m: Modulation, out: &mut Vec<Iq>) {
 /// What the receiver has found and done.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TpcStats {
-    /// The unique word is being found every 2964 bits.
+    /// The code whose unique word was found.
+    pub code: Option<Code>,
+    /// The unique word is being found every frame.
     pub uw_locked: bool,
     /// The carrier's phase ambiguity, once the UW resolved it.
     pub orientation: Option<String>,
@@ -522,6 +620,8 @@ pub struct TpcStats {
     pub uw_misses: u64,
     /// Carrier phase or symbol slips repaired.
     pub slips: u64,
+    /// TPC 7/8: the last decoded frame's 24 overhead bits.
+    pub overhead: Option<u32>,
 }
 
 impl TpcStats {
@@ -558,8 +658,9 @@ type Orientation = (u8, bool, bool);
 /// Symbols either way a slip is looked for.
 const SLIP: usize = 2;
 
-/// tpc_2964 receiver: carrier-locked BPSK, QPSK or 8PSK symbols in, data
-/// bits out, a frame (`DATA` bits) at a time.
+/// tpc_2964 receiver — or Comtech TPC 7/8, whichever unique word it finds:
+/// carrier-locked BPSK, QPSK or 8PSK symbols in, data bits out, a frame
+/// ([`Code::data`] bits) at a time.
 ///
 /// The carrier loop leaves a phase ambiguity (2 ways for BPSK, 8 for QPSK
 /// and 16 for 8PSK, counting mirror images), which the UW resolves. When
@@ -570,6 +671,13 @@ const SLIP: usize = 2;
 /// a full search.
 pub struct TpcRx {
     mapper: Mapper,
+    /// The codes looked for: both until one's UW is found, then that one.
+    search: Vec<Code>,
+    /// The code found.
+    code: Option<Code>,
+    /// While searching: symbols come since each code was last looked for
+    /// (by [`Code::index`]), so each is looked for once a frame.
+    since: [usize; 2],
     /// Symbols not yet used up.
     held: Vec<Iq>,
     /// Locked: the orientation, and the bit in `held` where the next frame
@@ -615,21 +723,32 @@ fn soft_bits(m: Mapper, s: Iq, (rot, conj, inv): Orientation, out: &mut Vec<f32>
     }
 }
 
-fn uw_errors(bits: &[f32], at: usize) -> u32 {
-    (0..UW_LEN)
+/// Bits of `code`'s UW wrong at bit `at` of `bits`.
+fn uw_errors(code: Code, bits: &[f32], at: usize) -> u32 {
+    let (uw, len) = (code.uw(), code.uw_len());
+    (0..len)
         .filter(|&i| {
-            let want = (UW >> (UW_LEN - 1 - i)) & 1;
+            let want = (uw >> (len - 1 - i)) & 1;
             ((bits[at + i] < 0.0) as u32) != want
         })
         .count() as u32
 }
 
 impl TpcRx {
-    /// A receiver for tpc_2964 sent on `modulation` (BPSK, QPSK or 8PSK;
-    /// anything else is taken as QPSK).
+    /// A receiver for tpc_2964 or Comtech TPC 7/8 sent on `modulation`
+    /// (BPSK, QPSK or 8PSK; anything else is taken as QPSK).
     pub fn new(modulation: Modulation) -> Self {
+        Self::with_codes(modulation, &Code::ALL)
+    }
+
+    /// A receiver that looks only for `codes`.
+    pub fn with_codes(modulation: Modulation, codes: &[Code]) -> Self {
         TpcRx {
             mapper: Mapper::of(modulation),
+            search: codes.to_vec(),
+            code: None,
+            // Look as soon as enough has come.
+            since: [usize::MAX; 2],
             held: Vec::new(),
             lock: None,
             layout: None,
@@ -637,6 +756,32 @@ impl TpcRx {
             ident_seen: 0,
             misses: 0,
             stats: TpcStats::default(),
+        }
+    }
+
+    /// The code found, once its UW has been.
+    pub fn code(&self) -> Option<Code> {
+        self.code
+    }
+
+    /// The user's data bits a frame: the code found's, or (until then)
+    /// tpc_2964's.
+    pub fn data_bits(&self) -> usize {
+        self.code.unwrap_or(Code::Tpc2964).data()
+    }
+
+    /// Bits a frame (UW included), as [`TpcRx::data_bits`].
+    pub fn frame_bits(&self) -> usize {
+        self.code.unwrap_or(Code::Tpc2964).frame()
+    }
+
+    /// Hold more symbols.
+    fn add(&mut self, symbols: &[Iq]) {
+        self.held.extend_from_slice(symbols);
+        if self.lock.is_none() {
+            for s in &mut self.since {
+                *s = s.saturating_add(symbols.len());
+            }
         }
     }
 
@@ -688,53 +833,105 @@ impl TpcRx {
         v
     }
 
-    /// Feed symbols; each decoded frame's `DATA` data bits (0/1) go to `out`.
+    /// Feed symbols; each decoded frame's data bits ([`Code::data`] of
+    /// them, 0/1) go to `out`.
     pub fn push(&mut self, symbols: &[Iq], out: &mut Vec<Vec<u8>>) {
-        self.held.extend_from_slice(symbols);
+        self.add(symbols);
         if self.lock.is_none() && !self.find_uw() {
             return;
         }
         self.frames(out);
     }
 
-    /// Look for the UW every 2964 bits in the held symbols under each
-    /// orientation.
+    /// Symbols a search for `code`'s UW looks through: every start in a
+    /// frame, and the frames from there.
+    fn need(&self, code: Code) -> usize {
+        (code.frame() + UW_FRAMES * code.frame() + code.uw_len()).div_ceil(self.per())
+    }
+
+    /// Look for each code's UW, frame after frame, in the newest held
+    /// symbols under each orientation — each code once a frame of its own.
     fn find_uw(&mut self) -> bool {
         let per = self.per();
-        // Every start in a frame, and the frames from there.
-        let need = (FRAME + UW_FRAMES * FRAME + UW_LEN).div_ceil(per);
-        if self.held.len() < need {
-            return false;
-        }
-        let mut bits = Vec::with_capacity(self.held.len() * per);
-        for o in self.orientations() {
-            bits.clear();
-            for &s in &self.held {
-                soft_bits(self.mapper, s, o, &mut bits);
+        let due: Vec<Code> = self
+            .search
+            .iter()
+            .copied()
+            .filter(|&c| {
+                self.held.len() >= self.need(c) && self.since[c.index()] >= c.frame() / per
+            })
+            .collect();
+        let mut found = None;
+        // `if let Some(x) = …` runs the block only when there is a value.
+        if let Some(span) = due.iter().map(|&c| self.need(c)).max() {
+            let s0 = self.held.len() - span;
+            let mut bits = Vec::with_capacity(span * per);
+            // A labelled loop: `break 'search` leaves both loops at once.
+            'search: for o in self.orientations() {
+                bits.clear();
+                for &s in &self.held[s0..] {
+                    soft_bits(self.mapper, s, o, &mut bits);
+                }
+                for &c in &due {
+                    // This code's window: its newest `need` symbols.
+                    let base = (span - self.need(c)) * per;
+                    let f = c.frame();
+                    let hit = (0..f).find(|&off| {
+                        (0..UW_FRAMES).all(|m| uw_errors(c, &bits, base + off + m * f) <= UW_ERRORS)
+                    });
+                    if let Some(off) = hit {
+                        found = Some((c, o, s0 * per + base + off));
+                        break 'search;
+                    }
+                }
             }
-            let found = (0..FRAME).find(|&off| {
-                (0..UW_FRAMES).all(|m| uw_errors(&bits, off + m * FRAME) <= UW_ERRORS)
-            });
-            if let Some(off) = found {
-                self.lock = Some((o, off));
-                self.misses = 0;
-                self.stats.uw_locked = true;
-                self.set_orientation(o);
-                return true;
+            for &c in &due {
+                self.since[c.index()] = 0;
             }
         }
-        // Keep the newest part and try again with more.
-        let keep = self.held.len().saturating_sub(need - FRAME / per);
-        self.held.drain(..keep);
+        if let Some((c, o, at)) = found {
+            self.found_code(c);
+            self.lock = Some((o, at));
+            self.misses = 0;
+            self.stats.uw_locked = true;
+            self.set_orientation(o);
+            return true;
+        }
+        // Keep what the longest search needs, and try again with more.
+        let keep = self.search.iter().map(|&c| self.need(c)).max().unwrap_or(0);
+        let drop = self.held.len().saturating_sub(keep);
+        self.held.drain(..drop);
         false
+    }
+
+    /// `code`'s UW has been found: keep to it. TPC 7/8's layout is known
+    /// already; tpc_2964's is found from its frames.
+    fn found_code(&mut self, code: Code) {
+        if self.code == Some(code) {
+            return;
+        }
+        self.code = Some(code);
+        self.search = vec![code];
+        self.stats.code = Some(code);
+        if code == Code::Comtech78 {
+            self.layout = Some(Layout::comtech78());
+            self.stats.structure = Some(format!(
+                "sent row by row ((128,120) words), generator {:#04x}, first {} bits shortened, \
+                 code bits not scrambled",
+                tpc78::POLY,
+                tpc78::SHORTENED
+            ));
+            self.stats.fit = 1.0;
+        }
     }
 
     /// Where the UW due at bit `at` went, if the carrier or the timing
     /// slipped: an orientation and offset under which it and the next UW
     /// both appear. `None` when there is not yet enough signal to tell.
-    fn repair(&self, at: usize) -> Option<Option<(Orientation, usize)>> {
+    fn repair(&self, code: Code, at: usize) -> Option<Option<(Orientation, usize)>> {
         let per = self.per();
-        if (at + SLIP * per + FRAME + UW_LEN).div_ceil(per) > self.held.len() {
+        let (frame, uw_len) = (code.frame(), code.uw_len());
+        if (at + SLIP * per + frame + uw_len).div_ceil(per) > self.held.len() {
             return None;
         }
         for d in [0isize, -1, 1, -2, 2] {
@@ -744,9 +941,9 @@ impl TpcRx {
             }
             let a = a as usize;
             for o in self.orientations() {
-                if (0..2)
-                    .all(|m| uw_errors(&self.soft_at(o, a + m * FRAME, UW_LEN), 0) <= UW_ERRORS)
-                {
+                if (0..2).all(|m| {
+                    uw_errors(code, &self.soft_at(o, a + m * frame, uw_len), 0) <= UW_ERRORS
+                }) {
                     return Some(Some((o, a)));
                 }
             }
@@ -756,16 +953,20 @@ impl TpcRx {
 
     fn frames(&mut self, out: &mut Vec<Vec<u8>>) {
         let per = self.per();
+        let Some(code) = self.code else {
+            return;
+        };
+        let (frame, uw_len) = (code.frame(), code.uw_len());
         while let Some((mut o, mut at)) = self.lock {
-            if (at + FRAME).div_ceil(per) > self.held.len() {
+            if (at + frame).div_ceil(per) > self.held.len() {
                 break;
             }
             let mut uw_ok = true;
-            if uw_errors(&self.soft_at(o, at, UW_LEN), 0) > UW_ERRORS {
-                match self.repair(at) {
+            if uw_errors(code, &self.soft_at(o, at, uw_len), 0) > UW_ERRORS {
+                match self.repair(code, at) {
                     None => break, // wait for the next UW to tell
                     Some(Some((o2, a2))) => {
-                        if (a2 + FRAME).div_ceil(per) > self.held.len() {
+                        if (a2 + frame).div_ceil(per) > self.held.len() {
                             break;
                         }
                         (o, at) = (o2, a2);
@@ -786,9 +987,9 @@ impl TpcRx {
             } else {
                 self.misses = 0;
             }
-            let block = self.soft_at(o, at + UW_LEN, BLOCK);
+            let block = self.soft_at(o, at + uw_len, frame - uw_len);
             // Keep a few symbols before the next frame for the slip search.
-            let next = at + FRAME;
+            let next = at + frame;
             let drop = (next / per).saturating_sub(SLIP);
             self.held.drain(..drop);
             self.lock = Some((o, next - drop * per));
@@ -797,10 +998,12 @@ impl TpcRx {
         }
     }
 
-    /// The UW has gone: search again from the symbols held.
+    /// The UW has gone: search again from the symbols held (for the code
+    /// found, at once).
     fn lost(&mut self) {
         self.lock = None;
         self.misses = 0;
+        self.since = [usize::MAX; 2];
         self.stats.uw_locked = false;
         self.stats.orientation = None;
     }
@@ -893,7 +1096,7 @@ impl TpcRx {
     fn decode(&mut self, block: &[f32], uw_ok: bool) -> Option<Vec<u8>> {
         let lay = self.layout.as_ref().expect("structure known");
         let arranged = lay.arrange(block);
-        let mut data = vec![0u8; DATA];
+        let mut data = vec![0u8; lay.code.k()];
         let o = lay.code.decode(&arranged, &mut data, ITERATIONS);
         if !o.converged {
             self.stats.failed += 1;
@@ -905,11 +1108,22 @@ impl TpcRx {
             // Data bits the decoder changed against the received ones: the
             // channel's errors, counted where decoding says what was sent.
             let (rk, rn) = (lay.code.row.k, lay.code.row.n);
-            let changed = (0..DATA)
-                .filter(|&i| (arranged[(i / rk) * rn + i % rk] < 0.0) as u8 != data[i])
+            let changed = lay
+                .data_order
+                .iter()
+                .filter(|&&i| (arranged[(i / rk) * rn + i % rk] < 0.0) as u8 != data[i])
                 .count();
             self.stats.corrected_bits += changed as u64;
-            self.stats.data_bits += DATA as u64;
+            self.stats.data_bits += lay.data_order.len() as u64;
+            if self.code == Some(Code::Comtech78) {
+                // The data bits after the user's.
+                let end = tpc78::SHORTENED + tpc78::DATA;
+                self.stats.overhead = Some(
+                    data[end..end + tpc78::OVERHEAD]
+                        .iter()
+                        .fold(0, |a, &b| (a << 1) | u32::from(b)),
+                );
+            }
         }
         Some(lay.data_order.iter().map(|&d| data[d]).collect())
     }
@@ -1168,6 +1382,40 @@ pub(crate) mod tests {
                 "Es/N0 {esn0:.1} dB: raw BER {:.2} %, {ok} of {frames} frames right",
                 100.0 * raw_err as f64 / raw_n as f64
             );
+        }
+    }
+
+    /// Comtech TPC 7/8: the receiver tells it by its UW, under any QPSK
+    /// orientation, and decodes it through noise — QPSK at 7.5 dB Es/N0
+    /// (raw BER ~0.6 %), the live carrier was at 12.3 dB.
+    #[test]
+    fn receives_comtech_tpc_7_8() {
+        let code = tpc78::code();
+        let mut next = rng(78);
+        let mut bits = Vec::new();
+        let mut sent = Vec::new();
+        for _ in 0..7 {
+            let d: Vec<u8> = (0..tpc78::DATA).map(|_| (next() & 1) as u8).collect();
+            tpc78::frame(&code, &d, 0x8C_EA42, &mut bits);
+            sent.push(d);
+        }
+        for (turn, conj) in [(Iq::new(0.0, 1.0), true), (Iq::new(-1.0, 0.0), false)] {
+            let sym = on_air(&bits, Modulation::Qpsk, 7.5, turn, conj);
+            let mut rx = TpcRx::new(Modulation::Qpsk);
+            let mut out = Vec::new();
+            for c in sym.chunks(1000) {
+                rx.push(c, &mut out);
+            }
+            let s = &rx.stats;
+            assert_eq!(s.code, Some(Code::Comtech78), "{s:?}");
+            assert_eq!(out.len(), 6, "{s:?}");
+            // The first whole frame received is the second sent.
+            for (k, f) in out.iter().enumerate() {
+                assert_eq!(*f, sent[1 + k], "frame {k}: {s:?}");
+            }
+            assert_eq!(s.overhead, Some(0x8C_EA42));
+            assert_eq!(s.failed, 0, "{s:?}");
+            assert!(s.channel_ber() > 0.002, "{s:?}");
         }
     }
 

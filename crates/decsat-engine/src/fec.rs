@@ -2348,12 +2348,19 @@ fn run(
                         symbols,
                         modulation,
                     } => {
-                        use decsat_modem::tpc2964::{DATA, FRAME, TpcRx, bits_per_symbol};
+                        // TPC 2964, or Comtech TPC 7/8: the receiver keeps
+                        // to the code whose UW it finds.
+                        use decsat_modem::tpc2964::{Code, TpcRx, bits_per_symbol};
                         let rx = tpc.get_or_insert_with(|| TpcRx::new(modulation));
                         rx.push(&symbols, &mut tpc_frames);
-                        let bps = symbol_rate * bits_per_symbol(modulation) as f64 * DATA as f64
-                            / FRAME as f64;
-                        (symbols.len() as f64 / symbol_rate, DATA, bps, "tpc2964")
+                        let (data, frame) = (rx.data_bits(), rx.frame_bits());
+                        let bps = symbol_rate * bits_per_symbol(modulation) as f64 * data as f64
+                            / frame as f64;
+                        let tag = match rx.code() {
+                            Some(Code::Comtech78) => "tpc78",
+                            _ => "tpc2964",
+                        };
+                        (symbols.len() as f64 / symbol_rate, data, bps, tag)
                     }
                     FecInput::FastLink(symbols) => {
                         use decsat_modem::fastlink::{FRAME_DATA, FRAME_SYMBOLS, FastLinkRx};
@@ -2401,6 +2408,11 @@ fn run(
                     }
                     _ => unreachable!("matched above"),
                 };
+                // The TPC receiver knows its frame size once it has found a
+                // UW: a payload stage made for another starts again.
+                if payload.as_ref().is_some_and(|p| p.frame_len() != block) {
+                    payload = None;
+                }
                 // FastLink's data pairs are QPSK symbols, and one Q-Flex
                 // sends its Q rail late: look for that too.
                 let pay = payload.get_or_insert_with(|| match tag {

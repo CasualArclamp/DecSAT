@@ -174,7 +174,7 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => Ok(DecoderKind::Tdma),
         Verdict::NotDvbS2 { hint }
-            if hint.contains("TPC 2964")
+            if decsat_engine::names_tpc(hint)
                 || hint.contains("FastLink")
                 || hint.contains("DVB-S (")
                 || matches!(

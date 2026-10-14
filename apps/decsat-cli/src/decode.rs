@@ -504,7 +504,8 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(t) = &f.tpc {
         println!(
-            "tpc: UW {}, {}, structure {}, fit {:.0} %, {} frames ({} decoded, {} failed), BER {:.2e}, {} slips, {} UW misses",
+            "tpc: {}UW {}, {}, structure {}, fit {:.0} %, {} frames ({} decoded, {} failed), BER {:.2e}, {} slips, {} UW misses{}",
+            t.code.map_or(String::new(), |c| format!("{}, ", c.name())),
             if t.uw_locked { "found" } else { "not found" },
             t.orientation.as_deref().unwrap_or("-"),
             t.structure.as_deref().unwrap_or("not identified"),
@@ -514,7 +515,9 @@ pub(crate) fn report(st: &VfoStatus) {
             t.failed,
             t.channel_ber(),
             t.slips,
-            t.uw_misses
+            t.uw_misses,
+            t.overhead
+                .map_or(String::new(), |o| format!(", overhead {o:06X}h"))
         );
     }
     if let Some(v) = &f.viterbi {

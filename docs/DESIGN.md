@@ -220,8 +220,9 @@ crates/
                   submodule (v0.1.13), built with cc; FFI bindings
   decsat-modem    other satellite modem formats: DVB-S (Viterbi K = 7 with
                   puncturing, RS(204,188), Forney interleaving, energy dispersal),
-                  generic RS over GF(256); turbo product codes and IESS-315
-                  tpc_2964 (structure found blind); modem payloads (HDLC,
+                  generic RS over GF(256); turbo product codes, IESS-315
+                  tpc_2964 (structure found blind) and Comtech TPC 7/8
+                  (16K block, measured); modem payloads (HDLC,
                   MPEG-TS, descramblers found blind); E1/D&I++ timeslots,
                   G.711, and G.728 LD-CELP (decoder from the Recommendation,
                   plus the robbed-sync-bit framing that finds it in a

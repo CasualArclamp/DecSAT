@@ -39,7 +39,7 @@ pub use fec::{
 };
 pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, SourceState};
 pub use identify::{
-    ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in,
+    ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in, names_tpc,
 };
 pub use psk::PskDemod;
 pub use radar::RadarStageView;

@@ -56,7 +56,7 @@ real carriers stay put.
 | DVB-S2/S2X PL demodulation: frame lock, MODCOD per frame (ACM) | ✅ |
 | Carrier recovery: a locked constellation, Es/N0 (the MER) and Eb/N0, for Identify and DVB-S2 VFOs | ✅ |
 | **DVB-S → MPEG-TS** (EN 300 421): code rate, rotation and inversion found blind; Viterbi, RS, the same TS outputs | ✅ |
-| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK/8PSK): frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), Comtech EDMAC → bridged Ethernet → IP, MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
+| **TPC 2964 → IP / TS / voice** (Intelsat IESS-315 turbo product code, BPSK/QPSK/8PSK) — and **Comtech TPC 7/8** (16K block), worked out from a live carrier: frame structure, scrambling and payload found from the signal; HDLC → IP (Cisco HDLC, PPP, Frame Relay), Comtech EDMAC → bridged Ethernet → IP, MPEG-TS, E1, Comtech D&I++ voice (one timeslot or several) and 64 kbit/s timeslots in HDLC packets — a trunk's voice channels, its IP, and the ADS-B and radar in it | ✅ confirmed on live Comtech CDM-600L and CDM-570L carriers |
 | **Q-Flex FastLink → data and voice** (Paradise, QPSK 0.710): sync word, the (2880, 2048) LDPC code and the frame scrambler, all measured from a live carrier; inside, Paradise's closed-network + ESC framing and a 257-bit TDM multiplex (sixteen 8 kbit/s channels, metered live so speech shows); a call's G.728 voice put together from its four channels — listen, record `.wav`; the 2–4 × faster links' multiplex, its HDLC timeslot (bridged Ethernet → IP) and its G.728 calls | ✅ decodes live Q-Flex links down to the calls' speech, the faster ones' IP too |
 | **Viterbi → data**: the K = 7 code (IESS-308/309 SCPC, DVB-S) at rate 1/2–7/8, puncturing and orientation found blind and followed when the carrier turns — and **any other rate-½ convolutional code up to K = 10** on BPSK or QPSK, its generators read off the parity check its stream satisfies (K = 9 (561, 753), K = 5, CCSDS-style inverted outputs …); then the payload search — with or without differential decoding — for HDLC, TS, E1, D&I++, Paradise or IBS/SMS (IESS-309, 16/15) framing, or just the scrambler from the idle fill | ✅ decodes a live 10.24 kBd IESS-308 carrier to its IBS frames (rate 1/2, differential, V.35) |
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
@@ -250,6 +250,16 @@ VFO finds the rest from the signal:
 4. **Payload**: HDLC (FCS-16/32) or MPEG-TS, under each candidate
    descrambler — the (2, 3, 9, 12) polynomial self-synchronising or additive,
    ITU-T V.35's and V.29's — whichever yields frames that check.
+
+**Comtech TPC 7/8** goes through the same decoder, which takes whichever
+unique word it finds. Worked out from a live 171.43 kS/s QPSK carrier (no
+document): frames of 16 320 bits (8160 QPSK symbols) — a 32-bit unique word
+F8DD4258h and a (128,120) × (128,120) extended-Hamming product codeword
+(generator x⁷ + x³ + 1, sent row by row), its first row's first 96 bits
+shortened away; 14 304 data bits, of which the last 24 are overhead and the
+rest — exactly 7/8 of the frame — the user's (300 kbit/s at 171.43 kS/s).
+The data are scrambled by the same (2, 3, 9, 12) / 475h sequence, restarted
+every frame one bit earlier than on TPC 2964.
 
 IP found in the HDLC frames (Cisco HDLC, PPP, Frame Relay as RFC 2427
 carries it, or anything with the packet after a short header) gets the same
@@ -557,7 +567,8 @@ taken for ACM or S2X).
 Anything else gets measurements (symbol rate, roll-off, an estimated
 constellation) and a labelled guess: plain QPSK reads *"possibly DVB-S (not
 verified)"* (the DVB-S decoder confirms it), and a BPSK, QPSK or 8PSK carrier
-with the TPC 2964 unique word every 2964 bits is named as such. For the rest it
+with the TPC 2964 unique word every 2964 bits, or Comtech TPC 7/8's every
+16 320, is named as such. For the rest it
 looks for fingerprints of proprietary waveforms:
 
 - **DVB-S2-style headers off their own grid**: SOF and PLS headers that recur
@@ -581,7 +592,8 @@ looks for fingerprints of proprietary waveforms:
 
 Comtech VersaFEC and the TPC/LDPC modes of SCPC modems publish no sync
 word or frame layout, so they can only be recognised by such measurements;
-captures of them would let DecSAT name them. Paradise FastLink was worked
+captures of them would let DecSAT name them — Comtech's TPC 7/8 was worked
+out that way (its frames repeating whole while idle gave it away). Paradise FastLink was worked
 out that way from a capture of a Q-Flex (QPSK 0.710): Identify names it, and
 the **Q-Flex FastLink** decoder decodes it — down to the calls in its TDM
 multiplex: G.728 voice spread over four channels, two bits a TDM word.

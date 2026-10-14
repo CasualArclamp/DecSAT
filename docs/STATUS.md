@@ -4059,3 +4059,60 @@ published (6.4 kBd, 7.7 kHz spacing, 2 s frame, Intelsat 19).
   the three terminals' values, changing slot to slot. That test's terminal
   fields are now values no turn or shift of another makes: it reads exactly
   three values (with the old fields it read 11, the misreads noted above).
+
+## Comtech TPC 7/8, worked out from a live carrier (2026-10-14)
+
+Rory: "what is this CDM mode" — VFO_29, 11 664.53 MHz (H3e), a 15 s cf32 at
+588 235 S/s, and the SDR++ baseband it sits in (`…comtechs_and_idk.wav`).
+Identify had called it a K = 7 code "(22, 141)" — a false check: the
+frames repeat whole while idle, which lets short spurious checks hold.
+
+**How it was found** (Python on the hard symbols, scratchpad `v29/`):
+
+1. The symbols repeat every 8160 (99.7 % frame to frame): idle data under a
+   frame-synchronous scrambler. 8160 QPSK symbols = 16 320 bits.
+2. Linear complexity (Berlekamp–Massey) over short windows of the bit
+   stream (I then Q): 19 in runs of ~120 bits, 127 runs a frame. The
+   polynomial factors as (x + 1)⁷ · (x¹² + x⁹ + x³ + x² + 1) — a period-8
+   pattern (HDLC flags) under the IESS-315 (2, 3, 9, 12) sequence. Across
+   each break the sequence carries on 8 bits later: 120 data bits and 8
+   inserted ones per 128.
+3. With one rail inverted (the carrier's ambiguity), every 128-bit row is
+   an extended Hamming (128,120) word, generator x⁷ + x³ + 1, MSB first,
+   even parity last (after moving the grid by one bit). The columns check
+   once a 128th row is put on top: zeros for its first 96 bits, and the
+   last 32 bits of the 64 between frames for the rest. The other 32 are
+   the unique word.
+4. Descrambled with that sequence (from one bit before the 475h preset's
+   first output), the data are HDLC flags throughout, but for the block's
+   last 24 data bits (overhead, 8CEA42h raw, constant).
+
+**The code**: frame = UW F8DD4258h (32 bits) + (128,120)² sent row by row
+from the first row's 97th bit (16 288 bits); 14 304 data bits, the last 24
+overhead; 14 280 user bits = 7/8 of the frame exactly → 300 kbit/s at
+171.43 kS/s QPSK. Code bits unscrambled. "16K block" is Comtech's own name
+for its TPC 7/8 (128² = 16 384), from memory of their modem manuals — the
+structure itself is measured.
+
+**Built**: `decsat-modem::tpc78` (layout, encoder); `tpc2964::TpcRx` looks
+for both UWs and keeps to the one found (`Code`, `TpcStats.code`,
+`.overhead`; per-code search pacing — each code once a frame of its own);
+`Layout` takes shortened bits as sure zeros; `payload::Descrambler::
+Additive { early }`; Identify names "Comtech TPC 7/8" (`names_tpc` for the
+CLI scan, the survey and the type-found model); the VFO line says "TPC
+7/8"; the decoder entry is "TPC (IESS-315 2964 or Comtech 7/8)" (key
+unchanged). Test `receives_comtech_tpc_7_8` (QPSK 7.5 dB, two
+orientations), a live row as a codeword.
+
+**Live**: VFO_29 — 314 of 327 frames decode (the failures at the 19
+interference bursts), BER 2·10⁻⁵, descrambler found by the payload search,
+idle flags (no traffic in 15 s).
+
+**The rest of that baseband** (11 662.548 MHz centre, 10 MS/s, 5 s):
+
+| offset | what | state |
+|---|---|---|
+| −3151, −2295 kHz | 8PSK TPC 2964, 711.1 kS/s (the "UW flipping 180°" pair of 0.8.1) | decode, 3596/3598 frames, idle |
+| +1531 kHz | QPSK TPC 2964, 170.67 kS/s = 256.0 kbit/s | decodes (BER 0); data under the usual additive sequence, **format unknown**: structured (periods 480 and 6144 bits, ~46-bit zero runs every 6144), not HDLC/TS/E1/D&I++/NRZI |
+| +2009 kHz | QPSK Comtech TPC 7/8, 171.43 kS/s (VFO_29) | decodes, idle HDLC |
+| +2.25…+3.35 MHz and +3.4…+4.1 MHz | ~0.97 MS/s and ~0.6 MS/s carriers that **take turns**: one is on while the other is off, on a 108.85 ms grid (the second gets whole 108 ms frames or 2 ms blips) | not decodable yet; Identify's readings vary run to run (16APSK / 2-ring / QPSK in bursts; BPSK/QPSK 590–609 kS/s) |

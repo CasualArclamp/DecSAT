@@ -118,7 +118,7 @@ impl DecoderKind {
             DecoderKind::Dvbs2Ts => "DVB-S2/S2X → MPEG-TS",
             DecoderKind::DvbsTs => "DVB-S → MPEG-TS",
             DecoderKind::CdmAuto => "Comtech CDM modem (type found)",
-            DecoderKind::Tpc2964 => "TPC 2964 (IESS-315) → IP / TS",
+            DecoderKind::Tpc2964 => "TPC (IESS-315 2964 or Comtech 7/8) → IP / TS",
             DecoderKind::Cdm600Voice => "Comtech CDM-600 voice (TPC → D&I → G.728)",
             DecoderKind::Cdm570 => "Comtech CDM-570L (Viterbi K=7 → data)",
             DecoderKind::Cdm570Trunk => "Comtech CDM-570L trunk (TPC → voice + ADS-B/radar)",
@@ -206,7 +206,7 @@ impl DecoderKind {
         match self {
             // (IP comes from the CDM-570Ls: the CDM-600s carry voice, Rory
             // says — they do no IP.)
-            DecoderKind::Tpc2964 => "CDM-570L TPC (TPC 2964 → IP / TS)",
+            DecoderKind::Tpc2964 => "CDM-570L TPC (TPC 2964 or 7/8 → IP / TS)",
             DecoderKind::Cdm600Voice => "CDM-600L voice (TPC 2964 → D&I++ → G.728)",
             DecoderKind::Cdm570 => {
                 "CDM-570L Viterbi (Viterbi K=7 → data, e.g. radar: BSC or ASTERIX)"
@@ -883,7 +883,7 @@ fn auto_chain(id: &Identification, failed: &[DecoderKind]) -> DecoderKind {
         _ => "",
     };
     use DecoderKind::{FastLink, Tpc2964, Viterbi};
-    let order: [DecoderKind; 3] = if hint.contains("TPC 2964") {
+    let order: [DecoderKind; 3] = if crate::identify::names_tpc(hint) {
         [Tpc2964, Viterbi, FastLink]
     } else if hint.contains("FastLink") {
         [FastLink, Tpc2964, Viterbi]
@@ -2155,7 +2155,8 @@ impl Worker {
 }
 
 /// Information bits a symbol of a coded modem carries, when its code is
-/// known: TPC 2964's 2223 data bits a 2964-bit frame (UW included);
+/// known: TPC 2964's 2223 data bits a 2964-bit frame (UW included), or
+/// Comtech TPC 7/8's 14 280 a 16 320-bit one once its UW is found;
 /// FastLink's data bits a frame of symbols; a convolutional code's rate (and
 /// DVB-S's Reed–Solomon 188/204, EN 300 421 §4.4.2) once found.
 fn modem_info_bits(
@@ -2166,7 +2167,13 @@ fn modem_info_bits(
     use decsat_modem::{fastlink, tpc2964};
     let bits = f32::from(m.bits_per_symbol());
     match kind {
-        DecoderKind::Tpc2964 => Some(bits * tpc2964::DATA as f32 / tpc2964::FRAME as f32),
+        DecoderKind::Tpc2964 => {
+            let code = f
+                .and_then(|f| f.tpc.as_ref())
+                .and_then(|t| t.code)
+                .unwrap_or(tpc2964::Code::Tpc2964);
+            Some(bits * code.data() as f32 / code.frame() as f32)
+        }
         DecoderKind::FastLink => Some(fastlink::FRAME_DATA as f32 / fastlink::FRAME_SYMBOLS as f32),
         DecoderKind::Viterbi => f?.viterbi.as_ref()?.rate.map(|r| bits * r.value() as f32),
         DecoderKind::DvbsTs => f?
@@ -2297,7 +2304,7 @@ fn cid_message(v: &crate::cid::CidView) -> String {
     }
 }
 
-/// A TPC 2964 VFO's status line.
+/// A TPC VFO's status line (TPC 2964 or Comtech TPC 7/8).
 fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
     let Some(t) = f.and_then(|f| f.tpc.as_ref()) else {
         return format!("{lock} · looking for the unique word");
@@ -2317,8 +2324,13 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         .map_or("payload not recognised yet".to_string(), |p| {
             p.split(',').next().unwrap_or(p).to_string()
         });
+    // Comtech's code is named; TPC 2964 is the one the decoder is known by.
+    let code = match t.code {
+        Some(decsat_modem::tpc2964::Code::Comtech78) => "TPC 7/8 · ",
+        _ => "",
+    };
     format!(
-        "{lock} · {} frames ({} failed) · BER {:.1e} · {payload}",
+        "{lock} · {code}{} frames ({} failed) · BER {:.1e} · {payload}",
         t.frames,
         t.failed,
         t.channel_ber()

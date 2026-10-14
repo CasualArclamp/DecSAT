@@ -203,6 +203,12 @@ pub enum Verdict {
     NotDvbS2 { hint: String },
 }
 
+/// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
+/// or Comtech TPC 7/8's (the TPC decoder reads either).
+pub fn names_tpc(hint: &str) -> bool {
+    hint.contains("TPC 2964") || hint.contains("TPC 7/8")
+}
+
 /// Everything Identify measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Identification {
@@ -1118,13 +1124,16 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     id.carrier_locked = lock.coherence > decsat_dsp::LOCK_COHERENCE;
 
     // 8. Not DVB-S2: the unique word of an Intelsat TPC 2964 carrier, every
-    //    2964 bits, is quick to look for on BPSK, QPSK and 8PSK.
-    let tpc = !is_s2
+    //    2964 bits, or a Comtech TPC 7/8 one, every 16 320, is quick to look
+    //    for on BPSK, QPSK and 8PSK.
+    let tpc_code = (!is_s2
         && matches!(
             cst,
             ConstellationGuess::Bpsk | ConstellationGuess::Qpsk | ConstellationGuess::Psk8
-        )
-        && decsat_modem::tpc2964::detect(&lock.symbols, cst.modulation());
+        ))
+    .then(|| decsat_modem::tpc2964::detect(&lock.symbols, cst.modulation()))
+    .flatten();
+    let tpc = tpc_code.is_some();
     // Paradise Q-Flex FastLink: its sync word every 11 538 symbols.
     let fastlink = !is_s2
         && !tpc
@@ -1140,7 +1149,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         && matches!(cst, ConstellationGuess::Bpsk | ConstellationGuess::Qpsk))
     .then(|| decsat_modem::convblind::detect(&lock.symbols, cst == ConstellationGuess::Bpsk))
     .flatten();
-    // 9. Not DVB-S2 nor TPC 2964: does anything repeat frame by frame? A
+    // 9. Not DVB-S2 nor a TPC: does anything repeat frame by frame? A
     //    header or pilots every frame fingerprint a framing — proprietary
     //    ones included — even with no decoder for it.
     if !is_s2 && !tpc && !fastlink && id.carrier_locked {
@@ -1183,6 +1192,11 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                      decoder reads it"
                         .into()
                 }
+                _ if tpc_code == Some(decsat_modem::tpc2964::Code::Comtech78) => format!(
+                    "{}, Comtech TPC 7/8 unique word every 16 320 bits — a (128,120) × \
+                     (128,120) turbo product code, rate 7/8",
+                    cst.label()
+                ),
                 _ if tpc => format!(
                     "{}, TPC 2964 unique word every 2964 bits — Intelsat IESS-315 turbo code",
                     cst.label()
