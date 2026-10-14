@@ -3897,3 +3897,32 @@ the code search.
 - Tests: `finds_the_bursty_channel_not_the_steady_carrier`,
   `bluetooth_lands_where_it_was_seen`, `finds_a_code_in_separate_bursts`,
   `the_signal_mode_is_kept_and_old_lines_take_the_decoders`.
+
+## Slow TDMA: the analyser waits for bursts and keeps looking (2026-10-14)
+
+Rory, on a live Intelsat 19 return: "the TDMA vfo does not wait long enough
+for slow TDMA that bursts every couple of seconds". The analyser took the
+carriers from a 0.4 s first look at an averaged spectrum: a carrier silent
+then, or averaged into the noise, was never found.
+
+- **Peak hold** (`PeakHold`: 4096-point segments, 3-bin smoothed, max over
+  the stretch) instead of the average; the first look goes on, "listening
+  for bursts… n s", until a carrier shows (or 20 s: then the old whole-VFO
+  fallback, and it keeps listening).
+- **Looks again every 5 s** over the peak hold of the last two stretches
+  (~10 s); a carrier no channel covers is added at the end of the list
+  (numbers kept for the file and the map) and decodes what was kept of its
+  past — the last 12 s of baseband (at most 4 M samples), the channel's
+  `t0_s` putting its bursts on the VFO's clock.
+- **A new carrier's rate from its bursts alone** (`bursts_only`: ~16-symbol
+  blocks 3 dB over the quietest tenth, a block either side): the silence no
+  longer buries its spectrum and cyclic line.
+- **Waterfall**: the bursty bands shown are the union of the last four 2 s
+  takes (`bursty::union`), so a slow carrier's bracket stays.
+- On the 90 s Intelsat 19 capture the 175 kHz group now reads as a regular
+  MF-TDMA grid: 17 channels 7.7 kHz apart (−80.6 … +73.8 kHz), mostly
+  6.4 kS/s (6.4 × 1.2 = 7.7), where the averaged look found 11; the last
+  one added by a re-look. Test
+  `waits_for_a_slow_carrier_and_finds_one_that_starts_later` (a burst every
+  2 s from 0.9 s, found by ~1 s; a second carrier from 7 s, added with its
+  earlier bursts), `takes_merge_into_one_list`.

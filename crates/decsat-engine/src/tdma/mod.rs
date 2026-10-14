@@ -62,8 +62,22 @@ use demod::{BurstSymbols, demod_burst, nearest, points};
 use layout::{Layout, commonest_length, find_layout, fit};
 use slots::{BurstTime, SlotGrid, Terminal, Terminals, TerminalsById, find_grid};
 
-/// Signal looked at before the carriers are looked for, seconds.
+/// Signal looked at before the carriers are looked for, seconds; and how
+/// long the look goes on, waiting for a burst, before it says none came. A
+/// slow TDMA return bursts once every few seconds: the look is a peak hold,
+/// and lasts until something shows.
 const FIRST_LOOK_S: f64 = 0.4;
+const LOOK_MAX_S: f64 = 20.0;
+/// How often carriers not yet known are looked for again, s (over the peak
+/// hold of the last two such stretches: a carrier bursting even every ~8 s
+/// is caught).
+const RELOOK_S: f64 = 5.0;
+/// Baseband kept to work out a new carrier from its own bursts, s, and at
+/// most this many samples (a wide VFO keeps less).
+const HISTORY_S: f64 = 12.0;
+const HISTORY_MAX: usize = 4_000_000;
+/// The peak hold's FFT size.
+const PEAK_FFT: usize = 4096;
 /// Bursts that vote on the modulation before it is fixed.
 const MODULATION_VOTES: u32 = 30;
 /// Bursts gathered to read a layout from (and tried again with every
@@ -348,6 +362,9 @@ struct Channel {
     snr_db: f32,
     idle_share: f32,
     code: CodeSearch,
+    /// The VFO's time at the channel's first sample, s (a carrier found
+    /// later starts from the kept history).
+    t0_s: f64,
     // Scratch.
     mixed: Vec<Iq>,
     filtered: Vec<Iq>,
@@ -413,6 +430,7 @@ impl Channel {
             filtered: Vec::new(),
             raw: Vec::new(),
             code: CodeSearch::default(),
+            t0_s: 0.0,
         }
     }
 
@@ -602,7 +620,7 @@ impl Channel {
         }
         Some(Done {
             channel: index,
-            t_s: b.t0 / self.rate(),
+            t_s: self.t0_s + b.t0 / self.rate(),
             dur_s: on.len() as f64 / self.rate(),
             power_db: b.power_db,
             freq_hz,
@@ -668,11 +686,74 @@ struct Writer {
     bursts: u64,
 }
 
+/// The spectrum's peak hold over short segments: a burst shows at its own
+/// level however rarely it comes, where an average spreads it over the
+/// silence between. Two stretches, the newest and the one before.
+struct PeakHold {
+    spec: Spectrum,
+    carry: Vec<Iq>,
+    cur: Vec<f32>,
+    prev: Vec<f32>,
+}
+
+impl Default for PeakHold {
+    fn default() -> Self {
+        PeakHold {
+            spec: Spectrum::new(PEAK_FFT),
+            carry: Vec::new(),
+            cur: vec![0.0; PEAK_FFT],
+            prev: vec![0.0; PEAK_FFT],
+        }
+    }
+}
+
+impl PeakHold {
+    fn push(&mut self, x: &[Iq]) {
+        self.carry.extend_from_slice(x);
+        if self.carry.len() < 4 * PEAK_FFT {
+            return;
+        }
+        let cur = &mut self.cur;
+        let (_, hop) = self.spec.compute_max_with(&self.carry, usize::MAX, |p| {
+            // Over three bins, so single-bin noise peaks fade.
+            for k in 0..PEAK_FFT {
+                let a = p[k.saturating_sub(1)];
+                let c = p[(k + 1).min(PEAK_FFT - 1)];
+                cur[k] = cur[k].max((a + p[k] + c) / 3.0);
+            }
+        });
+        // Keep the tail the segments did not reach.
+        let used = (self.carry.len() - PEAK_FFT) / hop * hop + hop;
+        self.carry.drain(..used.min(self.carry.len()));
+    }
+
+    /// The peak hold over both stretches, dB.
+    fn db(&self) -> Vec<f32> {
+        self.cur
+            .iter()
+            .zip(&self.prev)
+            .map(|(&a, &b)| 10.0 * a.max(b).max(1e-30).log10())
+            .collect()
+    }
+
+    /// A new stretch begins.
+    fn turn(&mut self) {
+        std::mem::swap(&mut self.cur, &mut self.prev);
+        self.cur.iter_mut().for_each(|v| *v = 0.0);
+    }
+}
+
 /// A TDMA VFO's decoder.
 pub struct TdmaAnalyser {
     rate: f64,
     bandwidth: f64,
-    first: Vec<Iq>,
+    /// The look's peak hold, the newest baseband (for a carrier found
+    /// late, worked out from its own bursts) and the VFO time of its first
+    /// sample, and the time since the last look.
+    peak: PeakHold,
+    history: VecDeque<Iq>,
+    history_t0: f64,
+    since_look: f64,
     started: bool,
     channels: Vec<Channel>,
     samples: u64,
@@ -691,7 +772,10 @@ impl TdmaAnalyser {
         TdmaAnalyser {
             rate,
             bandwidth,
-            first: Vec::new(),
+            peak: PeakHold::default(),
+            history: VecDeque::new(),
+            history_t0: 0.0,
+            since_look: 0.0,
             started: false,
             channels: Vec::new(),
             samples: 0,
@@ -709,25 +793,105 @@ impl TdmaAnalyser {
     /// to demodulate as, `None` to find it.
     pub fn push(&mut self, x: &[Iq], modulation: Option<Modulation>) {
         self.samples += x.len() as u64;
+        self.peak.push(x);
+        self.history.extend(x.iter().copied());
+        let keep = ((HISTORY_S * self.rate) as usize).min(HISTORY_MAX);
+        if self.history.len() > keep {
+            let over = self.history.len() - keep;
+            self.history.drain(..over);
+            self.history_t0 += over as f64 / self.rate;
+        }
+        let listened = self.samples as f64 / self.rate;
         if !self.started {
-            self.first.extend_from_slice(x);
-            if (self.first.len() as f64) < FIRST_LOOK_S * self.rate {
+            if listened < FIRST_LOOK_S {
+                return;
+            }
+            // Wait for a burst: the peak hold shows one when it comes.
+            let found = self.new_channels();
+            if found.is_empty() && listened < LOOK_MAX_S {
+                self.message = format!(
+                    "listening for bursts… {listened:.0} s (a slow TDMA carrier bursts every few \
+                     seconds)"
+                );
                 return;
             }
             self.started = true;
-            let first = std::mem::take(&mut self.first);
-            self.channels = self.find_channels(&first);
+            self.since_look = 0.0;
+            self.peak.turn();
+            self.channels = found;
             self.message = match self.channels.len() {
-                0 => "no TDMA carrier found in this VFO".into(),
+                0 => format!(
+                    "no burst in {LOOK_MAX_S:.0} s — still listening for carriers that start later"
+                ),
                 n => format!(
                     "{n} carrier{} — finding bursts",
                     if n == 1 { "" } else { "s" }
                 ),
             };
-            self.feed(&first, modulation);
+            // What was heard while waiting is decoded too.
+            let heard: Vec<Iq> = self.history.iter().copied().collect();
+            self.feed(&heard, modulation);
             return;
         }
         self.feed(x, modulation);
+        // Now and then, carriers that had not burst yet.
+        self.since_look += x.len() as f64 / self.rate;
+        if self.since_look >= RELOOK_S {
+            self.since_look = 0.0;
+            let mut found = self.new_channels();
+            self.peak.turn();
+            if !found.is_empty() {
+                // Each new one decodes what was kept of its past; the others
+                // keep their numbers (the file and the map use them).
+                let heard: Vec<Iq> = self.history.iter().copied().collect();
+                let first = self.channels.len();
+                let mut done = std::mem::take(&mut self.done);
+                done.clear();
+                for (i, c) in found.iter_mut().enumerate() {
+                    c.push(first + i, &heard, modulation, &mut done);
+                }
+                self.done = done;
+                self.channels.append(&mut found);
+            }
+        }
+    }
+
+    /// Carriers in the peak hold that no channel covers yet, each worked
+    /// out from its own bursts in the kept baseband.
+    fn new_channels(&self) -> Vec<Channel> {
+        let db = self.peak.db();
+        let bin = self.rate / db.len() as f64;
+        let known = |c: f64| {
+            self.channels
+                .iter()
+                .any(|k| (k.center_hz - c).abs() < k.rs * (1.0 + k.alpha) / 2.0)
+        };
+        let mut cands: Vec<(f64, f64, f64)> = detect_carriers(&db, self.rate, 4.0)
+            .iter()
+            .filter(|c| !c.narrow && c.bandwidth_hz >= 16.0 * bin)
+            .filter(|c| c.center_hz.abs() <= self.bandwidth / 2.0)
+            .filter(|c| !known(c.center_hz))
+            .map(|c| (c.center_hz, c.bandwidth_hz, c.symbol_rate_hz))
+            .collect();
+        // A VFO around one carrier, with no floor either side to see it by,
+        // is taken as that carrier — once the wait for bursts is over.
+        let waited = self.samples as f64 / self.rate >= LOOK_MAX_S;
+        if cands.is_empty() && self.channels.is_empty() && (waited || !self.started) {
+            if !waited {
+                return Vec::new();
+            }
+            cands.push((0.0, self.bandwidth, 0.0));
+        }
+        let heard: Vec<Iq> = self.history.iter().copied().collect();
+        let mut out = Vec::new();
+        for (centre, bw, enbw) in cands {
+            if let Some(mut c) = self.channel_at(&heard, centre, bw, enbw) {
+                c.t0_s = self.history_t0;
+                out.push(c);
+            }
+        }
+        out.sort_by(|a, b| a.center_hz.total_cmp(&b.center_hz));
+        out
     }
 
     fn feed(&mut self, x: &[Iq], modulation: Option<Modulation>) {
@@ -766,72 +930,57 @@ impl TdmaAnalyser {
         self.done = done;
     }
 
-    /// The carriers in the first look, each with its centre, symbol rate
-    /// and roll-off: the centre from the carrier's own spectrum, the rate
-    /// refined on its envelope's cyclic line from the spectrum's estimate,
-    /// the roll-off fitted to the skirts — the parts of Identify that matter
-    /// here (all of it took 0.6 s a carrier at 1.4 MS/s, on the VFO's
-    /// thread). A VFO around one carrier, with no floor either side to see
-    /// it by, is taken as that carrier.
-    fn find_channels(&self, x: &[Iq]) -> Vec<Channel> {
-        let mut spec = Spectrum::new(4096);
-        let db = spec.compute(x);
-        let bin = self.rate / db.len() as f64;
-        let mut cands: Vec<(f64, f64, f64)> = detect_carriers(&db, self.rate, 4.0)
-            .iter()
-            .filter(|c| !c.narrow && c.bandwidth_hz >= 16.0 * bin)
-            .filter(|c| c.center_hz.abs() <= self.bandwidth / 2.0)
-            .map(|c| (c.center_hz, c.bandwidth_hz, c.symbol_rate_hz))
-            .collect();
-        if cands.is_empty() {
-            cands.push((0.0, self.bandwidth, 0.0));
+    /// A carrier at `centre`, `bw` wide (`enbw`: the spectrum's rate
+    /// estimate, 0 if none), worked out from `x`: its centre from its own
+    /// spectrum, the rate refined on its envelope's cyclic line from the
+    /// spectrum's estimate, the roll-off fitted to the skirts — the parts of
+    /// Identify that matter here (all of it took 0.6 s a carrier at 1.4
+    /// MS/s, on the VFO's thread). Only its bursts are looked at: a slow
+    /// TDMA carrier is silent most of the time, and the silence would bury
+    /// its spectrum and its cyclic line.
+    fn channel_at(&self, x: &[Iq], centre: f64, bw: f64, enbw: f64) -> Option<Channel> {
+        let bw = (bw * 1.15).min(self.rate);
+        let mut ddc = Ddc::new(self.rate, centre, bw);
+        let mut all = Vec::new();
+        ddc.process(x, &mut all);
+        let r = ddc.out_rate();
+        let y = bursts_only(&all, r, bw);
+        if y.len() < 4096 {
+            return None;
         }
-        let mut out = Vec::new();
-        for (centre, bw, enbw) in cands {
-            let bw = (bw * 1.15).min(self.rate);
-            let mut ddc = Ddc::new(self.rate, centre, bw);
-            let mut y = Vec::new();
-            ddc.process(x, &mut y);
-            let r = ddc.out_rate();
-            let mut cs = Spectrum::new(4096);
-            let mut cdb = cs.compute(&y);
-            // Outside the carrier's band, the floor: as Identify does, so
-            // the neighbours' skirts do not pass for this carrier's.
-            let n = cdb.len();
-            let inside = |k: usize| ((k as f64 / n as f64) - 0.5).abs() * r <= bw / 2.0 / 1.15;
-            let mut within: Vec<f32> = (0..n).filter(|&k| inside(k)).map(|k| cdb[k]).collect();
-            if within.len() >= 16 {
-                within.sort_unstable_by(f32::total_cmp);
-                let floor = within[within.len() * 3 / 100];
-                for (k, d) in cdb.iter_mut().enumerate() {
-                    if !inside(k) {
-                        *d = floor;
-                    }
+        let mut cs = Spectrum::new(4096);
+        let mut cdb = cs.compute(&y);
+        // Outside the carrier's band, the floor: as Identify does, so the
+        // neighbours' skirts do not pass for this carrier's.
+        let n = cdb.len();
+        let inside = |k: usize| ((k as f64 / n as f64) - 0.5).abs() * r <= bw / 2.0 / 1.15;
+        let mut within: Vec<f32> = (0..n).filter(|&k| inside(k)).map(|k| cdb[k]).collect();
+        if within.len() >= 16 {
+            within.sort_unstable_by(f32::total_cmp);
+            let floor = within[within.len() * 3 / 100];
+            for (k, d) in cdb.iter_mut().enumerate() {
+                if !inside(k) {
+                    *d = floor;
                 }
             }
-            let band = estimate_band(&cdb, r, 0.99);
-            let guess = band
-                .map(|b| b.symbol_rate_hz)
-                .filter(|&g| g > 0.0)
-                .unwrap_or(if enbw > 0.0 { enbw } else { bw / 1.25 });
-            let rs = match cyclic_symbol_rate(&y, r, guess, 0.2) {
-                Some((rs, _)) => rs,
-                // No clean line (bursts too short or too weak to show one):
-                // Identify, all of it.
-                None => match identify_in(&y, r, Some(bw)).symbol_rate {
-                    Some(rs) => rs,
-                    None => continue,
-                },
-            };
-            if r / rs < 2.0 {
-                continue;
-            }
-            let shift = band.map_or(0.0, |b| b.center_hz);
-            let alpha = fit_roll_off(&cdb, r, shift, rs).map_or(0.35, |ro| ro.as_f64());
-            out.push(Channel::new(self.rate, centre + shift, rs, alpha));
         }
-        out.sort_by(|a, b| a.center_hz.total_cmp(&b.center_hz));
-        out
+        let band = estimate_band(&cdb, r, 0.99);
+        let guess = band
+            .map(|b| b.symbol_rate_hz)
+            .filter(|&g| g > 0.0)
+            .unwrap_or(if enbw > 0.0 { enbw } else { bw / 1.25 });
+        let rs = match cyclic_symbol_rate(&y, r, guess, 0.2) {
+            Some((rs, _)) => rs,
+            // No clean line (bursts too short or too weak to show one):
+            // Identify, all of it.
+            None => identify_in(&y, r, Some(bw)).symbol_rate?,
+        };
+        if r / rs < 2.0 {
+            return None;
+        }
+        let shift = band.map_or(0.0, |b| b.center_hz);
+        let alpha = fit_roll_off(&cdb, r, shift, rs).map_or(0.35, |ro| ro.as_f64());
+        Some(Channel::new(self.rate, centre + shift, rs, alpha))
     }
 
     /// Start or stop writing bursts (`dir`, files named with `tag`).
@@ -897,9 +1046,7 @@ impl TdmaAnalyser {
     pub fn view(&self) -> TdmaView {
         let channels: Vec<ChannelView> = self.channels.iter().map(|c| c.view()).collect();
         let per_s: f32 = channels.iter().map(|c| c.per_s).sum();
-        let message = if !self.started {
-            "listening…".into()
-        } else if channels.is_empty() {
+        let message = if !self.started || channels.is_empty() {
             self.message.clone()
         } else {
             let layouts = channels.iter().filter(|c| c.layout.is_some()).count();
@@ -919,11 +1066,41 @@ impl TdmaAnalyser {
             progress: if self.started {
                 1.0
             } else {
-                (self.first.len() as f64 / (FIRST_LOOK_S * self.rate)) as f32
+                // Up to the first look; then the wait for a burst.
+                let s = self.samples as f64 / self.rate;
+                (s / LOOK_MAX_S).max((s / FIRST_LOOK_S).min(1.0) * 0.1) as f32
             },
             message,
         }
     }
+}
+
+/// A carrier's bursts alone, end to end, from its baseband `y` at `rate`
+/// (`bw` wide): blocks of ~16 symbols whose power stands 3 dB over the
+/// quietest tenth, with a block either side for the ramps. A continuous
+/// carrier keeps everything.
+fn bursts_only(y: &[Iq], rate: f64, bw: f64) -> Vec<Iq> {
+    let blk = ((rate / bw * 16.0) as usize).max(16);
+    let n = y.len() / blk;
+    if n < 8 {
+        return y.to_vec();
+    }
+    let p: Vec<f32> = y
+        .chunks_exact(blk)
+        .map(|c| c.iter().map(|s| s.norm_sqr()).sum::<f32>() / blk as f32)
+        .collect();
+    let mut sorted = p.clone();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted[n / 10].max(1e-30);
+    let on: Vec<bool> = p.iter().map(|&v| v > 2.0 * floor).collect();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let near = on[i] || (i > 0 && on[i - 1]) || (i + 1 < n && on[i + 1]);
+        if near {
+            out.extend_from_slice(&y[i * blk..(i + 1) * blk]);
+        }
+    }
+    out
 }
 
 fn write_burst(w: &mut Writer, d: &Done) -> std::io::Result<()> {
@@ -1007,6 +1184,59 @@ mod tests {
             *v += Iq::new(r.gauss() * 0.12, r.gauss() * 0.12);
         }
         out
+    }
+
+    #[test]
+    fn waits_for_a_slow_carrier_and_finds_one_that_starts_later() {
+        // 50 kBd QPSK bursts of 2000 symbols (40 ms), one every 2 s at
+        // −80 kHz from 0.9 s; from 7 s another such carrier at +90 kHz;
+        // in a 400 kS/s VFO, Es/N0 ~15 dB.
+        let mut r = Lcg(5);
+        let (rate, rs) = (400e3, 50e3);
+        let sps = rate / rs;
+        let p = points(Modulation::Qpsk);
+        let n = (16.0 * rate) as usize;
+        let mut x = vec![Iq::new(0.0, 0.0); n];
+        for (centre, from) in [(-80e3, 0.9), (90e3, 7.0)] {
+            let mut t = from;
+            while t + 0.1 < 16.0 {
+                let sym: Vec<Iq> = (0..2000).map(|_| p[(r.next() % 4) as usize]).collect();
+                let b = shaped(&sym, sps, 0.0, 60.0, &mut r);
+                let t0 = (t * rate) as usize;
+                for (i, v) in b.iter().enumerate() {
+                    let a = std::f64::consts::TAU * centre / rate * (t0 + i) as f64;
+                    x[t0 + i] += v * Iq::new(a.cos() as f32, a.sin() as f32);
+                }
+                t += 2.0;
+            }
+        }
+        for v in &mut x {
+            *v += Iq::new(r.gauss() * 0.13, r.gauss() * 0.13);
+        }
+        let mut a = TdmaAnalyser::new(rate, rate * 0.9);
+        let mut seen_at = None;
+        for (k, c) in x.chunks(8_000).enumerate() {
+            a.push(c, None);
+            if seen_at.is_none() && !a.view().channels.is_empty() {
+                seen_at = Some((k + 1) as f64 * 8_000.0 / rate);
+            }
+        }
+        // The first burst comes at 0.9 s: waited for, not missed at 0.4 s.
+        let seen = seen_at.expect("the slow carrier found");
+        assert!((0.9..2.0).contains(&seen), "found at {seen} s");
+        let v = a.view();
+        assert_eq!(v.channels.len(), 2, "{}", v.message);
+        let late = &v.channels[1];
+        assert!((late.center_hz - 90e3).abs() < 3e3, "{}", late.center_hz);
+        assert!(
+            (late.symbol_rate - rs).abs() < rs * 0.02,
+            "{}",
+            late.symbol_rate
+        );
+        // Its bursts from before it was found count too, and every channel's
+        // bursts are timed on the VFO's clock.
+        assert!(late.bursts >= 4, "{} bursts", late.bursts);
+        assert!(v.channels[0].bursts >= 7, "{} bursts", v.channels[0].bursts);
     }
 
     #[test]

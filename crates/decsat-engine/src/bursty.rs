@@ -222,6 +222,27 @@ impl BurstMeter {
     }
 }
 
+/// The bands of several takes as one list: overlapping (or touching)
+/// bands merged, keeping the widest extent, the highest level and
+/// variation. A slow TDMA carrier bursting every few seconds shows in some
+/// takes and not others; the last few together keep it on the waterfall.
+pub fn union(takes: &[Vec<BurstBand>]) -> Vec<BurstBand> {
+    let mut all: Vec<BurstBand> = takes.iter().flatten().copied().collect();
+    all.sort_by(|a, b| a.lo_hz.total_cmp(&b.lo_hz));
+    let mut out: Vec<BurstBand> = Vec::new();
+    for b in all {
+        match out.last_mut() {
+            Some(last) if b.lo_hz <= last.hi_hz => {
+                last.hi_hz = last.hi_hz.max(b.hi_hz);
+                last.level_db = last.level_db.max(b.level_db);
+                last.variation = last.variation.max(b.variation);
+            }
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
 /// Where Bluetooth LE's advertising (2402, 2426 and 2480 MHz, the channels
 /// every device calls on) lands in a HackRF tuned to `tuned_hz`, relative
 /// to the centre, Hz — spectrally inverted, at IF − channel. None above
@@ -313,6 +334,22 @@ mod tests {
         );
         assert!(b.variation > 2.0, "{b:?}");
         assert_eq!(m.frames(), 0, "taking starts afresh");
+    }
+
+    #[test]
+    fn takes_merge_into_one_list() {
+        let b = |lo: f64, hi: f64, v: f32| BurstBand {
+            lo_hz: lo,
+            hi_hz: hi,
+            level_db: 2.0,
+            variation: v,
+        };
+        let u = union(&[
+            vec![b(0.0, 10e3, 2.0), b(50e3, 60e3, 3.0)],
+            vec![b(5e3, 20e3, 4.0)],
+            vec![],
+        ]);
+        assert_eq!(u, vec![b(0.0, 20e3, 4.0), b(50e3, 60e3, 3.0)]);
     }
 
     #[test]

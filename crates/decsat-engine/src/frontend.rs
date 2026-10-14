@@ -91,6 +91,9 @@ pub struct FrontStatus {
     pub input_dbfs: f32,
 }
 
+/// Burst-meter takes (2 s each) shown together on the waterfall.
+const BURST_TAKES: usize = 4;
+
 /// An input level above this is too strong for the HackRF: its LNA and
 /// mixer compress long before the ADC clips, and the products land on
 /// carriers, which then slip and lose frames. Measured on a 14 dB TPC 2964
@@ -339,6 +342,8 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     let mut bursts = crate::bursty::BurstMeter::default();
     let mut last_hop_secs = 0.0;
     let mut last_bursts = Instant::now();
+    // The last few takes, together: a slow TDMA carrier stays shown.
+    let mut takes: VecDeque<Vec<crate::bursty::BurstBand>> = VecDeque::new();
     let mut dc_removal = opts.dc_removal;
     let mut dc = decsat_dsp::DcBlocker::new();
 
@@ -484,7 +489,11 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
 
         let burst_bands = (last_bursts.elapsed() >= Duration::from_secs(2)).then(|| {
             last_bursts = Instant::now();
-            bursts.take()
+            takes.push_back(bursts.take());
+            if takes.len() > BURST_TAKES {
+                takes.pop_front();
+            }
+            crate::bursty::union(takes.make_contiguous())
         });
 
         {

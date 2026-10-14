@@ -461,8 +461,12 @@ leaking into the HackRF's IF (see *HackRF One*), not the satellite.
 `decsat scan` lists the bands as well.
 
 Drop a VFO over one TDMA carrier or a whole group (an MF-TDMA return) and
-choose **TDMA bursts**. Each carrier in it is found and given its own
-down-converter and matched filter; then, for each:
+choose **TDMA bursts**. Each carrier in it is found — from a peak hold of
+the spectrum, so a slow return that bursts once every few seconds is waited
+for (up to 20 s) rather than missed, and looked for again every 5 s, so a
+carrier that starts later joins, its earlier bursts decoded from what was
+kept — and given its own down-converter and matched filter (its rate
+measured on its bursts alone); then, for each:
 
 - **bursts** are found by their envelope and demodulated one by one —
   timing and carrier from each burst alone, as no two come from the same
