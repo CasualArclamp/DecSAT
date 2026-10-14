@@ -413,6 +413,9 @@ pub struct VfoSettings {
     /// A Q-Flex's TDM multiplex: play, and record, its call's voice.
     pub tdm_play: bool,
     pub tdm_record: bool,
+    /// Programme audio (apt-X in an IBS carrier): play it, and record it.
+    pub programme_play: bool,
+    pub programme_record: bool,
     /// The CDM-600 voice preset: play the G.728 voice as soon as it is
     /// found, without ▶ (so several carriers can be heard at once).
     pub voice_auto: bool,
@@ -464,6 +467,8 @@ impl VfoSettings {
             e1_record: None,
             tdm_play: false,
             tdm_record: false,
+            programme_play: false,
+            programme_record: false,
             voice_auto: true,
             record_dir: std::env::temp_dir(),
             bbframes: None,
@@ -2367,6 +2372,8 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
         e1_record: s.e1_record,
         tdm_play: s.tdm_play,
         tdm_record: s.tdm_record,
+        programme_play: s.programme_play,
+        programme_record: s.programme_record,
         voice_auto: s.voice_auto && s.decoder.plays_voice(),
         bbframes: s.bbframes.clone(),
     }

@@ -4116,3 +4116,63 @@ idle flags (no traffic in 15 s).
 | +1531 kHz | QPSK TPC 2964, 170.67 kS/s = 256.0 kbit/s | decodes (BER 0); data under the usual additive sequence, **format unknown**: structured (periods 480 and 6144 bits, ~46-bit zero runs every 6144), not HDLC/TS/E1/D&I++/NRZI |
 | +2009 kHz | QPSK Comtech TPC 7/8, 171.43 kS/s (VFO_29) | decodes, idle HDLC |
 | +2.25…+3.35 MHz and +3.4…+4.1 MHz | ~0.97 MS/s and ~0.6 MS/s carriers that **take turns**: one is on while the other is off, on a 108.85 ms grid (the second gets whole 108 ms frames or 2 ms blips) | not decodable yet; Identify's readings vary run to run (16APSK / 2-ring / QPSK in bursts; BPSK/QPSK 590–609 kS/s) |
+
+## IBS programme audio: the IESS-309 synchronous scrambler and apt-X (2026-10-15)
+
+Rory's 31 s baseband at 11 469.574 MHz (4 MS/s, a 16-bit WAV from another
+receiver), "Comtech IBS with audio". One carrier at −65.8 kHz: QPSK
+273.08 kBd, K = 7 rate ½ (the Viterbi decoder takes it, BER 0),
+differential — 273.08 kbit/s = 256 kbit/s × 16/15.
+
+- **Framing**: G.704-shaped 256-bit frames at 1066.7 a second — timeslot 0
+  FAS 9Bh / NFAS DFh or CFh, so the payload search called it "E1"; 30 data
+  octets (timeslots 1–15, 17–31) = 256 kbit/s, timeslot 16 overhead (idle).
+- **Scrambler** (`decsat-modem::ibssync`): the data looked random until
+  descrambled by the IESS-309 synchronous scrambler, worked out from the
+  carrier: x^15 + x^14 + 1 clocked on all 256 bits of a frame (timeslot 0
+  sent clear), restarted every 128 frames (32 768 bits) with its register at
+  100100100100100. Found by fitting candidate PRBSs to timeslot 16, which
+  repeats every 128 frames: that one fits exactly, and timeslot 16 then
+  reads FFh in all 33 536 frames. The multiframe is also marked by a 64-bit
+  pattern in NFAS bit 4 (Sa4); the receiver instead tries every start and
+  keeps the one that leaves the data least random (the scrambled stream's
+  per-position bias, ~50 against ~6 for the rest), so it needs nothing of
+  the overhead. Frames that do not descramble so stay a plain E1. The payload
+  stage runs it behind the E1 framer; "IBS n × 64 kbit/s (G.704-shaped
+  framing, IESS-309 synchronous scrambler)".
+- **Codec: apt-X** (`decsat-modem::aptx`). 16-bit words in left/right pairs
+  (adjacent words agree, the next pair does not), not octet aligned
+  (codewords start 30 bits into the data). Bit correlations split each word
+  3/2/4/7 — apt-X's HH/HL/LH/LL fields — and 256 kbit/s is apt-X stereo at
+  32 kHz exactly. Not MPEG audio (no syncs at any bit order or polarity),
+  not G.722, not G.711.
+- **Decoder**: FFmpeg's Bluetooth aptX decoder ported (tables, ADPCM, QMF;
+  LGPL-2.1+, Aurelien Jacobs), bit-exact against FFmpeg (test vector from
+  its encoder). FFmpeg itself rejects the stream (its sync check), and with
+  the check removed everything saturates: the broadcast stream writes its
+  fields differently — **inverted, sign and magnitude, with an exact zero
+  code** (all ones as sent, 14–72 % of each field). Read so, the LL band
+  decodes cleanly against aptX's LF tables: left/right coherence 0.95 over
+  0.1–3.5 kHz, nothing clipped, speech/music harmonics in the spectrogram
+  (Rory: "sounds like a studio link"). The magnitudes sit where the LF
+  step adaptation balances (~9–13 of 63).
+- **Not done: the LH, HL and HH bands.** Their codes (exact zero, then
+  sign-balanced magnitudes peaking at 3 of 7 for LH) cannot balance aptX's
+  MLF/MHF/HF step adaptation under any field mapping tried (every 4-bit
+  subset of the free 9 bits × sign position × magnitude order × polarity,
+  exact-zero or half-step): the step runs away, or settles too high (LH
+  louder than LL). Read as two's complement, LH gives the 8 kHz tone Rory
+  heard. So broadcast apt-X (apt-X 100) quantises its upper bands with
+  tables of its own; they are silent until found. The output is 0–4 kHz,
+  +12 dB (the LL reconstruction's scale is not pinned either).
+- **Built**: `AptxRx` finds the codeword start and stereo/mono by decoding
+  the LL band at each of 32 offsets (clip rate, sample-to-sample and
+  left/right correlation); the engine's `programme` stage plays/records it
+  through the multicast player/recorder as RTP L16 at the found rate
+  (`ProgrammeView`); GUI card *Programme audio* (▶ ●, L/R levels); CLI
+  `--programme-record`. On the capture: "ibs: … found 1× · TS16 FFh",
+  "programme: stereo · 32000 Hz · codewords from bit 30 · LL lag-1 0.85 ·
+  L/R 0.93 · 0.0 % clipped".
+- **Open**: broadband clicks (the loudest half-seconds, −15 dBFS against a
+  −50 programme) at ~2.8, 8.6, 13.5, 22 s — a handful of codes the decoder
+  mishandles, or the programme's own; to look at with the upper bands.

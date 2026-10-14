@@ -39,6 +39,8 @@ pub struct DecodeArgs {
     pub e1_record: Option<u8>,
     /// fastlink: record the TDM multiplex's call voice.
     pub tdm_record: bool,
+    /// Record a link's programme audio (apt-X in IBS).
+    pub programme_record: bool,
     /// psk: how the .bin numbers the symbols.
     pub labels: String,
     /// cid: low-SNR mode.
@@ -188,6 +190,10 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
         bail!("--tdm-record needs --out");
     }
     s.tdm_record = a.tdm_record;
+    if a.programme_record && a.out.is_none() {
+        bail!("--programme-record needs --out");
+    }
+    s.programme_record = a.programme_record;
     let id = eng.add_vfo(s);
 
     let t0 = Instant::now();
@@ -590,6 +596,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(t) = &f.tdm {
         print_tdm(t);
+    }
+    if let Some(p) = &f.programme {
+        print_programme(p);
     }
     if let Some(e) = &f.e1 {
         if let Some((n, lost)) = e.packets {
@@ -1098,5 +1107,53 @@ pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
                 );
             }
         }
+    }
+}
+
+/// Programme audio: the IBS scrambling it came out of and the apt-X in it.
+fn print_programme(p: &decsat_engine::ProgrammeView) {
+    if let Some(i) = &p.ibs {
+        println!(
+            "ibs: synchronous scrambler (x^15+x^14+1, 128-frame multiframe) · {} frames · \
+             found {}× · lost {}× · TS16 {}",
+            i.frames,
+            i.found,
+            i.losses,
+            i.ts16.map_or("varies".into(), |v| format!("{v:02X}h"))
+        );
+    }
+    let a = &p.aptx;
+    if a.locked {
+        println!(
+            "programme: {} · {} · {} Hz · codewords from bit {} · LL lag-1 {:.2}{} · \
+             {} codewords · {:.1} % clipped",
+            p.codec,
+            if a.stereo { "stereo" } else { "mono" },
+            p.rate,
+            a.offset,
+            a.lag1,
+            if a.stereo {
+                format!(" · L/R {:.2}", a.lr)
+            } else {
+                String::new()
+            },
+            a.codewords,
+            100.0 * a.clipped
+        );
+    } else {
+        println!(
+            "programme: {} not found yet ({} searches)",
+            p.codec, a.searches
+        );
+    }
+    if !p.levels_db.is_empty() {
+        let l: Vec<String> = p.levels_db.iter().map(|d| format!("{d:.1}")).collect();
+        println!("  levels {} dBFS", l.join(" / "));
+    }
+    if let Some((path, n)) = &p.record_file {
+        println!("  recorded to {} ({n} bytes)", path.display());
+    }
+    if let Some(e) = &p.error {
+        println!("  error: {e}");
     }
 }

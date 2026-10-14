@@ -21,6 +21,7 @@
 //! - [`asterix`]: the other radar feeds' ASTERIX; [`mode_s`]: the Mode S
 //!   registers (selected altitude, air data) their reports carry.
 
+pub mod aptx;
 pub mod asterix;
 pub mod bsc;
 pub mod cid;
@@ -34,6 +35,7 @@ pub mod ethblock;
 pub mod fastlink;
 pub mod g728;
 pub mod ibs;
+pub mod ibssync;
 pub mod interleave;
 pub mod mode_s;
 pub mod paradise;

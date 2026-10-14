@@ -483,6 +483,9 @@ pub struct PayloadOut {
     pub ts: Vec<[u8; 188]>,
     /// E1 frames: 32 timeslot bytes each.
     pub e1: Vec<[u8; TIMESLOTS]>,
+    /// IBS at n × 64 kbit/s (E1-shaped frames, scrambled): the data octets
+    /// descrambled, 30 a frame ([`crate::ibssync`]).
+    pub ibs_data: Vec<u8>,
     /// D&I++ timeslot bytes, in order.
     pub dandi: Vec<u8>,
     /// Timeslots from HDLC packets: (timeslot, its octets), in order.
@@ -503,6 +506,7 @@ impl PayloadOut {
         self.frames.clear();
         self.ts.clear();
         self.e1.clear();
+        self.ibs_data.clear();
         self.dandi.clear();
         self.slots.clear();
         self.bsc.clear();
@@ -521,6 +525,8 @@ pub struct PayloadStats {
     pub ts_packets: u64,
     /// E1 framing, when that is what the data are.
     pub e1: Option<crate::e1::E1Stats>,
+    /// E1-shaped frames: whether they are IBS-scrambled, and the multiframe.
+    pub ibs_sync: Option<crate::ibssync::SyncStats>,
     /// D&I++ framing, likewise.
     pub dandi: Option<DiPlusStats>,
     /// Paradise closed network plus ESC framing, likewise.
@@ -559,6 +565,11 @@ const IDLE_SHARE: f64 = 0.75;
 /// with bursts between its fill (ASA253 MAL-BN, 15 s of nothing).
 const IDLE_ONLY: f64 = 0.99;
 
+/// What the E1 format is called, and what it becomes once its frames turn
+/// out to be IBS-scrambled.
+const E1_FOUND: &str = "E1 (G.704 framing)";
+const IBS_FOUND: &str = "IBS n × 64 kbit/s (G.704-shaped framing, IESS-309 synchronous scrambler)";
+
 /// Whether `n` beats `best` by a clear margin (1/16).
 fn n_beats(n: u64, best: u64) -> bool {
     n > best + best / 16
@@ -572,6 +583,11 @@ pub struct PayloadRx {
     hdlc: Hdlc,
     ts: TsAlign,
     e1: E1Rx,
+    /// The E1 framer's frames, before they are judged IBS or E1, and the
+    /// alignments it had lost when last looked at.
+    e1_frames: Vec<[u8; TIMESLOTS]>,
+    e1_losses: u64,
+    ibs_sync: crate::ibssync::SyncDescrambler,
     dandi: DiPlusRx,
     paradise: EscRx,
     ibs: IbsRx,
@@ -608,6 +624,9 @@ impl PayloadRx {
             hdlc: Hdlc::default(),
             ts: TsAlign::default(),
             e1: E1Rx::new(),
+            e1_frames: Vec::new(),
+            e1_losses: 0,
+            ibs_sync: crate::ibssync::SyncDescrambler::new(),
             dandi: DiPlusRx::new(),
             paradise: EscRx::new(),
             ibs: IbsRx::new(),
@@ -852,7 +871,7 @@ impl PayloadRx {
             // owned `String`, so the arms can mix the two.
             let what: std::borrow::Cow<'static, str> = match (fmt, fcs) {
                 (Format::Ts, _) => "MPEG-TS".into(),
-                (Format::E1, _) => "E1 (G.704 framing)".into(),
+                (Format::E1, _) => E1_FOUND.into(),
                 (Format::DiPlus, _) => "E1 timeslots, Comtech D&I++ framing".into(),
                 (Format::ParadiseEsc, _) if octets == 20 => {
                     "Paradise closed network + ESC framing".into()
@@ -926,8 +945,32 @@ impl PayloadRx {
                 self.stats.ts_packets = self.ts.packets;
             }
             Format::E1 => {
-                self.e1.push(&bits, &mut out.e1);
+                self.e1.push(&bits, &mut self.e1_frames);
+                // E1-shaped frames may be IBS (IESS-309) scrambled: an E1's
+                // frames go on as they are, an IBS carrier's data
+                // descrambled. A lost alignment restarts the multiframe.
+                if self.e1.stats.losses != self.e1_losses {
+                    self.e1_losses = self.e1.stats.losses;
+                    self.ibs_sync.reset();
+                }
+                self.ibs_sync
+                    .push(&self.e1_frames, &mut out.e1, &mut out.ibs_data);
+                self.e1_frames.clear();
                 self.stats.e1 = Some(self.e1.stats.clone());
+                if self.ibs_sync.stats.found > 0 {
+                    self.stats.ibs_sync = Some(self.ibs_sync.stats.clone());
+                    if let Some(f) = &mut self.stats.found
+                        && f.starts_with(E1_FOUND)
+                    {
+                        // (The self-synchronising scrambler searched for
+                        // first is not there: the IBS one is.)
+                        *f = f.replacen(E1_FOUND, IBS_FOUND, 1).replacen(
+                            ", not scrambled",
+                            ", no other scrambler",
+                            1,
+                        );
+                    }
+                }
             }
             Format::DiPlus => {
                 self.dandi.push(&bits, &mut out.dandi);

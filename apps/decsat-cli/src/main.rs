@@ -194,6 +194,10 @@ enum Command {
         /// .wav in --out.
         #[arg(long)]
         tdm_record: bool,
+        /// Record a link's programme audio (apt-X in an IBS carrier) to a
+        /// .wav in --out.
+        #[arg(long)]
+        programme_record: bool,
         /// psk: number the symbols in the .bin as the standard labels them,
         /// by position (`natural`), or Gray-coded by position (`gray`).
         #[arg(long, default_value = "standard")]
@@ -342,6 +346,7 @@ fn main() -> Result<()> {
             fast,
             e1_record,
             tdm_record,
+            programme_record,
             labels,
             low_snr,
             clock_ppm,
@@ -367,6 +372,7 @@ fn main() -> Result<()> {
             fast,
             e1_record,
             tdm_record,
+            programme_record,
             labels,
             low_snr,
             clock_ppm,

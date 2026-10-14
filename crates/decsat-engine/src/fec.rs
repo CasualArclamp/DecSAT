@@ -77,7 +77,7 @@ pub const K7_SEARCHES: u64 = 40;
 /// LLR quantization: steps per LLR unit (the decoder is happy from 2 to 8).
 const LLR_SCALE: f32 = 4.0;
 /// Where in-app audio plays: the sound card, except under test.
-const AUDIO_OUTPUT: OutputKind = if cfg!(test) {
+pub(crate) const AUDIO_OUTPUT: OutputKind = if cfg!(test) {
     OutputKind::Null
 } else {
     OutputKind::Device
@@ -373,6 +373,8 @@ pub struct FecStats {
     pub text: Option<decsat_modem::text::TextView>,
     /// An E1 in a modem's data: its framing and voice channels.
     pub e1: Option<E1View>,
+    /// Programme audio in a modem's data (apt-X in an IBS carrier).
+    pub programme: Option<crate::programme::ProgrammeView>,
     /// A TDM multiplex's call voice being played or recorded.
     pub call_voice: Option<CallVoiceView>,
     /// A radar track feed in BSC blocks (the PH-ML carrier).
@@ -1305,6 +1307,9 @@ pub struct FecOutput {
     /// A TDM multiplex's call voice: play it, record it (to a `.wav`).
     pub tdm_play: bool,
     pub tdm_record: bool,
+    /// Programme audio (apt-X in an IBS carrier): play it, record it.
+    pub programme_play: bool,
+    pub programme_record: bool,
     /// Play an E1's G.728 voice as soon as it is found, when no timeslot
     /// is chosen (the CDM-600 voice preset).
     pub voice_auto: bool,
@@ -2325,6 +2330,7 @@ fn run(
     let mut raw = RawFile::default();
     let mut tpc_text: Option<decsat_modem::text::TextFinder> = None;
     let mut e1: Option<E1Stage> = None;
+    let mut programme: Option<crate::programme::ProgrammeStage> = None;
     let mut radar: Option<crate::radar::RadarStage> = None;
     while let Ok(input) = rx.recv() {
         let _done = pending.guard();
@@ -2508,6 +2514,13 @@ fn run(
                         stage.follow(&o);
                         stage.frames(&payload_out.e1);
                     }
+                    if !payload_out.ibs_data.is_empty() {
+                        // IBS: 30 of every 32 octets are data (16/15).
+                        let stage =
+                            programme.get_or_insert_with(crate::programme::ProgrammeStage::new);
+                        stage.follow(&o);
+                        stage.data(&payload_out.ibs_data, data_bps * 30.0 / 32.0, &o);
+                    }
                     if !payload_out.slots.is_empty() {
                         let channels = pay.stats.slots.as_ref().map_or(0, |s| s.channels);
                         let stage = e1.get_or_insert_with(E1Stage::new);
@@ -2621,6 +2634,10 @@ fn run(
                     let mut view = stage.view(st);
                     view.packets = pay.stats.slots.as_ref().map(|p| (p.slot_packets, p.lost));
                     s.e1 = Some(view);
+                }
+                if let Some(stage) = &mut programme {
+                    stage.follow(&o);
+                    s.programme = Some(stage.view(pay.stats.ibs_sync.clone()));
                 }
                 s.raw_file = raw.path.clone().map(|p| (p, raw.bytes));
                 s.raw_triggered = raw.triggered;

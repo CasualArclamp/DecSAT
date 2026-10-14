@@ -937,6 +937,9 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         if let Some(e) = st.fec.as_ref().and_then(|f| f.e1.as_ref()) {
             e1_card(ui, e, v, &mut actions);
         }
+        if let Some(p) = st.fec.as_ref().and_then(|f| f.programme.as_ref()) {
+            programme_card(ui, p, v, &mut actions);
+        }
         if let Some(r) = st.fec.as_ref().and_then(|f| f.radar.as_ref()) {
             radar_card(ui, r, v.id, &mut actions);
         }
@@ -1203,6 +1206,126 @@ fn call_voice_card(
             } else {
                 ui.label(RichText::new(format!("{txt}, stopped")).small());
             }
+        }
+    }
+    if s != v.settings {
+        actions.push(Action::Update(v.id, s));
+    }
+}
+
+/// Programme audio in an IBS carrier's data (apt-X): the IBS scrambling,
+/// the codec as found, each channel's level, and ▶ / ● for it.
+fn programme_card(
+    ui: &mut Ui,
+    p: &decsat_engine::ProgrammeView,
+    v: &UiVfo,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Programme audio ({})", p.codec)).strong())
+            .on_hover_text(
+                "apt-X sub-band ADPCM (a 16-bit codeword for every four samples) in an IBS \
+                 carrier's data, under the IESS-309 synchronous scrambler. Only the lowest \
+                 of its four bands decodes so far: the others' quantiser tables are not \
+                 known yet, so it sounds like a phone line.",
+            );
+        if p.playing {
+            volume_control(ui);
+        }
+    });
+    if let Some(i) = &p.ibs {
+        ui.label(
+            RichText::new(format!(
+                "IBS scrambler: multiframe found {}× · lost {}× · {} frames{}",
+                i.found,
+                i.losses,
+                i.frames,
+                i.ts16
+                    .map_or(String::new(), |t| format!(" · TS16 {t:02X}h"))
+            ))
+            .small(),
+        );
+    }
+    let a = &p.aptx;
+    let mut s = v.settings.clone();
+    ui.horizontal(|ui| {
+        if a.locked {
+            ui.colored_label(
+                scope::LOCK,
+                format!(
+                    "{} · {} Hz",
+                    if a.stereo { "stereo" } else { "mono" },
+                    p.rate
+                ),
+            )
+            .on_hover_text(format!(
+                "Codewords from bit {} of the data · LL band sample-to-sample correlation \
+                 {:.2}{} · {:.1} % clipped",
+                a.offset,
+                a.lag1,
+                if a.stereo {
+                    format!(" · left/right {:.2}", a.lr)
+                } else {
+                    String::new()
+                },
+                100.0 * a.clipped
+            ));
+        } else {
+            ui.label(format!("looking for apt-X ({} searches)", a.searches));
+        }
+        if ui
+            .small_button(if s.programme_play { "⏹" } else { "▶" })
+            .on_hover_text(if s.programme_play { "Stop" } else { "Listen" })
+            .clicked()
+        {
+            s.programme_play = !s.programme_play;
+        }
+        if ui
+            .small_button(if s.programme_record { "⏹" } else { "●" })
+            .on_hover_text(if s.programme_record {
+                "Stop recording"
+            } else {
+                "Record the programme audio to a .wav"
+            })
+            .clicked()
+        {
+            s.programme_record = !s.programme_record;
+        }
+    });
+    for (k, &db) in p.levels_db.iter().enumerate() {
+        ui.horizontal(|ui| {
+            let name = match (p.levels_db.len(), k) {
+                (1, _) => "M",
+                (_, 0) => "L",
+                _ => "R",
+            };
+            ui.label(RichText::new(name).monospace());
+            level_bar(ui, db);
+            ui.label(RichText::new(format!("{db:5.0} dB")).small());
+        });
+    }
+    if let Some(au) = &p.audio {
+        let st = au.status();
+        ui.label(
+            RichText::new(format!(
+                "playing · {:?} · buffer {} ms",
+                st.state, st.buffer_ms
+            ))
+            .small()
+            .weak(),
+        );
+    }
+    if let Some(err) = &p.error {
+        ui.colored_label(Color32::from_rgb(230, 110, 110), err);
+    }
+    if let Some((path, bytes)) = &p.record_file {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let txt = format!("{} ({})", name.unwrap_or_default(), format::bytes(*bytes));
+        if p.recording {
+            ui.colored_label(Color32::from_rgb(230, 90, 90), format!("● {txt}"));
+        } else {
+            ui.label(RichText::new(format!("{txt}, stopped")).small());
         }
     }
     if s != v.settings {

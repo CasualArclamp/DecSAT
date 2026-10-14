@@ -14,6 +14,7 @@ pub mod floor;
 pub mod frontend;
 pub mod identify;
 pub mod period;
+pub mod programme;
 pub mod psk;
 pub mod radar;
 pub mod rf;
@@ -42,6 +43,7 @@ pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, Source
 pub use identify::{
     ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in, names_tpc,
 };
+pub use programme::ProgrammeView;
 pub use psk::PskDemod;
 pub use radar::RadarStageView;
 pub use spectrum::Spectrum;
