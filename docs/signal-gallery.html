@@ -55,7 +55,7 @@ nav.index { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 14px 0 6px; 
 nav.index a { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
 nav.index a:hover, nav.index a:focus-visible { border-color: var(--accent); outline: none; }
 p.lede { max-width: 68ch; color: var(--muted); margin: 8px 0 18px; }
-section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 18px 0; }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 18px 0; scroll-margin-top: 76px; }
 section.card h2 { margin: 0 0 2px; font-size: 19px; text-wrap: balance; }
 section.card .tag { color: var(--accent); font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
 section.card .where { color: var(--muted); margin: 4px 0 12px; max-width: 80ch; }
@@ -492,6 +492,11 @@ function build() {
   const nav = document.getElementById('index'), main = document.getElementById('cards');
   for (const s of SIGNALS) {
     const a = document.createElement('a'); a.href = '#' + s.id; a.textContent = s.name.replace(/ \(.*$/, ''); nav.appendChild(a);
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      document.getElementById(s.id).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      try { history.replaceState(null, '', '#' + s.id); } catch (_) { /* a viewer that forbids it: the scroll is enough */ }
+    });
     const sec = document.createElement('section'); sec.className = 'card'; sec.id = s.id;
     sec.innerHTML = `
       <div class="tag">${s.tag}</div>
@@ -541,6 +546,7 @@ function frame(ts) {
 }
 build();
 for (const card of cards) drawAll(card, 0, 0);
+if (location.hash.length > 1) { const sec = document.getElementById(location.hash.slice(1)); if (sec) sec.scrollIntoView({ block: 'start' }); }
 const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const pause = document.getElementById('pause');
 function setRunning(on) { state.running = on; pause.textContent = on ? '⏸ Pause' : '▶ Run'; pause.setAttribute('aria-pressed', on ? 'false' : 'true'); }
