@@ -293,6 +293,23 @@ pub(crate) fn wait_settled(eng: &Engine, cap: Duration) -> bool {
     }
 }
 
+/// A TDMA channel's code search, in words.
+pub(crate) fn tdma_code_text(v: &decsat_engine::tdma::CodeView, layout: bool) -> String {
+    match v.code {
+        Some(code) => format!(
+            "{} (its parity check holds in {:.0} % of the bursts' data)",
+            code.name(),
+            100.0 * v.fit
+        ),
+        None if v.given_up => format!(
+            "no rate-1/2 convolutional code up to K = 10 in the bursts' data ({} looks)",
+            v.looks
+        ),
+        None if !layout => "waiting for the layout (the bursts' data, their phase known)".into(),
+        None => format!("looking ({} coded bits, {} looks)", v.bits, v.looks),
+    }
+}
+
 pub(crate) fn report(st: &VfoStatus) {
     println!("\n== {}", st.message);
     if let Some(c) = &st.carrier {
@@ -1014,6 +1031,7 @@ pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
             Some(l) => println!("  layout: {} (from {} bursts)", l.describe(), l.bursts),
             None => println!("  layout: not read yet"),
         }
+        println!("  code: {}", tdma_code_text(&c.code, c.layout.is_some()));
         if let Some(g) = &c.grid {
             let ms = |sym: f64| sym / c.symbol_rate * 1e3;
             println!(

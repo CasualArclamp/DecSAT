@@ -225,7 +225,7 @@ const STOPBAND_ROUGH_DB: f32 = 4.0;
 /// edge at ±68 kHz and a stopband 85–120 dB down with sidelobes every
 /// 4 kHz — each reported as a carrier against a floor taken from the
 /// stopband, and the real carrier as 104 dB above it rather than 13.
-fn passband(s: &[f32]) -> (usize, usize) {
+pub(crate) fn passband(s: &[f32]) -> (usize, usize) {
     let n = s.len();
     let cut = quantile(s, 0.9) - STOPBAND_DB;
     let lo = s.iter().position(|&x| x >= cut).unwrap_or(0);

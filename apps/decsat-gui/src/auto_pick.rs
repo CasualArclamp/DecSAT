@@ -98,8 +98,11 @@ impl AutoPick {
                         Ok(kind) => {
                             let mut s = v.settings.clone();
                             s.decoder = kind;
+                            s.signal = decsat_engine::SignalMode::of(kind);
                             s.offset_hz += id.center_offset_hz;
-                            s.symbol_rate = id.symbol_rate;
+                            // (The burst analyser finds its carriers' rates
+                            // itself.)
+                            s.symbol_rate = id.symbol_rate.filter(|_| kind != DecoderKind::Tdma);
                             updates.push((w.id, s));
                             note = Some(format!("{name}: {} → {}", id.summary(), kind.label()));
                             if kind == DecoderKind::Dvbs2Ip {

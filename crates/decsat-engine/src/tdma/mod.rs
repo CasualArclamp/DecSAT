@@ -116,6 +116,73 @@ pub struct ChannelView {
     pub layout: Option<Layout>,
     pub grid: Option<SlotGrid>,
     pub terminals: Vec<Terminal>,
+    /// The look for a convolutional code in the bursts' data.
+    pub code: CodeView,
+}
+
+/// What the look for a convolutional code in a channel's bursts has found.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CodeView {
+    /// The code, and the share of windows its parity check holds in.
+    pub code: Option<decsat_modem::convblind::Code>,
+    pub fit: f32,
+    /// Looks made, coded bits gathered, and whether it has stopped looking.
+    pub looks: u32,
+    pub bits: usize,
+    pub given_up: bool,
+}
+
+/// Coded bits gathered before each look, and looks before giving up.
+const CODE_LOOK_BITS: usize = 12_000;
+const CODE_LOOKS: u32 = 6;
+
+/// The look for a convolutional code in a channel's bursts
+/// ([`decsat_modem::convblind`]): the data of bursts fitted to the layout —
+/// their phase fixed by its known symbols, so every burst reads the same way
+/// up — one stretch a burst, as each is coded on its own.
+#[derive(Default)]
+struct CodeSearch {
+    pieces: Vec<Vec<u8>>,
+    view: CodeView,
+}
+
+impl CodeSearch {
+    fn push(&mut self, data: &[Iq], modulation: Modulation) {
+        if self.view.code.is_some() || self.view.given_up || data.is_empty() {
+            return;
+        }
+        let bpsk = match modulation {
+            Modulation::Bpsk | Modulation::Pi2Bpsk => true,
+            Modulation::Qpsk => false,
+            // (The code finder reads BPSK and QPSK.)
+            _ => return,
+        };
+        self.pieces
+            .push(decsat_modem::convblind::hard_bits(data, bpsk));
+        self.view.bits = self.pieces.iter().map(|p| p.len()).sum();
+        if self.view.bits < CODE_LOOK_BITS {
+            return;
+        }
+        self.view.looks += 1;
+        let refs: Vec<&[u8]> = self.pieces.iter().map(|p| p.as_slice()).collect();
+        match decsat_modem::convblind::find_pieces(&refs) {
+            Some(f) => {
+                self.view.code = Some(f.code);
+                self.view.fit = f.fit;
+                self.pieces.clear();
+            }
+            None if self.view.looks >= CODE_LOOKS => {
+                self.view.given_up = true;
+                self.pieces.clear();
+            }
+            None => {
+                // The newest half stays for the next look.
+                let drop = self.pieces.len() / 2;
+                self.pieces.drain(..drop);
+            }
+        }
+        self.view.bits = self.pieces.iter().map(|p| p.len()).sum();
+    }
 }
 
 /// What a TDMA VFO shows.
@@ -280,6 +347,7 @@ struct Channel {
     mer_db: f32,
     snr_db: f32,
     idle_share: f32,
+    code: CodeSearch,
     // Scratch.
     mixed: Vec<Iq>,
     filtered: Vec<Iq>,
@@ -344,6 +412,7 @@ impl Channel {
             mixed: Vec::new(),
             filtered: Vec::new(),
             raw: Vec::new(),
+            code: CodeSearch::default(),
         }
     }
 
@@ -477,6 +546,9 @@ impl Channel {
             }
             None => (b.t0 / self.sps, b.symbols, b.mer_db, false, false),
         };
+        if fitted && !idle {
+            self.code.push(&symbols, modulation_now);
+        }
         self.mer_db += (mer - self.mer_db) * if self.bursts == 1 { 1.0 } else { 0.02 };
         self.idle_share += ((idle as u8 as f32) - self.idle_share) * 0.01;
         let freq_hz = self.center_hz + b.freq * self.rs;
@@ -583,6 +655,7 @@ impl Channel {
             } else {
                 self.by_id.list(TERMINAL_MIN)
             },
+            code: self.code.view,
         }
     }
 }

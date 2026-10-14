@@ -3855,3 +3855,45 @@ K = 7, TPC 2964 or FastLink.
   — the 102.4 kS/s one repeats a 40 112-symbol frame (idle, ~98 % identical
   frame to frame after ~5 s of traffic): a block code with a frame-
   synchronous scrambler, coding unknown.
+
+## SCPC or TDMA: a mode per VFO, bursty bands on the waterfall (2026-10-14)
+
+Rory: "maybe it would be a good idea for the VFO to have 2 modes SCPC or
+TDMA to separate signal detection" — then, asked: per VFO with a default
+for new ones; two detectors on the waterfall; TDMA running the analyser and
+the code search.
+
+- **`bursty.rs`**: `BurstMeter` takes the waterfall's own FFT segments
+  (`Spectrum::compute_max_with` hands each to a callback: no extra FFTs),
+  averages them into ~2 ms frames smoothed over ~4 kHz, and every 2 s finds
+  bins whose coefficient of variation is ≥ 1.6× the noise's (measured on
+  the bins at the floor, the 20th percentile of the passband) and ≥ 0.6 dB
+  up; runs with gaps ≤ 20 kHz make a band (an MF-TDMA group's carriers one
+  band), ≥ 3 kHz wide. On the Intelsat 19 capture (8 MS/s, 1733.8 MHz)
+  every continuous carrier, 1–17 dB up, sat at the noise's CV (0.2–0.3);
+  the MF-TDMA group whose bursts are ~5 dB up read 0.7–1.9 and makes one
+  band (+1.48…+1.62 MHz, 11 carriers for the analyser), more bursty bands at
+  12331.0–12331.4 and 12332.0–12332.25 MHz. An averaged-spectrum
+  threshold, tried first, missed the group and called carrier skirts
+  bursty. `bluetooth_offsets(tuning)` (HackRF IF 2650 − f/7 MHz; BLE
+  advertising 2402/2426/2480 MHz, spectrally inverted) marks the
+  Bluetooth leak (there: −0.07…+1.02 MHz, varying 4–5× the noise).
+  `FrontStatus.burst_bands`, `burst_takes`.
+- **`SignalMode` { Scpc, Tdma }** on `VfoSettings.signal` (from the decoder
+  by default; `DecoderKind::fits`: TDMA bursts in TDMA, the recorder and
+  spectrum in both, the rest SCPC); the session keeps it (`mode=`; older
+  lines take the decoder's). GUI: a *Signal* row above *Decoder*, the
+  decoder list filtered; *New VFOs run* has the switch.
+- **Waterfall**: violet dashed brackets under the green ones (grey,
+  "Bluetooth", where the leak would be for the HackRF's tuning or the
+  file's), hover text, click → a TDMA VFO over the band (+15 % + 4 kHz).
+  The survey's/claim's `pick` sends a bursty carrier to TDMA (it was "no
+  decoder"); `scan --decode` likewise, and `scan` lists the bands.
+- **TDMA code search**: per channel, fitted non-idle bursts' data (phase
+  fixed by the layout's known symbols) → hard bits, one piece a burst;
+  every 12 000 bits `convblind::find_pieces` (no window across bursts) up
+  to 6 looks; `ChannelView.code` → CLI "code: …", GUI "Code" row. The
+  Intelsat 19 group's bursts (MER 4.5 dB) never yield a layout, so it waits.
+- Tests: `finds_the_bursty_channel_not_the_steady_carrier`,
+  `bluetooth_lands_where_it_was_seen`, `finds_a_code_in_separate_bursts`,
+  `the_signal_mode_is_kept_and_old_lines_take_the_decoders`.

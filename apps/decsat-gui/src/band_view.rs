@@ -80,6 +80,9 @@ pub struct BandInput<'a> {
     /// What carriers have been heard to carry (ADS-B, radar), by RF:
     /// tagged on the waterfall.
     pub caps: &'a crate::carrier_caps::CarrierCaps,
+    /// Where Bluetooth would leak in, were the source a HackRF tuned as it
+    /// is (offsets, Hz): bursty bands there are marked as such.
+    pub bluetooth: &'a [f64],
 }
 
 /// The decoder for a VFO made over offsets `lo..hi` (Hz from the band's
@@ -1023,6 +1026,60 @@ impl BandView {
             }
         }
 
+        // ---- bands that come and go (TDMA, or Bluetooth in the HackRF):
+        // brackets just under the carriers', violet; Bluetooth's grey
+        let burst_y = carrier_y + 13.0;
+        let mut burst_hit: Option<usize> = None;
+        for (i, b) in inp.front.burst_bands.iter().enumerate() {
+            let x0 = x_of(b.lo_hz);
+            let x1 = x_of(b.hi_hz).max(x0 + 4.0);
+            if x1 < rect.left() || x0 > rect.right() {
+                continue;
+            }
+            let hit = Rect::from_min_max(
+                pos2(x0 - 3.0, burst_y - 5.0),
+                pos2(x1 + 3.0, burst_y + 12.0),
+            );
+            let hovered = carrier_hit.is_none()
+                && pointer.is_some_and(|p| hit.contains(p))
+                && matches!(self.drag, Drag::None);
+            if hovered {
+                burst_hit = Some(i);
+            }
+            let bluetooth = decsat_engine::bursty::is_bluetooth(b, inp.bluetooth);
+            let base = if bluetooth {
+                Color32::from_gray(150)
+            } else {
+                Color32::from_rgb(200, 140, 255)
+            };
+            let col = if hovered {
+                Color32::WHITE
+            } else if covered(b.center_hz()) {
+                base.gamma_multiply(0.4)
+            } else {
+                base
+            };
+            let st = Stroke::new(if hovered { 2.0 } else { 1.3 }, col);
+            // Dashed, as the signal under it comes and goes.
+            let mut x = x0;
+            while x < x1 {
+                let e = (x + 5.0).min(x1);
+                painter.line_segment([pos2(x, burst_y), pos2(e, burst_y)], st);
+                x += 8.0;
+            }
+            painter.line_segment([pos2(x0, burst_y - 3.0), pos2(x0, burst_y + 3.0)], st);
+            painter.line_segment([pos2(x1, burst_y - 3.0), pos2(x1, burst_y + 3.0)], st);
+            if x1 - x0 > 30.0 {
+                painter.text(
+                    pos2((x0 + x1) / 2.0, burst_y + 2.0),
+                    Align2::CENTER_TOP,
+                    if bluetooth { "Bluetooth" } else { "TDMA" },
+                    FontId::proportional(10.0),
+                    col,
+                );
+            }
+        }
+
         // ---- create-drag preview
         if let Drag::Create { start_hz } = self.drag {
             let (a, b) = (
@@ -1057,6 +1114,25 @@ impl BandView {
                 if let Some(d) = s.get(k.min(s.len() - 1)) {
                     text.push_str(&format!("   {d:.1} dB"));
                 }
+            }
+            if let Some(i) = burst_hit {
+                let b = &inp.front.burst_bands[i];
+                text = if decsat_engine::bursty::is_bluetooth(b, inp.bluetooth) {
+                    format!(
+                        "bursts at {} where Bluetooth leaks into a HackRF tuned here (its IF is in \
+                         the 2.4 GHz band): not on the satellite — retune a few MHz to move it",
+                        format::freq(inp.rf_center + b.center_hz())
+                    )
+                } else {
+                    format!(
+                        "click: TDMA VFO over {} ({:.0} kHz that comes and goes: varies {:.1}× as \
+                         much as the noise, {:.0} dB up)",
+                        format::freq(inp.rf_center + b.center_hz()),
+                        b.width_hz() / 1e3,
+                        b.variation,
+                        b.level_db
+                    )
+                };
             }
             if let Some(i) = carrier_hit {
                 let c = &inp.front.carriers[i];
@@ -1272,6 +1348,19 @@ impl BandView {
                     off,
                     bw,
                     decoder_over(inp, off - bw / 2.0, off + bw / 2.0).0,
+                );
+                s.record_dir = default_record_dir();
+                actions.push(Action::Create(s));
+            } else if let Some(i) = burst_hit {
+                // A TDMA VFO over the band, with a little room either side;
+                // its analyser finds the carriers in it.
+                let b = inp.front.burst_bands[i];
+                let bw = (b.width_hz() * 1.15 + 4e3).max(min_vfo);
+                let mut s = VfoSettings::new(
+                    name_at(b.center_hz(), bw),
+                    b.center_hz(),
+                    bw,
+                    DecoderKind::Tdma,
                 );
                 s.record_dir = default_record_dir();
                 actions.push(Action::Create(s));

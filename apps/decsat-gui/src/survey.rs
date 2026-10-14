@@ -171,8 +171,8 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
     match &ident.verdict {
         Verdict::NoSignal => Err(Outcome::NoSignal),
         Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => Ok(DecoderKind::Dvbs2Ip),
-        // A TDMA carrier's bursts: no continuous decoder reads them.
-        _ if ident.bursts.is_some() => Err(Outcome::NoDecoder),
+        // A TDMA carrier's bursts: the burst analyser reads them.
+        _ if ident.bursts.is_some() => Ok(DecoderKind::Tdma),
         Verdict::NotDvbS2 { hint }
             if hint.contains("TPC 2964")
                 || hint.contains("FastLink")

@@ -277,6 +277,71 @@ impl DecoderKind {
     }
 }
 
+/// How a VFO treats its signal: a continuous carrier (SCPC: Identify, the
+/// modem and DVB decoders, the generic PSK; a burst landing on it is
+/// interference, coasted through) or a channel terminals take turns on
+/// (TDMA: the burst analyser). Which decoders a VFO offers follows it; the
+/// waterfall's brackets say which a band looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SignalMode {
+    #[default]
+    Scpc,
+    Tdma,
+}
+
+impl SignalMode {
+    pub const ALL: [SignalMode; 2] = [SignalMode::Scpc, SignalMode::Tdma];
+
+    /// The mode a decoder belongs to (the tools, either: SCPC).
+    pub fn of(decoder: DecoderKind) -> Self {
+        if decoder == DecoderKind::Tdma {
+            SignalMode::Tdma
+        } else {
+            SignalMode::Scpc
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SignalMode::Scpc => "SCPC",
+            SignalMode::Tdma => "TDMA",
+        }
+    }
+
+    /// A stable name for saving.
+    pub fn key(self) -> &'static str {
+        match self {
+            SignalMode::Scpc => "scpc",
+            SignalMode::Tdma => "tdma",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        SignalMode::ALL.into_iter().find(|m| m.key() == key)
+    }
+
+    /// What a VFO switched to this mode runs (when its decoder does not
+    /// fit it).
+    pub fn default_decoder(self) -> DecoderKind {
+        match self {
+            SignalMode::Scpc => DecoderKind::Identify,
+            SignalMode::Tdma => DecoderKind::Tdma,
+        }
+    }
+}
+
+impl DecoderKind {
+    /// Offered in `mode`: the burst analyser in TDMA, the rest in SCPC, the
+    /// IQ recorder and the spectrum in both.
+    pub fn fits(self, mode: SignalMode) -> bool {
+        match self {
+            DecoderKind::IqRecord | DecoderKind::Spectrum => true,
+            DecoderKind::Tdma => mode == SignalMode::Tdma,
+            _ => mode == SignalMode::Scpc,
+        }
+    }
+}
+
 /// A VFO's user-facing settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VfoSettings {
@@ -285,6 +350,8 @@ pub struct VfoSettings {
     pub offset_hz: f64,
     pub bandwidth_hz: f64,
     pub decoder: DecoderKind,
+    /// SCPC or TDMA: which decoders it offers (see [`SignalMode`]).
+    pub signal: SignalMode,
     pub enabled: bool,
     /// Known symbol rate; `None` finds it blind.
     pub symbol_rate: Option<f64>,
@@ -368,6 +435,7 @@ impl VfoSettings {
             offset_hz,
             bandwidth_hz,
             decoder,
+            signal: SignalMode::of(decoder),
             enabled: true,
             symbol_rate: None,
             gold_code: 0,

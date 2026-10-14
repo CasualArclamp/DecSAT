@@ -415,10 +415,48 @@ fn scan(
         },
     );
 
-    // Let the averaged spectrum settle, then take the carrier list.
+    // Let the averaged spectrum settle, then take the carrier list, and the
+    // bursty bands once the burst meter has had its couple of seconds.
     let t0 = Instant::now();
     std::thread::sleep(Duration::from_millis(1500));
-    let carriers = eng.front().carriers;
+    while eng.front().burst_takes == 0 && t0.elapsed() < Duration::from_secs(6) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let front = eng.front();
+    if !front.burst_bands.is_empty() {
+        // Where Bluetooth would leak in, were this a HackRF tuned here (a
+        // raw file's tuning from its name: `decsat record` writes
+        // `decsat-1733.8000MHz-…`).
+        let tuned = Some(front.center_freq)
+            .filter(|&f| f > 0.0)
+            .or_else(|| tuning_in_name(&file));
+        let bt = tuned.map_or_else(Vec::new, |f| {
+            decsat_engine::bursty::bluetooth_offsets(f, rate / 2.0)
+        });
+        println!(
+            "
+bands that come and go (TDMA, or Bluetooth in a HackRF):"
+        );
+        for b in &front.burst_bands {
+            println!(
+                "  {:+9.1} .. {:+9.1} kHz  ({:6.1} kHz)  varies {:.1}× as much as the noise, {:4.1} dB up{}",
+                b.lo_hz / 1e3,
+                b.hi_hz / 1e3,
+                b.width_hz() / 1e3,
+                b.variation,
+                b.level_db,
+                if decsat_engine::bursty::is_bluetooth(b, &bt) {
+                    format!(
+                        "  — where Bluetooth leaks into a HackRF tuned to {:.1} MHz",
+                        tuned.unwrap_or_default() / 1e6
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+    }
+    let carriers = front.carriers;
     if carriers.is_empty() {
         println!("no carriers found");
         return Ok(());
@@ -552,13 +590,25 @@ fn scan(
 /// names by their framing; for a plain BPSK/QPSK carrier with no framing
 /// found, the K = 7 Viterbi decoder (it finds a convolutional code's rate
 /// blind, or says there is none); nothing for the rest.
+/// The tuning a raw capture's name gives: an unsigned `…MHz` figure, as
+/// `decsat record` names its files (a signed one is an offset, not a
+/// tuning).
+fn tuning_in_name(file: &std::path::Path) -> Option<f64> {
+    let name = file.file_name()?.to_str()?;
+    name.split(['-', '_'])
+        .filter_map(|t| t.strip_suffix("MHz"))
+        .filter(|t| !t.starts_with(['+', '-']))
+        .find_map(|t| t.parse::<f64>().ok())
+        .map(|mhz| mhz * 1e6)
+}
+
 fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::DecoderKind> {
     use decsat_engine::identify::ConstellationGuess;
     use decsat_engine::{DecoderKind, Verdict};
     match &ident.verdict {
         Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => vec![DecoderKind::Dvbs2Ip],
-        // A TDMA carrier's bursts: no continuous decoder reads them.
-        _ if ident.bursts.is_some() => Vec::new(),
+        // A TDMA carrier's bursts: the burst analyser reads them.
+        _ if ident.bursts.is_some() => vec![DecoderKind::Tdma],
         Verdict::NotDvbS2 { hint } => {
             // Rust note: the hint is a sentence for people; these are the
             // names Identify puts in it when a decoder can read the carrier.

@@ -30,6 +30,7 @@ pub fn vfo_text(s: &VfoSettings) -> String {
         format!("offset={}", s.offset_hz),
         format!("bw={}", s.bandwidth_hz),
         format!("decoder={}", s.decoder.key()),
+        format!("mode={}", s.signal.key()),
         format!("enabled={}", u8::from(s.enabled)),
         format!("follow={}", u8::from(s.follow_carrier)),
         format!("voice={}", u8::from(s.voice_auto)),
@@ -63,6 +64,10 @@ pub fn vfo_from_text(t: &str, record_dir: std::path::PathBuf) -> Option<VfoSetti
         get("bw")?.parse().ok()?,
         DecoderKind::from_key(get("decoder")?)?,
     );
+    // (Sessions before the SCPC/TDMA modes: the decoder's.)
+    if let Some(m) = get("mode").and_then(decsat_engine::SignalMode::from_key) {
+        s.signal = m;
+    }
     let flag = |key: &str, default: bool| get(key).map_or(default, |v| v == "1");
     s.enabled = flag("enabled", true);
     s.follow_carrier = flag("follow", true);
@@ -123,5 +128,22 @@ mod tests {
         want.record_dir = dir;
         assert_eq!(back, want);
         assert!(vfo_from_text("nonsense", std::path::PathBuf::new()).is_none());
+    }
+
+    #[test]
+    fn the_signal_mode_is_kept_and_old_lines_take_the_decoders() {
+        // A TDMA VFO recording its IQ: the mode is its own, not the tool's.
+        let mut s = VfoSettings::new("group", 1e5, 2e5, DecoderKind::IqRecord);
+        s.signal = decsat_engine::SignalMode::Tdma;
+        let back = vfo_from_text(&vfo_text(&s), std::path::PathBuf::new()).unwrap();
+        assert_eq!(back.signal, decsat_engine::SignalMode::Tdma);
+        // A line from before the modes: TDMA if its decoder is the burst
+        // analyser, else SCPC.
+        let old = "name=a;offset=0;bw=1000;decoder=tdma;enabled=1";
+        let back = vfo_from_text(old, std::path::PathBuf::new()).unwrap();
+        assert_eq!(back.signal, decsat_engine::SignalMode::Tdma);
+        let old = "name=b;offset=0;bw=1000;decoder=viterbi;enabled=1";
+        let back = vfo_from_text(old, std::path::PathBuf::new()).unwrap();
+        assert_eq!(back.signal, decsat_engine::SignalMode::Scpc);
     }
 }

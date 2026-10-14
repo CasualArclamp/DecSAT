@@ -367,11 +367,25 @@ fn varied(rows: &[u32], k: usize) -> bool {
 /// coded pairs. `None`: no such code (a block code, an uncoded stream, one
 /// too noisy, or too regular to tell).
 pub fn find(bits: &[u8]) -> Option<Found> {
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ bits.len() as u64);
+    find_pieces(&[bits])
+}
+
+/// As [`find`], over separate stretches of one stream (a TDMA channel's
+/// bursts, each coded on its own): no window crosses from one into the
+/// next, and the coded pairs start `phase` bits into every stretch.
+pub fn find_pieces(pieces: &[&[u8]]) -> Option<Found> {
+    let total: usize = pieces.iter().map(|p| p.len()).sum();
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ total as u64);
     for k in 2..=MAX_K {
         let mut best: Option<Found> = None;
         for phase in 0..2 {
-            let rows = windows(bits, k, phase, JUDGE);
+            let mut rows = Vec::new();
+            for p in pieces {
+                if rows.len() >= JUDGE {
+                    break;
+                }
+                rows.extend(windows(p, k, phase, JUDGE - rows.len()));
+            }
             if rows.len() < 200 || !varied(&rows, k) {
                 continue;
             }
@@ -497,6 +511,14 @@ fn soft_bits(symbols: &[Iq], bpsk: bool, turn: u8, mirrored: bool, out: &mut Vec
 
 fn hard(soft: &[f32]) -> Vec<u8> {
     soft.iter().map(|&s| (s < 0.0) as u8).collect()
+}
+
+/// Hard-decided coded bits of symbols as they come: BPSK one a symbol (its
+/// real part), QPSK two (I then Q); 1 for a negative.
+pub fn hard_bits(symbols: &[Iq], bpsk: bool) -> Vec<u8> {
+    let mut soft = Vec::with_capacity(2 * symbols.len());
+    soft_bits(symbols, bpsk, 0, false, &mut soft);
+    hard(&soft)
 }
 
 /// What the receiver has made of the carrier.
@@ -870,6 +892,19 @@ mod tests {
             let p = ber_from_fit(f.fit, f.check.count_ones());
             assert!((0.002..0.01).contains(&p), "BER {p}");
         }
+    }
+
+    #[test]
+    fn finds_a_code_in_separate_bursts() {
+        // 60 bursts of 200 coded bits, each coded from the zero state: no
+        // window spans two bursts, and the code is found across them.
+        let c = code(7, [0o171, 0o133]);
+        let bursts: Vec<Vec<u8>> = (0..60).map(|i| c.encode(&bits(100, 100 + i))).collect();
+        let refs: Vec<&[u8]> = bursts.iter().map(|b| b.as_slice()).collect();
+        let f = find_pieces(&refs).expect("found");
+        assert_eq!(f.code.k, 7);
+        assert!(f.code.is_k7_standard());
+        assert!(f.fit > 0.99);
     }
 
     #[test]

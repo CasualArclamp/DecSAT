@@ -4,6 +4,7 @@
 //! spectrum and constellation views. The demodulator, FEC and GSE stages slot
 //! in here from M1 onward — see `docs/DESIGN.md`.
 
+pub mod bursty;
 pub mod carriers;
 pub mod cid;
 pub mod demod;
@@ -44,7 +45,7 @@ pub use psk::PskDemod;
 pub use radar::RadarStageView;
 pub use spectrum::Spectrum;
 pub use tdma::{BurstMark, ChannelView as TdmaChannelView, TdmaView};
-pub use vfo::{CarrierState, DecoderKind, VfoId, VfoSettings, VfoStatus};
+pub use vfo::{CarrierState, DecoderKind, SignalMode, VfoId, VfoSettings, VfoStatus};
 
 use decsat_core::{Iq, Metrics, Result, RxConfig};
 use decsat_io::IqSource;

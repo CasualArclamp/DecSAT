@@ -577,6 +577,17 @@ impl App {
         self.rf_center_mhz * 1e6
     }
 
+    /// What a HackRF would be tuned to for this span (no LO): the radio's
+    /// tuning, or a file's centre as its name gives it (`decsat record`
+    /// names its files by the tuning).
+    fn hackrf_tuning(&self) -> f64 {
+        #[cfg(feature = "hackrf")]
+        if self.path.is_none() {
+            return self.front.center_freq;
+        }
+        self.rf_center_mhz * 1e6
+    }
+
     /// Set the LO trim so the detected carriers line up with the plan: a
     /// search of ±3 MHz, or (`keep`) a small step from where it is.
     fn align_to_plan(&mut self, keep: bool) {
@@ -1706,6 +1717,10 @@ impl eframe::App for App {
                 });
             });
 
+        // Where Bluetooth would leak in, were the source a HackRF tuned as it
+        // is: live, its tuning; a file, the tuning its name gives.
+        let bluetooth =
+            decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1723,6 +1738,7 @@ impl eframe::App for App {
                     can_retune: self.can_retune(),
                     plan: &self.plan,
                     caps: &self.carrier_caps,
+                    bluetooth: &bluetooth,
                 };
                 actions.extend(self.band.show(ui, &inp));
             });

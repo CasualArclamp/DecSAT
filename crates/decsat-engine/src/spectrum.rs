@@ -53,9 +53,22 @@ impl Spectrum {
     /// 64 well-spread segments give a smooth row at a fraction of the cost of
     /// transforming all of them.
     pub fn compute_max(&mut self, samples: &[Iq], max_segments: usize) -> Vec<f32> {
+        self.compute_max_with(samples, max_segments, |_| {}).0
+    }
+
+    /// As [`Self::compute_max`], handing each segment's own power spectrum
+    /// (linear, FFT-shifted, unnormalised) to `each` on the way — the burst
+    /// meter's short frames — and returning the samples between segments
+    /// with the row.
+    pub fn compute_max_with(
+        &mut self,
+        samples: &[Iq],
+        max_segments: usize,
+        mut each: impl FnMut(&[f32]),
+    ) -> (Vec<f32>, usize) {
         self.accum.fill(0.0);
         if samples.len() < self.size {
-            return vec![-200.0; self.size];
+            return (vec![-200.0; self.size], self.size);
         }
 
         let full = (samples.len() - self.size) / (self.size / 2) + 1;
@@ -64,6 +77,8 @@ impl Spectrum {
         } else {
             self.size / 2
         };
+        let half = self.size / 2;
+        let mut frame = vec![0f32; self.size];
         let mut segments = 0usize;
         let mut start = 0usize;
         while start + self.size <= samples.len() {
@@ -72,10 +87,14 @@ impl Spectrum {
             }
             self.fft.process(&mut self.scratch);
             for k in 0..self.size {
-                self.accum[k] += self.scratch[k].norm_sqr();
+                let p = self.scratch[k].norm_sqr();
+                self.accum[k] += p;
+                // FFT-shifted, as the row.
+                frame[(k + half) % self.size] = p;
             }
+            each(&frame);
             segments += 1;
-            start += hop;
+            start += hop.max(1);
         }
 
         let norm = 1.0 / (segments.max(1) as f32 * self.size as f32);
@@ -83,10 +102,12 @@ impl Spectrum {
         // fftshift while converting to dB: output bin k reads accumulator bin
         // k+half for the lower half (the negative frequencies live up top).
         let (neg, pos) = self.accum.split_at(half);
-        pos.iter()
+        let row = pos
+            .iter()
             .chain(neg.iter())
             .map(|&p| 10.0 * (p * norm).max(1e-20).log10())
-            .collect()
+            .collect();
+        (row, hop.max(1))
     }
 }
 

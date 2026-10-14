@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use decsat_core::Modulation;
 use decsat_engine::{
     CarrierState, ConstellationGuess, DecoderKind, FecStats, GseView, Identification, LockState,
-    RateSource, TsView, Verdict, VfoId, VfoStatus,
+    RateSource, SignalMode, TsView, Verdict, VfoId, VfoStatus,
 };
 use decsat_gse::{Source, Variant};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Ui, pos2, vec2};
@@ -68,7 +68,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     });
     ui.horizontal_wrapped(|ui| {
         ui.label("New VFOs run");
-        decoder_menu(ui, "new_decoder", new_decoder);
+        // SCPC or TDMA first, then a decoder of that kind.
+        let mut mode = SignalMode::of(*new_decoder);
+        if mode_switch(ui, "new_mode", &mut mode) && !new_decoder.fits(mode) {
+            *new_decoder = mode.default_decoder();
+        }
+        decoder_menu(ui, "new_decoder", new_decoder, mode);
         if new_decoder.is_cdm() {
             cdm_model_menu(ui, "new_cdm_model", new_decoder);
         }
@@ -222,8 +227,14 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             ui.text_edit_singleline(&mut s.name);
             ui.end_row();
 
+            ui.label("Signal");
+            if mode_switch(ui, "vfo_mode", &mut s.signal) && !s.decoder.fits(s.signal) {
+                s.decoder = s.signal.default_decoder();
+            }
+            ui.end_row();
+
             ui.label("Decoder");
-            decoder_menu(ui, "vfo_decoder", &mut s.decoder);
+            decoder_menu(ui, "vfo_decoder", &mut s.decoder, s.signal);
             ui.end_row();
             if s.decoder.is_cdm() {
                 ui.label("CDM model");
@@ -3298,7 +3309,27 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
 
 /// The decoder menu: every kind, the Comtech CDM presets folded into one
 /// entry whose model [`cdm_model_menu`] chooses.
-fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
+/// SCPC or TDMA (see [`SignalMode`]); whether it changed.
+fn mode_switch(ui: &mut Ui, id: &str, mode: &mut SignalMode) -> bool {
+    let before = *mode;
+    ui.push_id(id, |ui| {
+        ui.horizontal(|ui| {
+            ui.selectable_value(mode, SignalMode::Scpc, SignalMode::Scpc.label())
+                .on_hover_text(
+                    "A continuous carrier: Identify, the modem and DVB decoders, the generic PSK \
+                     (a burst landing on it is interference, coasted through)",
+                );
+            ui.selectable_value(mode, SignalMode::Tdma, SignalMode::Tdma.label())
+                .on_hover_text(
+                    "Terminals taking turns: the burst analyser — the carriers in the VFO, their \
+                     bursts, layout, slots, terminals and code",
+                );
+        });
+    });
+    *mode != before
+}
+
+fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind, mode: SignalMode) {
     let shown = if decoder.is_cdm() {
         DecoderKind::CDM_MENU
     } else {
@@ -3307,7 +3338,7 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind) {
     egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .show_ui(ui, |ui| {
-            for k in DecoderKind::ALL {
+            for k in DecoderKind::ALL.into_iter().filter(|k| k.fits(mode)) {
                 if !k.is_cdm() {
                     ui.selectable_value(decoder, k, k.label());
                 } else if k == DecoderKind::CDM[0] {
@@ -4326,6 +4357,28 @@ fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: V
                 )),
                 None => ui.label(RichText::new("gathering bursts…").weak()),
             };
+            ui.end_row();
+            ui.label("Code");
+            let v = &c.code;
+            match v.code {
+                Some(code) => ui.colored_label(
+                    Color32::from_rgb(110, 220, 110),
+                    format!("{} · holds in {:.0} %", code.name(), 100.0 * v.fit),
+                ),
+                None if v.given_up => ui
+                    .label(RichText::new("none: no rate-½ convolutional code up to K = 10").weak()),
+                None if c.layout.is_none() => {
+                    ui.label(RichText::new("waits for the layout").weak())
+                }
+                None => ui.label(
+                    RichText::new(format!("looking… ({} bits, {} looks)", v.bits, v.looks)).weak(),
+                ),
+            }
+            .on_hover_text(
+                "A rate-½ convolutional code in the bursts' data symbols (phase fixed by the \
+                 layout's known symbols): found from the parity check its coded bits satisfy, \
+                 each burst on its own.",
+            );
             ui.end_row();
             if let Some(g) = &c.grid {
                 ui.label("Slots");

@@ -72,6 +72,11 @@ pub struct FrontStatus {
     /// Smoothed wideband spectrum, dB, FFT-shifted.
     pub spectrum_db: Vec<f32>,
     pub carriers: Vec<Carrier>,
+    /// Bands whose power comes and goes — TDMA channels (or Bluetooth in a
+    /// HackRF's IF: [`crate::bursty::bluetooth_offsets`]) — from the last
+    /// couple of seconds, and how many times they have been taken.
+    pub burst_bands: Vec<crate::bursty::BurstBand>,
+    pub burst_takes: u64,
     pub source: String,
     pub state: SourceState,
     /// Samples read since start.
@@ -330,6 +335,10 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     let mut clock = Instant::now();
     let mut played = 0.0f64;
     let mut last_carriers = Instant::now() - Duration::from_secs(1);
+    // Bursty bands: the meter, the segment spacing, and a take every 2 s.
+    let mut bursts = crate::bursty::BurstMeter::default();
+    let mut last_hop_secs = 0.0;
+    let mut last_bursts = Instant::now();
     let mut dc_removal = opts.dc_removal;
     let mut dc = decsat_dsp::DcBlocker::new();
 
@@ -432,8 +441,12 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         }
         let t0 = Instant::now();
 
-        // Waterfall row.
-        let row = spec.compute_max(&block, SEGMENTS_PER_ROW);
+        // Waterfall row; its segments feed the burst meter too, spaced as
+        // the last row's were (the same in a steady stream).
+        let spacing = last_hop_secs;
+        let (row, hop) =
+            spec.compute_max_with(&block, SEGMENTS_PER_ROW, |p| bursts.push(p, rate, spacing));
+        last_hop_secs = hop as f64 / rate;
         row_seq += 1;
 
         // Smoothed spectrum, averaged in linear power.
@@ -469,6 +482,11 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
             found
         });
 
+        let burst_bands = (last_bursts.elapsed() >= Duration::from_secs(2)).then(|| {
+            last_bursts = Instant::now();
+            bursts.take()
+        });
+
         {
             let mut rows = shared.rows.lock().unwrap();
             if rows.len() == ROW_BACKLOG {
@@ -488,6 +506,10 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         f.spectrum_db = avg_db;
         if let Some(c) = carriers {
             f.carriers = c;
+        }
+        if let Some(b) = burst_bands {
+            f.burst_bands = b;
+            f.burst_takes += 1;
         }
         f.samples = samples;
         f.load = load;

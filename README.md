@@ -65,7 +65,7 @@ real carriers stay put.
 | **Radar feeds** on CDM-570/570L links: track reports in IBM bisync blocks, **ASTERIX** categories 034 and 048 in HDLC (the Mode S registers in them read too) and ADS-B (category 021) in IP — a track table, a CSV log, and the **radar scope**: a PPI with trails and leaders, a map, airports and runways, ADS-B aircraft over a radar's picture, callsigns from a decoded ADS-B feed or (switched on) adsb.lol | ✅ on live carriers |
 | **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers; on BPSK and QPSK it looks for a convolutional code meanwhile (as the Viterbi decoder does, given up after a while) and decodes what it finds through the payload search — or says there is none (*a block code or uncoded*) | ✅ |
-| **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals; a burst map; each burst's data symbols to a `.bursts` file | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
+| **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -108,6 +108,7 @@ On the waterfall:
 | **double-click** | drop a VFO |
 | **click a green bracket** | claim a detected carrier with a VFO sized to fit, on the decoder it is known to need, else found as the Survey finds it (Identify, then DVB-S2 or the Comtech *type found*) |
 | **shift-click a green bracket** | claim it with the decoder *New VFOs run* instead |
+| **click a violet dashed bracket** | a TDMA VFO over a band whose power comes and goes (grey dashed: Bluetooth leaking into the HackRF, not the satellite) |
 | **drag a VFO** / **its edge** | move it / resize it |
 | **click** (VFO selected) | tune it there |
 | **✕** on a VFO's label, or **Delete** | remove it |
@@ -443,6 +444,21 @@ choice of identifier, position, telephone and text (see
 [`tests/`](tests/README.md)).
 
 ### TDMA bursts
+
+**SCPC or TDMA.** Every VFO says which kind of signal it is on — *Signal:
+SCPC* (a continuous carrier: Identify, the modem and DVB decoders, the
+generic PSK; a burst landing on it is interference) or *TDMA* (terminals
+taking turns: the burst analyser) — and its decoder list follows; *New VFOs
+run* has the same switch. The waterfall finds the two kinds apart: green
+brackets for continuous carriers, from the averaged spectrum; **violet
+dashed brackets** for bands whose power comes and goes, from how much each
+bin varies frame to frame (2 ms frames: a stationary bin — noise, a
+carrier, its skirts — varies by a fixed share of its mean, an on-and-off
+one far more), so a TDMA group a few dB over the noise is not missed or
+merged into its neighbour. Click one for a TDMA VFO over it; Identify's
+claim sends a bursty carrier there too. A grey dashed bracket is Bluetooth
+leaking into the HackRF's IF (see *HackRF One*), not the satellite.
+`decsat scan` lists the bands as well.
 
 Drop a VFO over one TDMA carrier or a whole group (an MF-TDMA return) and
 choose **TDMA bursts**. Each carrier in it is found and given its own
