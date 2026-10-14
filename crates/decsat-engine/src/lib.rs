@@ -31,6 +31,7 @@ pub use decsat_modem::tdm257::{
 };
 pub use decsat_modem::tdmfast::{FastCall, FastStats as FastTdmStats};
 pub use decsat_modem::text::{ByteTextView, TextView};
+pub use decsat_modem::tpc2964::Code as TpcCode;
 pub use demod::{Demod, LockState, PlFrame};
 pub use estimate::{BandEstimate, estimate_band};
 pub use fec::{

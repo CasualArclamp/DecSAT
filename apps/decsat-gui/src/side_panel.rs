@@ -1533,22 +1533,31 @@ fn text_card(ui: &mut Ui, t: &decsat_engine::TextView) {
     }
 }
 
-/// A TPC 2964 VFO: the carrier, the frame sync and structure found, the
-/// turbo decoder, and what the data carry.
+/// A TPC VFO (TPC 2964, or Comtech TPC 7/8 once its UW is found): the
+/// carrier, the frame sync and structure found, the turbo decoder, and
+/// what the data carry.
 fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
+    use decsat_engine::TpcCode as Code;
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
+    let f = st.fec.as_ref();
+    let t = f.and_then(|f| f.tpc.as_ref());
+    // Until a UW is found, both codes are looked for.
+    let code = t.and_then(|t| t.code);
+    let name = match code {
+        Some(Code::Comtech78) => "Comtech TPC 7/8 (16K block)",
+        Some(Code::Tpc2964) => "TPC 2964 (IESS-315)",
+        None => "TPC 2964 (IESS-315) or Comtech TPC 7/8",
+    };
     ui.add_space(6.0);
     ui.label(
         RichText::new(if kind == DecoderKind::Cdm570Trunk {
-            "Comtech CDM-570L trunk · TPC 2964 (IESS-315)"
+            format!("Comtech CDM-570L trunk · {name}")
         } else {
-            "TPC 2964 (IESS-315)"
+            name.to_string()
         })
         .strong(),
     );
-    let f = st.fec.as_ref();
-    let t = f.and_then(|f| f.tpc.as_ref());
     egui::Grid::new("tpc").num_columns(2).show(ui, |ui| {
         carrier_rows(ui, c);
         if let Some(rs) = st.symbol_rate {
@@ -1561,7 +1570,11 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
             Some(t) if t.uw_locked => ui.colored_label(
                 good,
                 format!(
-                    "F50B8h every 2964 bits · {}{}",
+                    "{} · {}{}",
+                    match code {
+                        Some(Code::Comtech78) => "F8DD4258h every 16 320 bits",
+                        _ => "F50B8h every 2964 bits",
+                    },
                     t.orientation.as_deref().unwrap_or("?"),
                     if t.uw_misses > 0 {
                         format!(" · {} missed", t.uw_misses)
