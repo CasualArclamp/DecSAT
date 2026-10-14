@@ -3926,3 +3926,94 @@ then, or averaged into the noise, was never found.
   `waits_for_a_slow_carrier_and_finds_one_that_starts_later` (a burst every
   2 s from 0.9 s, found by ~1 s; a second carrier from 7 s, added with its
   earlier bursts), `takes_merge_into_one_list`.
+
+## Slow TDMA on the radio: CPU, noise bursts, rates and clocks (2026-10-14)
+
+Rory, after the slow-TDMA exe: "on slow it seems to use a ton of CPU — use
+the radio and test on this frequency" (HackRF at 1733.391 MHz, 10 MS/s,
+LNA 24 VGA 20, a TDMA VFO 8.1 kHz wide on one carrier of the Intelsat 19
+group at 12335.357 MHz: "listening for bursts… 19 s", CPU 208 %, blocks
+dropped). Recorded 45 s and 150 s there (scratchpad, not kept). The group:
+16 carriers 7.7 kHz apart (and a gap of two), 6.4 kS/s QPSK, roll-off
+~0.2, all bursting together every 2 s (two slots ~80 ms apart):
+1000-symbol bursts (157 ms) opening with a fixed ~180-symbol BPSK preamble,
+~6–9 dB over the noise, mostly idle fill; the LNB drifted ~900 Hz between
+the two recordings (30 min). Some channels' bursts in the 150 s one do not
+demodulate at all at times (carrier offset jumping burst to burst: likely
+terminals colliding).
+
+- **CPU**: while waiting, every block looked at the peak hold and worked out
+  every carrier it showed from all the kept signal (a VFO down-converter
+  over 12 s), and one that failed was tried again the next block: 1.7 s of
+  work a second of signal by 10 s. Now the peak hold is looked at every
+  0.5 s; carriers seen go to a queue worked through for at most 30 ms a
+  block (one carrier can take ~45 ms), each from the latest 5 s; one that
+  fails waits 1.5 s (four times), then twice as long each time (to 30 s).
+  Kept signal at most 2 M samples. Narrow VFO ~1 ms a second of signal; the
+  whole group (454 kS/s, 16 carriers) ~34 ms, ~300 ms in the second its
+  carriers are worked out. The CLI's progress line shows the VFO's CPU and
+  dropped blocks.
+- **Peak hold** sized to the VFO (frames ~10 ms, 256–4096 points), smoothed
+  over 5 bins and 4 half-overlapping frames (noise's own peaks ~3 dB over
+  its mean where 0.2 s single frames' stood ~7 dB, as high as the bursts);
+  the VFO's band only (its filter's stopband passed for the floor); what
+  the VFO's edge cuts is dropped when other carriers lie wholly inside.
+- **Burst detector** (`burst.rs`): levels from a 1 s histogram, floor its
+  0.3 % point and bursts the median of what stood 3 dB clear — with no
+  burst in the last second, noise's own spread passed for bursts (28 a
+  second a carrier, MER 4.5). The envelope's noise spread is fixed by its
+  6-symbol average (simulated: 0.3 % point 5.5 dB under the median, 99.9 %
+  point 4.5 dB over, for 3–8 samples a symbol, roll-offs 0.05–0.35); where
+  noise fills most of the histogram its median is the floor and bursts are
+  what stands past its tail (≥ 0.5 % of the time); where bursts fill most,
+  the old rule. Memory 10 s. `prime`: a carrier found later sets its levels
+  from the kept signal first, so its first bursts count.
+- **Centre and rate** (`channel_at`): the rate was a cyclic line over the
+  bursts run end to end, or Identify's (7108, 7934 for 6400). Now the
+  centre from the bursts' own squared/fourth-power line (`burst_carrier`);
+  candidates from each burst's envelope spectrum summed in power
+  (`burst_lines`: the data's repeats put lines at 5628 Hz nearly as strong
+  as 6400's), the cyclic estimate and a 1 % grid over 0.7–1.15 × the
+  band's estimate; each read on the three longest bursts at its own clock
+  (`best_rate`), judged by the coherence of the constellation's second
+  half (fourth-power line: live QPSK at the right rate 0.40–0.77, wrong
+  rates up to 0.49 — the first half may be a BPSK preamble any rate leaves
+  on one line; MER does not tell rates apart, 5–6 dB at wrong ones), the
+  best refined ±0.3 % in 0.05 % steps; taken only if on two in three
+  bursts it is near that burst's own best and 1.3 × its median (one burst
+  alone: ≥ 0.55). Gating closes gaps of ≤ 4 blocks inside a burst and drops
+  lone blocks; one burst is enough to try.
+- **Demodulator** (`demod.rs`): one timing phase at the expected rate for a
+  whole burst — at a clock 0.5 % out a 1000-symbol burst slips five
+  symbols. `clock`: the envelope's line over 32-symbol blocks, a rough step
+  from the lag-one product, then a weighted straight line through every
+  block's phase unwrapped onto the line (not the neighbour), twice
+  (1e-5 at 40 dB). The channel keeps the median of its last 31 bursts'
+  clocks; where they scatter < 0.2 % the terminals keep the hub's clock and
+  every burst is read at the median. `follow_phase`: after the straight
+  phase line, 32-symbol blocks' fourth-power phases, smoothed and
+  interpolated (LNB phase noise over 157 ms). The modulation is guessed
+  past the first 40 % (the BPSK preamble made every burst BPSK, MER 2 dB)
+  and settles at 8 votes when 4 in 5 agree. Matched-filter roll-off at
+  least 0.2 (the fit read 0.05–0.1 here; with the excess band filtered off
+  the bursts' clocks scattered ±13–31 Hz in 6400, ±2–3 at 0.2).
+- **Shown and layouts**: MER/SNR the mean over the first 50 bursts (the
+  2 % smoothing showed the first burst for minutes). A slow carrier's
+  layout is tried once 40 bursts share the commonest length (three in four
+  do: the rest split or cut), every 10 more.
+- Result: Rory's 8.1 kHz VFO finds its carrier at the first burst (~2.5 s):
+  6400.1 S/s, QPSK, centre right to 25 Hz, MER 8.8 dB; layout at ~140 s on
+  the 150 s capture (292-symbol preamble, fixed fields, 100 % idle fill).
+  Whole group over 150 s: all 16 at 6399.4–6400.3 S/s, MER 7.1–9.7, 8
+  layouts read. Tests: `noise_alone_makes_no_bursts`,
+  `finds_a_slow_carriers_bursts_from_the_first`,
+  `follows_a_burst_clock_that_is_out`,
+  `a_bpsk_preamble_leaves_a_qpsk_burst_qpsk`,
+  `follows_a_wandering_carrier_phase` (noise through the matched filter,
+  as a receiver's is), `reads_a_slow_group_like_the_live_one`.
+- `finds_a_group_its_layouts_and_slots`: its terminals' preamble fields
+  stepped a quarter turn a symbol, so a one-symbol misread could not be told
+  from another terminal — every terminal read the same, the test passing
+  on misreads; now fields no turn or shift makes of another. Open: a field
+  symbol is still misread now and then on the synthetic group (both before
+  and after these changes).

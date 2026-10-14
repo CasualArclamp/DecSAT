@@ -229,7 +229,19 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                     .filter(|_| a.record_on_activity)
                     .map(|f| format!(" · {} recordings", f.raw_triggered))
                     .unwrap_or_default();
-                println!("[{:5.1} s] {}{rec}", t0.elapsed().as_secs_f64(), st.message);
+                // The VFO's own thread: its time over the signal's (over
+                // 100 % it falls behind and drops blocks, in real time).
+                println!(
+                    "[{:5.1} s] {}{rec} · CPU {:.0} %{}",
+                    t0.elapsed().as_secs_f64(),
+                    st.message,
+                    100.0 * st.load,
+                    if st.dropped > 0 {
+                        format!(" · {} blocks dropped", st.dropped)
+                    } else {
+                        String::new()
+                    }
+                );
             }
             last_line = Instant::now();
         }

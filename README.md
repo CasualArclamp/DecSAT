@@ -465,13 +465,20 @@ choose **TDMA bursts**. Each carrier in it is found — from a peak hold of
 the spectrum, so a slow return that bursts once every few seconds is waited
 for (up to 20 s) rather than missed, and looked for again every 5 s, so a
 carrier that starts later joins, its earlier bursts decoded from what was
-kept — and given its own down-converter and matched filter (its rate
-measured on its bursts alone); then, for each:
+kept — and given its own down-converter and matched filter. Its centre and
+symbol rate come from its bursts alone: the rate is the one its bursts
+demodulate cleanly at, checked burst by burst, so a slow carrier is
+usually read from its first burst or two; the work is spread over a few
+blocks, so a whole group never holds the VFO up. Then, for each carrier:
 
-- **bursts** are found by their envelope and demodulated one by one —
-  timing and carrier from each burst alone, as no two come from the same
-  terminal;
-- once a hundred or so are in, the **layout** every burst shares is read
+- **bursts** are found by their envelope (against the noise's own spread,
+  so silence between a slow carrier's bursts never passes for bursts) and
+  demodulated one by one — timing, symbol clock and carrier phase from each
+  burst alone, as no two come from the same terminal (once the bursts show
+  the terminals keep the hub's clock, every burst is read at their median
+  clock instead);
+- once a hundred or so are in (forty of one length on a slow carrier:
+  ~2 minutes at one burst every 2 s), the **layout** every burst shares is read
   blind: the preamble (and a varying field inside it), pilot blocks, fixed
   fields, the data symbols — and the share of bursts that are idle fill
   (terminals with nothing to send repeat one burst);

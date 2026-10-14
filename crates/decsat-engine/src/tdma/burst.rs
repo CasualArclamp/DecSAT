@@ -3,10 +3,15 @@
 //! floor and the bursts' own — kept as a slowly forgetting histogram, with
 //! hysteresis between them.
 //!
-//! The floor is a deep percentile of the envelope, not the median: a loaded
-//! TDMA carrier is on ~98 % of the time and the noise shows only in the
-//! guard times between bursts (live: 14 symbols every 870). The bursts' level
-//! is the median of what stands clear of the floor.
+//! Where the noise fills most of the time (a slow TDMA carrier: live, a
+//! 150 ms burst every 2 s), the noise level is the median of the noise's own
+//! part of the histogram, and bursts are what stands clear of the noise's
+//! spread — known, as the envelope averages a fixed number of symbols
+//! ([`NOISE_FLOOR_DB`], [`NOISE_TAIL_DB`]): noise alone, however long, never
+//! makes a burst. Where bursts fill most of it (a loaded carrier, on ~98 % of
+//! the time, the noise only in the guard times between bursts: live, 14
+//! symbols every 870), the floor is a deep percentile of the envelope, and the
+//! bursts' level the median of what stands clear of it.
 
 use decsat_core::Iq;
 
@@ -24,10 +29,24 @@ const MARGIN_SYMBOLS: f64 = 4.0;
 const MAX_BURST_SYMBOLS: f64 = 100_000.0;
 /// The floor's percentile.
 const FLOOR_QUANTILE: f64 = 0.003;
-/// The histogram forgets with this time constant, seconds.
-const MEMORY_S: f64 = 1.0;
+/// The histogram forgets with this time constant, seconds: long enough to
+/// remember a slow carrier's bursts between one and the next (live, every
+/// 2 s; some every several).
+const MEMORY_S: f64 = 10.0;
 /// Bursts must stand this far above the floor to be looked for at all, dB.
 const MIN_CONTRAST_DB: f32 = 3.0;
+/// Noise alone, through the envelope's average of [`ENVELOPE_SYMBOLS`]
+/// matched-filtered symbols: its [`FLOOR_QUANTILE`] point lies this far under
+/// its median, and its 99.9 % point this far over, dB (simulated, the same
+/// to ±0.15 dB for 3–8 samples a symbol and roll-offs 0.05–0.35); its mean is
+/// 0.23 dB over the median.
+const NOISE_FLOOR_DB: f32 = 5.5;
+const NOISE_TAIL_DB: f32 = 4.5;
+const NOISE_MEAN_DB: f32 = 0.23;
+/// Bursts' share of the remembered envelope before they are looked for,
+/// where the noise fills most of it (its own tail past [`NOISE_TAIL_DB`] is
+/// 0.1 %).
+const MIN_BURST_SHARE: f32 = 0.005;
 
 /// The histogram's bins: dB from `HIST_LO`, a quarter dB each.
 const HIST_LO: f32 = -160.0;
@@ -133,6 +152,25 @@ impl BurstDetector {
         self.next
     }
 
+    /// Fill the histogram from `x` without looking for bursts: the levels a
+    /// stretch of signal already heard sets, before it is gone through.
+    pub fn prime(&mut self, x: &[Iq]) {
+        let mut ring = vec![0f32; self.avg];
+        let mut sum = 0f64;
+        for (i, s) in x.iter().enumerate() {
+            let p = s.norm_sqr();
+            sum += p as f64 - ring[i % self.avg] as f64;
+            ring[i % self.avg] = p;
+            if i >= self.avg && i % self.hist_every == 0 {
+                let env = (sum / self.avg as f64).max(1e-16) as f32;
+                let db = 10.0 * env.log10();
+                let k = ((db - HIST_LO) / HIST_STEP).clamp(0.0, (HIST_BINS - 1) as f32) as usize;
+                self.hist[k] += 1.0;
+            }
+        }
+        self.update_levels();
+    }
+
     /// The thresholds (linear power) from the histogram, or `None` while it
     /// is too thin or shows no contrast.
     fn update_levels(&mut self) {
@@ -161,6 +199,30 @@ impl BurstDetector {
             return;
         };
         let floor_db = HIST_LO + (fk as f32 + 0.5) * HIST_STEP;
+        // Mostly noise? Its part of the histogram: up to its tail, were the
+        // floor its own deep percentile.
+        let db_bin = |db: f32| (db / HIST_STEP).round() as usize;
+        let tail = (fk + db_bin(NOISE_FLOOR_DB + NOISE_TAIL_DB)).min(HIST_BINS);
+        let noise_mass: f32 = self.hist[..tail].iter().sum();
+        if noise_mass >= 0.5 * total {
+            // The noise's median, from its part alone; bursts are what
+            // stands clear of its tail.
+            let nk = quantile(&self.hist[..tail], 0, 0.5).unwrap_or(fk);
+            let noise_db = HIST_LO + (nk as f32 + 0.5) * HIST_STEP;
+            let clear = (nk + db_bin(NOISE_TAIL_DB)).min(HIST_BINS);
+            let mass: f32 = self.hist[clear..].iter().sum();
+            if mass < MIN_BURST_SHARE * total {
+                self.levels = None;
+                return;
+            }
+            let ok = quantile(&self.hist, clear, 0.5).unwrap_or(clear);
+            let on_db = HIST_LO + (ok as f32 + 0.5) * HIST_STEP;
+            self.levels = Some(Levels {
+                floor_db: noise_db + NOISE_MEAN_DB,
+                on_db,
+            });
+            return;
+        }
         // The bursts' level: the median of everything clear of the floor.
         let clear = fk + (MIN_CONTRAST_DB / HIST_STEP) as usize;
         let mass: f32 = self.hist[clear.min(HIST_BINS)..].iter().sum();
@@ -352,6 +414,74 @@ fn refine_edges(
 mod tests {
     use super::super::demod::tests::{Lcg, qpsk, shaped};
     use super::*;
+
+    /// Noise at unit power, `n` samples.
+    fn noise(n: usize, r: &mut Lcg) -> Vec<Iq> {
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        (0..n)
+            .map(|_| Iq::new(r.gauss() * s, r.gauss() * s))
+            .collect()
+    }
+
+    #[test]
+    fn noise_alone_makes_no_bursts() {
+        // Its own spread is no burst, however long it is listened to (it
+        // was: a slow carrier's VFO counted 28 a second between bursts).
+        let mut r = Lcg(31);
+        let sps = 3.2;
+        let mut d = BurstDetector::new(20_000.0, sps);
+        let mut out = Vec::new();
+        for _ in 0..40 {
+            d.push(&noise(10_000, &mut r), &mut out);
+        }
+        assert!(out.is_empty(), "{} bursts in noise", out.len());
+    }
+
+    #[test]
+    fn finds_a_slow_carriers_bursts_from_the_first() {
+        // 1000-symbol bursts 8 dB over the noise, one every 2 s at 6.4
+        // kS/s (3 % of the time): primed on what was heard, the detector
+        // finds every one, the first too.
+        let mut r = Lcg(37);
+        let sps = 3.2;
+        let rate = 6400.0 * sps;
+        let gap = (2.0 * rate) as usize;
+        let mut x = noise(20 * gap / 3, &mut r);
+        let mut truth = Vec::new();
+        for k in 0..6 {
+            let t0 = gap / 4 + k * gap;
+            let sym = qpsk(1000, &mut r);
+            // `shaped` adds noise of its own; at 30 dB it is nothing.
+            let s = shaped(&sym, sps, 0.001, 30.0, &mut r);
+            let g = 10f32.powf(8.0 / 20.0);
+            for (i, v) in s.iter().enumerate() {
+                if t0 + i < x.len() {
+                    x[t0 + i] += v * g;
+                }
+            }
+            truth.push(t0 + (4.0 * sps) as usize);
+        }
+        truth.retain(|&t| t + (1000.0 * sps) as usize + 100 < x.len());
+        let mut d = BurstDetector::new(rate, sps);
+        d.prime(&x);
+        let mut out = Vec::new();
+        for c in x.chunks(4096) {
+            d.push(c, &mut out);
+        }
+        let found: Vec<u64> = out.iter().map(|b| b.start + b.on.start as u64).collect();
+        for t in &truth {
+            assert!(
+                found
+                    .iter()
+                    .any(|&f| (f as i64 - *t as i64).abs() < (4.0 * sps) as i64),
+                "burst at {t} not found in {found:?}"
+            );
+        }
+        assert_eq!(out.len(), truth.len(), "{found:?}");
+        // The floor is the noise's mean, so the bursts read 8 dB over it.
+        let l = d.levels().expect("levels");
+        assert!((l.floor_db - 0.0).abs() < 0.5, "{l:?}");
+    }
 
     #[test]
     fn finds_bursts_and_their_guard_times() {

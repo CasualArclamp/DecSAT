@@ -54,11 +54,11 @@ use decsat_dsp::{Ddc, Fir, rrc_taps};
 
 use crate::carriers::detect_carriers;
 use crate::estimate::estimate_band;
-use crate::identify::{cyclic_symbol_rate, fit_roll_off, identify_in};
+use crate::identify::{cyclic_symbol_rate, fit_roll_off};
 use crate::spectrum::Spectrum;
 
 use burst::{BurstDetector, Levels, RawBurst};
-use demod::{BurstSymbols, demod_burst, nearest, points};
+use demod::{BurstSymbols, demod_burst, nearest, points, rotate};
 use layout::{Layout, commonest_length, find_layout, fit};
 use slots::{BurstTime, SlotGrid, Terminal, Terminals, TerminalsById, find_grid};
 
@@ -75,16 +75,87 @@ const RELOOK_S: f64 = 5.0;
 /// Baseband kept to work out a new carrier from its own bursts, s, and at
 /// most this many samples (a wide VFO keeps less).
 const HISTORY_S: f64 = 12.0;
-const HISTORY_MAX: usize = 4_000_000;
-/// The peak hold's FFT size.
-const PEAK_FFT: usize = 4096;
+const HISTORY_MAX: usize = 2_000_000;
+/// The peak hold: frames of about this long, s (a slow carrier's bursts
+/// last far longer: live, 150 ms), within these FFT sizes; each frame's
+/// spectrum smoothed over this many bins, and this many half-overlapping
+/// frames averaged before the hold — noise's own peaks then stand ~3 dB over
+/// its mean where single frames' stood ~7 dB, as high as the live bursts.
+const PEAK_FRAME_S: f64 = 0.01;
+const PEAK_FFT_MIN: usize = 256;
+const PEAK_FFT_MAX: usize = 4096;
+const PEAK_SMOOTH_BINS: usize = 5;
+const PEAK_FRAMES: usize = 4;
+/// While waiting for the first burst, how often the peak hold is looked at,
+/// s; and how long a carrier that could not be worked out is left before it
+/// is tried again (more bursts by then).
+const LOOK_EVERY_S: f64 = 0.5;
+const RETRY_S: f64 = 1.5;
+/// The longest wait before a carrier that keeps failing is tried again, s,
+/// and how long one is remembered after it was last due.
+const RETRY_MAX_S: f64 = 30.0;
+/// Tries at `RETRY_S` before the waits double.
+const RETRY_FLAT: u32 = 4;
+const FAILED_KEPT_S: f64 = 120.0;
+/// A carrier is worked out from this much of the latest signal kept, s
+/// (a slow carrier bursts in it a couple of times), and carriers are worked
+/// out for at most this long a block.
+const LOOK_SPAN_S: f64 = 5.0;
+const LOOK_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
+/// How far the bursts' symbol-rate line must stand over its band's median,
+/// dB ([`burst_rate`]).
+const BURST_LINE_DB: f32 = 9.0;
+/// The sharpest roll-off a channel's matched filter is given.
+const MIN_ALPHA: f64 = 0.2;
+/// How coherent a burst's constellation must be for its carrier's rate to
+/// be taken ([`best_rate`]), at least (and four times what n symbols read
+/// at random give).
+const RATE_COHERENCE: f64 = 0.25;
+/// How many times the median of the rates tried the best's coherence must
+/// be, on most of the bursts tried.
+const RATE_STANDS_OUT: f32 = 1.3;
+/// The share of a burst's own best coherence the rate taken must reach on
+/// it, and the coherence one burst alone must reach.
+const RATE_NEAR_BEST: f32 = 0.9;
+const RATE_COHERENCE_ALONE: f32 = 0.55;
+/// The strongest lines tried as the symbol rate, by demodulating at each.
+const RATE_TRIES: usize = 5;
+/// The grid of rates tried besides, as a share (a burst's clock is measured
+/// from within 1.5 %); and the symbols of a burst tried at each.
+const RATE_GRID: f64 = 0.01;
+const RATE_TRY_SYMBOLS: usize = 1500;
+/// Bursts tried at each rate, at most.
+const RATE_TRY_BURSTS: usize = 3;
+/// The steps either side of the best rate tried, and their size (a share).
+const RATE_FINE_STEPS: i32 = 6;
+const RATE_FINE: f64 = 0.0005;
+/// Gaps closed inside a burst, blocks of ~16 symbols ([`bursts_only`]).
+const BURST_GAP_BLOCKS: usize = 4;
+/// Fewest blocks in a row that make a burst.
+const BURST_MIN_BLOCKS: usize = 3;
+/// Bursts whose own clocks set the channel's symbol rate (their median),
+/// and how far out it must be to be changed, as a share.
+const CLOCK_VOTES: usize = 8;
+const CLOCK_SETTLE: f64 = 0.0002;
+/// Clocks kept for the median.
+const CLOCK_KEPT: usize = 31;
+/// Bursts' clocks scattering less than this (a share, as a standard
+/// deviation) are one shared clock: a burst's own measurement scatters
+/// ~0.1 % (live, 1000 symbols at 9 dB).
+const CLOCK_SHARED: f64 = 0.002;
 /// Bursts that vote on the modulation before it is fixed.
 const MODULATION_VOTES: u32 = 30;
+/// Votes that settle it early when four in five agree.
+const MODULATION_EARLY: u32 = 8;
 /// Bursts gathered to read a layout from (and tried again with every
 /// `LAYOUT_RETRY` more, up to `LAYOUT_KEEP`).
 const LAYOUT_FIRST: usize = 120;
 const LAYOUT_RETRY: usize = 100;
 const LAYOUT_KEEP: usize = 400;
+/// Bursts a second under which a carrier is slow, and how many more bursts
+/// before a slow carrier's layout is tried again.
+const SLOW_PER_S: usize = 5;
+const LAYOUT_SLOW_RETRY: usize = 10;
 /// Bursts' times kept for the slot grid.
 const TIMES_KEPT: usize = 20_000;
 /// The slot grid is worked out again every this many bursts.
@@ -356,6 +427,10 @@ struct Channel {
     freq_prior: Option<f64>,
     bursts: u64,
     lens: Vec<u32>,
+    /// The latest bursts' own clocks (samples a symbol), for the channel's
+    /// symbol rate; and whether they agree as one shared clock would.
+    clocks: VecDeque<f64>,
+    clock_shared: bool,
     /// Burst starts (channel samples) and lengths in the last second.
     recent: VecDeque<(u64, u64)>,
     mer_db: f32,
@@ -422,6 +497,8 @@ impl Channel {
             freq_prior: None,
             bursts: 0,
             lens: Vec::new(),
+            clocks: VecDeque::new(),
+            clock_shared: false,
             recent: VecDeque::new(),
             mer_db: 0.0,
             snr_db: 0.0,
@@ -438,12 +515,50 @@ impl Channel {
         self.front.rate()
     }
 
+    /// How much of a new burst's MER or SNR goes into the smoothed one: the
+    /// mean of all so far for the first fifty (a slow carrier's take
+    /// minutes), then a fiftieth.
+    fn smoothing(&self) -> f32 {
+        1.0 / (self.bursts as f32).clamp(1.0, 50.0)
+    }
+
+    /// The band it takes, Hz either side of its centre.
+    fn half_width(&self) -> f64 {
+        self.rs * (1.0 + self.alpha) / 2.0
+    }
+
     /// Take a block of the VFO's baseband; bursts finished in it to `done`.
     fn push(&mut self, index: usize, x: &[Iq], fixed: Option<Modulation>, done: &mut Vec<Done>) {
+        self.filter(x);
+        self.detect(index, fixed, done);
+    }
+
+    /// As [`Self::push`], for the signal kept from before the channel was
+    /// found: the burst detector's levels set from all of it first (a slow
+    /// carrier's first bursts are in it, and would go by before levels
+    /// learnt from them could find them).
+    fn push_heard(
+        &mut self,
+        index: usize,
+        x: &[Iq],
+        fixed: Option<Modulation>,
+        done: &mut Vec<Done>,
+    ) {
+        self.filter(x);
+        self.det.prime(&self.filtered);
+        self.detect(index, fixed, done);
+    }
+
+    /// The channel's front and matched filter, into `filtered`.
+    fn filter(&mut self, x: &[Iq]) {
         self.mixed.clear();
         self.front.process(x, &mut self.mixed);
         self.filtered.clear();
         self.mf.process(&self.mixed, &mut self.filtered);
+    }
+
+    /// Bursts in `filtered`, demodulated, to `done`.
+    fn detect(&mut self, index: usize, fixed: Option<Modulation>, done: &mut Vec<Done>) {
         self.raw.clear();
         self.det.push(&self.filtered, &mut self.raw);
         let raw = std::mem::take(&mut self.raw);
@@ -501,6 +616,7 @@ impl Channel {
             r.start,
             modulation,
             self.freq_prior,
+            !self.clock_shared,
         )?;
         if modulation.is_none() {
             let k = match b.modulation {
@@ -509,13 +625,41 @@ impl Channel {
                 _ => 1,
             };
             self.votes[k] += 1;
-            if self.votes.iter().sum::<u32>() >= MODULATION_VOTES {
+            // Settled by enough votes, or early by a clear majority (a slow
+            // carrier's thirty bursts take a minute).
+            let total = self.votes.iter().sum::<u32>();
+            let top = self.votes.iter().copied().max().unwrap_or(0);
+            if total >= MODULATION_VOTES || (total >= MODULATION_EARLY && 5 * top >= 4 * total) {
                 let best = (0..3).max_by_key(|&i| self.votes[i]).unwrap_or(1);
                 self.modulation =
                     Some([Modulation::Bpsk, Modulation::Qpsk, Modulation::Psk8][best]);
             }
         }
         self.bursts += 1;
+        // The symbol rate from the bursts' own clocks — a carrier found from
+        // one short burst has it only roughly (live, 0.9 % out) — their
+        // median over the latest. Where they scatter no more than measuring
+        // one burst's clock does, the terminals keep one clock (the hub's),
+        // and every burst is read at the median: more exact than its own
+        // (live, ±5 Hz in 6400 a burst, which cost a 1000-symbol burst up to
+        // 4 dB of MER).
+        self.clocks.push_back(b.sps);
+        if self.clocks.len() > CLOCK_KEPT {
+            self.clocks.pop_front();
+        }
+        if self.clocks.len() >= CLOCK_VOTES {
+            let mut c: Vec<f64> = self.clocks.iter().copied().collect();
+            c.sort_by(f64::total_cmp);
+            let med = c[c.len() / 2];
+            let mut dev: Vec<f64> = c.iter().map(|x| (x - med).abs()).collect();
+            dev.sort_by(f64::total_cmp);
+            let spread = 1.4826 * dev[dev.len() / 2] / med;
+            if (med / self.sps - 1.0).abs() > CLOCK_SETTLE {
+                self.sps = med;
+                self.rs = self.rate() / self.sps;
+            }
+            self.clock_shared = spread < CLOCK_SHARED;
+        }
         let len = b.symbols.len();
         self.lens.push(len as u32);
         if self.lens.len() > 4000 {
@@ -525,7 +669,7 @@ impl Channel {
             .push_back((r.start + on.start as u64, on.len() as u64));
         let floor = r.floor.max(1e-20);
         let snr = 10.0 * ((10f32.powf(b.power_db / 10.0) - floor).max(1e-20) / floor).log10();
-        self.snr_db += (snr - self.snr_db) * if self.bursts == 1 { 1.0 } else { 0.02 };
+        self.snr_db += (snr - self.snr_db) * self.smoothing();
 
         // Gather for the layout until one is read: the newest
         // `LAYOUT_KEEP`, tried with the first `LAYOUT_FIRST` and again with
@@ -536,9 +680,22 @@ impl Channel {
             }
             self.gathered.push(b.symbols.clone());
             self.since_try += 1;
-            if self.gathered.len() >= LAYOUT_FIRST
-                && (!self.tried || self.since_try >= LAYOUT_RETRY)
-            {
+            // A slow carrier (a few bursts a second at most, over the time
+            // it has been heard) is tried once there are as many bursts of
+            // its commonest length as a layout is read from (live, three in
+            // four; the rest split or cut short), and every few more: its
+            // 120 take minutes.
+            let heard_s = self.det.position() as f64 / self.rate();
+            let slow = (self.bursts as f64) < SLOW_PER_S as f64 * heard_s;
+            let ready = if slow && self.gathered.len() <= LAYOUT_FIRST {
+                let lens: Vec<usize> = self.gathered.iter().map(|g| g.len()).collect();
+                let same = commonest_length(&lens).map_or(0, |c| c.1);
+                same >= layout::MIN_BURSTS && (!self.tried || self.since_try >= LAYOUT_SLOW_RETRY)
+            } else {
+                self.gathered.len() >= LAYOUT_FIRST
+                    && (!self.tried || self.since_try >= LAYOUT_RETRY)
+            };
+            if ready {
                 self.tried = true;
                 self.since_try = 0;
                 self.read_layout();
@@ -567,7 +724,7 @@ impl Channel {
         if fitted && !idle {
             self.code.push(&symbols, modulation_now);
         }
-        self.mer_db += (mer - self.mer_db) * if self.bursts == 1 { 1.0 } else { 0.02 };
+        self.mer_db += (mer - self.mer_db) * self.smoothing();
         self.idle_share += ((idle as u8 as f32) - self.idle_share) * 0.01;
         let freq_hz = self.center_hz + b.freq * self.rs;
         let time = BurstTime {
@@ -686,44 +843,75 @@ struct Writer {
     bursts: u64,
 }
 
-/// The spectrum's peak hold over short segments: a burst shows at its own
+/// The spectrum's peak hold over short frames: a burst shows at its own
 /// level however rarely it comes, where an average spreads it over the
 /// silence between. Two stretches, the newest and the one before.
 struct PeakHold {
+    n: usize,
     spec: Spectrum,
     carry: Vec<Iq>,
+    /// The last [`PEAK_FRAMES`] frames, smoothed across bins.
+    frames: VecDeque<Vec<f32>>,
     cur: Vec<f32>,
     prev: Vec<f32>,
 }
 
-impl Default for PeakHold {
-    fn default() -> Self {
+impl PeakHold {
+    /// For a baseband at `rate`.
+    fn new(rate: f64) -> Self {
+        let want = (rate * PEAK_FRAME_S).max(1.0) as usize;
+        // The largest power of two not over `want`, within the limits.
+        let n = (1usize << want.ilog2()).clamp(PEAK_FFT_MIN, PEAK_FFT_MAX);
         PeakHold {
-            spec: Spectrum::new(PEAK_FFT),
+            n,
+            spec: Spectrum::new(n),
             carry: Vec::new(),
-            cur: vec![0.0; PEAK_FFT],
-            prev: vec![0.0; PEAK_FFT],
+            frames: VecDeque::new(),
+            cur: vec![0.0; n],
+            prev: vec![0.0; n],
         }
     }
-}
 
-impl PeakHold {
     fn push(&mut self, x: &[Iq]) {
         self.carry.extend_from_slice(x);
-        if self.carry.len() < 4 * PEAK_FFT {
+        if self.carry.len() < 4 * self.n {
             return;
         }
-        let cur = &mut self.cur;
+        let n = self.n;
+        // Rust note: the fields the callback changes are borrowed one by one
+        // (a closure borrowing `self` whole would clash with `self.spec`).
+        let (frames, cur) = (&mut self.frames, &mut self.cur);
         let (_, hop) = self.spec.compute_max_with(&self.carry, usize::MAX, |p| {
-            // Over three bins, so single-bin noise peaks fade.
-            for k in 0..PEAK_FFT {
-                let a = p[k.saturating_sub(1)];
-                let c = p[(k + 1).min(PEAK_FFT - 1)];
-                cur[k] = cur[k].max((a + p[k] + c) / 3.0);
+            // Across bins: a running sum over `PEAK_SMOOTH_BINS` (fewer at
+            // the ends).
+            let h = PEAK_SMOOTH_BINS / 2;
+            let mut f = if frames.len() >= PEAK_FRAMES {
+                frames.pop_front().unwrap_or_default()
+            } else {
+                vec![0.0; n]
+            };
+            let mut acc: f32 = p[..h].iter().sum();
+            for (k, v) in f.iter_mut().enumerate() {
+                if k + h < n {
+                    acc += p[k + h];
+                }
+                if k > h {
+                    acc -= p[k - h - 1];
+                }
+                let width = (k + h).min(n - 1) + 1 - k.saturating_sub(h);
+                *v = acc / width as f32;
+            }
+            frames.push_back(f);
+            // Over time: the mean of the last frames, held at its highest.
+            if frames.len() >= PEAK_FRAMES {
+                for (k, c) in cur.iter_mut().enumerate() {
+                    let m = frames.iter().map(|f| f[k]).sum::<f32>() / PEAK_FRAMES as f32;
+                    *c = c.max(m);
+                }
             }
         });
         // Keep the tail the segments did not reach.
-        let used = (self.carry.len() - PEAK_FFT) / hop * hop + hop;
+        let used = (self.carry.len() - n) / hop * hop + hop;
         self.carry.drain(..used.min(self.carry.len()));
     }
 
@@ -743,6 +931,15 @@ impl PeakHold {
     }
 }
 
+/// A carrier that could not be worked out.
+struct Failed {
+    centre: f64,
+    half_width: f64,
+    /// When it may be tried again, s; and how many times it has failed.
+    next: f64,
+    tries: u32,
+}
+
 /// A TDMA VFO's decoder.
 pub struct TdmaAnalyser {
     rate: f64,
@@ -754,6 +951,15 @@ pub struct TdmaAnalyser {
     history: VecDeque<Iq>,
     history_t0: f64,
     since_look: f64,
+    /// While waiting: when the peak hold was last looked at, s.
+    last_look: f64,
+    /// Carriers that could not be worked out, left a while before they are
+    /// tried again — longer each time.
+    failed: Vec<Failed>,
+    /// Carriers seen in the peak hold, waiting to be worked out (centre,
+    /// width, the spectrum's rate estimate), a few a block: a whole MF-TDMA
+    /// group at once held the VFO's thread up for seconds.
+    pending: VecDeque<(f64, f64, f64)>,
     started: bool,
     channels: Vec<Channel>,
     samples: u64,
@@ -772,10 +978,13 @@ impl TdmaAnalyser {
         TdmaAnalyser {
             rate,
             bandwidth,
-            peak: PeakHold::default(),
+            peak: PeakHold::new(rate),
             history: VecDeque::new(),
             history_t0: 0.0,
             since_look: 0.0,
+            last_look: f64::NEG_INFINITY,
+            failed: Vec::new(),
+            pending: VecDeque::new(),
             started: false,
             channels: Vec::new(),
             samples: 0,
@@ -802,104 +1011,183 @@ impl TdmaAnalyser {
             self.history_t0 += over as f64 / self.rate;
         }
         let listened = self.samples as f64 / self.rate;
-        if !self.started {
-            if listened < FIRST_LOOK_S {
-                return;
+        // The carriers known already take the block.
+        let mut done = std::mem::take(&mut self.done);
+        done.clear();
+        for (i, c) in self.channels.iter_mut().enumerate() {
+            c.push(i, x, modulation, &mut done);
+        }
+        // Look at the peak hold: while waiting for the first burst now and
+        // then, after it every `RELOOK_S` for carriers that had not burst
+        // yet; and work out a few of those seen.
+        self.since_look += x.len() as f64 / self.rate;
+        let due = if self.started {
+            self.since_look >= RELOOK_S
+        } else {
+            listened >= FIRST_LOOK_S && listened - self.last_look >= LOOK_EVERY_S
+        };
+        if due {
+            self.last_look = listened;
+            self.look();
+            if self.started {
+                self.since_look = 0.0;
+                self.peak.turn();
             }
-            // Wait for a burst: the peak hold shows one when it comes.
-            let found = self.new_channels();
-            if found.is_empty() && listened < LOOK_MAX_S {
+        }
+        self.work(modulation, &mut done);
+        self.deliver(done);
+        if !self.started {
+            let waited = listened >= LOOK_MAX_S;
+            if self.channels.is_empty() && !waited {
                 self.message = format!(
-                    "listening for bursts… {listened:.0} s (a slow TDMA carrier bursts every few \
-                     seconds)"
+                    "listening for bursts… {listened:.0} s (a slow TDMA carrier bursts every \
+                     few seconds)"
                 );
                 return;
             }
             self.started = true;
             self.since_look = 0.0;
             self.peak.turn();
-            self.channels = found;
-            self.message = match self.channels.len() {
-                0 => format!(
-                    "no burst in {LOOK_MAX_S:.0} s — still listening for carriers that start later"
-                ),
-                n => format!(
-                    "{n} carrier{} — finding bursts",
-                    if n == 1 { "" } else { "s" }
-                ),
-            };
-            // What was heard while waiting is decoded too.
-            let heard: Vec<Iq> = self.history.iter().copied().collect();
-            self.feed(&heard, modulation);
-            return;
-        }
-        self.feed(x, modulation);
-        // Now and then, carriers that had not burst yet.
-        self.since_look += x.len() as f64 / self.rate;
-        if self.since_look >= RELOOK_S {
-            self.since_look = 0.0;
-            let mut found = self.new_channels();
-            self.peak.turn();
-            if !found.is_empty() {
-                // Each new one decodes what was kept of its past; the others
-                // keep their numbers (the file and the map use them).
-                let heard: Vec<Iq> = self.history.iter().copied().collect();
-                let first = self.channels.len();
-                let mut done = std::mem::take(&mut self.done);
-                done.clear();
-                for (i, c) in found.iter_mut().enumerate() {
-                    c.push(first + i, &heard, modulation, &mut done);
-                }
-                self.done = done;
-                self.channels.append(&mut found);
-            }
+            self.message = format!(
+                "no burst in {LOOK_MAX_S:.0} s — still listening for carriers that start later"
+            );
         }
     }
 
-    /// Carriers in the peak hold that no channel covers yet, each worked
-    /// out from its own bursts in the kept baseband.
-    fn new_channels(&self) -> Vec<Channel> {
-        let db = self.peak.db();
-        let bin = self.rate / db.len() as f64;
+    /// Carriers in the peak hold that no channel covers yet, queued to be
+    /// worked out.
+    fn look(&mut self) {
+        let mut db = self.peak.db();
+        let n = db.len();
+        let bin = self.rate / n as f64;
+        // Only the VFO's band: past its edges the VFO's own filter, whose
+        // stopband would pass for the noise floor.
+        let inside =
+            |k: usize| ((k as f64 / n as f64) - 0.5).abs() * self.rate <= self.bandwidth / 2.0;
+        let mut within: Vec<f32> = (0..n).filter(|&k| inside(k)).map(|k| db[k]).collect();
+        if within.len() >= 16 {
+            within.sort_unstable_by(f32::total_cmp);
+            let floor = within[within.len() * 3 / 100];
+            for (k, d) in db.iter_mut().enumerate() {
+                if !inside(k) {
+                    *d = floor;
+                }
+            }
+        }
+        let now = self.samples as f64 / self.rate;
+        self.failed.retain(|f| now < f.next + FAILED_KEPT_S);
         let known = |c: f64| {
             self.channels
                 .iter()
-                .any(|k| (k.center_hz - c).abs() < k.rs * (1.0 + k.alpha) / 2.0)
+                .any(|k| (k.center_hz - c).abs() < k.half_width())
+                || self
+                    .failed
+                    .iter()
+                    .any(|f| now < f.next && (f.centre - c).abs() < f.half_width)
+                || self.pending.iter().any(|p| (p.0 - c).abs() < p.1 / 2.0)
         };
-        let mut cands: Vec<(f64, f64, f64)> = detect_carriers(&db, self.rate, 4.0)
-            .iter()
+        let seen: Vec<_> = detect_carriers(&db, self.rate, 4.0)
+            .into_iter()
             .filter(|c| !c.narrow && c.bandwidth_hz >= 16.0 * bin)
             .filter(|c| c.center_hz.abs() <= self.bandwidth / 2.0)
+            .collect();
+        // What the VFO's edge cuts is a neighbour (live, 2 kHz of the next
+        // 6.4 kS/s carrier either side; a continuous carrier's skirt): not
+        // one to work out — unless nothing lies wholly inside (a VFO drawn
+        // tight round one carrier cuts that carrier's skirts too).
+        let touches = |c: &crate::carriers::Carrier| {
+            c.center_hz.abs() + c.bandwidth_hz / 2.0 >= self.bandwidth / 2.0 - 2.0 * bin
+        };
+        let inner = seen.iter().any(|c| !touches(c));
+        let cut = |c: &crate::carriers::Carrier| inner && touches(c);
+        let mut cands: Vec<(f64, f64, f64)> = seen
+            .iter()
+            .filter(|c| !cut(c))
             .filter(|c| !known(c.center_hz))
             .map(|c| (c.center_hz, c.bandwidth_hz, c.symbol_rate_hz))
             .collect();
         // A VFO around one carrier, with no floor either side to see it by,
         // is taken as that carrier — once the wait for bursts is over.
-        let waited = self.samples as f64 / self.rate >= LOOK_MAX_S;
-        if cands.is_empty() && self.channels.is_empty() && (waited || !self.started) {
-            if !waited {
-                return Vec::new();
-            }
+        if cands.is_empty()
+            && self.channels.is_empty()
+            && self.pending.is_empty()
+            && now >= LOOK_MAX_S
+            && !known(0.0)
+        {
             cands.push((0.0, self.bandwidth, 0.0));
         }
-        let heard: Vec<Iq> = self.history.iter().copied().collect();
-        let mut out = Vec::new();
-        for (centre, bw, enbw) in cands {
-            if let Some(mut c) = self.channel_at(&heard, centre, bw, enbw) {
-                c.t0_s = self.history_t0;
-                out.push(c);
-            }
-        }
-        out.sort_by(|a, b| a.center_hz.total_cmp(&b.center_hz));
-        out
+        // In frequency order, so a group's carriers are numbered across it.
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.pending.extend(cands);
     }
 
-    fn feed(&mut self, x: &[Iq], modulation: Option<Modulation>) {
-        let mut done = std::mem::take(&mut self.done);
-        done.clear();
-        for (i, c) in self.channels.iter_mut().enumerate() {
-            c.push(i, x, modulation, &mut done);
+    /// Work out carriers waiting in the queue, for at most `LOOK_BUDGET`:
+    /// each from its bursts in the latest `LOOK_SPAN_S` of what was kept,
+    /// then fed all of it (its bursts so far, on the VFO's clock).
+    fn work(&mut self, modulation: Option<Modulation>, done: &mut Vec<Done>) {
+        if self.pending.is_empty() {
+            return;
         }
+        let t0 = std::time::Instant::now();
+        let now = self.samples as f64 / self.rate;
+        // Rust note: `make_contiguous` puts the ring's two halves in one
+        // slice in place, so it can be borrowed whole without a copy.
+        self.history.make_contiguous();
+        let mut found = Vec::new();
+        {
+            let heard = self.history.as_slices().0;
+            let span = heard
+                .len()
+                .saturating_sub((LOOK_SPAN_S * self.rate) as usize);
+            while t0.elapsed() < LOOK_BUDGET {
+                let Some((centre, bw, enbw)) = self.pending.pop_front() else {
+                    break;
+                };
+                match self.channel_at(&heard[span..], centre, bw, enbw) {
+                    Some(mut c) => {
+                        c.t0_s = self.history_t0;
+                        c.push_heard(self.channels.len() + found.len(), heard, modulation, done);
+                        found.push(c);
+                    }
+                    None => {
+                        let near = self
+                            .failed
+                            .iter_mut()
+                            .find(|f| (f.centre - centre).abs() < f.half_width);
+                        match near {
+                            Some(f) => {
+                                f.tries += 1;
+                                // The first few as often as bursts may
+                                // come, then less and less.
+                                let back = f.tries.saturating_sub(RETRY_FLAT) as i32;
+                                f.next = now + (RETRY_S * 2f64.powi(back)).min(RETRY_MAX_S);
+                            }
+                            None => self.failed.push(Failed {
+                                centre,
+                                half_width: bw / 2.0,
+                                next: now + RETRY_S,
+                                tries: 0,
+                            }),
+                        }
+                    }
+                }
+            }
+        }
+        if !found.is_empty() {
+            // The others keep their numbers (the file and the map use them).
+            self.channels.append(&mut found);
+            let n = self.channels.len();
+            if !self.started {
+                self.message = format!(
+                    "{n} carrier{} — finding bursts",
+                    if n == 1 { "" } else { "s" }
+                );
+            }
+        }
+    }
+
+    /// Bursts finished: to the burst map, the constellation and the file.
+    fn deliver(&mut self, mut done: Vec<Done>) {
         done.sort_by(|a, b| a.t_s.total_cmp(&b.t_s));
         for d in &done {
             self.marks.push_back(BurstMark {
@@ -944,11 +1232,14 @@ impl TdmaAnalyser {
         let mut all = Vec::new();
         ddc.process(x, &mut all);
         let r = ddc.out_rate();
-        let y = bursts_only(&all, r, bw);
-        if y.len() < 4096 {
+        let (mut y, runs) = bursts_only(&all, r, bw);
+        // One burst is enough (live, a slow carrier's: 1000 symbols, 3200
+        // samples here).
+        if y.len() < 1024 {
             return None;
         }
-        let mut cs = Spectrum::new(4096);
+        let size = (1usize << (y.len() / 2).ilog2()).clamp(256, 4096);
+        let mut cs = Spectrum::new(size);
         let mut cdb = cs.compute(&y);
         // Outside the carrier's band, the floor: as Identify does, so the
         // neighbours' skirts do not pass for this carrier's.
@@ -969,17 +1260,56 @@ impl TdmaAnalyser {
             .map(|b| b.symbol_rate_hz)
             .filter(|&g| g > 0.0)
             .unwrap_or(if enbw > 0.0 { enbw } else { bw / 1.25 });
-        let rs = match cyclic_symbol_rate(&y, r, guess, 0.2) {
-            Some((rs, _)) => rs,
-            // No clean line (bursts too short or too weak to show one):
-            // Identify, all of it.
-            None => identify_in(&y, r, Some(bw)).symbol_rate?,
-        };
+        // The bursts' own line, between the rates the band's width allows
+        // (its estimate reads the occupied width: live, 7.9 kHz for a
+        // 6.4 kS/s carrier of roll-off 0.2); else as one stretch; else it
+        // waits for more bursts.
+        let mut rates: Vec<f64> = burst_lines(&y, &runs, r, 0.7 * guess, 1.15 * guess)
+            .into_iter()
+            .filter(|l| l.1 >= BURST_LINE_DB)
+            .take(RATE_TRIES)
+            .map(|l| l.0)
+            .collect();
+        if let Some((rs, _)) = cyclic_symbol_rate(&y, r, guess, 0.2) {
+            rates.push(rs);
+        }
+        // And a grid across the range, each point near enough for a burst's
+        // own clock to be measured from it (one burst's line may be lost in
+        // the noise: synthetic, 9 dB, under five noise peaks) — which also
+        // gives the wrong rates the right one must stand clear of.
+        let mut g = 0.7 * guess;
+        while g <= 1.15 * guess {
+            rates.push(g);
+            g *= 1.0 + RATE_GRID;
+        }
+        // A rate is taken when the bursts demodulate at it (live, the first
+        // look at one partial burst once read 5026 S/s for 6400; at 4400,
+        // 5000, 5200, 5600 — simple fractions of it — bursts of idle fill
+        // keep some coherence): else the carrier waits for more bursts.
+        let longest = runs.iter().map(|r| r.len()).max().unwrap_or(0) as f64;
+        let bar = RATE_COHERENCE.max(4.0 / (0.5 * longest * guess / r).max(1.0).sqrt()) as f32;
+        // The carrier's centre from its bursts' own power line, and the
+        // bursts brought there before their rate is chosen: the band's
+        // centre is pulled by neighbours bursting at the same moment (live,
+        // ~1 kHz on a 6.4 kS/s carrier — past the ±800 Hz a QPSK burst's
+        // own carrier search reaches, so its rate never demodulated).
+        let line = burst_carrier(&y, &runs, r);
+        if let Some(f) = line {
+            rotate(&mut y, f / r, 0.0);
+        }
+        let rs = best_rate(&y, &runs, r, &rates, bar)?;
         if r / rs < 2.0 {
             return None;
         }
-        let shift = band.map_or(0.0, |b| b.center_hz);
-        let alpha = fit_roll_off(&cdb, r, shift, rs).map_or(0.35, |ro| ro.as_f64());
+        let shift = line.unwrap_or(band.map_or(0.0, |b| b.center_hz));
+        // The roll-off fitted, but no sharper than `MIN_ALPHA`: a burst's
+        // clock and timing come from the excess band the matched filter
+        // lets through, and a fit to a few bursts with neighbours either
+        // side reads low (live, 0.05–0.1 for a carrier of 0.2, whose
+        // bursts' clocks then scattered ±30 Hz in 6400, ±3 at 0.2).
+        let alpha = fit_roll_off(&cdb, r, shift, rs)
+            .map_or(0.35, |ro| ro.as_f64())
+            .max(MIN_ALPHA);
         Some(Channel::new(self.rate, centre + shift, rs, alpha))
     }
 
@@ -1077,13 +1407,16 @@ impl TdmaAnalyser {
 
 /// A carrier's bursts alone, end to end, from its baseband `y` at `rate`
 /// (`bw` wide): blocks of ~16 symbols whose power stands 3 dB over the
-/// quietest tenth, with a block either side for the ramps. A continuous
-/// carrier keeps everything.
-fn bursts_only(y: &[Iq], rate: f64, bw: f64) -> Vec<Iq> {
+/// quietest tenth, with a block either side for the ramps; and where each
+/// run of them lies in what is returned. A continuous carrier keeps
+/// everything.
+fn bursts_only(y: &[Iq], rate: f64, bw: f64) -> (Vec<Iq>, Vec<std::ops::Range<usize>>) {
     let blk = ((rate / bw * 16.0) as usize).max(16);
     let n = y.len() / blk;
     if n < 8 {
-        return y.to_vec();
+        // Rust note: `std::iter::once(…).collect()` rather than `vec![0..n]`,
+        // which reads like a vector of the numbers 0 to n.
+        return (y.to_vec(), std::iter::once(0..y.len()).collect());
     }
     let p: Vec<f32> = y
         .chunks_exact(blk)
@@ -1092,15 +1425,277 @@ fn bursts_only(y: &[Iq], rate: f64, bw: f64) -> Vec<Iq> {
     let mut sorted = p.clone();
     sorted.sort_by(f32::total_cmp);
     let floor = sorted[n / 10].max(1e-30);
-    let on: Vec<bool> = p.iter().map(|&v| v > 2.0 * floor).collect();
+    let mut on: Vec<bool> = p.iter().map(|&v| v > 2.0 * floor).collect();
+    // A burst's envelope dips under the bar now and then (live, a slow
+    // carrier's 150 ms bursts came out in a dozen pieces): gaps of a few
+    // blocks are closed, so each burst stays one run.
+    let mut last_on: Option<usize> = None;
+    for i in 0..n {
+        if on[i] {
+            if let Some(l) = last_on
+                && i - l <= BURST_GAP_BLOCKS
+            {
+                on[l..i].iter_mut().for_each(|v| *v = true);
+            }
+            last_on = Some(i);
+        }
+    }
+    // And a lone block or two over the bar is noise (live, one in fifty
+    // between a slow carrier's bursts).
+    let mut i = 0;
+    while i < n {
+        let j = (i..n).find(|&j| !on[j]).unwrap_or(n);
+        if j - i < BURST_MIN_BLOCKS {
+            on[i..j].iter_mut().for_each(|v| *v = false);
+        }
+        i = j + 1;
+    }
     let mut out = Vec::new();
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut was = false;
     for i in 0..n {
         let near = on[i] || (i > 0 && on[i - 1]) || (i + 1 < n && on[i + 1]);
         if near {
+            if !was {
+                runs.push(out.len()..out.len());
+            }
             out.extend_from_slice(&y[i * blk..(i + 1) * blk]);
+            if let Some(r) = runs.last_mut() {
+                r.end = out.len();
+            }
+        }
+        was = near;
+    }
+    (out, runs)
+}
+
+/// Where a carrier is, Hz from the centre of `y` (its baseband at `rate`):
+/// the line the bursts' samples leave raised to the power that strips the
+/// modulation — the square for BPSK, the fourth power for QPSK (and for a
+/// BPSK preamble) — the stronger, over the longest few bursts; `None` when
+/// neither stands out (8PSK, or too little signal). At the sample level its
+/// reach is a quarter of the sample rate either side for QPSK.
+fn burst_carrier(y: &[Iq], runs: &[std::ops::Range<usize>], rate: f64) -> Option<f64> {
+    let mut longest: Vec<&std::ops::Range<usize>> = runs.iter().collect();
+    longest.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    longest.truncate(RATE_TRY_BURSTS);
+    let mut best: Option<(f64, f32)> = None;
+    for m in [2u32, 4] {
+        // The bursts end to end: each line's phase differs, but a burst
+        // holds it for thousands of samples.
+        let seg: Vec<Iq> = longest
+            .iter()
+            .flat_map(|r| y[(*r).clone()].iter().copied())
+            .collect();
+        if seg.len() < 256 {
+            return None;
+        }
+        let (f, strength) = demod::power_line(&seg, m);
+        if best.is_none_or(|b| strength > b.1) {
+            best = Some((f * rate, strength));
         }
     }
-    out
+    let n = longest.iter().map(|r| r.len()).sum::<usize>().max(1) as f32;
+    best.filter(|b| b.1 > CARRIER_LINE.max(4.0 / n.sqrt()))
+        .map(|b| b.0)
+}
+
+/// How strong a burst's power line must be to place its carrier.
+const CARRIER_LINE: f32 = 0.05;
+
+/// Lines in a carrier's bursts' squared envelope that may be its symbol
+/// rate: the spectrum taken over each burst on its own and summed — the
+/// symbol-rate line's phase differs from one burst to the next, so the
+/// bursts add in power, where run end to end they partly cancel — and its
+/// strongest peaks between `lo` and `hi` Hz, each with how far it stands
+/// over the median there, dB, strongest first. (Live, the symbol-rate line
+/// of a slow carrier's bursts stood 20 dB clear, but its data repeated and
+/// put another line nearly as strong 12 % lower: which is which is for the
+/// demodulator to say.)
+fn burst_lines(
+    y: &[Iq],
+    runs: &[std::ops::Range<usize>],
+    rate: f64,
+    lo: f64,
+    hi: f64,
+) -> Vec<(f64, f32)> {
+    let Some(longest) = runs.iter().map(|r| r.len()).max() else {
+        return Vec::new();
+    };
+    if longest < 256 {
+        return Vec::new();
+    }
+    // Zero-padded four times over, for the peak's place between bins.
+    let n = (4 * longest).next_power_of_two().min(1 << 18);
+    let fft = rustfft::FftPlanner::new().plan_fft_forward(n);
+    let mut acc = vec![0f32; n / 2];
+    let mut buf = vec![Iq::new(0.0, 0.0); n];
+    for r in runs.iter().filter(|r| 4 * r.len() >= longest) {
+        let seg = &y[r.start..r.start + r.len().min(n)];
+        let m = seg.len();
+        let mean = seg.iter().map(|s| s.norm_sqr()).sum::<f32>() / m as f32;
+        buf.iter_mut().for_each(|b| *b = Iq::new(0.0, 0.0));
+        for (k, s) in seg.iter().enumerate() {
+            // Hann over the burst, so its ends do not spread the line.
+            let w = 0.5 - 0.5 * (std::f32::consts::TAU * k as f32 / m as f32).cos();
+            buf[k] = Iq::new((s.norm_sqr() - mean) * w, 0.0);
+        }
+        fft.process(&mut buf);
+        for (a, b) in acc.iter_mut().zip(&buf) {
+            *a += b.norm_sqr();
+        }
+    }
+    let kl = (lo / rate * n as f64).ceil() as usize;
+    let kh = ((hi / rate * n as f64).floor() as usize).min(n / 2 - 2);
+    if kh < kl + 8 || kl < 2 {
+        return Vec::new();
+    }
+    let mut band: Vec<f32> = acc[kl..=kh].to_vec();
+    let mid = band.len() / 2;
+    let median = band
+        .select_nth_unstable_by(mid, f32::total_cmp)
+        .1
+        .max(1e-30);
+    // Peaks: the highest bin within a main lobe's width (a burst's Hann
+    // window, zero-padded four times: ±8 bins) either side.
+    let lobe = 8;
+    let mut peaks: Vec<(f64, f32)> = (kl..=kh)
+        .filter(|&k| {
+            let (a, b) = (k.saturating_sub(lobe).max(kl), (k + lobe).min(kh));
+            (a..=b).all(|j| acc[j] <= acc[k])
+        })
+        .map(|k| {
+            let (l, peak, r) = (acc[k - 1], acc[k], acc[k + 1]);
+            let den = l - 2.0 * peak + r;
+            let frac = if den.abs() > 1e-30 {
+                (0.5 * (l - r) / den).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            };
+            (
+                (k as f64 + frac as f64) * rate / n as f64,
+                10.0 * (peak / median).log10(),
+            )
+        })
+        .collect();
+    peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    peaks
+}
+
+/// Of the symbol `rates` offered, the one the longest few of `runs`
+/// demodulate best at — through a matched filter at that rate, each burst's
+/// own clock measured from there (within 1.5 %), then the rates just either
+/// side read as they stand — as measured, if it stands clear of the rest on
+/// most of those bursts. "Best" is the coherence of the constellation of a
+/// burst's second half: the strength of the line its M-th power leaves (1 a
+/// clean constellation; live QPSK at 9 dB 0.6–0.77, the rates tried around
+/// it a median of 0.36–0.46). The first half may be a preamble on one line
+/// through the origin (live, 180 BPSK symbols), which any rate leaves on
+/// that line; MER does not tell rates apart (at a wrong one a live burst
+/// still read 5–6 dB, against 6–9); and with dozens of rates tried, one
+/// wrong rate may stand clear on one burst by chance, but not on most.
+fn best_rate(
+    y: &[Iq],
+    runs: &[std::ops::Range<usize>],
+    rate: f64,
+    rates: &[f64],
+    bar: f32,
+) -> Option<f64> {
+    let mut longest: Vec<&std::ops::Range<usize>> = runs.iter().collect();
+    longest.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    // The few longest, and none much shorter than the longest (a scrap of
+    // a burst says little).
+    let top = longest.first()?.len();
+    longest.retain(|r| 2 * r.len() >= top);
+    longest.truncate(RATE_TRY_BURSTS);
+    let n = longest.len();
+    // The bursts read at `rs`, from there at each one's own clock or not:
+    // the rate they ran at (their mean), and each one's coherence (0 for
+    // one that would not demodulate).
+    let score = |rs: f64, own_clock: bool| -> Option<(f64, Vec<f32>)> {
+        let sps = rate / rs;
+        let (mut clock, mut read) = (0.0, 0);
+        let mut coherence = Vec::with_capacity(n);
+        for run in &longest {
+            // At most a few thousand symbols of it.
+            let end = run
+                .end
+                .min(run.start + (RATE_TRY_SYMBOLS as f64 * sps) as usize);
+            let mut mf = Fir::new(rrc_taps(sps, 0.2, 6));
+            let mut x = Vec::new();
+            mf.process(&y[run.start..end], &mut x);
+            let Some(b) = demod_burst(&x, 0..x.len(), sps, 0, None, None, own_clock) else {
+                coherence.push(0.0);
+                continue;
+            };
+            // The fourth power for all but 8PSK (BPSK's is as clean as its
+            // square): one measure, so rates read as different
+            // constellations compare (a wrong rate read as BPSK beat the
+            // right one read as QPSK on its square).
+            let m = if b.modulation == Modulation::Psk8 {
+                8
+            } else {
+                4
+            };
+            let half = &b.symbols[b.symbols.len() / 2..];
+            clock += if own_clock { rate / b.sps } else { rs };
+            coherence.push(demod::power_line(half, m).1);
+            read += 1;
+        }
+        (read > 0).then(|| (clock / read as f64, coherence))
+    };
+    let mean = |c: &[f32]| c.iter().sum::<f32>() / c.len().max(1) as f32;
+    let tried: Vec<(f64, Vec<f32>)> = rates
+        .iter()
+        .filter(|&&rs| rate / rs >= 2.0)
+        .filter_map(|&rs| score(rs, true))
+        .collect();
+    // Each burst's median over the rates tried.
+    let medians: Vec<f32> = (0..n)
+        .map(|j| {
+            let mut c: Vec<f32> = tried.iter().map(|t| t.1[j]).collect();
+            c.sort_by(f32::total_cmp);
+            c.get(c.len() / 2).copied().unwrap_or(0.0)
+        })
+        .collect();
+    let mut best = tried
+        .iter()
+        .max_by(|a, b| mean(&a.1).total_cmp(&mean(&b.1)))?
+        .clone();
+    // Finer than a burst's own clock can be measured at low SNR (live and
+    // synthetic, 0.1 % on 1000 symbols at 9 dB, which a burst feels): the
+    // rates either side, each read as it stands, the most coherent kept.
+    let around = best.0;
+    for k in -RATE_FINE_STEPS..=RATE_FINE_STEPS {
+        let rs = around * (1.0 + k as f64 * RATE_FINE);
+        if let Some(t) = score(rs, false)
+            && mean(&t.1) > mean(&best.1)
+        {
+            best = t;
+        }
+    }
+    // On most bursts it must be (near enough) each one's own best, and
+    // stand clear of the median: a wrong rate wins on one burst's chance
+    // (live, bursts that would not demodulate at their carrier's rate —
+    // terminals colliding — gave wrong winners up to 0.49 on one burst and
+    // 0.2 on the next). One burst alone must be clean beyond doubt (the
+    // right rate on one live burst read 0.40–0.72; a wrong one up to 0.49).
+    let each_best: Vec<f32> = (0..n)
+        .map(|j| tried.iter().map(|t| t.1[j]).fold(0.0, f32::max))
+        .collect();
+    let bar = if n == 1 {
+        bar.max(RATE_COHERENCE_ALONE)
+    } else {
+        bar
+    };
+    let clear = (0..n)
+        .filter(|&j| {
+            best.1[j] >= bar
+                && best.1[j] >= RATE_STANDS_OUT * medians[j]
+                && best.1[j] >= RATE_NEAR_BEST * each_best[j]
+        })
+        .count();
+    (3 * clear >= 2 * n).then_some(best.0)
 }
 
 fn write_burst(w: &mut Writer, d: &Done) -> std::io::Result<()> {
@@ -1162,9 +1757,14 @@ mod tests {
                 if k % 12 != 5 {
                     let term = (k * 7 + c) % 3;
                     let mut b = live_like(r, k.is_multiple_of(3), &fill, &fixed);
-                    // Each terminal's own value in the preamble's field.
+                    // Each terminal's own value in the preamble's field —
+                    // values no turn or one-symbol shift of another makes
+                    // (a field stepping a quarter turn a symbol was read
+                    // the same for every terminal off by a symbol).
+                    const IDS: [[usize; 5]; 3] =
+                        [[0, 1, 1, 3, 2], [2, 0, 3, 3, 1], [1, 3, 0, 2, 2]];
                     for (i, s) in b[13..18].iter_mut().enumerate() {
-                        *s = p[(term * 5 + i * 3 + c) % 4];
+                        *s = p[(IDS[term][i] + c) % 4];
                     }
                     let f = [0.0005, -0.0008, 0.0012][term];
                     let g = [1.0f32, 0.6, 1.4][term];
@@ -1240,6 +1840,64 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_slow_group_like_the_live_one() {
+        // As live (Intelsat 19): 6.4 kS/s QPSK carriers 7.7 kHz apart, all
+        // bursting together once every 2 s — 1000 symbols, 180 of them a
+        // BPSK preamble — at Es/N0 ~9 dB, in a 48 kS/s VFO.
+        let mut r = Lcg(41);
+        let (rate, rs) = (48_000.0, 6400.0);
+        let sps = rate / rs;
+        let p = points(Modulation::Qpsk);
+        let pre: Vec<Iq> = (0..180).map(|_| p[2 * (r.next() % 2) as usize]).collect();
+        let n = (24.0 * rate) as usize;
+        let sigma = (0.5f64 * (1.0 / 10f64.powf(0.9)) * rate / rs).sqrt() as f32;
+        let mut x: Vec<Iq> = (0..n)
+            .map(|_| Iq::new(r.gauss() * sigma, r.gauss() * sigma))
+            .collect();
+        let centres = [-7700.0, 0.0, 7700.0];
+        let mut t = 0.6;
+        while t + 0.2 < 24.0 {
+            for &centre in &centres {
+                let mut sym = pre.clone();
+                sym.extend((0..820).map(|_| p[(r.next() % 4) as usize]));
+                let b = shaped(&sym, sps, 0.0, 60.0, &mut r);
+                let t0 = (t * rate) as usize;
+                for (i, v) in b.iter().enumerate() {
+                    let a = std::f64::consts::TAU * centre / rate * (t0 + i) as f64;
+                    x[t0 + i] += v * Iq::new(a.cos() as f32, a.sin() as f32);
+                }
+            }
+            t += 2.0;
+        }
+        let mut a = TdmaAnalyser::new(rate, 30_000.0);
+        let mut seen_at = None;
+        for (k, c) in x.chunks(4_800).enumerate() {
+            a.push(c, None);
+            if seen_at.is_none() && a.view().channels.len() == 3 {
+                seen_at = Some((k + 1) as f64 * 0.1);
+            }
+        }
+        // All three at the first burst.
+        let seen = seen_at.expect("three carriers");
+        assert!(seen < 1.5, "found at {seen} s");
+        let v = a.view();
+        assert_eq!(v.channels.len(), 3, "{}", v.message);
+        for (c, want) in v.channels.iter().zip(centres) {
+            assert!((c.center_hz - want).abs() < 300.0, "centre {}", c.center_hz);
+            assert!(
+                (c.symbol_rate - rs).abs() < rs * 1e-3,
+                "rate {}",
+                c.symbol_rate
+            );
+            assert_eq!(c.modulation, Some(Modulation::Qpsk));
+            assert!(c.mer_db > 7.0, "MER {}", c.mer_db);
+            // Every burst, and nothing between them.
+            assert!((11..=12).contains(&c.bursts), "{} bursts", c.bursts);
+            assert_eq!(c.len_symbols.map(|l| l.abs_diff(1000) <= 6), Some(true));
+        }
+    }
+
+    #[test]
     fn finds_a_group_its_layouts_and_slots() {
         let mut r = Lcg(21);
         let rate = 2.0e6;
@@ -1270,7 +1928,14 @@ mod tests {
             // Every twelfth slot empty: a frame of twelve.
             let f = g.frame.expect("a frame");
             assert!((f.period - 12.0 * 870.0).abs() < 3.0, "{f:?}");
-            assert!(c.terminals.len() >= 3, "{:?}", c.terminals);
+            assert!(
+                c.terminals.len() >= 3,
+                "{:?} layout {} clock {} rate {}",
+                c.terminals,
+                l.describe(),
+                c.symbol_rate,
+                c.mer_db
+            );
             assert!(c.mer_db > 10.0, "MER {}", c.mer_db);
         }
     }

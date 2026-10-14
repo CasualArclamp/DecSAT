@@ -5,12 +5,18 @@
 //!
 //! - **timing** from the symbol-rate line of the squared envelope — Oerder &
 //!   Meyr, "Digital filter and square timing recovery", IEEE Trans. Commun.
-//!   36(5), 1988;
+//!   36(5), 1988 — and the burst's own symbol clock from how that line's
+//!   phase turns from one block of the burst to the next (a slow carrier's
+//!   bursts are long: live, 1000 symbols, over which a clock 0.5 % out
+//!   slips five symbols);
 //! - **carrier** from the M-th power of the symbols, which strips QPSK's
 //!   (M = 4) or BPSK's (M = 2) modulation — Viterbi & Viterbi, "Nonlinear
 //!   estimation of PSK-modulated carrier phase", IEEE Trans. Inf. Theory
 //!   29(4), 1983: a coarse frequency from an FFT of `s^M`, then a straight
-//!   line fitted through block-wise phases for the rest.
+//!   line fitted through block-wise phases for the rest, and on a long
+//!   burst the phase followed block by block from there (an LNB's phase
+//!   noise wanders the carrier ±30 Hz in under a second: over a slow
+//!   carrier's 150 ms burst no straight line holds).
 
 use std::f64::consts::{PI, TAU};
 
@@ -30,6 +36,8 @@ pub struct BurstSymbols {
     pub power_db: f32,
     /// Residual carrier, cycles a symbol.
     pub freq: f64,
+    /// Samples a symbol, as the burst's own clock was measured to run.
+    pub sps: f64,
     pub mer_db: f32,
     pub modulation: Modulation,
 }
@@ -122,6 +130,104 @@ fn timing_offset(x: &[Iq], sps: f64) -> f64 {
     (-im.atan2(re) / TAU * sps).rem_euclid(sps)
 }
 
+/// Symbols a block, for the burst's clock: the line's phase may turn up to
+/// half a symbol a block, so a clock up to 1.5 % out is followed.
+const CLOCK_BLOCK_SYMBOLS: f64 = 32.0;
+/// Blocks a burst needs before its own clock is measured, and the most the
+/// clock may be out, as a share.
+const CLOCK_BLOCKS: usize = 4;
+const CLOCK_MAX: f64 = 0.015;
+
+/// The burst's samples a symbol, from `sps` as expected: the envelope's line
+/// summed over blocks, and how its phase turns from block to block (a
+/// frequency estimate from the lag-one product, as for a carrier).
+fn clock(x: &[Iq], sps: f64) -> f64 {
+    let len = (CLOCK_BLOCK_SYMBOLS * sps).round() as usize;
+    let blocks = x.len() / len.max(1);
+    if blocks < CLOCK_BLOCKS {
+        return sps;
+    }
+    // The mean power out, or it leaks into the line (a block is not a
+    // whole number of symbols).
+    let mean = x.iter().map(|s| s.norm_sqr() as f64).sum::<f64>() / x.len() as f64;
+    let w = -TAU / sps;
+    let step = (w.cos(), w.sin());
+    let lines: Vec<(f64, f64)> = (0..blocks)
+        .map(|b| {
+            // The oscillator by recursion, from the exact phase at the
+            // block's start.
+            let a = w * (b * len) as f64;
+            let mut osc = (a.cos(), a.sin());
+            let (mut re, mut im) = (0f64, 0f64);
+            for s in &x[b * len..(b + 1) * len] {
+                let p = s.norm_sqr() as f64 - mean;
+                re += p * osc.0;
+                im += p * osc.1;
+                osc = (
+                    osc.0 * step.0 - osc.1 * step.1,
+                    osc.0 * step.1 + osc.1 * step.0,
+                );
+            }
+            (re, im)
+        })
+        .collect();
+    // Roughly, from the lag-one product (a frequency estimate as for a
+    // carrier) — which amounts to the first and last blocks alone...
+    let (mut zr, mut zi) = (0f64, 0f64);
+    for pair in lines.windows(2) {
+        let ((ar, ai), (br, bi)) = (pair[0], pair[1]);
+        // b · conj(a)
+        zr += br * ar + bi * ai;
+        zi += bi * ar - br * ai;
+    }
+    // ...then a straight line through every block's phase, weighted by the
+    // line's strength, each unwrapped onto the line so far (not onto its
+    // neighbour, whose noise would carry on into every block after), twice
+    // (the data's own jitter on a 1000-symbol burst: 0.3 % from the first,
+    // 0.003 % from this).
+    let mut slope = zi.atan2(zr);
+    for _ in 0..2 {
+        // Where the line stands at block 0: the blocks' mean with the slope
+        // taken off.
+        let (mut ar, mut ai) = (0f64, 0f64);
+        for (b, &(re, im)) in lines.iter().enumerate() {
+            let a = -slope * b as f64;
+            ar += re * a.cos() - im * a.sin();
+            ai += re * a.sin() + im * a.cos();
+        }
+        let anchor = ai.atan2(ar);
+        let pts: Vec<(f64, f64, f64)> = lines
+            .iter()
+            .enumerate()
+            .map(|(b, &(re, im))| {
+                let want = anchor + slope * b as f64;
+                let ph = im.atan2(re);
+                (
+                    b as f64,
+                    ph - TAU * ((ph - want) / TAU).round(),
+                    re.hypot(im),
+                )
+            })
+            .collect();
+        let w: f64 = pts.iter().map(|p| p.2).sum::<f64>().max(1e-30);
+        let mx = pts.iter().map(|p| p.2 * p.0).sum::<f64>() / w;
+        let my = pts.iter().map(|p| p.2 * p.1).sum::<f64>() / w;
+        let sxx: f64 = pts.iter().map(|p| p.2 * (p.0 - mx).powi(2)).sum();
+        let sxy: f64 = pts.iter().map(|p| p.2 * (p.0 - mx) * (p.1 - my)).sum();
+        if sxx > 0.0 {
+            slope = sxy / sxx;
+        }
+    }
+    // The line sits at 1/T: its phase turns by 2π(1/T − 1/sps) a sample.
+    let turn = slope / TAU / len as f64;
+    let t = 1.0 / (1.0 / sps + turn);
+    if (t / sps - 1.0).abs() <= CLOCK_MAX {
+        t
+    } else {
+        sps
+    }
+}
+
 /// The `m`-th power line's frequency in `s` (cycles a symbol, within
 /// ±1/(2m)) and its strength, |Σ s^m| / Σ |s|^m (1 = a clean line).
 pub fn power_line(s: &[Iq], m: u32) -> (f64, f32) {
@@ -173,6 +279,14 @@ pub fn power_line(s: &[Iq], m: u32) -> (f64, f32) {
 /// clean line (BPSK's square is a line, and so is its fourth power, so the
 /// order is tried from the lowest).
 pub fn guess_modulation(s: &[Iq]) -> Modulation {
+    // The data, past any preamble: live, 180 BPSK symbols open a slow
+    // carrier's QPSK bursts, and their square's line passed the whole burst
+    // for BPSK.
+    let s = if s.len() >= 200 {
+        &s[s.len() * 2 / 5..]
+    } else {
+        s
+    };
     let bar = (4.0 / (s.len().max(1) as f32).sqrt()).max(0.12);
     for (m, kind) in [
         (2, Modulation::Bpsk),
@@ -190,7 +304,9 @@ pub fn guess_modulation(s: &[Iq]) -> Modulation {
 /// symbol, the burst itself within `on` (the rest is margin), the first
 /// sample `start` samples into the stream. `modulation` `None` guesses it.
 /// `freq`: where the carrier is known to be (cycles a symbol), which saves
-/// the frequency search.
+/// the frequency search. `own_clock`: sample at the burst's own clock as
+/// measured, rather than at `sps` (which [`BurstSymbols::sps`] reports
+/// either way).
 pub fn demod_burst(
     x: &[Iq],
     on: std::ops::Range<usize>,
@@ -198,6 +314,7 @@ pub fn demod_burst(
     start: u64,
     modulation: Option<Modulation>,
     freq: Option<f64>,
+    own_clock: bool,
 ) -> Option<BurstSymbols> {
     let on = on.start.min(x.len())..on.end.min(x.len());
     if (on.len() as f64) < 8.0 * sps {
@@ -208,6 +325,11 @@ pub fn demod_burst(
         .map(|s| s.norm_sqr() as f64)
         .sum::<f64>()
         / on.len() as f64;
+    // Twice: the first from `sps`, the second from there (a block's line
+    // leaks a little of the envelope's mirror line, which pulls the first
+    // towards where it started).
+    let measured = clock(&x[on.clone()], clock(&x[on.clone()], sps));
+    let sps = if own_clock { measured } else { sps };
     let tau = timing_offset(&x[on.clone()], sps);
     // The first instant at or after the burst's start (half a symbol of
     // leeway, the edges being only as good as the envelope), and the last
@@ -238,6 +360,7 @@ pub fn demod_burst(
         _ => 0.0,
     };
     rotate(&mut sym, f1, phase - offset);
+    follow_phase(&mut sym, m);
     let p = sym.iter().map(|s| s.norm_sqr() as f64).sum::<f64>() / sym.len() as f64;
     let g = (1.0 / p.max(1e-20).sqrt()) as f32;
     for s in &mut sym {
@@ -250,6 +373,7 @@ pub fn demod_burst(
         symbols: sym,
         power_db: (10.0 * power.max(1e-20).log10()) as f32,
         freq: f0 + f1,
+        sps: measured,
         modulation,
     })
 }
@@ -258,6 +382,53 @@ pub fn demod_burst(
 pub fn rotate(s: &mut [Iq], f: f64, phase: f64) {
     for (k, x) in s.iter_mut().enumerate() {
         let a = -(TAU * f * k as f64 + phase);
+        *x *= Iq::new(a.cos() as f32, a.sin() as f32);
+    }
+}
+
+/// Symbols a block for following the phase, and blocks a burst needs.
+const FOLLOW_BLOCK: usize = 32;
+const FOLLOW_BLOCKS: usize = 6;
+
+/// Follow what phase is left after the straight line: each block's M-th
+/// power phase, smoothed over three blocks, between block centres in a
+/// straight line, taken off symbol by symbol. (A block's phase is only
+/// known modulo 2π/M; neighbours are unwrapped onto each other, and the
+/// line already took off nearly all of it.)
+fn follow_phase(s: &mut [Iq], m: u32) {
+    let blocks = s.len() / FOLLOW_BLOCK;
+    if blocks < FOLLOW_BLOCKS {
+        return;
+    }
+    let span = TAU / m as f64;
+    let mut ph: Vec<f64> = Vec::with_capacity(blocks);
+    for b in 0..blocks {
+        let sum: Iq = s[b * FOLLOW_BLOCK..(b + 1) * FOLLOW_BLOCK]
+            .iter()
+            .map(|x| x.powu(m))
+            .sum();
+        // QPSK sits at ±45°, ±135°: its fourth power at π, so the phase
+        // measured is of −s^M (BPSK's square and 8PSK's eighth sit at 0).
+        let v = if m == 4 { -sum } else { sum };
+        let mut p = (v.im as f64).atan2(v.re as f64) / m as f64;
+        if let Some(&q) = ph.last() {
+            p -= span * ((p - q) / span).round();
+        }
+        ph.push(p);
+    }
+    let smooth: Vec<f64> = (0..blocks)
+        .map(|b| {
+            let (a, c) = (b.saturating_sub(1), (b + 1).min(blocks - 1));
+            (ph[a] + ph[b] + ph[c]) / 3.0
+        })
+        .collect();
+    let centre = |b: usize| (b * FOLLOW_BLOCK) as f64 + (FOLLOW_BLOCK as f64 - 1.0) / 2.0;
+    for (k, x) in s.iter_mut().enumerate() {
+        let t = k as f64;
+        // The block centres either side (or the nearest two at the ends).
+        let b = (((t - centre(0)) / FOLLOW_BLOCK as f64).floor().max(0.0) as usize).min(blocks - 2);
+        let w = ((t - centre(b)) / FOLLOW_BLOCK as f64).clamp(-0.5, 1.5);
+        let a = -(smooth[b] + w * (smooth[b + 1] - smooth[b]));
         *x *= Iq::new(a.cos() as f32, a.sin() as f32);
     }
 }
@@ -369,9 +540,9 @@ pub(crate) mod tests {
         let sps = 3.37;
         let x = shaped(&sym, sps, 0.004, 14.0, &mut r);
         let on = (4.0 * sps) as usize..((4.0 + 600.0) * sps) as usize;
-        let b = demod_burst(&x, on.clone(), sps, 0, None, None).unwrap();
+        let b = demod_burst(&x, on.clone(), sps, 0, None, None, true).unwrap();
         // Told where the carrier is, the same.
-        let k = demod_burst(&x, on, sps, 0, Some(Modulation::Qpsk), Some(0.0039)).unwrap();
+        let k = demod_burst(&x, on, sps, 0, Some(Modulation::Qpsk), Some(0.0039), true).unwrap();
         assert!(
             (k.freq - 0.004).abs() < 2e-4 && k.mer_db > 11.0,
             "{} {}",
@@ -416,6 +587,86 @@ pub(crate) mod tests {
         );
     }
 
+    /// MER of `b`'s symbols, QPSK.
+    fn qpsk_mer(b: &BurstSymbols) -> f32 {
+        mer_db(&b.symbols, points(Modulation::Qpsk))
+    }
+
+    /// As [`shaped`], the noise through the matched filter too (as a
+    /// receiver's is), not white: Es/N0 `esn0_db` at the symbol instants.
+    fn shaped_mf(sym: &[Iq], sps: f64, f: f64, esn0_db: f64, r: &mut Lcg) -> Vec<Iq> {
+        let mut x = shaped(sym, sps, f, 80.0, r);
+        let taps = decsat_dsp::rrc_taps(sps, 0.2, 6);
+        let sigma = (0.5 / 10f64.powf(esn0_db / 10.0)).sqrt() as f32;
+        let white: Vec<Iq> = (0..x.len() + taps.len())
+            .map(|_| Iq::new(r.gauss() * sigma, r.gauss() * sigma))
+            .collect();
+        // Unit-energy taps keep the noise's power, band-limited.
+        let e: f32 = taps.iter().map(|t| t * t).sum::<f32>().sqrt();
+        for (i, v) in x.iter_mut().enumerate() {
+            let n: Iq = taps
+                .iter()
+                .zip(&white[i..])
+                .map(|(t, w)| w * (*t / e))
+                .sum();
+            *v += n;
+        }
+        x
+    }
+
+    #[test]
+    fn follows_a_burst_clock_that_is_out() {
+        // 1000 symbols sent 0.8 % slower than expected: read at the
+        // expected clock they slip eight symbols over the burst.
+        let mut r = Lcg(17);
+        let sym = qpsk(1000, &mut r);
+        let (sps, true_sps) = (3.2, 3.2 * 1.008);
+        let x = shaped_mf(&sym, true_sps, 0.002, 14.0, &mut r);
+        let on = (4.0 * true_sps) as usize..((4.0 + 1000.0) * true_sps) as usize;
+        let b = demod_burst(&x, on.clone(), sps, 0, Some(Modulation::Qpsk), None, true).unwrap();
+        assert!((b.sps / true_sps - 1.0).abs() < 3e-4, "clock {}", b.sps);
+        assert!(qpsk_mer(&b) > 11.0, "MER {}", qpsk_mer(&b));
+        let fixed = demod_burst(&x, on, sps, 0, Some(Modulation::Qpsk), None, false).unwrap();
+        assert!(
+            qpsk_mer(&fixed) < qpsk_mer(&b) - 3.0,
+            "at the expected clock, MER {}",
+            qpsk_mer(&fixed)
+        );
+    }
+
+    #[test]
+    fn a_bpsk_preamble_leaves_a_qpsk_burst_qpsk() {
+        // Live: 180 symbols on two opposite QPSK points open a slow
+        // carrier's bursts, ahead of 800 QPSK data symbols.
+        let mut r = Lcg(23);
+        let p = points(Modulation::Qpsk);
+        let mut sym: Vec<Iq> = (0..180).map(|_| p[2 * (r.next() % 2) as usize]).collect();
+        sym.extend(qpsk(800, &mut r));
+        let x = shaped_mf(&sym, 3.2, -0.003, 14.0, &mut r);
+        let on = (4.0 * 3.2) as usize..((4.0 + 980.0) * 3.2) as usize;
+        let b = demod_burst(&x, on, 3.2, 0, None, None, true).unwrap();
+        assert_eq!(b.modulation, Modulation::Qpsk);
+        assert!(b.mer_db > 11.0, "MER {}", b.mer_db);
+    }
+
+    #[test]
+    fn follows_a_wandering_carrier_phase() {
+        // An LNB's phase noise: the carrier's phase wanders ±0.5 rad over a
+        // 1000-symbol burst, which no straight line follows.
+        let mut r = Lcg(29);
+        let sym = qpsk(1000, &mut r);
+        let sps = 3.2;
+        let mut x = shaped_mf(&sym, sps, 0.0, 14.0, &mut r);
+        let n = x.len() as f64;
+        for (i, v) in x.iter_mut().enumerate() {
+            let a = 0.5 * (TAU * 1.3 * i as f64 / n).sin();
+            *v *= Iq::new(a.cos() as f32, a.sin() as f32);
+        }
+        let on = (4.0 * sps) as usize..((4.0 + 1000.0) * sps) as usize;
+        let b = demod_burst(&x, on, sps, 0, Some(Modulation::Qpsk), None, true).unwrap();
+        assert!(qpsk_mer(&b) > 11.0, "MER {}", qpsk_mer(&b));
+    }
+
     #[test]
     fn tells_bpsk_from_qpsk() {
         let mut r = Lcg(3);
@@ -423,7 +674,7 @@ pub(crate) mod tests {
             .map(|_| Iq::new(if r.next() & 1 == 0 { 1.0 } else { -1.0 }, 0.0))
             .collect();
         let x = shaped(&bp, 4.0, -0.01, 12.0, &mut r);
-        let b = demod_burst(&x, 16..(404 * 4), 4.0, 0, None, None).unwrap();
+        let b = demod_burst(&x, 16..(404 * 4), 4.0, 0, None, None, true).unwrap();
         assert_eq!(b.modulation, Modulation::Bpsk);
         assert!(b.mer_db > 9.0);
     }
