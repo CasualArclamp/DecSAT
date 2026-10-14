@@ -52,8 +52,8 @@ header.bar h1 small { color: var(--muted); font-weight: 400; font-size: 14px; ma
 .control input[type=range] { width: 180px; accent-color: var(--accent); }
 .control output { min-width: 5.5em; font-variant-numeric: tabular-nums; }
 nav.index { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 14px 0 6px; font-size: 13px; }
-nav.index a { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
-nav.index a:hover, nav.index a:focus-visible { border-color: var(--accent); outline: none; }
+nav.index button { font: inherit; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+nav.index button:hover, nav.index button:focus-visible { border-color: var(--accent); outline: none; }
 p.lede { max-width: 68ch; color: var(--muted); margin: 8px 0 18px; }
 section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 18px 0; scroll-margin-top: 76px; }
 section.card h2 { margin: 0 0 2px; font-size: 19px; text-wrap: balance; }
@@ -491,9 +491,10 @@ const cards = [];
 function build() {
   const nav = document.getElementById('index'), main = document.getElementById('cards');
   for (const s of SIGNALS) {
-    const a = document.createElement('a'); a.href = '#' + s.id; a.textContent = s.name.replace(/ \(.*$/, ''); nav.appendChild(a);
-    a.addEventListener('click', e => {
-      e.preventDefault();
+    // A button, not a link: the htmlpreview viewer rewrites every link to
+    // the raw file's address, which a #anchor would leave the page for.
+    const a = document.createElement('button'); a.type = 'button'; a.textContent = s.name.replace(/ \(.*$/, ''); nav.appendChild(a);
+    a.addEventListener('click', () => {
       document.getElementById(s.id).scrollIntoView({ behavior: 'smooth', block: 'start' });
       try { history.replaceState(null, '', '#' + s.id); } catch (_) { /* a viewer that forbids it: the scroll is enough */ }
     });
