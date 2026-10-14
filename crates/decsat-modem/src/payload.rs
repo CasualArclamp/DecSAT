@@ -473,6 +473,8 @@ pub enum Format {
     /// (constant, 1010… or a repeated byte): the scrambler is found even
     /// though what the data carry is not.
     Idle,
+    /// MPEG audio frames (a programme feed sent straight over the modem).
+    MpegAudio,
 }
 
 /// The data of one frame, made useful.
@@ -499,6 +501,8 @@ pub struct PayloadOut {
     /// The descrambled data, MSB first, while the format is unknown or for
     /// recording.
     pub raw: Vec<u8>,
+    /// MPEG audio frames, whole (header first).
+    pub mpa: Vec<Vec<u8>>,
 }
 
 impl PayloadOut {
@@ -513,6 +517,7 @@ impl PayloadOut {
         self.inner.clear();
         self.esc.clear();
         self.raw.clear();
+        self.mpa.clear();
     }
 }
 
@@ -527,6 +532,8 @@ pub struct PayloadStats {
     pub e1: Option<crate::e1::E1Stats>,
     /// E1-shaped frames: whether they are IBS-scrambled, and the multiframe.
     pub ibs_sync: Option<crate::ibssync::SyncStats>,
+    /// MPEG audio frames, when that is what the data are.
+    pub mpa: Option<crate::mpa::MpaStats>,
     /// D&I++ framing, likewise.
     pub dandi: Option<DiPlusStats>,
     /// Paradise closed network plus ESC framing, likewise.
@@ -565,6 +572,11 @@ const IDLE_SHARE: f64 = 0.75;
 /// with bursts between its fill (ASA253 MAL-BN, 15 s of nothing).
 const IDLE_ONLY: f64 = 0.99;
 
+/// MPEG audio frames found (each where the last one's length put it, none
+/// lost) that name the format: a fill pattern broken by the odd random byte
+/// can make a few chance headers line up, never without misses.
+const MPA_FOUND: u64 = 6;
+
 /// What the E1 format is called, and what it becomes once its frames turn
 /// out to be IBS-scrambled.
 const E1_FOUND: &str = "E1 (G.704 framing)";
@@ -588,6 +600,7 @@ pub struct PayloadRx {
     e1_frames: Vec<[u8; TIMESLOTS]>,
     e1_losses: u64,
     ibs_sync: crate::ibssync::SyncDescrambler,
+    mpa: crate::mpa::MpaRx,
     dandi: DiPlusRx,
     paradise: EscRx,
     ibs: IbsRx,
@@ -627,6 +640,7 @@ impl PayloadRx {
             e1_frames: Vec::new(),
             e1_losses: 0,
             ibs_sync: crate::ibssync::SyncDescrambler::new(),
+            mpa: crate::mpa::MpaRx::new(),
             dandi: DiPlusRx::new(),
             paradise: EscRx::new(),
             ibs: IbsRx::new(),
@@ -715,6 +729,8 @@ impl PayloadRx {
             let mut bs = BscRx::new();
             let mut bso = Vec::new();
             let mut ed = EdmacRx::new();
+            let mut mp = crate::mpa::MpaRx::new();
+            let mut mpo = Vec::new();
             // HDLC on the inverted line: differential decoding reads an
             // NRZI line inverted.
             let mut hi = Hdlc::default();
@@ -748,6 +764,8 @@ impl PayloadRx {
                 bs.push(&bits, &mut bso);
                 bso.clear();
                 ed.push(&bits, &mut ped, &mut pee);
+                mp.push(&bits, &mut mpo);
+                mpo.clear();
                 let inverted: Vec<u8> = bits.iter().map(|b| b ^ 1).collect();
                 hi.push(&inverted, &mut hio);
                 hio.clear();
@@ -826,6 +844,13 @@ impl PayloadRx {
                     framed(ed.stats.frames * crate::edmac::FRAME as u64),
                     Format::Edmac,
                 ),
+                // MPEG audio frames, each found where the last one's length
+                // said.
+                (
+                    framed(mp.stats.bits)
+                        .filter(|_| mp.stats.frames >= MPA_FOUND && mp.stats.losses == 0),
+                    Format::MpegAudio,
+                ),
             ];
             for (score, fmt) in candidates {
                 // EDMAC taken from an earlier reading needs beating clearly:
@@ -898,6 +923,7 @@ impl PayloadRx {
                     "idle: nothing but its fill so far (no traffic to tell the format by)".into()
                 }
                 (Format::Idle, _) => "idle fill between bursts (format not known)".into(),
+                (Format::MpegAudio, _) => "MPEG audio frames".into(),
                 (Format::Hdlc, Fcs::Crc16) => "HDLC (FCS-16)".into(),
                 (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
                 (Format::Hdlc, Fcs::None) => unreachable!("HDLC frames carry an FCS"),
@@ -1054,6 +1080,16 @@ impl PayloadRx {
             }
             // Descrambled, for the text finder and the data file.
             Format::Idle => out.inner.extend_from_slice(&bits),
+            Format::MpegAudio => {
+                self.mpa.push(&bits, &mut out.mpa);
+                self.stats.mpa = Some(self.mpa.stats.clone());
+                // Name the stream once its first header is read.
+                if let (Some(f), Some(h)) = (&mut self.stats.found, self.mpa.stats.header)
+                    && f.starts_with("MPEG audio frames,")
+                {
+                    *f = f.replacen("MPEG audio frames", &h.describe(), 1);
+                }
+            }
         }
         if raw {
             self.pack(&bits, out);

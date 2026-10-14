@@ -1224,13 +1224,16 @@ fn programme_card(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Programme audio ({})", p.codec)).strong())
-            .on_hover_text(
+            .on_hover_text(if p.mpeg.is_some() {
+                "MPEG audio frames found in the modem's data (a programme feed sent \
+                 straight over the link); ▶ plays them, ● keeps them as they are (.mp2)."
+            } else {
                 "Standard apt-X sub-band ADPCM (a 16-bit codeword for every four samples) \
                  in an IBS carrier's data, under the IESS-309 synchronous scrambler. Its \
                  0–4 kHz band decodes exactly; the three bands above use step-size tables \
                  fitted to a live carrier (Standard apt-X's own are not published), so \
-                 4–16 kHz is close but not exact.",
-            );
+                 4–16 kHz is close but not exact."
+            });
         if p.playing {
             volume_control(ui);
         }
@@ -1251,7 +1254,19 @@ fn programme_card(
     let a = &p.aptx;
     let mut s = v.settings.clone();
     ui.horizontal(|ui| {
-        if a.locked {
+        if let Some(m) = &p.mpeg {
+            // MPEG audio frames: the player decodes them.
+            if m.locked {
+                ui.colored_label(scope::LOCK, format!("{} frames", m.frames))
+                    .on_hover_text(format!(
+                        "MPEG audio frames found in the data, each where the last one's \
+                         length said · {} losses",
+                        m.losses
+                    ));
+            } else {
+                ui.label("looking for MPEG audio frames");
+            }
+        } else if a.locked {
             ui.colored_label(
                 scope::LOCK,
                 format!(

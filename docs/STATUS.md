@@ -4217,3 +4217,25 @@ differential — 273.08 kbit/s = 256 kbit/s × 16/15.
   / 0.80 / 0.59 / 0.48 / 0.55. Approximate — the true tables would differ in
   shape. Engine output matches the scratch decoder (0.9998 once settled).
   Listening page: `out/ibs-audio-tests-3.html` (not committed).
+
+## The 256 kbit/s "format unknown" TPC carrier is MPEG-1 Layer II (2026-10-15)
+
+The 11 662.548 MHz baseband of 2026-10-10 (`…comtechs_and_idk.wav`), +1531
+kHz: QPSK TPC 2964 at 170.67 kS/s = 256.0 kbit/s, noted above as
+"structured (periods 480 and 6144 bits), format unknown". 6144 bits at
+256 kbit/s is one 24 ms frame of 48 kHz MPEG audio: under the additive
+(2,3,9,12)/475h sequence (feedback output, preset reversed — the payload
+search never chose it, nothing framed), every 6144 bits starts FFFD C4 70h:
+**MPEG-1 Layer II, 256 kbit/s, 48 kHz**, stereo/joint stereo, no CRC — 183
+frames in 4.4 s, none missing. Decoded: a programme feed (speech/music to
+18 kHz, left = right) for 1.8 s, then digital silence.
+
+- `decsat-modem::mpa`: MPEG-1/2 audio frames found at any bit offset (sync
+  and header, trusted when the next header is where the length says; stereo
+  and joint stereo the same stream), `Format::MpegAudio` in the payload
+  search (≥ 6 frames, none lost — a 0x55 fill broken by random bytes,
+  differentially decoded, lined up six chance Layer I headers with misses).
+  "MPEG-1 Layer II, 256 kbit/s, 48 kHz, stereo, additive (2,3,9,12)/475h …".
+- The programme stage takes the frames as they are: the player decodes
+  them (Symphonia), the recorder keeps them (`.mp2`); same *Programme audio*
+  card, ▶ ●; CLI `--programme-record` writes the `.mp2`.

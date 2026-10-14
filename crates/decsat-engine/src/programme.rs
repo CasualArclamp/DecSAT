@@ -1,7 +1,11 @@
-//! Programme audio in a link's data: apt-X in an IBS carrier's descrambled
-//! data (a studio link's stereo feed), decoded, measured, and played and
-//! recorded through the multicast-audio player and recorder as RTP L16 —
-//! PCM at the stream's own rate, which both already take.
+//! Programme audio in a link's data, played and recorded through the
+//! multicast-audio player and recorder:
+//! - apt-X in an IBS carrier's descrambled data (a studio link's stereo
+//!   feed), decoded here and sent on as RTP L16 — PCM at the stream's own
+//!   rate, which both already take;
+//! - MPEG audio frames found in a modem's data (a programme feed sent
+//!   straight over a TPC carrier), handed on as they are: the player decodes
+//!   them, the recorder keeps them (`.mp2`).
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -10,6 +14,7 @@ use decsat_audio::{AudioHandle, AudioPlayer, AudioRecorder};
 use decsat_ip::mcast::{AudioStream, SdpInfo};
 use decsat_modem::aptx::{AptxRx, AptxStats};
 use decsat_modem::ibssync::SyncStats;
+use decsat_modem::mpa::MpaStats;
 
 use crate::fec::{AUDIO_OUTPUT, FecOutput};
 
@@ -32,22 +37,45 @@ fn snap_rate(hz: f64) -> u32 {
         .unwrap_or(hz.round() as u32)
 }
 
-/// The decoded audio as a stream the player and recorder understand.
-fn stream(rate: u32, channels: u16) -> AudioStream {
-    AudioStream {
+/// What goes to the player and recorder: decoded PCM (rate, channels), or
+/// MPEG audio frames (sample rate, channels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fmt {
+    Pcm(u32, u16),
+    Mpa(u32, u16),
+}
+
+/// The audio as a stream the player and recorder understand.
+fn stream(f: Fmt) -> AudioStream {
+    let blank = AudioStream {
         group: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
         port: 0,
         src: None,
         packets: 0,
-        rate_bps: f64::from(rate) * 16.0 * f64::from(channels),
-        rtp: true,
-        pt: Some(PT),
-        codec: decsat_ip::Codec::Pcm,
-        sdp: Some(SdpInfo {
+        rate_bps: 0.0,
+        rtp: false,
+        pt: None,
+        codec: decsat_ip::Codec::Unknown,
+        sdp: None,
+    };
+    match f {
+        Fmt::Pcm(rate, channels) => AudioStream {
+            rate_bps: f64::from(rate) * 16.0 * f64::from(channels),
+            rtp: true,
             pt: Some(PT),
-            encoding: Some(format!("L16/{rate}/{channels}")),
-            ..Default::default()
-        }),
+            codec: decsat_ip::Codec::Pcm,
+            sdp: Some(SdpInfo {
+                pt: Some(PT),
+                encoding: Some(format!("L16/{rate}/{channels}")),
+                ..Default::default()
+            }),
+            ..blank
+        },
+        // An elementary stream in plain UDP: the frames as they come.
+        Fmt::Mpa(..) => AudioStream {
+            codec: decsat_ip::Codec::MpegAudio,
+            ..blank
+        },
     }
 }
 
@@ -59,10 +87,13 @@ pub struct ProgrammeView {
     /// The IBS scrambling the data came out of.
     pub ibs: Option<SyncStats>,
     pub aptx: AptxStats,
+    /// MPEG audio frames, when that is what the link carries.
+    pub mpeg: Option<MpaStats>,
     /// Once found: the sample rate and channels.
     pub rate: u32,
     pub channels: u16,
-    /// Each channel's level over the last half second, dBFS.
+    /// Each channel's level over the last half second, dBFS (apt-X: the
+    /// MPEG audio is decoded by the player alone).
     pub levels_db: Vec<f32>,
     pub playing: bool,
     pub audio: Option<AudioHandle>,
@@ -72,18 +103,18 @@ pub struct ProgrammeView {
     pub error: Option<String>,
 }
 
-/// One RTP L16 output (a player or a recorder) and what it waits to send.
+/// One output (a player or a recorder) and what it waits to send.
 struct Out<T> {
     sink: T,
-    /// The rate and channels it was started for.
-    format: (u32, u16),
+    /// What it was started for.
+    format: Fmt,
     buf: Vec<u8>,
     seq: u16,
     ts: u32,
 }
 
 impl<T> Out<T> {
-    fn new(sink: T, format: (u32, u16)) -> Self {
+    fn new(sink: T, format: Fmt) -> Self {
         Out {
             sink,
             format,
@@ -93,9 +124,11 @@ impl<T> Out<T> {
         }
     }
 
-    /// Samples in (interleaved); whole packets out through `send`.
+    /// Samples in (interleaved); whole RTP L16 packets out through `send`.
     fn samples(&mut self, pcm: &[f32], mut send: impl FnMut(&mut T, &[u8])) {
-        let (rate, ch) = self.format;
+        let Fmt::Pcm(rate, ch) = self.format else {
+            return;
+        };
         let frames = (rate * PACKET_MS / 1000) as usize;
         let bytes = frames * 2 * usize::from(ch);
         for &x in pcm {
@@ -112,11 +145,12 @@ impl<T> Out<T> {
     }
 }
 
-/// apt-X found in a link's data, decoded, played and recorded.
+/// Programme audio found in a link's data, decoded, played and recorded.
 pub(crate) struct ProgrammeStage {
     rx: AptxRx,
-    /// Once found: the rate and channels.
-    format: Option<(u32, u16)>,
+    mpeg: Option<MpaStats>,
+    /// Once found: what goes out.
+    format: Option<Fmt>,
     player: Option<Out<AudioPlayer>>,
     recorder: Option<Out<AudioRecorder>>,
     want_play: bool,
@@ -133,6 +167,7 @@ impl ProgrammeStage {
     pub(crate) fn new() -> Self {
         ProgrammeStage {
             rx: AptxRx::new(),
+            mpeg: None,
             format: None,
             player: None,
             recorder: None,
@@ -165,12 +200,12 @@ impl ProgrammeStage {
         {
             self.record_last = r.sink.path().map(|p| (p.to_path_buf(), r.sink.bytes));
         }
-        let Some((rate, ch)) = fmt else {
+        let Some(f) = fmt else {
             return;
         };
         if self.want_play && self.player.is_none() {
-            match AudioPlayer::start(&stream(rate, ch), AUDIO_OUTPUT) {
-                Ok(p) => self.player = Some(Out::new(p, (rate, ch))),
+            match AudioPlayer::start(&stream(f), AUDIO_OUTPUT) {
+                Ok(p) => self.player = Some(Out::new(p, f)),
                 Err(e) => self.error = Some(e),
             }
         }
@@ -185,18 +220,19 @@ impl ProgrammeStage {
                 crate::rf::freq_tag(o.carrier_hz)
             );
             let _ = std::fs::create_dir_all(&o.dir);
-            match AudioRecorder::start(&stream(rate, ch), &o.dir, &stem) {
-                Ok(r) => self.recorder = Some(Out::new(r, (rate, ch))),
+            match AudioRecorder::start(&stream(f), &o.dir, &stem) {
+                Ok(r) => self.recorder = Some(Out::new(r, f)),
                 Err(e) => self.error = Some(e),
             }
         }
     }
 
-    /// The link's data octets in, and its data rate (for the sample rate).
+    /// apt-X: the link's data octets in, and its data rate (for the sample
+    /// rate).
     pub(crate) fn data(&mut self, data: &[u8], data_bps: f64, o: &FecOutput) {
         self.rx.push(data);
         if self.rx.stats.locked {
-            let f = (snap_rate(self.rx.sample_rate(data_bps)), self.rx.channels());
+            let f = Fmt::Pcm(snap_rate(self.rx.sample_rate(data_bps)), self.rx.channels());
             if self.format != Some(f) {
                 self.format = Some(f);
                 self.follow(o);
@@ -206,7 +242,9 @@ impl ProgrammeStage {
         if pcm.is_empty() {
             return;
         }
-        let (rate, ch) = self.format.unwrap_or((32_000, 2));
+        let Some(Fmt::Pcm(rate, ch)) = self.format else {
+            return;
+        };
         let chans = usize::from(ch);
         for frame in pcm.chunks(chans) {
             for (a, &x) in self.acc.iter_mut().zip(frame) {
@@ -230,12 +268,40 @@ impl ProgrammeStage {
         }
     }
 
+    /// MPEG audio: whole frames in, as found in the link's data.
+    pub(crate) fn mpeg(&mut self, frames: &[Vec<u8>], stats: &MpaStats, o: &FecOutput) {
+        self.mpeg = Some(stats.clone());
+        if let Some(h) = stats.header {
+            let f = Fmt::Mpa(h.sample_rate, if h.mode == 3 { 1 } else { 2 });
+            if self.format != Some(f) {
+                self.format = Some(f);
+                self.follow(o);
+            }
+        }
+        for f in frames {
+            if let Some(p) = &mut self.player {
+                p.sink.packet(f);
+            }
+            if let Some(r) = &mut self.recorder {
+                r.sink.packet(f);
+            }
+        }
+    }
+
     pub(crate) fn view(&self, ibs: Option<SyncStats>) -> ProgrammeView {
-        let (rate, channels) = self.format.unwrap_or((0, 0));
+        let (rate, channels) = match self.format {
+            Some(Fmt::Pcm(r, c)) | Some(Fmt::Mpa(r, c)) => (r, c),
+            None => (0, 0),
+        };
+        let codec = match self.mpeg.as_ref().and_then(|m| m.header) {
+            Some(h) => h.describe(),
+            None => CODEC.into(),
+        };
         ProgrammeView {
-            codec: CODEC.into(),
+            codec,
             ibs,
             aptx: self.rx.stats.clone(),
+            mpeg: self.mpeg.clone(),
             rate,
             channels,
             levels_db: self.levels_db.clone(),

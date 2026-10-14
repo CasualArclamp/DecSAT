@@ -38,6 +38,7 @@ pub mod ibs;
 pub mod ibssync;
 pub mod interleave;
 pub mod mode_s;
+pub mod mpa;
 pub mod paradise;
 pub mod payload;
 pub mod radar;

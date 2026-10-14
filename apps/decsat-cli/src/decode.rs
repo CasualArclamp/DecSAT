@@ -1123,7 +1123,18 @@ fn print_programme(p: &decsat_engine::ProgrammeView) {
         );
     }
     let a = &p.aptx;
-    if a.locked {
+    if let Some(m) = &p.mpeg {
+        println!(
+            "programme: {} · {} frames · {} losses{}",
+            p.codec,
+            m.frames,
+            m.losses,
+            match m.header {
+                Some(h) if h.crc => " · CRC".to_string(),
+                _ => String::new(),
+            }
+        );
+    } else if a.locked {
         println!(
             "programme: {} · {} · {} Hz · codewords from bit {} · LL lag-1 {:.2}{} · \
              {} codewords · {:.1} % clipped",

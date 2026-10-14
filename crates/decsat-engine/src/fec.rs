@@ -2521,6 +2521,15 @@ fn run(
                         stage.follow(&o);
                         stage.data(&payload_out.ibs_data, data_bps * 30.0 / 32.0, &o);
                     }
+                    if !payload_out.mpa.is_empty()
+                        && let Some(m) = &pay.stats.mpa
+                    {
+                        // MPEG audio frames sent straight over the modem.
+                        let stage =
+                            programme.get_or_insert_with(crate::programme::ProgrammeStage::new);
+                        stage.follow(&o);
+                        stage.mpeg(&payload_out.mpa, m, &o);
+                    }
                     if !payload_out.slots.is_empty() {
                         let channels = pay.stats.slots.as_ref().map_or(0, |s| s.channels);
                         let stage = e1.get_or_insert_with(E1Stage::new);
