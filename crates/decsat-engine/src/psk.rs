@@ -128,6 +128,176 @@ impl SymbolLabels {
     }
 }
 
+/// Symbols each side of the one judged in the burst finder's power window.
+const BURST_HALF: usize = 2;
+/// Symbols coasted through each side of a burst found (its ramps).
+const BURST_GUARD: usize = 2;
+/// How far the window's mean power must stand above the carrier's own, in
+/// standard deviations of that mean — and at least this ratio (2 dB).
+const BURST_Z: f32 = 5.0;
+const BURST_RATIO: f32 = 1.6;
+/// The power statistics' smoothing, a symbol.
+const BURST_RATE: f32 = 0.001;
+/// Symbols in a row under a "burst" after which the level is taken to have
+/// really changed (a fade ending, a stronger carrier): the new normal.
+const BURST_LONGEST: usize = 512;
+/// A symbol's interference is read from 3-symbol windows, less this many
+/// standard deviations of such a window's own spread.
+const WEIGHT_SPAN: usize = 3;
+const WEIGHT_Z: f32 = 3.0;
+
+/// Short bursts of interference landing on a carrier, wider than it and
+/// stronger: each lifts the carrier's in-band power for a few symbols and
+/// sends wild decisions into the carrier loop. Found live, and not on the
+/// satellite: below 2.17 GHz the HackRF mixes up to a 2.34–2.65 GHz IF
+/// (2650 − f/7 MHz), and tuned to 1732.9 MHz that IF sits on Bluetooth LE
+/// advertising channel 37 (2402 MHz). Nearby devices' adverts (1 Msym/s,
+/// ~0.4 ms, one shared access address, two of them every ~100 ms) leaked
+/// in ~0.5 MHz from the centre, onto five 10.24 kBd QPSK carriers: their
+/// power rose 3–20× for ~5 symbols at a time, and the two at Es/N0 ≈ 8 dB
+/// slipped 90° every ~4 s (29 and 32 times in 120 s; with the bursts zeroed
+/// in the IQ, once and not at all). Tuned 2.6 MHz higher the leak moved
+/// off them: the weakest read 14.7 dB, and none slipped — retuning is the cure;
+/// this is for when the leak and a carrier cannot be kept apart.
+///
+/// The finder compares each symbol's power, averaged over a short centred
+/// window, with the carrier's own mean and spread (tracked on the symbols
+/// not under bursts), before the AGC so a burst's effect on the gain does
+/// not hide it. A strong carrier's power varies little, so a burst only a
+/// little above it shows; a weak one's (or noise's) varies a lot, so only a
+/// big burst counts there — false alarms stay rare at any SNR.
+///
+/// Symbols under a burst coast the carrier loop, and go on to the decoders
+/// weighed by N / (N + I), their noise against noise plus interference:
+/// soft decisions scale as 1/σ², and the burst raised σ². How I is read
+/// matters as much as the formula. Each symbol's is the quietest 3-symbol
+/// window holding it, less 3σ of such a window's own spread: a wider or
+/// centred window smears a burst onto clean neighbours, and on a strong
+/// carrier (N tiny) a clean symbol only 1σ loud already weighs 0.08. Those
+/// near-erasures add up to runs longer than the ~6 symbols a K = 7 rate ½
+/// code bridges, and the decoder did worse than trusting the hit symbols.
+/// Error events in 100 s of the five carriers' idle data (Viterbi K = 7 ½;
+/// Es/N0 ≈ 8.6, 8.2, 10, 16.5, 16.6 dB in turn): before 1455 / 1409
+/// / 1214 / 43 / 17; all erased (weight 0) 1943 / 1858 / 1860 / 1698 / 1436;
+/// N / (N + I) over the 5-symbol window 451 / 698 / 702 / 483 / 168; as here
+/// 258 / 109 / 127 / 53 / 6.
+#[derive(Default)]
+struct Blanker {
+    /// Mean and mean square of a symbol's power; `None` until the first block.
+    stats: Option<(f32, f32)>,
+    /// The previous block's last powers: the windows' look-back.
+    tail: Vec<f32>,
+    /// Guard symbols still to coast after a burst found near a block's end.
+    guard: usize,
+    /// Symbols in a row under a burst.
+    run: usize,
+    symbols: u64,
+    bursts: u64,
+}
+
+impl Blanker {
+    /// Mark the symbols of a block to coast through, given each one's
+    /// power, and weigh each symbol (1 when not under a burst).
+    fn mark(&mut self, power: &[f32], blank: &mut Vec<bool>, weight: &mut Vec<f32>) {
+        blank.clear();
+        blank.resize(power.len(), false);
+        weight.clear();
+        weight.resize(power.len(), 1.0);
+        if power.is_empty() {
+            return;
+        }
+        let (mut mean, mut square) = match self.stats {
+            Some(s) => s,
+            None => Self::first(power),
+        };
+        // The windows run over the previous block's tail then this block:
+        // `ext[i + back]` is `power[i]`.
+        let back = self.tail.len();
+        let ext: Vec<f32> = self.tail.iter().chain(power).copied().collect();
+        for i in 0..power.len() {
+            let c = i + back;
+            let lo = c.saturating_sub(BURST_HALF);
+            let hi = (c + BURST_HALF).min(ext.len() - 1);
+            let n = (hi - lo + 1) as f32;
+            let avg = ext[lo..=hi].iter().sum::<f32>() / n;
+            let sd = (square - mean * mean).max(0.0).sqrt();
+            let over = (mean + BURST_Z * sd / n.sqrt()).max(BURST_RATIO * mean);
+            if avg > over {
+                // A new burst unless the last symbol was under one already.
+                let was = if i == 0 { self.run > 0 } else { blank[i - 1] };
+                if !was {
+                    self.bursts += 1;
+                }
+                // Its leading ramp, in this block.
+                for b in &mut blank[i.saturating_sub(BURST_GUARD)..i] {
+                    *b = true;
+                }
+                blank[i] = true;
+                self.guard = BURST_GUARD;
+            } else if self.guard > 0 {
+                blank[i] = true;
+                self.guard -= 1;
+            }
+            if blank[i] {
+                self.run += 1;
+                if self.run > BURST_LONGEST {
+                    // Not a burst: the level has changed. Take it, keeping
+                    // the spread relative to the mean.
+                    let rel = square / (mean * mean).max(1e-30);
+                    mean = avg;
+                    square = rel * avg * avg;
+                    self.run = 0;
+                    self.guard = 0;
+                }
+            } else {
+                self.run = 0;
+                mean += BURST_RATE * (power[i] - mean);
+                square += BURST_RATE * (power[i] * power[i] - square);
+            }
+        }
+        // The weights. For a constant-envelope signal S in noise N the power
+        // has mean m = S + N and variance v = 2SN + N², so N = m − √(m² − v)
+        // (noise alone: v = m², N = m). Multi-ring constellations add their
+        // own spread and read N high, which only weighs bursts less.
+        let v = (square - mean * mean).max(0.0);
+        let noise = (mean - (mean * mean - v).max(0.0).sqrt()).max(1e-3 * mean);
+        let spread = WEIGHT_Z * v.sqrt() / (WEIGHT_SPAN as f32).sqrt();
+        for (i, w) in weight.iter_mut().enumerate() {
+            if !blank[i] {
+                continue;
+            }
+            let c = i + back;
+            let quietest = (c.saturating_sub(WEIGHT_SPAN - 1)..=c)
+                .filter(|&st| st + WEIGHT_SPAN <= ext.len())
+                .map(|st| ext[st..st + WEIGHT_SPAN].iter().sum::<f32>() / WEIGHT_SPAN as f32)
+                .fold(f32::INFINITY, f32::min);
+            if quietest.is_finite() {
+                let interference = (quietest - spread - mean).max(0.0);
+                *w = noise / (noise + interference);
+            }
+        }
+        self.symbols += blank.iter().filter(|&&b| b).count() as u64;
+        self.stats = Some((mean, square));
+        self.tail.clear();
+        self.tail
+            .extend_from_slice(&power[power.len().saturating_sub(BURST_HALF)..]);
+    }
+
+    /// Statistics from a first block, which may hold bursts: from the
+    /// powers up to four times the median.
+    fn first(power: &[f32]) -> (f32, f32) {
+        let mut sorted = power.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let kept: Vec<f32> = sorted.into_iter().filter(|&p| p <= 4.0 * median).collect();
+        let n = kept.len().max(1) as f32;
+        (
+            kept.iter().sum::<f32>() / n,
+            kept.iter().map(|p| p * p).sum::<f32>() / n,
+        )
+    }
+}
+
 /// Streaming generic demodulator.
 pub struct PskDemod {
     mf: Fir,
@@ -154,6 +324,13 @@ pub struct PskDemod {
     outer_from: f32,
     /// Steering on full decisions (after the outer ring has locked).
     full: bool,
+    /// Bursts of interference to coast through, and per symbol of the
+    /// block: its power before the AGC, whether it is under a burst, and
+    /// its weight.
+    blanker: Blanker,
+    power_in: Vec<f32>,
+    blank: Vec<bool>,
+    weight: Vec<f32>,
 }
 
 impl PskDemod {
@@ -178,6 +355,10 @@ impl PskDemod {
             outer: Vec::new(),
             outer_from: f32::INFINITY,
             full: false,
+            blanker: Blanker::default(),
+            power_in: Vec::new(),
+            blank: Vec::new(),
+            weight: Vec::new(),
         }
         .with_outer_ring()
     }
@@ -217,13 +398,29 @@ impl PskDemod {
         self.raw.clear();
         self.sync.process(&self.filtered, &mut self.raw);
 
+        // Each symbol's power before the AGC (undoing this block's gain), for
+        // the burst finder.
+        let g2 = (self.agc.gain() * self.agc.gain()).max(1e-30);
+        self.power_in.clear();
+        self.power_in
+            .extend(self.raw.iter().map(|s| s.norm_sqr() / g2));
+        self.blanker
+            .mark(&self.power_in, &mut self.blank, &mut self.weight);
+
         let start = out.len();
         if self.power.is_none() && !self.raw.is_empty() {
             let p = self.raw.iter().map(|s| s.norm_sqr()).sum::<f32>() / self.raw.len() as f32;
             self.power = Some(p.max(1e-12));
         }
-        for &s in &self.raw {
+        for ((&s, &blank), &w) in self.raw.iter().zip(&self.blank).zip(&self.weight) {
             let p = self.power.get_or_insert(1.0);
+            if blank {
+                // Under a burst: the loop coasts, the decoders get the symbol
+                // weighed down, and the level and display leave it out.
+                let y = self.pll.coast(s / p.sqrt().max(1e-6));
+                out.push((self.cst.nearest(y) as u8, y * w));
+                continue;
+            }
             *p += 0.0005 * (s.norm_sqr() - *p);
             let s = s / p.sqrt().max(1e-6);
             let y = if self.outer.is_empty() || self.full {
@@ -242,7 +439,16 @@ impl PskDemod {
         let new = &out[start..];
         self.symbols += new.len() as u64;
         if !new.is_empty() {
-            let soft: Vec<Iq> = new.iter().map(|&(_, y)| y).collect();
+            // The quality readouts from the symbols not blanked.
+            let soft: Vec<Iq> = new
+                .iter()
+                .zip(&self.blank)
+                .filter(|(_, b)| !**b)
+                .map(|(&(_, y), _)| y)
+                .collect();
+            if soft.is_empty() {
+                return;
+            }
             let (mer, coh) = decsat_dsp::quality(&soft, |_| &self.cst.points);
             // Smooth so the readout does not flicker: over ~SMOOTH_SYMBOLS
             // symbols whatever the block size, from the first block's own
@@ -253,7 +459,7 @@ impl PskDemod {
             let k = if first {
                 1.0
             } else {
-                1.0 - (-(new.len() as f32) / SMOOTH_SYMBOLS).exp()
+                1.0 - (-(soft.len() as f32) / SMOOTH_SYMBOLS).exp()
             };
             self.mer += k * (mer - self.mer);
             self.coherence += k * (coh - self.coherence);
@@ -279,6 +485,12 @@ impl PskDemod {
 
     pub fn mer_db(&self) -> f32 {
         self.mer
+    }
+
+    /// Bursts of interference coasted through, and the symbols under them
+    /// (handed on weighed down).
+    pub fn blanked(&self) -> (u64, u64) {
+        (self.blanker.bursts, self.blanker.symbols)
     }
 
     pub fn coherence(&self) -> f32 {
@@ -564,5 +776,113 @@ mod tests {
             })
             .fold(0.0f64, f64::max);
         assert!(best > 0.99, "only {:.3} of symbols agree", best);
+    }
+
+    /// QPSK at `esn0_db` under a slow phase wander (an LNB's), and if
+    /// `bursts`, every 400 symbols a 5-symbol burst of wideband noise 40
+    /// times the carrier's sample power (a Bluetooth packet leaking in).
+    /// Returns the demodulator, the symbols sent and what it made of them.
+    fn bursty_qpsk(esn0_db: f64, bursts: bool) -> (PskDemod, Vec<usize>, Vec<(u8, Iq)>) {
+        let cst = Constellation::generic(Modulation::Qpsk);
+        let mut s = 0x5eedu64;
+        let mut next = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        // Unit-variance complex Gaussian (Box–Muller).
+        let mut gauss = move || {
+            let u1 = ((next() >> 11) as f64 + 1.0) / (1u64 << 53) as f64;
+            let u2 = (next() >> 11) as f64 / (1u64 << 53) as f64;
+            let r = (-u1.ln()).sqrt();
+            let a = std::f64::consts::TAU * u2;
+            Iq::new((r * a.cos()) as f32, (r * a.sin()) as f32)
+        };
+        let mut t = 0x1234u64;
+        let sent: Vec<usize> = (0..60_000)
+            .map(|_| {
+                t ^= t >> 12;
+                t ^= t << 25;
+                t ^= t >> 27;
+                (t.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 62) as usize
+            })
+            .collect();
+        let syms: Vec<Iq> = sent.iter().map(|&i| cst.map(i)).collect();
+        let mut sh = Shaper::new(4, 0.35, 16);
+        let mut x = Vec::new();
+        sh.process(&syms, &mut x);
+        let ps = x.iter().map(|v| v.norm_sqr()).sum::<f32>() / x.len() as f32;
+        // Es/N0 = Ps·sps / σ².
+        let sigma = (ps * 4.0 / 10f32.powf(esn0_db as f32 / 10.0)).sqrt();
+        let mut phase = 0.3f64;
+        for (k, v) in x.iter_mut().enumerate() {
+            phase += 0.004 * gauss().re as f64;
+            *v = *v * Iq::new(phase.cos() as f32, phase.sin() as f32) + gauss() * sigma;
+            if bursts && k % 1600 >= 800 && k % 1600 < 820 {
+                *v += gauss() * (40.0 * ps).sqrt();
+            }
+        }
+        let mut d = PskDemod::new(4.0, 1.0, 0.35, Modulation::Qpsk, 0.0);
+        let mut out = Vec::new();
+        for c in x.chunks(4_096) {
+            d.process(c, &mut out);
+        }
+        (d, sent, out)
+    }
+
+    /// The carrier loop's slips: the rotation mapping sent onto decided
+    /// symbols, block by block after pull-in, and how often it changes.
+    fn slips(sent: &[usize], out: &[(u8, Iq)]) -> usize {
+        let cst = Constellation::generic(Modulation::Qpsk);
+        let turn = |i: usize, k: usize| {
+            let a = k as f32 * std::f32::consts::FRAC_PI_2;
+            cst.nearest(cst.points[i] * Iq::new(a.cos(), a.sin()))
+        };
+        let agree = |from: usize, lag: usize, k: usize| {
+            (from..from + 500)
+                .filter(|&m| turn(sent[m - lag], k) == out[m].0 as usize)
+                .count()
+        };
+        // The filters' lag, from a block after pull-in.
+        let (lag, _) = (0..40)
+            .flat_map(|lag| (0..4).map(move |k| (lag, k)))
+            .max_by_key(|&(lag, k)| agree(5_000, lag, k))
+            .unwrap();
+        let mut last = None;
+        let mut changes = 0;
+        for from in (5_000..out.len() - 600).step_by(500) {
+            let k = (0..4).max_by_key(|&k| agree(from, lag, k)).unwrap();
+            if last.is_some_and(|l| l != k) {
+                changes += 1;
+            }
+            last = Some(k);
+        }
+        changes
+    }
+
+    #[test]
+    fn coasts_through_bursts_without_slipping() {
+        // Without the burst finder this slips 14 times.
+        let (d, sent, out) = bursty_qpsk(8.0, true);
+        assert_eq!(slips(&sent, &out), 0);
+        let (bursts, symbols) = d.blanked();
+        // 150 bursts sent; each costs its 5 symbols and a few either side.
+        assert!((140..=152).contains(&bursts), "{bursts} bursts");
+        assert!(symbols < 150 * 14, "{symbols} symbols under bursts");
+        assert!(d.mer_db() > 7.0, "MER {}", d.mer_db());
+    }
+
+    #[test]
+    fn finds_no_bursts_on_a_clean_carrier() {
+        // False alarms: none on a strong carrier, a handful in noise.
+        for (esn0, most) in [(25.0, 0), (8.0, 5), (0.0, 30)] {
+            let (d, _, _) = bursty_qpsk(esn0, false);
+            let (bursts, _) = d.blanked();
+            assert!(
+                bursts <= most,
+                "Es/N0 {esn0} dB: {bursts} bursts in 60 000 symbols"
+            );
+        }
     }
 }
