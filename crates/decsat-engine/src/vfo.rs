@@ -475,6 +475,9 @@ pub struct CarrierState {
     /// times the bits per symbol, less framing overhead): Eb/N0 is then per
     /// information bit. `None`: per channel bit (uncoded).
     pub info_bits: Option<f32>,
+    /// Bursts of interference (Bluetooth leaking into the HackRF's IF, say)
+    /// the loop coasted through: the generic PSK demodulator's.
+    pub bursts: u64,
 }
 
 impl CarrierState {
@@ -493,16 +496,20 @@ impl CarrierState {
     }
 
     /// "Es/N0 8.1 dB · Eb/N0 4.6 dB", the Eb/N0 marked uncoded when the
-    /// code's rate is not known.
+    /// code's rate is not known, and the interference bursts if any.
     pub fn snr_text(&self) -> String {
         format!(
-            "Es/N0 {:.1} dB · Eb/N0 {:.1} dB{}",
+            "Es/N0 {:.1} dB · Eb/N0 {:.1} dB{}{}",
             self.esn0_db(),
             self.ebn0_db(),
             if self.info_bits.is_some() {
                 ""
             } else {
                 " (uncoded)"
+            },
+            match self.bursts {
+                0 => String::new(),
+                n => format!(" · {n} interference bursts coasted"),
             }
         )
     }
@@ -1755,6 +1762,7 @@ impl Worker {
                         offset_hz: l.demod.carrier_offset_hz(),
                         modulation: l.demod.modulation(),
                         info_bits: None,
+                        bursts: l.demod.blanked().0,
                     });
                 } else {
                     match self
@@ -1821,6 +1829,7 @@ impl Worker {
                             offset_hz: d.carrier_offset_hz(),
                             modulation: m,
                             info_bits: rate.map(|r| r * f32::from(m.bits_per_symbol())),
+                            bursts: 0,
                         });
                     }
                     st.gold_code = Some(d.gold_code());
@@ -1890,6 +1899,7 @@ impl Worker {
                         offset_hz: d.carrier_offset_hz(),
                         modulation: d.modulation(),
                         info_bits: modem_info_bits(kind.chain(), d.modulation(), f.as_ref()),
+                        bursts: d.blanked().0,
                     };
                     st.carrier = Some(carrier);
                     let lock = format!(
@@ -1993,6 +2003,7 @@ impl Worker {
                         offset_hz: d.carrier_offset_hz(),
                         modulation: d.modulation(),
                         info_bits: None,
+                        bursts: d.blanked().0,
                     };
                     st.carrier = Some(carrier);
                     if let Some(p) = path {

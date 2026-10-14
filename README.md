@@ -48,7 +48,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers | ✅ |
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals; a burst map; each burst's data symbols to a `.bursts` file | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
-| Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock | ✅ |
+| Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
 | **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
@@ -686,6 +686,17 @@ above −25 dBFS: lower the LNA gain. A carrier that still misbehaves at one
 tuning (slips, a raised noise floor beside it) is usually clean a few MHz
 either side — the HackRF's synthesisers put noise at particular offsets —
 so retune a little.
+
+**Bluetooth:** below 2.17 GHz the HackRF mixes up to an IF of 2650 − f/7
+MHz (f the tuned frequency), inside the 2.4 GHz band, and nearby Bluetooth
+leaks in. Tuned to 1732.9 MHz its IF sits on Bluetooth LE advertising
+channel 37 (2402 MHz): ~0.4 ms bursts about 20 times a second, ~1 MHz
+wide, ≈ 248 − f/7 MHz from the centre — invisible on the averaged
+spectrum, but two 10 kBd carriers under them slipped every few seconds and
+read 3–6 dB worse than 2.6 MHz higher, where they were clean. Keep carriers
+away from it (BLE advertising also sits at 2426 and 2480 MHz: tunings near
+1568 and 1190 MHz). The generic demodulators coast through such bursts and
+say so ("N interference bursts coasted" after the Es/N0).
 
 The driver is pure Rust over USB ([`seify-hackrfone`](https://crates.io/crates/seify-hackrfone)
 on `nusb`): no libhackrf, no libusb, nothing to install beyond the WinUSB driver

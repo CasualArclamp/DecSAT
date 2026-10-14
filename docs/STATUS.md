@@ -3711,3 +3711,72 @@ scratchpad: `code1/2.py`, `ser.py`, `wht.py`, `hdr.py`):
 Next for the coding: a cleaner capture (more LNA/amp, the dish peaked) so
 rank-based code recognition works, and the network's outbound — its
 signalling names the system and may carry the burst plan.
+## Intelsat 19's narrow carriers at 12333.60–12333.68 MHz; Bluetooth in the HackRF's IF (2026-10-14)
+
+Rory's screenshot: a row of narrow carriers near 12333.6 MHz, and "the
+radio is yours". The dish is on **Intelsat 19** (166° E): the GUI's names
+for them (ML-LEC, ASA084 LEC-ML) came from the H3e plan, still loaded, and
+do not apply. Recorded 30 s and 5 min at 4 MS/s, centre 1732.9 MHz (LNA
+24, VGA 20).
+
+- **Five carriers**, ~16.5 kHz apart: +735.8, +751.4, +768.2, +784.4 and
+  +816.5 kHz from 1732.9 MHz, ≈ 12333.603, .618, .635, .651 and .684 MHz
+  RF. All the same chain as H3e's 10.24 kBd carrier of 2026-10-09: QPSK
+  10 240 Bd, K = 7 rate ½, differential, V.35 (taps 3, 20), IBS/SMS
+  framing (IESS-309, 16/15) → 9.6 kbit/s. The CDM-570L Viterbi decoder
+  takes each as it is (the modems' make is not known: the chain is
+  IESS-308/309's). IBS overhead cycle E4 00 20 00 on all five; bit 10h
+  of the 20h octet carries one fixed 16-bit pattern every 64 cycles (3.2 s),
+  the same on every carrier — framing housekeeping, not a service channel.
+- **Idle**, all five, for the whole 5 minutes: four at constant 0, the
+  +816.5 kHz one at constant 1. The 300–700-bit stretches of random-looking
+  data on three of them were carrier slips, not traffic: their count
+  matched the Viterbi decoder's "turns followed" exactly (68 / 5 / 0 / 73 /
+  1 in 5 min), the output garbage until it follows the new orientation.
+- **The slips were Bluetooth**, not the satellite (my first reading, an
+  overlapping 1 MBd TDMA network, was wrong; Rory: "bluetooth"). Below
+  2.17 GHz the HackRF mixes up to a 2.34–2.65 GHz IF — 2650 − f/7 MHz,
+  firmware `tuning.c`, `select_graduated_if` — so tuned to 1732.9 MHz its
+  IF is 2402.4 MHz, on Bluetooth LE advertising channel 37 (2402 MHz).
+  Nearby devices' adverts showed as ~0.47 ms bursts, ~1 MHz wide, centred
+  +0.48 MHz, ~19 a second in two ~105 ms trains (two devices), 1 Msym/s,
+  all starting with the same ~57 symbols (one access address), invisible on
+  the averaged spectrum. They lifted the carriers' in-band power 3–20× for
+  ~5 symbols; the two at Es/N0 ≈ 8 dB slipped every ~4 s (29 and 32 times
+  in 120 s). With the bursts zeroed in the IQ (1.6 % of samples): once
+  and not at all, and their MER read ~2 dB higher.
+- **Tuned off centre** (Rory's suggestion), 1735.5 MHz at 8 MS/s: the leak
+  moved to 0…+0.5 MHz (it sits ≈ 248 − f/7 MHz from the centre, inverted),
+  the carriers to −1.86…−1.78 MHz, and the release build decodes them with
+  0 / 0 / 1 / 1 / 1 turns in 60 s at Es/N0 14.7 / 16.5 / 19.5 / 11.6 /
+  19.6 dB (8.6 / 10.0 / 16.5 / 8.2 / 16.6 at 1732.9 MHz). BLE advertising
+  also uses 2426 and 2480 MHz: the same leak near tunings of 1568 and
+  1190 MHz.
+- **Burst blanking** in `PskDemod` (`psk.rs`, `Blanker`; every generic-PSK
+  decoder: Viterbi, TPC, FastLink, DVB-S, CID, PSK, Identify's live view),
+  for when the leak and a carrier cannot be kept apart. Each symbol's power
+  before the AGC, averaged over 5 symbols, against the carrier's own mean
+  and spread (5σ of the window mean, at least 2 dB); found bursts (±2
+  symbols) coast the carrier loop and are passed on weighed by N / (N + I),
+  I read from the quietest 3-symbol window holding the symbol less 3σ of
+  its spread, N from the power's mean and variance (N = m − √(m² − v)).
+  The weighting mattered as much as the coasting — error events in 100 s
+  of the five idle streams (+735 / +751 / +768 / +784 / +816 kHz):
+
+  | | events |
+  |---|---|
+  | release build | 1455 / 1214 / 43 / 1409 / 17 |
+  | coasting, symbols at full weight | 1442 / 1217 / 46 / 1379 / 16 |
+  | coasting, symbols erased | 1943 / 1860 / 1698 / 1858 / 1436 |
+  | N / (N + I), I over the 5-symbol window | 451 / 702 / 483 / 698 / 168 |
+  | as built | 258 / 127 / 53 / 109 / 6 |
+
+  Erasing ~9 symbols a burst is more than a K = 7 code bridges (~6), and on
+  a strong carrier a clean symbol only 1σ loud weighed 0.08 under the wide
+  window. Slips in 120 s: 29 → 1 and 32 → 2. Nine earlier captures (TPC
+  QPSK/8PSK, FastLink ×2, CDM-600 D&I++, Viterbi 64k/9.6k) decode the same
+  as before (one TPC frame fewer failed). Live, 60 s of the +784 kHz carrier
+  at the old tuning: 1 turn, IBS misaligned 0.2 % (3.3 % before). The
+  status reads "N interference bursts coasted" after the Es/N0 (CLI, GUI).
+  Tests `coasts_through_bursts_without_slipping` (14 slips without the
+  finder, 0 with), `finds_no_bursts_on_a_clean_carrier`.
