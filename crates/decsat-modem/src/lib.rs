@@ -24,6 +24,7 @@ pub mod asterix;
 pub mod bsc;
 pub mod cid;
 pub mod conv;
+pub mod convblind;
 pub mod dandi;
 pub mod dvbs;
 pub mod e1;

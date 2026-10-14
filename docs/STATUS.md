@@ -3800,3 +3800,58 @@ LEC-ML), because neither knew its satellite.
   changes until a satellite is added. `--plan FILE` still loads a plan for
   the run whatever is chosen. Radar places stay keyed by radar.
 - Test `each_satellite_keeps_its_own_plan_and_labels`.
+
+## Convolutional codes found blind; the generic PSK decoder looks for one (2026-10-14)
+
+Rory: "add support in the generic psk for 1/2 rate and other stuff that
+could be used and wire that into the auto ident system". The Intelsat 19
+group (12333.2–12336.2 MHz, 90 s at 8 MS/s, centre 1733.8 MHz so the
+Bluetooth leak sits clear) had prompted it: none of its PSK carriers is
+K = 7, TPC 2964 or FastLink.
+
+- **`decsat-modem::convblind`**: any rate-½ convolutional code, K ≤ 10. A
+  code with generators g₁, g₂ satisfies g₂·c₁ + g₁·c₂ = 0 — a parity check
+  of span K whose taps are the generators reversed — so windows of K steps
+  have one null vector, and none for a shorter K. Null spaces of random
+  handfuls of windows (an all-ones column added, so a check holding as 1 —
+  an inverted output — comes out too), each candidate judged on 6000
+  windows (≥ 0.62 to count; a true check of weight w holds in
+  (1 + (1 − 2p)^w)/2), shortest K first, after the windows prove varied
+  enough (an idle pattern fits many checks and proves none). Generic soft
+  Viterbi (2^(K−1) states), the outputs' inversion picked by decode and
+  re-encode; `ConvRx` searches 6000 symbols at a time (8 looks, then gives
+  up), decodes, checks the code's own parity check every 512 symbols and
+  follows 90° turns (keeping the mirror; a ±90° slip cannot be told apart
+  when the check has even weight, so the data after it may come out
+  inverted — as with the K = 7 code). On QPSK the receiver reads the
+  carrier the way up that needs no inverted output. One orientation is
+  enough to find the code (turned or mirrored it is the same code, outputs
+  swapped or inverted). Tests: K = 3, 5, 7, 9 found exactly through 0.5 %
+  errors at either pair alignment; K = 7 identical to `conv::Encoder`;
+  random and idle bits give nothing; a 90° turn followed; BPSK with an
+  inverted output (CCSDS-style); every QPSK orientation × alignment comes
+  out uninverted and unturned; an uncoded carrier given up on.
+- **The Viterbi chain** (`FecInput::Viterbi { symbols, bpsk, bounded }`):
+  the K = 7 `ViterbiRx` (QPSK) and `ConvRx` side by side, the first to lock
+  decodes; BPSK now allowed (rate-½ search only). Status: "K = 7 rate 1/2",
+  "K = 9, rate 1/2 (561, 753)", the search's progress, or "no
+  convolutional code: not K = 7 at any rate, nor a rate-½ code up to K = 10
+  — a block code (TPC, LDPC, turbo) or uncoded". `cdm_model` keeps a
+  non-K = 7 code off the CDM-570L name. GUI: one "Code" row (`code_row`).
+- **Generic PSK** (BPSK/QPSK): its own FEC worker runs the same search,
+  bounded (K = 7 stops after 40 tries) — Code/Payload/Framing rows and the
+  decoded data's text in its panel; Record writes the decoded data beside
+  the symbols.
+- **Identify**: `conv_code` from the locked symbols; the hint names the
+  code ("QPSK, convolutional code K = 7, rate 1/2 (171, 133) — the code of
+  DVB-S (not verified) and IESS-308/309, found from its parity checks").
+  The type-found modem, the survey and `scan --decode` already send BPSK
+  and QPSK carriers to the Viterbi chain, which now decodes any such code.
+- **Checked**: the H3e 10.24 kBd IBS carriers — Identify names K = 7 (171,
+  133), Generic PSK and Viterbi decode to IBS framing; synthetic K = 9 (561,
+  753) BPSK and K = 5 (23, 35) QPSK through `--decoder auto`: Identify names
+  them and they decode (BER 0 at 8.8 dB); Intelsat 19's 102.4 kS/s and
+  5.133 kBd QPSK carriers: "no convolutional code" after the bounded search
+  — the 102.4 kS/s one repeats a 40 112-symbol frame (idle, ~98 % identical
+  frame to frame after ~5 s of traffic): a block code with a frame-
+  synchronous scrambler, coding unknown.

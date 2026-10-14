@@ -66,16 +66,19 @@ pub enum DecoderKind {
     /// LDPC decoding and descrambling as measured on a live carrier; the
     /// data go to the same payload search as TPC 2964's.
     FastLink,
-    /// A K = 7 convolutional code (EN 300 421's, as IESS-308/309 SCPC
-    /// carriers use): rate and orientation found blind, then the payload
-    /// search on the decoded bits.
+    /// A convolutional code: the K = 7 one (EN 300 421's, as IESS-308/309
+    /// SCPC carriers use) at any rate, or any other rate-½ code found blind
+    /// from the signal's parity checks (BPSK too); rate, code and
+    /// orientation found blind, then the payload search on the decoded bits.
     Viterbi,
     /// DVB-CID (ETSI TS 103 129): the carrier identification signal under a
     /// host carrier — the uplink modulator's unique ID, position, telephone
     /// and text.
     CarrierId,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
-    /// hard-decided symbols to a `.bin` file, one byte per symbol.
+    /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
+    /// and QPSK look for a convolutional code meanwhile (the Viterbi
+    /// chain's search, given up after a while) and decode what it finds.
     PskSymbols,
     /// TDMA: the carriers in the VFO (one, or an MF-TDMA group), their
     /// bursts found and demodulated one by one, the bursts' layout
@@ -120,9 +123,9 @@ impl DecoderKind {
             DecoderKind::Cdm570 => "Comtech CDM-570L (Viterbi K=7 → data)",
             DecoderKind::Cdm570Trunk => "Comtech CDM-570L trunk (TPC → voice + ADS-B/radar)",
             DecoderKind::FastLink => "Q-Flex FastLink (QPSK 0.710) → data",
-            DecoderKind::Viterbi => "Viterbi K=7 (IESS-308/309 SCPC) → data",
+            DecoderKind::Viterbi => "Viterbi (K=7 any rate, or a code found blind) → data",
             DecoderKind::CarrierId => "Carrier ID (DVB-CID)",
-            DecoderKind::PskSymbols => "Generic PSK → symbols (.bin)",
+            DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::IqRecord => "IQ recorder",
             DecoderKind::Spectrum => "Spectrum only",
@@ -774,6 +777,9 @@ enum Decoder {
         /// How the open file is written (bits or bytes) and bits not yet
         /// making a byte.
         pack: SymbolPacker,
+        /// The look for a convolutional code (BPSK and QPSK), and what it
+        /// decodes, on the FEC thread.
+        fec: Option<FecWorker>,
     },
 }
 
@@ -827,7 +833,10 @@ fn auto_chain(id: &Identification, failed: &[DecoderKind]) -> DecoderKind {
 fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
     match kind {
         DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| t.decoded > 0),
-        DecoderKind::Viterbi => f.viterbi.as_ref().is_some_and(|v| v.rate.is_some()),
+        DecoderKind::Viterbi => {
+            f.viterbi.as_ref().is_some_and(|v| v.rate.is_some())
+                || f.conv.as_ref().is_some_and(|c| c.code.is_some())
+        }
         DecoderKind::FastLink => f.fastlink.as_ref().is_some_and(|x| x.decoded > 0),
         _ => true,
     }
@@ -852,6 +861,14 @@ pub fn cdm_model(chain: DecoderKind, f: Option<&crate::fec::FecStats>) -> Decode
             } else {
                 DecoderKind::Tpc2964
             }
+        }
+        // A code found blind other than the K = 7 is no Comtech's.
+        DecoderKind::Viterbi
+            if f.and_then(|f| f.conv.as_ref())
+                .and_then(|c| c.code)
+                .is_some_and(|c| !c.is_k7_standard()) =>
+        {
+            DecoderKind::Viterbi
         }
         DecoderKind::Viterbi => DecoderKind::Cdm570,
         k => k,
@@ -932,7 +949,9 @@ impl Worker {
     /// Tell the FEC or CID thread to stop after its current input.
     fn quit_threads(&self) {
         match &self.decoder {
-            Decoder::Dvbs2 { fec: Some(f), .. } | Decoder::Modem { fec: Some(f), .. } => f.quit(),
+            Decoder::Dvbs2 { fec: Some(f), .. }
+            | Decoder::Modem { fec: Some(f), .. }
+            | Decoder::Psk { fec: Some(f), .. } => f.quit(),
             Decoder::Cid {
                 worker: Some(w), ..
             } => w.quit(),
@@ -1045,6 +1064,7 @@ impl Worker {
                 carrier_hz: s.offset_hz,
                 text: None,
                 pack: SymbolPacker::default(),
+                fec: None,
             },
         }
     }
@@ -1098,8 +1118,9 @@ impl Worker {
         let signal_changed = rebuild_ddc || retuned || new_decoder;
         self.settings = new;
         // Record / GSE variant changes reach a running FEC thread directly.
-        if let Decoder::Dvbs2 { fec: Some(w), .. } | Decoder::Modem { fec: Some(w), .. } =
-            &self.decoder
+        if let Decoder::Dvbs2 { fec: Some(w), .. }
+        | Decoder::Modem { fec: Some(w), .. }
+        | Decoder::Psk { fec: Some(w), .. } = &self.decoder
         {
             w.set_output(fec_output(&self.settings, &self.ddc));
         }
@@ -1502,6 +1523,19 @@ impl Worker {
                                     }
                                     _ => decsat_core::Modulation::Qpsk,
                                 },
+                                // A convolutional code rides on BPSK or QPSK
+                                // (the K = 7 search on QPSK alone).
+                                DecoderKind::Viterbi => match self
+                                    .settings
+                                    .psk_modulation
+                                    .or(id.constellation.map(|c| c.modulation()))
+                                {
+                                    Some(
+                                        decsat_core::Modulation::Bpsk
+                                        | decsat_core::Modulation::Pi2Bpsk,
+                                    ) => decsat_core::Modulation::Bpsk,
+                                    _ => decsat_core::Modulation::Qpsk,
+                                },
                                 _ => decsat_core::Modulation::Qpsk,
                             };
                             let mut d =
@@ -1599,10 +1633,14 @@ impl Worker {
                 carrier_hz,
                 text,
                 pack,
+                fec,
             } => match demod {
                 Some(d) => {
                     self.syms.clear();
                     d.process(&self.bb, &mut self.syms);
+                    if let Some(w) = fec {
+                        offer_code_search(w, d.modulation(), &self.syms);
+                    }
                     let file = PskFile {
                         writer,
                         path,
@@ -1657,6 +1695,20 @@ impl Worker {
 
                             self.syms.clear();
                             d.process(&shifted, &mut self.syms);
+                            // BPSK and QPSK: look for a convolutional code.
+                            if matches!(
+                                modulation,
+                                decsat_core::Modulation::Bpsk | decsat_core::Modulation::Qpsk
+                            ) {
+                                let w = FecWorker::spawn(
+                                    rs,
+                                    fec_output(&self.settings, &self.ddc),
+                                    self.pending.clone(),
+                                )
+                                .lossless(self.lossless);
+                                offer_code_search(&w, modulation, &self.syms);
+                                *fec = Some(w);
+                            }
                             // Recording armed before lock starts at once.
                             let file = PskFile {
                                 writer,
@@ -1982,6 +2034,7 @@ impl Worker {
                 written,
                 open_failed,
                 text,
+                fec,
                 ..
             } => match demod {
                 None => {
@@ -2011,11 +2064,16 @@ impl Worker {
                     }
                     st.recording_active = writer.is_some();
                     st.text = text.as_ref().map(|t| t.view());
+                    st.fec = fec.as_ref().map(|w| w.stats());
                     let lock = format!(
-                        "{} {}, {}",
+                        "{} {}, {}{}",
                         d.modulation().name(),
                         if d.locked() { "locked" } else { "not locked" },
-                        carrier.snr_text()
+                        carrier.snr_text(),
+                        match &st.fec {
+                            Some(f) => format!(" · {}", code_text(Some(f))),
+                            None => String::new(),
+                        }
                     );
                     st.message = match (writer.is_some(), *open_failed, path) {
                         (_, true, Some(p)) => format!("{lock} — cannot write {}", p.display()),
@@ -2065,30 +2123,66 @@ fn offer_symbols(
     match kind {
         DecoderKind::Tpc2964 => w.offer_tpc(s, modulation),
         DecoderKind::FastLink => w.offer_fastlink(s),
-        DecoderKind::Viterbi => w.offer_viterbi(s),
+        DecoderKind::Viterbi => {
+            w.offer_viterbi(s, modulation == decsat_core::Modulation::Bpsk, false)
+        }
         _ => w.offer_dvbs(s),
     }
 }
 
+/// The generic PSK decoder's look for a convolutional code: its symbols to
+/// the Viterbi chain's search, bounded.
+fn offer_code_search(w: &FecWorker, modulation: decsat_core::Modulation, syms: &[(u8, Iq)]) {
+    let s = syms.iter().map(|s| s.1).collect();
+    w.offer_viterbi(s, modulation == decsat_core::Modulation::Bpsk, true);
+}
+
 /// A Viterbi VFO's status line.
 fn viterbi_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
-    let Some(v) = f.and_then(|f| f.viterbi.as_ref()) else {
-        return format!("{lock} · finding the code rate");
+    format!("{lock} · {}", code_text(f))
+}
+
+/// What the convolutional-code search has found (the Viterbi chain's, or
+/// the generic PSK decoder's): the code and what its data carry, or how
+/// the search is going, or that there is no such code.
+fn code_text(f: Option<&crate::fec::FecStats>) -> String {
+    let payload = || {
+        f.and_then(|f| f.payload.as_ref())
+            .and_then(|p| p.found.as_deref())
+            .map_or("payload not recognised yet".to_string(), |p| {
+                p.split(',').next().unwrap_or(p).to_string()
+            })
     };
-    let Some(rate) = v.rate else {
-        return format!("{lock} · finding the code rate ({} tries)", v.searches);
-    };
-    let payload = f
-        .and_then(|f| f.payload.as_ref())
-        .and_then(|p| p.found.as_deref())
-        .map_or("payload not recognised yet".to_string(), |p| {
-            p.split(',').next().unwrap_or(p).to_string()
-        });
-    format!(
-        "{lock} · rate {} · BER {:.1e} · {payload}",
-        rate.name(),
-        v.channel_ber
-    )
+    let k7 = f.and_then(|f| f.viterbi.as_ref());
+    let blind = f.and_then(|f| f.conv.as_ref());
+    if let Some(rate) = k7.and_then(|v| v.rate) {
+        let ber = k7.map_or(0.0, |v| v.channel_ber);
+        return format!("K = 7 rate {} · BER {ber:.1e} · {}", rate.name(), payload());
+    }
+    if let Some((code, c)) = blind.and_then(|c| c.code.map(|code| (code, c))) {
+        return format!(
+            "{} · BER {:.1e} · {}",
+            code.name(),
+            c.channel_ber,
+            payload()
+        );
+    }
+    let k7_done = f.is_some_and(|f| f.k7_stopped) || k7.is_none();
+    match (blind, k7) {
+        (Some(c), _) if c.gave_up && k7_done => "no convolutional code: not K = 7 at any rate, \
+             nor a rate-½ code up to K = 10 — a block code (TPC, LDPC, turbo) or uncoded"
+            .into(),
+        (Some(c), Some(v)) if c.gave_up => format!(
+            "finding the K = 7 code rate ({} tries) · no other rate-½ code",
+            v.searches
+        ),
+        (Some(c), Some(v)) => format!(
+            "finding the code: K = 7 at every rate ({} tries), rate-½ codes ({} looks)",
+            v.searches, c.searches
+        ),
+        (Some(c), None) => format!("finding a rate-½ code ({} looks)", c.searches),
+        _ => "finding the code".into(),
+    }
 }
 
 /// A FastLink VFO's status line.
@@ -2173,6 +2267,7 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
                     | DecoderKind::CdmAuto
                     | DecoderKind::FastLink
                     | DecoderKind::Viterbi
+                    | DecoderKind::PskSymbols
             ),
         record_on_activity: s.record_on_activity && s.decoder == DecoderKind::FastLink,
         pcap: s.pcap && s.decoder.carries_ip(),

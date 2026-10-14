@@ -1036,10 +1036,24 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 }
                 ui.end_row();
             }
+            // BPSK and QPSK: the look for a convolutional code, and what
+            // its data carry once one is decoded.
+            if st.fec.is_some() {
+                code_row(
+                    ui,
+                    st.fec.as_ref(),
+                    Color32::from_rgb(110, 220, 110),
+                    Color32::from_rgb(240, 200, 80),
+                );
+                payload_rows(ui, st.fec.as_ref());
+            }
         });
         psk_note(ui);
         if let Some(t) = &st.text {
             text_card(ui, t);
+        }
+        if let Some(f) = &st.fec {
+            data_text(ui, f, DecoderKind::PskSymbols);
         }
     }
 
@@ -2366,16 +2380,20 @@ fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
+    let f = st.fec.as_ref();
+    // A code found blind other than the K = 7 is nobody's CDM-570L.
+    let blind = f
+        .and_then(|f| f.conv.as_ref())
+        .and_then(|c| c.code)
+        .filter(|c| !c.is_k7_standard());
     ui.label(
-        RichText::new(if kind == DecoderKind::Cdm570 {
-            "Comtech CDM-570L · Viterbi K=7"
-        } else {
-            "Viterbi K=7 (IESS-308/309)"
+        RichText::new(match (blind, kind) {
+            (Some(_), _) => "Convolutional code (found blind)",
+            (None, DecoderKind::Cdm570) => "Comtech CDM-570L · Viterbi K=7",
+            (None, _) => "Viterbi (K=7, or a code found blind)",
         })
         .strong(),
     );
-    let f = st.fec.as_ref();
-    let v = f.and_then(|f| f.viterbi.as_ref());
     egui::Grid::new("viterbi").num_columns(2).show(ui, |ui| {
         carrier_rows(ui, c);
         if let Some(rs) = st.symbol_rate {
@@ -2383,35 +2401,75 @@ fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind
             ui.label(format::rate(rs));
             ui.end_row();
         }
-        ui.label("Code");
-        match v.and_then(|v| v.rate.map(|r| (v, r))) {
-            Some((v, r)) => ui.colored_label(
-                good,
-                format!(
-                    "rate {} · {} · channel BER {:.1e}{}",
-                    r.name(),
-                    v.orientation.as_deref().unwrap_or("?"),
-                    v.channel_ber,
-                    match (v.losses, v.turns) {
-                        (0, 0) => String::new(),
-                        (l, 0) => format!(" · {l} relocks"),
-                        (0, t) => format!(" · {t} turns followed"),
-                        (l, t) => format!(" · {l} relocks · {t} turns followed"),
-                    }
-                ),
-            ),
-            None => ui.colored_label(
-                wait,
-                format!("finding the rate… ({} tries)", v.map_or(0, |v| v.searches)),
-            ),
-        }
-        .on_hover_text(
-            "The 171/133 code of DVB-S and IESS-308/309, rate 1/2 to 7/8: rate, \
-             puncturing phase and orientation found by decoding and re-encoding.",
-        );
-        ui.end_row();
+        code_row(ui, f, good, wait);
         payload_rows(ui, f);
     });
+}
+
+/// The convolutional-code search's row (the Viterbi chain's, the generic
+/// PSK decoder's): the K = 7 code's rate, or a code found blind, or how the
+/// search goes, or that there is none.
+fn code_row(ui: &mut Ui, f: Option<&FecStats>, good: Color32, wait: Color32) {
+    let k7 = f.and_then(|f| f.viterbi.as_ref());
+    let blind = f.and_then(|f| f.conv.as_ref());
+    let followed = |losses: u64, turns: u64| match (losses, turns) {
+        (0, 0) => String::new(),
+        (l, 0) => format!(" · {l} relocks"),
+        (0, t) => format!(" · {t} turns followed"),
+        (l, t) => format!(" · {l} relocks · {t} turns followed"),
+    };
+    ui.label("Code");
+    let r = if let Some((v, r)) = k7.and_then(|v| v.rate.map(|r| (v, r))) {
+        ui.colored_label(
+            good,
+            format!(
+                "K = 7 rate {} · {} · channel BER {:.1e}{}",
+                r.name(),
+                v.orientation.as_deref().unwrap_or("?"),
+                v.channel_ber,
+                followed(v.losses, v.turns)
+            ),
+        )
+    } else if let Some((b, code)) = blind.and_then(|b| b.code.map(|c| (b, c))) {
+        ui.colored_label(
+            good,
+            format!(
+                "{} · {} · channel BER {:.1e}{}",
+                code.name(),
+                b.orientation.as_deref().unwrap_or("?"),
+                b.channel_ber,
+                followed(b.losses, b.turns)
+            ),
+        )
+    } else if blind.is_some_and(|b| b.gave_up) && (f.is_some_and(|f| f.k7_stopped) || k7.is_none())
+    {
+        ui.colored_label(
+            Color32::from_gray(170),
+            "none: not K = 7 at any rate, nor rate ½ up to K = 10 — a block code \
+             (TPC, LDPC, turbo) or uncoded",
+        )
+    } else {
+        ui.colored_label(
+            wait,
+            format!(
+                "finding it… ({}rate ½: {} looks{})",
+                k7.map_or(String::new(), |v| format!("K = 7: {} tries · ", v.searches)),
+                blind.map_or(0, |b| b.searches),
+                if blind.is_some_and(|b| b.gave_up) {
+                    ", none"
+                } else {
+                    ""
+                }
+            ),
+        )
+    };
+    r.on_hover_text(
+        "The 171/133 code of DVB-S and IESS-308/309 at rate 1/2 to 7/8 (QPSK: rate, \
+         puncturing phase and orientation found by decoding and re-encoding), and any \
+         other rate-½ convolutional code up to K = 10 on BPSK or QPSK: found from the \
+         parity check its stream satisfies, the generators read off it.",
+    );
+    ui.end_row();
 }
 
 /// A Q-Flex FastLink VFO: the carrier, the sync word, the LDPC decoder,

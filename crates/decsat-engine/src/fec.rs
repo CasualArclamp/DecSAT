@@ -58,10 +58,21 @@ pub(crate) enum FecInput {
     },
     /// Carrier-locked QPSK symbols of a Q-Flex FastLink carrier.
     FastLink(Vec<Iq>),
-    /// Carrier-locked QPSK symbols of a K = 7 convolutional-code carrier
-    /// (IESS-308/309 and the like).
-    Viterbi(Vec<Iq>),
+    /// Carrier-locked BPSK or QPSK symbols of a convolutionally coded
+    /// carrier: the K = 7 code of IESS-308/309 and DVB-S at any rate (QPSK),
+    /// and any rate-½ code found blind ([`decsat_modem::convblind`]).
+    /// `bounded`: the K = 7 search stops after [`K7_SEARCHES`] (the generic
+    /// PSK decoder's look for a code, which should not search for ever).
+    Viterbi {
+        symbols: Vec<Iq>,
+        bpsk: bool,
+        bounded: bool,
+    },
 }
+
+/// Rate searches a bounded K = 7 search makes before it stops (each over
+/// ~1500 new symbols).
+pub const K7_SEARCHES: u64 = 40;
 
 /// LLR quantization: steps per LLR unit (the decoder is happy from 2 to 8).
 const LLR_SCALE: f32 = 4.0;
@@ -346,6 +357,10 @@ pub struct FecStats {
     pub fast_tdm: Option<decsat_modem::tdmfast::FastStats>,
     /// A K = 7 convolutional code: the rate and orientation found.
     pub viterbi: Option<decsat_modem::dvbs::ViterbiStats>,
+    /// Any other rate-½ convolutional code, found blind.
+    pub conv: Option<decsat_modem::convblind::ConvStats>,
+    /// A bounded K = 7 search ran out (see [`FecInput::Viterbi`]).
+    pub k7_stopped: bool,
     /// What a modem's data carry (TPC 2964).
     pub payload: Option<decsat_modem::payload::PayloadStats>,
     /// The raw data file (TPC 2964, while recording) and its bytes.
@@ -1426,9 +1441,14 @@ impl FecWorker {
         self.send(FecInput::FastLink(symbols));
     }
 
-    /// Queue a block of symbols of a K = 7 convolutional-code carrier.
-    pub fn offer_viterbi(&self, symbols: Vec<Iq>) {
-        self.send(FecInput::Viterbi(symbols));
+    /// Queue a block of symbols of a convolutionally coded carrier (see
+    /// [`FecInput::Viterbi`]).
+    pub fn offer_viterbi(&self, symbols: Vec<Iq>, bpsk: bool, bounded: bool) {
+        self.send(FecInput::Viterbi {
+            symbols,
+            bpsk,
+            bounded,
+        });
     }
 
     fn send(&self, input: FecInput) {
@@ -2297,6 +2317,8 @@ fn run(
     let mut call_voice: Option<CallVoice> = None;
     let mut tdm_active_until = 0u64;
     let mut viterbi: Option<decsat_modem::dvbs::ViterbiRx> = None;
+    let mut conv: Option<decsat_modem::convblind::ConvRx> = None;
+    let mut k7_stopped = false;
     let mut tpc_frames = Vec::new();
     let mut payload: Option<decsat_modem::payload::PayloadRx> = None;
     let mut payload_out = decsat_modem::payload::PayloadOut::default();
@@ -2313,7 +2335,7 @@ fn run(
         let f = match input {
             FecInput::Frame(f) => f,
             // `name @ (A | B)` binds the whole input whichever it is.
-            modem @ (FecInput::Tpc { .. } | FecInput::FastLink(_) | FecInput::Viterbi(_)) => {
+            modem @ (FecInput::Tpc { .. } | FecInput::FastLink(_) | FecInput::Viterbi { .. }) => {
                 // A coded modem's data blocks: TPC 2964 (frame sync and the
                 // code's structure found blind, turbo decoding) or Q-Flex
                 // FastLink (measured LDPC code); then, for either, the
@@ -2345,17 +2367,37 @@ fn run(
                             "fastlink",
                         )
                     }
-                    FecInput::Viterbi(symbols) => {
+                    FecInput::Viterbi {
+                        symbols,
+                        bpsk,
+                        bounded,
+                    } => {
+                        use decsat_modem::convblind::{CONV_BLOCK, ConvRx};
                         use decsat_modem::dvbs::{VITERBI_BLOCK, ViterbiRx};
-                        let rx = viterbi.get_or_insert_with(ViterbiRx::new);
-                        rx.push(&symbols, &mut tpc_frames);
-                        let bps = 2.0 * symbol_rate * rx.stats.rate.map_or(0.5, |r| r.value());
-                        (
-                            symbols.len() as f64 / symbol_rate,
-                            VITERBI_BLOCK,
-                            bps,
-                            "viterbi",
-                        )
+                        // The K = 7 code at every rate (QPSK), and beside it
+                        // any rate-½ code its parity checks show; the first
+                        // to lock decodes, the other stops.
+                        let blind = conv.get_or_insert_with(|| ConvRx::new(bpsk));
+                        if !bpsk && !blind.locked() && !k7_stopped {
+                            let rx = viterbi.get_or_insert_with(ViterbiRx::new);
+                            rx.push(&symbols, &mut tpc_frames);
+                            k7_stopped = bounded
+                                && rx.stats.rate.is_none()
+                                && rx.stats.searches >= K7_SEARCHES;
+                        }
+                        let k7 = viterbi.as_ref().and_then(|v| v.stats.rate);
+                        if k7.is_none() {
+                            blind.push(&symbols, &mut tpc_frames);
+                        }
+                        // Data bits a symbol: one or two coded bits, at the
+                        // code's rate.
+                        let coded = if bpsk { 1.0 } else { 2.0 };
+                        let bps = coded * symbol_rate * k7.map_or(0.5, |r| r.value());
+                        let secs = symbols.len() as f64 / symbol_rate;
+                        match k7 {
+                            Some(_) => (secs, VITERBI_BLOCK, bps, "viterbi"),
+                            None => (secs, CONV_BLOCK, bps, "conv"),
+                        }
                     }
                     _ => unreachable!("matched above"),
                 };
@@ -2538,6 +2580,8 @@ fn run(
                 s.fast_tdm = fast_tdm.as_ref().map(|t| t.stats.clone());
                 s.call_voice = call_voice.as_ref().map(|c| c.view());
                 s.viterbi = viterbi.as_ref().map(|r| r.stats.clone());
+                s.conv = conv.as_ref().map(|r| r.stats.clone());
+                s.k7_stopped = k7_stopped;
                 s.payload = Some(pay.stats.clone());
                 s.text = tpc_text.as_ref().map(|t| t.view());
                 if let Some(stage) = &mut radar {

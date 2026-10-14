@@ -500,6 +500,33 @@ pub(crate) fn report(st: &VfoStatus) {
             v.turns
         );
     }
+    if f.k7_stopped {
+        println!("viterbi: the K = 7 search stopped (no rate fitted)");
+    }
+    // (The rate-½ search's line only when the K = 7 code has not locked.)
+    if let Some(c) = f
+        .conv
+        .as_ref()
+        .filter(|_| f.viterbi.as_ref().is_none_or(|v| v.rate.is_none()))
+    {
+        match c.code {
+            Some(code) => println!(
+                "conv: {}, {}, channel BER {:.2e}, {} bits, {} looks, {} relocks, {} turns followed",
+                code.name(),
+                c.orientation.as_deref().unwrap_or("-"),
+                c.channel_ber,
+                c.bits,
+                c.searches,
+                c.losses,
+                c.turns
+            ),
+            None if c.gave_up => println!(
+                "conv: no rate-1/2 convolutional code up to K = 10 in {} looks",
+                c.searches
+            ),
+            None => println!("conv: looking for a rate-1/2 code ({} looks)", c.searches),
+        }
+    }
     if let Some(t) = &f.fastlink {
         println!(
             "fastlink: sync {}, {}, {} frames, {} codewords ({} decoded, {} failed), BER {:.2e}, {} slips, {} sync misses",

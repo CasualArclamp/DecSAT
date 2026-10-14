@@ -236,6 +236,9 @@ pub struct Identification {
     pub roll_off_2pct: bool,
     /// The carrier comes and goes: a TDMA carrier's bursts.
     pub bursts: Option<Bursts>,
+    /// A rate-½ convolutional code its symbols carry, found from their
+    /// parity checks ([`decsat_modem::convblind`]).
+    pub conv_code: Option<decsat_modem::convblind::Code>,
 }
 
 /// A carrier keyed on and off, as TDMA terminals share one (the STDMA
@@ -332,6 +335,7 @@ impl Identification {
             frame_structure: None,
             roll_off_2pct: false,
             bursts: None,
+            conv_code: None,
         }
     }
 
@@ -1126,6 +1130,16 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         && !tpc
         && cst == ConstellationGuess::Qpsk
         && decsat_modem::fastlink::detect(&lock.symbols);
+    // A convolutional code on BPSK or QPSK: its parity checks show in the
+    // hard decisions (quick: small GF(2) matrices), the K = 7 code of DVB-S
+    // and IESS-308/309 or any other rate-½ one.
+    id.conv_code = (!is_s2
+        && !tpc
+        && !fastlink
+        && id.carrier_locked
+        && matches!(cst, ConstellationGuess::Bpsk | ConstellationGuess::Qpsk))
+    .then(|| decsat_modem::convblind::detect(&lock.symbols, cst == ConstellationGuess::Bpsk))
+    .flatten();
     // 9. Not DVB-S2 nor TPC 2964: does anything repeat frame by frame? A
     //    header or pilots every frame fingerprint a framing — proprietary
     //    ones included — even with no decoder for it.
@@ -1174,6 +1188,20 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                     cst.label()
                 ),
                 _ if id.bursts.is_some() => burst_text.clone(),
+                // ("DVB-S (" kept in the K = 7 one: the CLI's scan tries the
+                // DVB-S decoder on that.)
+                _ if id.conv_code.is_some_and(|c| c.is_k7_standard()) => format!(
+                    "{}, convolutional code {} — the code of DVB-S (not verified) and \
+                     IESS-308/309, found from its parity checks",
+                    cst.label(),
+                    id.conv_code.map(|c| c.name()).unwrap_or_default()
+                ),
+                _ if id.conv_code.is_some() => format!(
+                    "{}, convolutional code {} — found from its parity checks; the Viterbi \
+                     decoder decodes it",
+                    cst.label(),
+                    id.conv_code.map(|c| c.name()).unwrap_or_default()
+                ),
                 ConstellationGuess::Qpsk => {
                     "QPSK, no DVB-S2 PLHEADER — possibly DVB-S (not verified)".into()
                 }
