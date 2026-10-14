@@ -3780,3 +3780,23 @@ do not apply. Recorded 30 s and 5 min at 4 MS/s, centre 1732.9 MHz (LNA
   status reads "N interference bursts coasted" after the Es/N0 (CLI, GUI).
   Tests `coasts_through_bursts_without_slipping` (14 slips without the
   finder, 0 with), `finds_no_bursts_on_a_clean_carrier`.
+
+## Plan and carrier labels per satellite (2026-10-14)
+
+Rory, on Intelsat 19: "its not LEC-ML … can you set the labels to only show
+when on that satellite". The H3e plan and the labels learned on H3e named
+Intelsat 19's carriers at the same frequencies (a VFO took the name ASA084
+LEC-ML), because neither knew its satellite.
+
+- **Toolbar satellite list** (beside 📋 Plan…): the satellites named, *Add*
+  a new one (no plan or labels yet), *Rename this one*. Choosing one loads
+  its own plan and carrier labels and clears the survey's results; the
+  plan button and *Reset labels* act on the chosen one's.
+- **Prefs**: `satellites=` (names, `|`-separated), `satellite=` (chosen),
+  `freqplan.<slug>` and `carrier_caps.<slug>.rf<kHz>khz` per satellite
+  (slug: letters/digits lower case, else `_` — "Intelsat 19" →
+  `intelsat_19`). The old `freqplan` / `carrier_caps.rf…` keys are the
+  unnamed satellite's, shown as *(unnamed)* until renamed, so nothing
+  changes until a satellite is added. `--plan FILE` still loads a plan for
+  the run whatever is chosen. Radar places stay keyed by radar.
+- Test `each_satellite_keeps_its_own_plan_and_labels`.

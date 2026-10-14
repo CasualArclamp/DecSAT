@@ -172,17 +172,20 @@ pub fn vfo_model(
     })
 }
 
-/// The carriers known, by RF (Hz).
+/// The carriers known on one satellite, by RF (Hz).
 #[derive(Debug, Default)]
 pub struct CarrierCaps {
+    /// The satellite they are on ("" for none named).
+    satellite: String,
     known: Vec<(f64, Caps)>,
 }
 
 impl CarrierCaps {
-    /// As kept in the settings.
-    pub fn load() -> Self {
+    /// Satellite `sat`'s, as kept in the settings.
+    pub fn load(sat: &str) -> Self {
         CarrierCaps {
-            known: crate::prefs::carrier_caps()
+            satellite: sat.to_string(),
+            known: crate::prefs::carrier_caps(sat)
                 .into_iter()
                 .map(|(hz, t)| (hz, Caps::parse(&t)))
                 .filter(|(_, c)| c.any())
@@ -215,7 +218,7 @@ impl CarrierCaps {
             Some(k) => k.1 = new,
             None => self.known.push((hz, new)),
         }
-        let _ = crate::prefs::set_carrier_caps(hz, &new.text());
+        let _ = crate::prefs::set_carrier_caps(&self.satellite, hz, &new.text());
     }
 
     pub fn all(&self) -> &[(f64, Caps)] {
@@ -227,14 +230,14 @@ impl CarrierCaps {
         self.known.len()
     }
 
-    /// Forget every carrier known, here and in the settings — the
-    /// waterfall's labels reset (after false decodes, or once the band's
-    /// carriers have changed). A VFO still decoding one learns it again.
-    /// How many went.
+    /// Forget every carrier known on this satellite, here and in the
+    /// settings — the waterfall's labels reset (after false decodes, or once
+    /// the band's carriers have changed). A VFO still decoding one learns it
+    /// again. How many went.
     pub fn forget_all(&mut self) -> usize {
         let n = self.known.len();
         self.known.clear();
-        let _ = crate::prefs::forget_carrier_caps();
+        let _ = crate::prefs::forget_carrier_caps(&self.satellite);
         n
     }
 
@@ -317,6 +320,7 @@ mod tests {
     #[test]
     fn a_vfo_over_a_known_carrier_takes_its_decoder() {
         let k = CarrierCaps {
+            satellite: String::new(),
             known: vec![
                 (
                     12_300_000_000.0,
@@ -357,6 +361,7 @@ mod tests {
     #[test]
     fn a_carrier_is_found_near_its_rf() {
         let k = CarrierCaps {
+            satellite: String::new(),
             known: vec![
                 (
                     12_300_000_000.0,

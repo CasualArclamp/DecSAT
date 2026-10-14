@@ -596,6 +596,16 @@ file is marked in that colour (to tell modem types apart, say); SDR++ ignores
 the field. The plan stays your own file: only its path is remembered
 (right-click the button to stop using it).
 
+**Satellites:** the plan and the carrier labels the decoders learn belong to
+the satellite the dish is on — another satellite's carriers at the same
+frequencies are other carriers. The toolbar's satellite list (beside
+**📋 Plan…**) says which one that is: each satellite keeps its own plan and
+labels, and only the chosen one's are shown, given to new VFOs and cleared
+by **Reset labels**. Type a name in the list and **Add** a satellite (it starts
+with no plan or labels); **Rename this one** names the chosen one — the plan
+and labels kept before satellites were named are listed as *(unnamed)* until
+you name them.
+
 An LNB's oscillator is rarely exactly on 10600 MHz and drifts as it warms,
 so the carriers sit a few kHz off their plan frequencies. **LO trim** in the
 toolbar corrects the RF scale for that on the fly (drag or type kHz;

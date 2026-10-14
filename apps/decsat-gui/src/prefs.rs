@@ -214,40 +214,50 @@ pub fn radar_airports() -> bool {
 
 /// Callsigns from ADS-B on the scope (off unless turned on: it asks an
 /// outside service).
-/// What carriers have been heard to carry ([`crate::carrier_caps`]): (RF
-/// Hz, `adsb,radar`), from `carrier_caps.rf<kHz>` keys.
-pub fn carrier_caps() -> Vec<(f64, String)> {
-    read_all()
-        .into_iter()
-        .filter_map(|(k, v)| Some((carrier_caps_hz(&k)?, v)))
+/// What satellite `sat`'s carriers have been heard to carry
+/// ([`crate::carrier_caps`]): (RF Hz, `adsb,radar`), from its
+/// `carrier_caps.<satellite>.rf<kHz>khz` keys (`carrier_caps.rf<kHz>khz`
+/// for none named).
+pub fn carrier_caps(sat: &str) -> Vec<(f64, String)> {
+    caps_in(&read_all(), sat)
+}
+
+fn caps_in(all: &[(String, String)], sat: &str) -> Vec<(f64, String)> {
+    let prefix = caps_prefix(sat);
+    all.iter()
+        .filter_map(|(k, v)| Some((carrier_caps_hz(&prefix, k)?, v.clone())))
         .collect()
 }
 
-/// The RF (Hz) a `carrier_caps.rf<kHz>khz` key keeps a carrier at.
-fn carrier_caps_hz(key: &str) -> Option<f64> {
+/// The RF (Hz) a carrier-caps key (`prefix` then `<kHz>khz`) keeps a
+/// carrier at.
+fn carrier_caps_hz(prefix: &str, key: &str) -> Option<f64> {
     let khz: f64 = key
-        .strip_prefix("carrier_caps.rf")?
+        .strip_prefix(prefix)?
         .strip_suffix("khz")?
         .parse()
         .ok()?;
     Some(khz * 1e3)
 }
 
-/// Forget every carrier kept (see [`carrier_caps`]).
-pub fn forget_carrier_caps() -> std::io::Result<()> {
+/// Forget every carrier kept for satellite `sat` (see [`carrier_caps`]).
+pub fn forget_carrier_caps(sat: &str) -> std::io::Result<()> {
     let mut all = read_all();
-    drop_carrier_caps(&mut all);
+    drop_carrier_caps(&mut all, sat);
     write_all(&all)
 }
 
-/// [`forget_carrier_caps`] on the settings in hand: the other keys stay.
-fn drop_carrier_caps(all: &mut Vec<(String, String)>) {
-    all.retain(|(k, _)| carrier_caps_hz(k).is_none());
+/// [`forget_carrier_caps`] on the settings in hand: the other keys (and
+/// other satellites' carriers) stay.
+fn drop_carrier_caps(all: &mut Vec<(String, String)>, sat: &str) {
+    let prefix = caps_prefix(sat);
+    all.retain(|(k, _)| carrier_caps_hz(&prefix, k).is_none());
 }
 
-/// Keep what the carrier at `rf_hz` carries (see [`carrier_caps`]).
-pub fn set_carrier_caps(rf_hz: f64, caps: &str) -> std::io::Result<()> {
-    write_key(&format!("carrier_caps.rf{:.0}khz", rf_hz / 1e3), caps)
+/// Keep what satellite `sat`'s carrier at `rf_hz` carries (see
+/// [`carrier_caps`]).
+pub fn set_carrier_caps(sat: &str, rf_hz: f64, caps: &str) -> std::io::Result<()> {
+    write_key(&format!("{}{:.0}khz", caps_prefix(sat), rf_hz / 1e3), caps)
 }
 
 /// The scope may ask adsb.lol for callsigns (its "adsb.lol" switch, first
@@ -437,23 +447,160 @@ pub fn save_audio() {
     let _ = write_key("voice_hold", &hold);
 }
 
-/// The frequency plan file in use (the user's own: only its path is kept).
-pub fn freqplan_path() -> Option<PathBuf> {
+/// Satellite `sat`'s frequency plan file (the user's own: only its path
+/// is kept).
+pub fn freqplan_path(sat: &str) -> Option<PathBuf> {
+    let key = plan_key(sat);
     read_all()
         .into_iter()
-        .find(|(k, _)| k == "freqplan")
+        .find(|(k, _)| *k == key)
         .map(|(_, v)| PathBuf::from(v))
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// Use `path` as the frequency plan from now on (`None`: no plan).
-pub fn set_freqplan_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
+/// Use `path` as satellite `sat`'s frequency plan from now on (`None`: no
+/// plan).
+pub fn set_freqplan_path(sat: &str, path: Option<&std::path::Path>) -> std::io::Result<()> {
     write_key(
-        "freqplan",
+        &plan_key(sat),
         &path
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
     )
+}
+
+// Satellites. The frequency plan and the carrier labels belong to the
+// satellite the dish is on: moved from Horizons 3e to Intelsat 19, the
+// waterfall still named Intelsat 19's carriers after H3e's plan carriers at
+// the same frequencies, and a VFO made on one took the wrong name. So each
+// satellite keeps its own, and only the one chosen is shown. The plan and
+// labels kept before satellites were named belong to none ("") until that
+// one is named.
+
+/// The satellites named, in order (`satellites`: names separated by `|`).
+pub fn satellites() -> Vec<String> {
+    names_in(&read_all())
+}
+
+fn names_in(all: &[(String, String)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some((_, v)) = all.iter().find(|(k, _)| k == "satellites") {
+        for n in v.split('|').map(str::trim).filter(|n| !n.is_empty()) {
+            if !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The satellite the dish is on, as last chosen ("" for none named).
+pub fn satellite() -> String {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "satellite")
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+/// The dish is on `name` now (added to the list if new; "" for none named).
+pub fn set_satellite(name: &str) -> std::io::Result<()> {
+    let mut all = read_all();
+    choose_in(&mut all, name);
+    write_all(&all)
+}
+
+fn choose_in(all: &mut Vec<(String, String)>, name: &str) {
+    let mut names = names_in(all);
+    if !name.is_empty() && !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    set_in(all, "satellites", names.join("|"));
+    set_in(all, "satellite", name.to_string());
+}
+
+/// Rename satellite `old` ("" for the plan and labels kept before
+/// satellites were named) to `new`: its plan and carrier labels go with it,
+/// and it stays the one chosen.
+pub fn rename_satellite(old: &str, new: &str) -> std::io::Result<()> {
+    let mut all = read_all();
+    rename_in(&mut all, old, new);
+    write_all(&all)
+}
+
+fn rename_in(all: &mut Vec<(String, String)>, old: &str, new: &str) {
+    let (old_plan, new_plan) = (plan_key(old), plan_key(new));
+    let (old_caps, new_caps) = (caps_prefix(old), caps_prefix(new));
+    for (k, _) in all.iter_mut() {
+        if *k == old_plan {
+            *k = new_plan.clone();
+        } else if let Some(rest) = k.strip_prefix(&old_caps) {
+            *k = format!("{new_caps}{rest}");
+        }
+    }
+    let mut names = names_in(all);
+    match names.iter().position(|n| n == old) {
+        Some(i) => names[i] = new.to_string(),
+        None => names.push(new.to_string()),
+    }
+    set_in(all, "satellites", names.join("|"));
+    set_in(all, "satellite", new.to_string());
+}
+
+/// Whether a plan or carrier labels are kept for no satellite named (the
+/// ones from before satellites were).
+pub fn unnamed_kept() -> bool {
+    let all = read_all();
+    let plan = plan_key("");
+    all.iter().any(|(k, v)| *k == plan && !v.is_empty()) || !caps_in(&all, "").is_empty()
+}
+
+/// `name` tidied, if it can name a new satellite: not empty, no `|` or `=`
+/// (the settings file's separators), and not spelled in the keys as one of
+/// `names` is.
+pub fn satellite_name_ok(name: &str, names: &[String]) -> Option<String> {
+    let n = name.trim();
+    let taken = names.iter().any(|o| satellite_slug(o) == satellite_slug(n));
+    (!n.is_empty() && !n.contains(['|', '=']) && !taken).then(|| n.to_string())
+}
+
+/// A satellite's name as its keys spell it: letters and digits in lower
+/// case, anything else `_` ("Intelsat 19" → `intelsat_19`); "" for none.
+fn satellite_slug(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Satellite `sat`'s plan key: `freqplan.<satellite>` (`freqplan` for none).
+fn plan_key(sat: &str) -> String {
+    match satellite_slug(sat).as_str() {
+        "" => "freqplan".into(),
+        s => format!("freqplan.{s}"),
+    }
+}
+
+/// What satellite `sat`'s carrier-caps keys start with.
+fn caps_prefix(sat: &str) -> String {
+    match satellite_slug(sat).as_str() {
+        "" => "carrier_caps.rf".into(),
+        s => format!("carrier_caps.{s}.rf"),
+    }
+}
+
+/// Set `key` to `value` in the settings in hand.
+fn set_in(all: &mut Vec<(String, String)>, key: &str, value: String) {
+    match all.iter_mut().find(|(k, _)| k == key) {
+        Some(e) => e.1 = value,
+        None => all.push((key.to_string(), value)),
+    }
 }
 
 /// Where new output goes.
@@ -491,8 +638,62 @@ mod tests {
             ("carrier_caps.rf12310000khz", "adsb,model=tpc2964"),
             ("carrier_caps.rf12400000khz", "radar"),
         ]);
-        drop_carrier_caps(&mut all);
+        drop_carrier_caps(&mut all, "");
         assert_eq!(all, kept(&[("volume", "0.800")]));
+    }
+
+    #[test]
+    fn each_satellite_keeps_its_own_plan_and_labels() {
+        // Before satellites were named: one plan, labels by RF alone.
+        let mut all = kept(&[
+            ("freqplan", "C:\\plans\\h3e.json"),
+            ("carrier_caps.rf12333684khz", "model=cdm570"),
+            ("volume", "0.800"),
+        ]);
+        // A new satellite starts with nothing, and is chosen.
+        choose_in(&mut all, "Intelsat 19");
+        assert!(caps_in(&all, "Intelsat 19").is_empty());
+        assert_eq!(names_in(&all), ["Intelsat 19"]);
+        // What it learns is its own; the unnamed labels stay as they were.
+        set_in(
+            &mut all,
+            &format!("{}12333684khz", caps_prefix("Intelsat 19")),
+            "model=viterbi".into(),
+        );
+        assert_eq!(
+            caps_in(&all, "Intelsat 19"),
+            [(12_333_684_000.0, "model=viterbi".to_string())]
+        );
+        assert_eq!(
+            caps_in(&all, ""),
+            [(12_333_684_000.0, "model=cdm570".to_string())]
+        );
+        // Naming the old one takes its plan and labels along.
+        rename_in(&mut all, "", "Horizons 3e");
+        assert!(caps_in(&all, "").is_empty());
+        assert_eq!(
+            caps_in(&all, "Horizons 3e"),
+            [(12_333_684_000.0, "model=cdm570".to_string())]
+        );
+        assert!(
+            all.iter()
+                .any(|(k, v)| k == "freqplan.horizons_3e" && v.ends_with("h3e.json"))
+        );
+        assert!(!all.iter().any(|(k, _)| k == "freqplan"));
+        assert_eq!(names_in(&all), ["Intelsat 19", "Horizons 3e"]);
+        // Forgetting one satellite's labels leaves the other's.
+        drop_carrier_caps(&mut all, "Horizons 3e");
+        assert!(caps_in(&all, "Horizons 3e").is_empty());
+        assert_eq!(caps_in(&all, "Intelsat 19").len(), 1);
+        // Names: no separators, none spelled like one taken.
+        let names = names_in(&all);
+        assert_eq!(
+            satellite_name_ok(" Optus D3 ", &names).as_deref(),
+            Some("Optus D3")
+        );
+        assert_eq!(satellite_name_ok("intelsat-19", &names), None);
+        assert_eq!(satellite_name_ok("a|b", &names), None);
+        assert_eq!(satellite_name_ok("  ", &names), None);
     }
 
     #[test]

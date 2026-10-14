@@ -96,7 +96,7 @@ fn main() -> eframe::Result {
             if app.remember {
                 app.restore_session();
                 app.tx = transmit::TxPanel::restored();
-                if let Some(p) = prefs::freqplan_path() {
+                if let Some(p) = prefs::freqplan_path(&app.satellite) {
                     app.load_plan(&p);
                 }
             }
@@ -142,8 +142,16 @@ struct App {
     band: BandView,
     vfos: Vec<UiVfo>,
     statuses: BTreeMap<VfoId, VfoStatus>,
-    /// What carriers have been heard to carry (ADS-B, radar), by RF.
+    /// What carriers have been heard to carry (ADS-B, radar), by RF: the
+    /// chosen satellite's.
     carrier_caps: carrier_caps::CarrierCaps,
+    /// The satellite the dish is on ("" for none named), the satellites
+    /// named, whether a plan or labels are kept for none named, and the
+    /// name being typed for a new one.
+    satellite: String,
+    satellites: Vec<String>,
+    unnamed_kept: bool,
+    satellite_edit: String,
     /// Every carrier in the span tried in turn.
     survey: survey::Survey,
     /// Carriers claimed from their brackets: Identify, then their decoder.
@@ -215,7 +223,11 @@ impl Default for App {
             band: BandView::default(),
             vfos: Vec::new(),
             statuses: BTreeMap::new(),
-            carrier_caps: carrier_caps::CarrierCaps::load(),
+            carrier_caps: carrier_caps::CarrierCaps::load(&prefs::satellite()),
+            satellite: prefs::satellite(),
+            satellites: prefs::satellites(),
+            unnamed_kept: prefs::unnamed_kept(),
+            satellite_edit: String::new(),
             survey: Default::default(),
             auto_pick: Default::default(),
             selected: None,
@@ -248,6 +260,10 @@ impl Default for App {
         }
     }
 }
+
+/// How the satellite choice shows the plan and labels kept before
+/// satellites were named.
+const UNNAMED_SATELLITE: &str = "(unnamed)";
 
 impl App {
     fn next_name(&self) -> String {
@@ -339,6 +355,125 @@ impl App {
                 survey::Request::Keep(s) => self.apply(Action::Create(s)),
                 survey::Request::ResetLabels => self.reset_labels(),
             }
+        }
+    }
+
+    /// The dish is on satellite `name` now ("" for none named): its own plan
+    /// and carrier labels take the place of the last one's.
+    fn choose_satellite(&mut self, name: &str) {
+        let _ = prefs::set_satellite(name);
+        self.satellite = name.to_string();
+        self.satellites = prefs::satellites();
+        self.unnamed_kept = prefs::unnamed_kept();
+        self.carrier_caps = carrier_caps::CarrierCaps::load(name);
+        self.survey.found.clear();
+        self.plan.clear();
+        if let Some(p) = prefs::freqplan_path(name) {
+            self.load_plan(&p);
+        }
+        self.note = format!(
+            "Satellite {}: {} plan carriers, {} carriers labelled",
+            if name.is_empty() {
+                UNNAMED_SATELLITE
+            } else {
+                name
+            },
+            self.plan.len(),
+            self.carrier_caps.count()
+        );
+    }
+
+    /// Name the satellite chosen `name` (the one from before satellites
+    /// were named, or a misspelt one): its plan and labels keep with it.
+    fn rename_satellite(&mut self, name: &str) {
+        let _ = prefs::rename_satellite(&self.satellite, name);
+        self.satellite = name.to_string();
+        self.satellites = prefs::satellites();
+        self.unnamed_kept = prefs::unnamed_kept();
+        self.carrier_caps = carrier_caps::CarrierCaps::load(name);
+        self.note = format!("This satellite is {name} now");
+    }
+
+    /// The toolbar's satellite choice: each satellite keeps its own plan
+    /// and carrier labels, shown only while it is chosen. Satellites are
+    /// added and renamed in its list.
+    fn satellite_choice(&mut self, ui: &mut egui::Ui) {
+        let shown = if self.satellite.is_empty() {
+            UNNAMED_SATELLITE.to_string()
+        } else {
+            self.satellite.clone()
+        };
+        let mut chosen: Option<String> = None;
+        let mut renamed: Option<String> = None;
+        egui::ComboBox::from_id_salt("satellite")
+            .width(110.0)
+            .truncate()
+            .selected_text(shown)
+            // Typing a new name is a click inside: only one outside closes.
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                // The labels from before satellites were named, while kept.
+                if (self.satellite.is_empty() || self.unnamed_kept)
+                    && ui
+                        .selectable_label(self.satellite.is_empty(), UNNAMED_SATELLITE)
+                        .on_hover_text(
+                            "The plan and carrier labels kept before satellites were named: \
+                             choose it, then name it below",
+                        )
+                        .clicked()
+                {
+                    chosen = Some(String::new());
+                }
+                for sat in &self.satellites {
+                    if ui
+                        .selectable_label(*sat == self.satellite, sat.as_str())
+                        .clicked()
+                    {
+                        chosen = Some(sat.clone());
+                    }
+                }
+                ui.separator();
+                let ok = prefs::satellite_name_ok(&self.satellite_edit, &self.satellites);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.satellite_edit)
+                        .hint_text("name, e.g. Intelsat 19")
+                        .desired_width(150.0),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(ok.is_some(), egui::Button::new("Add"))
+                        .on_hover_text("A new satellite, chosen: no plan or labels yet")
+                        .clicked()
+                    {
+                        chosen = ok.clone();
+                    }
+                    if ui
+                        .add_enabled(ok.is_some(), egui::Button::new("Rename this one"))
+                        .on_hover_text(
+                            "Give the satellite chosen this name: its plan and carrier labels \
+                             go with it",
+                        )
+                        .clicked()
+                    {
+                        renamed = ok.clone();
+                    }
+                });
+                if chosen.is_some() || renamed.is_some() {
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text(
+                "The satellite the dish is on. Each keeps its own frequency plan and carrier \
+                 labels, shown only while it is chosen: another satellite's names at the same \
+                 frequencies would be wrong.",
+            );
+        if let Some(name) = renamed {
+            self.satellite_edit.clear();
+            self.rename_satellite(&name);
+        } else if let Some(name) = chosen {
+            self.satellite_edit.clear();
+            self.choose_satellite(&name);
         }
     }
 
@@ -943,7 +1078,7 @@ impl App {
                 }
             }
             let plan_tip = if self.plan.is_empty() {
-                "Load a frequency plan: an SDR++ frequency-manager bookmark list (.json). Its carriers are labelled on the waterfall (zoom in for more names), clicking a name makes a VFO on that carrier, and VFOs made on one take its name. Kept only here: its path is remembered."
+                "Load a frequency plan for this satellite: an SDR++ frequency-manager bookmark list (.json). Its carriers are labelled on the waterfall (zoom in for more names), clicking a name makes a VFO on that carrier, and VFOs made on one take its name. Kept only here: its path is remembered, with the satellite."
                     .to_string()
             } else {
                 format!(
@@ -990,6 +1125,7 @@ impl App {
             {
                 self.reset_labels();
             }
+            self.satellite_choice(ui);
             let r = ui.button("📋 Plan…").on_hover_text(plan_tip);
             if r.clicked()
                 && let Some(p) = rfd::FileDialog::new()
@@ -999,12 +1135,13 @@ impl App {
             {
                 self.load_plan(&p);
                 if !self.plan.is_empty() {
-                    let _ = prefs::set_freqplan_path(Some(&p));
+                    let _ = prefs::set_freqplan_path(&self.satellite, Some(&p));
+                    self.unnamed_kept = prefs::unnamed_kept();
                 }
             }
             if r.secondary_clicked() && !self.plan.is_empty() {
                 self.plan.clear();
-                let _ = prefs::set_freqplan_path(None);
+                let _ = prefs::set_freqplan_path(&self.satellite, None);
                 self.note = "Frequency plan put away".into();
             }
             // The LNB's error, trimmed out of the RF scale on the fly.
