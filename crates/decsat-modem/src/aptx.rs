@@ -4,24 +4,30 @@
 //! at 32 kHz is 256 kbit/s, mono at 16 kHz 64 kbit/s.
 //!
 //! A codeword holds the four sub-bands' quantised prediction errors, first
-//! sent first: HH (12–16 kHz at 32 kHz sampling, 3 bits), HL (8–12, 2 bits),
-//! LH (4–8, 4 bits), LL (0–4, 7 bits). Each sub-band is backward-adaptive
-//! ADPCM (an adaptive quantiser step and a pole-zero predictor), and a
-//! two-stage QMF tree joins them.
+//! sent first, 3 | 2 | 4 | 7 bits: Standard apt-X gives its bands (at 32 kHz
+//! sampling) 0–4 kHz 7 bits, 4–8 kHz 4, 8–12 kHz 3 and 12–16 kHz 2 (APT's
+//! apt-X technical overview); the 3-bit field drives the QMF slot that comes
+//! out at 8–12 kHz. Each sub-band is backward-adaptive ADPCM (an adaptive
+//! quantiser step and a pole-zero predictor), and a two-stage QMF tree joins
+//! them.
 //!
 //! The decoder here is a port of FFmpeg's Bluetooth aptX decoder
 //! (libavcodec/aptx.c, aptx.h, aptxdec.c; © 2017 Aurelien Jacobs,
 //! LGPL-2.1-or-later): its tables, its ADPCM and its QMF, bit-exact against
-//! it ([`Mapping::Bluetooth`]). The broadcast stream found on a Comtech IBS
-//! carrier differs in how a codeword's fields are written
-//! ([`Mapping::Broadcast`], worked out from the carrier): every bit is
-//! inverted, each field is sign and magnitude (sign first), and an all-zero
-//! field (all ones as sent) is an exact zero, so the quantiser has a zero
-//! level where aptX's has two half steps. With that the LL band decodes
-//! cleanly against aptX's LL tables (its left and right agree to 0.95
-//! coherence on a near-mono programme), but the other three bands' codes do
-//! not fit aptX's tables for them: their step sizes run away. Until their
-//! tables are known they are left silent — the audio is the 0–4 kHz band.
+//! it ([`Mapping::Bluetooth`]). Bluetooth aptX is Enhanced apt-X (its sync is
+//! in every codeword). The broadcast stream found on a Comtech IBS carrier is
+//! Standard apt-X: its AutoSync is a sync word stolen one bit a codeword,
+//! from one channel's 4–8 kHz field, over 10–11 codewords of every 128. It
+//! writes its fields differently ([`Mapping::Broadcast`], worked out from
+//! the carrier): every bit is inverted, each field is sign and magnitude
+//! (sign first), and an all-zero field (all ones as sent) is an exact zero —
+//! a zero level where aptX has two half steps. With that the 0–4 kHz band
+//! decodes cleanly against aptX's tables (left and right agree to 0.95
+//! coherence on a near-mono programme). The upper bands' codes do not fit
+//! aptX's step-size steering; Standard apt-X's own tables are not published,
+//! so theirs is aptX's moved by a per-band constant fitted to the carrier
+//! ([`BROADCAST_BIAS`]): an approximation, though the bands then agree
+//! left to right and join one another as a programme's spectrum does.
 //!
 //! [`AptxRx`] takes the data bits of a link, finds where the codewords
 //! start and whether they alternate left and right, and decodes.
@@ -247,8 +253,9 @@ enum Code {
 
 impl Band {
     /// FFmpeg's `aptx_invert_quantization`: the reconstructed difference,
-    /// and the step size steered by the index.
-    fn invert_quantization(&mut self, code: Code, dither: i32, t: &Tables) {
+    /// and the step size steered by the index (its steering moved by
+    /// `bias`: 0 for aptX, see [`BROADCAST_BIAS`]).
+    fn invert_quantization(&mut self, code: Code, dither: i32, t: &Tables, bias: i32) {
         let (idx, sign) = match code {
             // Rust note: `q ^ -(q < 0)` is the C's one's complement of a
             // negative value: −1 → 0, −2 → 1 …; plus one, the table index.
@@ -272,7 +279,10 @@ impl Band {
         };
         self.rdiff = ((i64::from(self.quant_factor) * i64::from(qr)) >> 19) as i32;
         let fs = 32620i32.wrapping_mul(self.factor_select);
-        let fs = rshift32(fs.wrapping_add(i32::from(t.qfs[idx]) * (1 << 15)), 15);
+        let fs = rshift32(
+            fs.wrapping_add((i32::from(t.qfs[idx]) + bias) * (1 << 15)),
+            15,
+        );
         self.factor_select = fs.clamp(0, t.factor_max);
         let i = ((self.factor_select & 0xFF) >> 3) as usize;
         let shift = (t.factor_max - self.factor_select) >> 8;
@@ -308,8 +318,8 @@ impl Band {
     }
 
     /// FFmpeg's `aptx_process_subband`: one quantised value in.
-    fn process(&mut self, code: Code, dither: i32, t: &Tables) {
-        self.invert_quantization(code, dither, t);
+    fn process(&mut self, code: Code, dither: i32, t: &Tables, bias: i32) {
+        self.invert_quantization(code, dither, t, bias);
         let sign = diffsign(self.rdiff, -self.pred_diff);
         let ss0 = sign * self.prev_sign[0];
         let ss1 = sign * self.prev_sign[1];
@@ -339,8 +349,9 @@ pub enum Mapping {
     /// FFmpeg's aptX: two's complement, the HH field's last bit a parity
     /// (sync) bit, dither added.
     Bluetooth,
-    /// The broadcast stream: inverted, sign and magnitude, an exact zero, no
-    /// dither; only the LL band is understood (see the module notes).
+    /// The broadcast stream (Standard apt-X): inverted, sign and magnitude,
+    /// an exact zero, no dither; the upper bands' step sizes fitted (see the
+    /// module notes).
     Broadcast,
 }
 
@@ -392,22 +403,28 @@ impl Channel {
                 let parity = (self.dither_parity ^ self.q.iter().fold(0, |a, &q| a ^ q)) & 1;
                 self.q[3] = (self.q[3] & !1) | parity;
                 for (sb, band) in self.bands.iter_mut().enumerate() {
-                    band.process(Code::Aptx(self.q[sb]), self.dither[sb], &TABLES[sb]);
+                    band.process(Code::Aptx(self.q[sb]), self.dither[sb], &TABLES[sb], 0);
                 }
             }
             Mapping::Broadcast => {
+                // Every bit is inverted on the line.
                 let v = !w & 0xFFFF;
-                // LL: bits 6–0, sign first.
-                let f = v & 0x7F;
-                let (sign, m) = (f >> 6, (f & 0x3F) as usize);
-                let code = if m == 0 && sign == 0 {
-                    // Exact zero, stepping as the smallest step.
-                    Code::Index(1, 0)
-                } else {
-                    Code::Index(m.max(1), if sign == 1 { -1 } else { 1 })
-                };
-                self.bands[0].process(code, 0, &TABLES[0]);
-                // LH, HL and HH: their tables are not known yet; silent.
+                for (sb, band) in self.bands.iter_mut().enumerate() {
+                    let (shift, bits) = BROADCAST_FIELDS[sb];
+                    let f = (v >> shift) & ((1 << bits) - 1);
+                    // Sign first, then the magnitude.
+                    let (neg, m) = (f >> (bits - 1) == 1, (f & ((1 << (bits - 1)) - 1)) as usize);
+                    let code = if m == 0 && !neg {
+                        // The exact zero, steering as the smallest step.
+                        Code::Index(1, 0)
+                    } else {
+                        // LL: magnitude m is aptX's index m (m ≥ 1); the
+                        // upper bands: index m + 1 (see the module notes).
+                        let idx = if sb == 0 { m.max(1) } else { m + 1 };
+                        Code::Index(idx, if neg { -1 } else { 1 })
+                    };
+                    band.process(code, 0, &TABLES[sb], BROADCAST_BIAS[sb]);
+                }
             }
         }
         self.synth()
@@ -440,9 +457,34 @@ impl Channel {
     }
 }
 
+/// The broadcast stream's fields, per QMF slot (the order of [`TABLES`]):
+/// (lowest bit, bits). Standard apt-X gives its bands 7, 4, 3 and 2 bits
+/// (0–4, 4–8, 8–12, 12–16 kHz at 32 kHz); slot 3 is 8–12 kHz, the high
+/// half's QMF output being frequency-inverted, so the 3-bit field drives it
+/// with aptX's 5-entry tables and the 2-bit field slot 2 with the 3-entry.
+/// The same layout as aptX's codeword, MSB first: 3 | 2 | 4 | 7.
+const BROADCAST_FIELDS: [(u32, u32); BANDS] = [(0, 7), (7, 4), (11, 2), (13, 3)];
+
+/// The broadcast stream's step-size steering, moved from aptX's by this per
+/// band. Fitted on the carrier (2026-10-15): aptX's offsets with these added
+/// make each upper band's level continuous with the band below across 4, 8
+/// and 12 kHz (frame by frame, at the spectral slope below the edge), and
+/// at those levels left and right agree as a near-mono programme should
+/// (coherence 0.86, 0.80 and 0.50 against 0.2–0.4 off them). Standard
+/// apt-X's own tables are not published; these stand in for them.
+const BROADCAST_BIAS: [i32; BANDS] = [0, -35, 12, -16];
+
 /// The broadcast stream's samples are this much quieter than its programme
-/// (the reconstruction's scale for the stream's codes is not known yet).
-const GAIN: f32 = 4.0;
+/// (the reconstruction's scale for the stream's codes is not known).
+const GAIN: f32 = 2.0;
+
+/// AutoSync: codewords in its frame; frames gathered before judging, and
+/// given up after; fixed places in a row that make the word (10 bits; on
+/// the carrier 11 places read fixed).
+const SYNC_FRAME: usize = 128;
+const SYNC_LOOK: u16 = 16;
+const SYNC_GIVE_UP: u16 = 64;
+const SYNC_MIN_RUN: usize = 8;
 
 /// Codewords looked at per channel when searching, and the data needed.
 const SEARCH_WORDS: usize = 4000;
@@ -532,6 +574,13 @@ pub struct AptxStats {
     pub losses: u64,
     /// Share of LL reconstructions clipped over the last check.
     pub clipped: f64,
+    /// AutoSync: Standard apt-X's sync word, one bit in each of 10–11
+    /// codewords of every 128, stolen from one channel's LMF bit: where in
+    /// its frame it starts, once seen. That channel is played as the left.
+    pub autosync: Option<usize>,
+    /// The stream's second channel carried the AutoSync, so the two are
+    /// played swapped.
+    pub swapped: bool,
 }
 
 /// Finds apt-X in a link's data and decodes it; see the module notes.
@@ -545,6 +594,11 @@ pub struct AptxRx {
     left: [i32; 4],
     check_words: u32,
     check_clipped: u32,
+    /// AutoSync search: per channel, ones seen in the LMF bit at each place
+    /// of a 128-codeword frame, frames seen, and the next codeword's place.
+    sync_ones: Vec<[u16; SYNC_FRAME]>,
+    sync_frames: u16,
+    sync_at: usize,
     /// Decoded samples, interleaved when stereo, ±1 full scale.
     pub pcm: Vec<f32>,
     pub stats: AptxStats,
@@ -584,6 +638,7 @@ impl AptxRx {
         for k in 0..words {
             let w = word_at(&self.bits, 16 * k);
             let c = self.next;
+            self.watch_autosync(c, chans, w);
             let s = self.dec[c].decode(w, Mapping::Broadcast);
             self.check_clipped += u32::from(self.dec[c].ll().abs() >= CLIP);
             self.check_words += 1;
@@ -591,11 +646,16 @@ impl AptxRx {
             if chans == 1 {
                 self.pcm.extend(s.iter().map(|&v| sample(v)));
             } else if c == 1 {
-                // The right channel's four samples go with the left's.
-                let l = self.left;
+                // The second channel's four samples go with the first's
+                // (swapped when the second carries the AutoSync).
+                let (l, r) = if self.stats.swapped {
+                    (s, self.left)
+                } else {
+                    (self.left, s)
+                };
                 for i in 0..4 {
                     self.pcm.push(sample(l[i]));
-                    self.pcm.push(sample(s[i]));
+                    self.pcm.push(sample(r[i]));
                 }
             } else {
                 self.left = s;
@@ -610,6 +670,56 @@ impl AptxRx {
             if self.stats.clipped > LOSE_CLIP {
                 self.stats.locked = false;
                 self.stats.losses += 1;
+            }
+        }
+    }
+
+    /// Gather the LMF bit of each channel's codewords by their place in a
+    /// 128-codeword frame; after enough frames, the channel with a run of
+    /// places that never change carries the AutoSync word.
+    fn watch_autosync(&mut self, c: usize, chans: usize, w: u16) {
+        if self.stats.autosync.is_some() || self.sync_frames >= SYNC_GIVE_UP {
+            return;
+        }
+        if self.sync_ones.len() != chans {
+            self.sync_ones = vec![[0; SYNC_FRAME]; chans];
+            self.sync_frames = 0;
+            self.sync_at = 0;
+        }
+        // The LMF field's last bit (bit 7 as sent).
+        self.sync_ones[c][self.sync_at] += (w >> 7) & 1;
+        if c + 1 < chans {
+            return;
+        }
+        self.sync_at += 1;
+        if self.sync_at < SYNC_FRAME {
+            return;
+        }
+        self.sync_at = 0;
+        self.sync_frames += 1;
+        if self.sync_frames < SYNC_LOOK {
+            return;
+        }
+        let n = self.sync_frames;
+        for (ch, ones) in self.sync_ones.iter().enumerate() {
+            // The longest run of places (round the frame) always 0 or 1.
+            let fixed = |p: usize| ones[p % SYNC_FRAME] == 0 || ones[p % SYNC_FRAME] == n;
+            let mut best = (0, 0);
+            for start in 0..SYNC_FRAME {
+                if fixed(start + SYNC_FRAME - 1) || !fixed(start) {
+                    continue;
+                }
+                let len = (start..start + SYNC_FRAME)
+                    .take_while(|&p| fixed(p))
+                    .count();
+                if len > best.0 {
+                    best = (len, start);
+                }
+            }
+            if best.0 >= SYNC_MIN_RUN {
+                self.stats.autosync = Some(best.1);
+                self.stats.swapped = ch == 1;
+                return;
             }
         }
     }
@@ -640,6 +750,9 @@ impl AptxRx {
                 self.stats.lr = lr;
                 self.dec = [Channel::new(), Channel::new()];
                 self.next = 0;
+                self.sync_ones.clear();
+                self.stats.autosync = None;
+                self.stats.swapped = false;
                 self.bits.drain(..offset);
             }
             None => {
@@ -725,9 +838,26 @@ mod tests {
         let (mut el, mut er) = (Channel::new(), Channel::new());
         let wl = encode_ll(&left, &mut el);
         let wr = encode_ll(&right, &mut er);
-        // Interleaved, then 11 stray bits ahead of the first codeword.
+        // Interleaved, then 11 stray bits ahead of the first codeword. The
+        // second channel carries AutoSync in its LMF bit (bit 7 as sent),
+        // as the carrier's first channel does, 16 codewords into each 128.
+        // Elsewhere that bit changes (on the carrier it is the LMF band's
+        // least significant): here at random.
+        const SYNC: [u16; 11] = [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1];
+        let mut seed = 0x1234_5678u32;
+        let mut coin = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 31) as u16
+        };
         let mut bits: Vec<u8> = vec![1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1];
-        for (l, r) in wl.iter().zip(&wr) {
+        for (k, (l, r)) in wl.iter().zip(&wr).enumerate() {
+            let p = k % SYNC_FRAME;
+            let l = (l & !0x80) | (coin() << 7);
+            let r = if (16..27).contains(&p) {
+                (r & !0x80) | (SYNC[p - 16] << 7)
+            } else {
+                (r & !0x80) | (coin() << 7)
+            };
             for w in [l, r] {
                 bits.extend((0..16).rev().map(|i| ((w >> i) & 1) as u8));
             }
@@ -747,7 +877,11 @@ mod tests {
         assert!(rx.stats.stereo);
         assert_eq!(rx.stats.offset, 11);
         assert_eq!(rx.sample_rate(256_000.0), 32_000.0);
-        // 440 Hz dominates the left channel at 32 kHz.
+        // The AutoSync puts the second channel first: the left played is
+        // the one with 300 Hz in it.
+        assert_eq!(rx.stats.autosync, Some(16), "{:?}", rx.stats);
+        assert!(rx.stats.swapped);
+        // 440 Hz dominates the left channel at 32 kHz, and 300 Hz is there.
         let l: Vec<f32> = rx.pcm.iter().step_by(2).copied().collect();
         let power = |f: f64| {
             let (mut re, mut im) = (0.0, 0.0);
@@ -762,6 +896,12 @@ mod tests {
             power(440.0) > 100.0 * power(1000.0),
             "{} {}",
             power(440.0),
+            power(1000.0)
+        );
+        assert!(
+            power(300.0) > 10.0 * power(1000.0),
+            "{} {}",
+            power(300.0),
             power(1000.0)
         );
     }

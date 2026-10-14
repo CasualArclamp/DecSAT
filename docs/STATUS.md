@@ -4176,3 +4176,44 @@ differential — 273.08 kbit/s = 256 kbit/s × 16/15.
 - **Open**: broadband clicks (the loudest half-seconds, −15 dBFS against a
   −50 programme) at ~2.8, 8.6, 13.5, 22 s — a handful of codes the decoder
   mishandles, or the programme's own; to look at with the upper bands.
+
+### The upper bands, Standard apt-X and AutoSync (2026-10-15, overnight)
+
+- **APT's apt-X technical overview** (pcper.com copy of "apt-X Digital
+  Audio Data Compression Technical Overview"): Standard apt-X gives its
+  bands 7, 4, **3** and **2** bits (0–4, 4–8, 8–12, 12–16 kHz at 32 kHz) —
+  the 3-bit field is 8–12 kHz, and the QMF slot it drives (FFmpeg's "HF",
+  slot 3) does come out at 8–12 kHz (the high half is frequency-inverted),
+  so the layout is aptX's. AutoSync "periodically inserts a unique 10 bit
+  sync word … each of the bits spread over the first ten codewords of a
+  frame"; Enhanced apt-X "revised [it] to embed a synchronisation pattern
+  in every codeword" — Bluetooth aptX's parity sync. So **Bluetooth aptX is
+  Enhanced apt-X, the carrier Standard apt-X (apt-X 100)**. No decoder or
+  tables for Standard apt-X are public (the cinema apt-X100 decoders are a
+  closed DLL); the 1991 AES paper (Smyth & Smyth) is paywalled; the 1988
+  patent (EP0398973, APT) has no tables.
+- **AutoSync found**: the first channel's LMF last bit (bit 8 of the
+  codeword as sent) reads 00100010001 at the same 11 places of every 128
+  codewords (period 512 samples), the rest of that bit the LMF band's as in
+  the other channel. `AptxRx` finds it (LMF bit per place of a 128-codeword
+  frame, a run of ≥ 8 fixed places after 16 frames) and plays that channel
+  as the left — deterministic where the left/right pairing was a tie.
+- **Upper bands fitted**: the codes are what aptX's would be (sign first,
+  exact zero, magnitudes sign-balanced) but sit where aptX's step steering
+  cannot balance them. Model: aptX's tables with each band's steering moved
+  by a constant (`BROADCAST_BIAS`), and magnitude m → aptX index m + 1 in
+  the upper bands (index m in LL). The bias is nearly a gain (≈ 5 dB per
+  unit) and does not change left/right coherence, so it is set from
+  **frame-by-frame continuity across 4, 8 and 12 kHz**: each band's own
+  output just above the edge against the band below's just under it (8 ms
+  frames), the level at the slope measured below. With it the bands' own
+  left/right coherence jumps (HMF 0.2–0.4 off the fit → 0.71 on it), and
+  edge envelope correlation is 0.78 / 0.82 / 0.41. Fitted: LMF −35, HF
+  (12–16 kHz, 2-bit) +12, HMF (8–12 kHz, 3-bit) −16. Shape searches
+  (offset scale, interval warp) only nudged the metric (0.73 → 0.80, at the
+  grid's edge): not identifiable from this capture, left at aptX's.
+- **Result**: full band, speech harmonics under 4 kHz and sibilants at
+  4–10 kHz where they belong; coherence per 2 kHz 0.94 / 0.86 / 0.86 / 0.81
+  / 0.80 / 0.59 / 0.48 / 0.55. Approximate — the true tables would differ in
+  shape. Engine output matches the scratch decoder (0.9998 once settled).
+  Listening page: `out/ibs-audio-tests-3.html` (not committed).

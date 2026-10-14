@@ -13,9 +13,9 @@ use decsat_modem::ibssync::SyncStats;
 
 use crate::fec::{AUDIO_OUTPUT, FecOutput};
 
-/// What the decoder makes of apt-X so far (the LH, HL and HH bands' tables
-/// are not known yet: see `decsat_modem::aptx`).
-const CODEC: &str = "apt-X, 0–4 kHz band only";
+/// What the decoder makes of apt-X (Standard apt-X; the upper bands' step
+/// tables fitted, not known: see `decsat_modem::aptx`).
+const CODEC: &str = "Standard apt-X (apt-X 100)";
 /// Audio a packet carries: 20 ms.
 const PACKET_MS: u32 = 20;
 /// RTP payload type for the L16 stream (dynamic, named by its SDP).

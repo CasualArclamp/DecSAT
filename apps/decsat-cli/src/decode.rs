@@ -1153,6 +1153,12 @@ fn print_programme(p: &decsat_engine::ProgrammeView) {
     if let Some((path, n)) = &p.record_file {
         println!("  recorded to {} ({n} bytes)", path.display());
     }
+    if let Some(at) = a.autosync {
+        println!(
+            "  AutoSync word {at} codewords into each 128, in the {} channel (played as the left)",
+            if a.swapped { "second" } else { "first" }
+        );
+    }
     if let Some(e) = &p.error {
         println!("  error: {e}");
     }

@@ -1225,10 +1225,11 @@ fn programme_card(
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("Programme audio ({})", p.codec)).strong())
             .on_hover_text(
-                "apt-X sub-band ADPCM (a 16-bit codeword for every four samples) in an IBS \
-                 carrier's data, under the IESS-309 synchronous scrambler. Only the lowest \
-                 of its four bands decodes so far: the others' quantiser tables are not \
-                 known yet, so it sounds like a phone line.",
+                "Standard apt-X sub-band ADPCM (a 16-bit codeword for every four samples) \
+                 in an IBS carrier's data, under the IESS-309 synchronous scrambler. Its \
+                 0–4 kHz band decodes exactly; the three bands above use step-size tables \
+                 fitted to a live carrier (Standard apt-X's own are not published), so \
+                 4–16 kHz is close but not exact.",
             );
         if p.playing {
             volume_control(ui);
@@ -1261,7 +1262,7 @@ fn programme_card(
             )
             .on_hover_text(format!(
                 "Codewords from bit {} of the data · LL band sample-to-sample correlation \
-                 {:.2}{} · {:.1} % clipped",
+                 {:.2}{} · {:.1} % clipped{}",
                 a.offset,
                 a.lag1,
                 if a.stereo {
@@ -1269,7 +1270,15 @@ fn programme_card(
                 } else {
                     String::new()
                 },
-                100.0 * a.clipped
+                100.0 * a.clipped,
+                match a.autosync {
+                    Some(at) => format!(
+                        " · AutoSync word {at} codewords into each 128, in the {} channel \
+                         (played as the left)",
+                        if a.swapped { "second" } else { "first" }
+                    ),
+                    None => " · no AutoSync seen".into(),
+                }
             ));
         } else {
             ui.label(format!("looking for apt-X ({} searches)", a.searches));
