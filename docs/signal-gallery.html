@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DecSAT Signal Gallery</title>
+<style>
+/* Layout: a sticky instrument bar (title, Es/N0 control), an index of signal
+   types, then one card per type: four scope panes (spectrum, waterfall,
+   constellation, envelope) over two columns of notes. Dark first, as a
+   waterfall is; the light theme follows the system or data-theme. */
+:root {
+  --bg: #0b0f14;
+  --panel: #121923;
+  --pane: #070a0f;
+  --fg: #d9e1ea;
+  --muted: #8a97a6;
+  --accent: #5ec8ff;
+  --warn: #ffb347;
+  --good: #7ad88c;
+  --bad: #ff7a7a;
+  --line: #223040;
+  --grid: #1a2430;
+  --font: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f3f5f8; --panel: #ffffff; --pane: #0b1016; --fg: #15202b; --muted: #5b6b7a;
+    --accent: #0b6fb4; --warn: #b36b00; --good: #1f7a3a; --bad: #b3261e; --line: #d6dde6; --grid: #e4e9ef;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f3f5f8; --panel: #ffffff; --pane: #0b1016; --fg: #15202b; --muted: #5b6b7a;
+  --accent: #0b6fb4; --warn: #b36b00; --good: #1f7a3a; --bad: #b3261e; --line: #d6dde6; --grid: #e4e9ef;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--font); }
+.wrap { max-width: 1180px; margin: 0 auto; padding-block: 0 48px; padding-inline: 16px; }
+header.bar {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 12px 0;
+}
+header.bar h1 { font-size: 20px; margin: 0; letter-spacing: 0.01em; text-wrap: balance; }
+header.bar h1 small { color: var(--muted); font-weight: 400; font-size: 14px; margin-left: 10px; }
+.control { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px; }
+.control input[type=range] { width: 180px; accent-color: var(--accent); }
+.control output { min-width: 5.5em; font-variant-numeric: tabular-nums; }
+nav.index { display: flex; flex-wrap: wrap; gap: 6px 10px; padding: 14px 0 6px; font-size: 13px; }
+nav.index a { color: var(--accent); text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
+nav.index a:hover, nav.index a:focus-visible { border-color: var(--accent); outline: none; }
+p.lede { max-width: 68ch; color: var(--muted); margin: 8px 0 18px; }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 18px 0; }
+section.card h2 { margin: 0 0 2px; font-size: 19px; text-wrap: balance; }
+section.card .tag { color: var(--accent); font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+section.card .where { color: var(--muted); margin: 4px 0 12px; max-width: 80ch; }
+.panes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.pane { min-width: 0; }
+.pane canvas { width: 100%; height: auto; display: block; background: var(--pane); border-radius: 4px; }
+.pane .cap { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+.notes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; margin-top: 12px; }
+.notes > div { min-width: 0; }
+.notes h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 4px; }
+.notes ul { margin: 0; padding-left: 18px; }
+.notes li { margin: 2px 0; }
+.notes li b { font-weight: 600; }
+code { font-family: var(--mono); font-size: 0.92em; }
+button.small { font: 13px var(--font); color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+button.small:hover, button.small:focus-visible { border-color: var(--accent); outline: none; }
+.legend { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+@media (max-width: 900px) { .panes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .notes { grid-template-columns: 1fr; } header.bar h1 small { display: block; margin: 0; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+  <h1>DecSAT Signal Gallery <small>what each kind of carrier looks like, and what DecSAT does with it</small></h1>
+  <div class="control">
+    <label for="esn0">Es/N0</label>
+    <input id="esn0" type="range" min="2" max="22" step="1" value="14">
+    <output id="esn0v" for="esn0">14 dB</output>
+  </div>
+  <button class="small" id="pause" aria-pressed="false">⏸ Pause</button>
+  <span class="legend">panes: spectrum · waterfall (newest at the top) · constellation · power against time, all live</span>
+</header>
+
+<nav class="index" id="index" aria-label="Signal types"></nav>
+<p class="lede">Every pane is drawn from a model of the signal, not a recording: the shapes are the ones the waterfall, the Identify constellation and the burst analyser show on the real carriers, with the numbers DecSAT measured on Horizons 3e and Intelsat 19. The panes run live, with signal time slowed so that a pane's window passes in about six seconds; the Es/N0 control sets the noise everywhere, and Pause freezes the lot. The one thing a pane cannot show is the bit-level fingerprint a decoder sees, so each card says what that is.</p>
+
+<main id="cards"></main>
+</div>
+
+<script>
+'use strict';
+// ------------------------------------------------------------ the signals
+// span: Hz either side of the pane's centre. Carriers: offset f (Hz), symbol
+// rate rs, roll-off alpha, level above the floor (dB) at 10 dB Es/N0,
+// modulation, and optionally kind ('cw', 'side', 'cid', 'wide') or the
+// burst pattern index for slotted carriers.
+const SIGNALS = [
+{
+  id: 'dvbs2', name: 'DVB-S2 / S2X, constant coding (CCM)', tag: 'standard · decodes',
+  where: 'Outbounds of VSAT networks, DATV, feeds: on Horizons 3e the 1.2 MS/s GSE outbound (QPSK 1/4, every BBFRAME good); on Intelsat 19 the 4.28 MS/s 8PSK 2/3 and 1.27 MS/s QPSK 3/4 carriers.',
+  span: 2.0e6,
+  carriers: [{ f: 0, rs: 1.2e6, alpha: 0.2, lvl: 24, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['A flat top with gentle shoulders: roll-off 0.35, 0.25 or 0.20 (S2X adds 0.15, 0.10, 0.05).',
+         'The constellation is one clean ring set; the modulation does not change from frame to frame.',
+         'The fingerprint is the PLHEADER: 90 symbols of π/2-BPSK at the start of every frame, and the next header exactly where the PLS code says the frame ends.'],
+  decsat: ['Identify names it as a fact ("DVB-S2 CCM, QPSK 3/4 ×N, pilots") once headers confirm on their own grid.',
+           'A DVB-S2 → GSE/IP VFO gives IP (PCAP, Wireshark live), a → MPEG-TS VFO gives services and a stream for VLC.',
+           'A carrier with S2 frame sizes but headers off the grid is not this: see NovelSat.']
+},
+{
+  id: 'acm', name: 'DVB-S2X with adaptive coding (ACM)', tag: 'standard · decodes',
+  where: 'Hub outbounds that change MODCOD per remote: the 2.7 MS/s outbound on Horizons 3e (QPSK 1/4 and 1/3 short frames), the 1 MS/s ones mixing QPSK 1/4 with 32APSK 3/4.',
+  span: 4.0e6,
+  carriers: [{ f: 0, rs: 2.72e6, alpha: 0.2, lvl: 22, mod: 'acm' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk', '16apsk', '32apsk'], perFrame: true },
+  tell: ['Spectrum and envelope look exactly like CCM: the change is inside the frames.',
+         'The constellation changes ring set from frame to frame, because each frame may use a different modulation; averaged, the sets pile on top of each other.',
+         'Frames of different MODCODs have different lengths, so the header spacing varies; each still lands where its PLS code predicts.'],
+  decsat: ['Identify lists the MODCODs with counts ("QPSK 1/4 ×44, 32APSK 3/4 ×23, pilots"); a MODCOD read once among many frames is a misread header, not S2X.',
+           'The FEC thread decodes each frame by its own MODCOD; frames whose MODCOD is above threshold at this dish fail while the rest decode.',
+           'Multiple-stream outbounds often carry GSE type 0005h PDUs that are encrypted: the IP card says so.']
+},
+{
+  id: 'dvbs', name: 'DVB-S (the older standard)', tag: 'standard · decodes',
+  where: 'Amateur DATV (QO-100), older feeds; on the Ku SCPC block most "possibly DVB-S" readings turn out to be K = 7 Viterbi modem links instead.',
+  span: 400e3,
+  carriers: [{ f: 0, rs: 250e3, alpha: 0.35, lvl: 20, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['Plain QPSK, roll-off 0.35, nothing periodic in the symbols: no PLHEADER, no unique word.',
+         'Only the decoder can confirm it: the sync bytes appear once the Viterbi code rate and puncturing phase are right.'],
+  decsat: ['Identify says "QPSK, no DVB-S2 PLHEADER — possibly DVB-S (not verified)".',
+           'The DVB-S decoder tries rate 1/2 … 7/8, rotation and inversion and keeps the one whose re-encoding matches; then RS(204,188) and the TS outputs.',
+           'The Viterbi K = 7 decoder runs on the same carriers for the non-DVB case (next cards).']
+},
+{
+  id: 'ns4', name: 'NovelSat NS3 / NS4 (proprietary S2-like)', tag: 'fingerprint only',
+  where: 'Hypermux outbounds. On Intelsat 19 a ~10 kHz carrier read as NS4-like from its 2 % roll-off fit; it switched off before it could be recorded.',
+  span: 1.0e6,
+  carriers: [{ f: 0, rs: 800e3, alpha: 0.02, lvl: 22, mod: '8psk' }],
+  env: { type: 'continuous' }, cons: { mods: ['8psk'] },
+  tell: ['Edges sharper than any DVB-S2X roll-off allows: the skirts fit 2 % better than 5 %.',
+         'S2-style SOF and PLS headers that recur regularly but not where their PLS codes say the next frame starts.',
+         'The constellation cannot tell it apart: QPSK, 8PSK, 16APSK like S2.'],
+  decsat: ['Identify reports "DVB-S2-style headers off their own grid" and "α ≈ 0.02 (sharper than DVB-S2X allows)" as fingerprints, with the header spacing.',
+           'No decoder: the PLS meaning and the LDPC codes are not published. A long recording (at 10 kS/s one frame takes 3 s) would let the framing be measured.']
+},
+{
+  id: 'tpc', name: 'TPC 2964 (Comtech CDM-600 / 570L)', tag: 'modem · decodes',
+  where: 'The Horizons 3e SCPC block: about fifty carriers, 43.6 kS/s voice links 58.8 kHz apart, 85–683 kS/s data links, and the 87.2 kS/s two-timeslot D&I++ pair.',
+  span: 300e3,
+  carriers: [{ f: -117.6e3, rs: 43.6e3, alpha: 0.25, lvl: 14, mod: 'qpsk' }, { f: -58.8e3, rs: 43.6e3, alpha: 0.35, lvl: 12, mod: 'qpsk' }, { f: 0, rs: 43.6e3, alpha: 0.25, lvl: 15, mod: 'qpsk' }, { f: 58.8e3, rs: 43.6e3, alpha: 0.25, lvl: 11, mod: 'qpsk' }, { f: 117.6e3, rs: 43.6e3, alpha: 0.35, lvl: 13, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['A comb of narrow carriers at a fixed spacing is the telltale of a voice SCPC block; each is plain QPSK (BPSK or 8PSK on some).',
+         'The fingerprint is the 20-bit unique word F50B8h every 2964 bits (1482 QPSK symbols), under any carrier phase.',
+         'The rate gives the payload: 43.6 kS/s × 2 × 2223/2964 = 65.4 kbit/s = one 64 kbit/s timeslot plus the D&I++ 46/45 overhead; 87.2 kS/s is two timeslots.'],
+  decsat: ['Identify: "QPSK, TPC 2964 unique word every 2964 bits — Intelsat IESS-315 turbo code".',
+           'The decoder finds the frame structure (432 hypotheses), decodes Chase–Pyndiah, then the payload: D&I++ voice (G.728 in bits 2–3), HDLC timeslot packets, HDLC IP, EDMAC with bridged Ethernet, Frame Relay, radar in BSC blocks or ASTERIX.',
+           'The Comtech CDM entry with "type found" picks TPC 2964, Viterbi or FastLink from the first look and the model from the data.']
+},
+{
+  id: 'fastlink', name: 'Paradise Q-Flex FastLink', tag: 'modem · decodes',
+  where: 'About forty 95 kS/s links on Horizons 3e (128.5 kbit/s, QPSK 0.710), plus the 2×, 3× and 4× faster "CAP" links at 185.5, 276 and 366.5 kS/s.',
+  span: 400e3,
+  carriers: [{ f: -119e3, rs: 95e3, alpha: 0.25, lvl: 13, mod: 'qpsk' }, { f: 0, rs: 95e3, alpha: 0.25, lvl: 15, mod: 'qpsk' }, { f: 119e3, rs: 95e3, alpha: 0.25, lvl: 12, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['QPSK at 95.0 kS/s (or exactly 2, 3, 4 times it) with roll-off 0.25, 119 kHz apart in pairs: one carrier each way of a link.',
+         'The fingerprint is an 18-symbol sync word every 11 538 symbols: eight (2880, 2048) LDPC codewords a frame.',
+         'A carrier with this rate and roll-off that locks as nothing at all is probably two carriers on one frequency (paired-carrier mode).'],
+  decsat: ['Identify: "Paradise Q-Flex FastLink framing (sync word every 11 538 symbols: rate 0.710 …)".',
+           'The FastLink decoder: LDPC, the frame scrambler, Paradise closed-network + ESC framing, the 257-bit TDM multiplex, G.728 calls found from their silence fill and played; the faster links\' HDLC timeslot gives the site\'s IP (encrypted in transit on those seen).']
+},
+{
+  id: 'viterbi', name: 'K = 7 Viterbi SCPC (IESS-308/309 and the like)', tag: 'modem · decodes',
+  where: 'The 9.6 and 64 kS/s CDM-570 links: the radar feeds (bisync track reports, ASTERIX in HDLC), idle HDLC lines, IBS/SMS framing.',
+  span: 60e3,
+  carriers: [{ f: 0, rs: 9.6e3, alpha: 0.35, lvl: 14, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['A slow QPSK carrier, 12–80 kHz wide, roll-off 0.35, no periodic symbol pattern at all.',
+         'At 20 MS/s with a 4096-point FFT a 9.6 kS/s carrier is two or three bins: it looks like a CW tone until a finer look shows its flat top.',
+         'Only the code tells: a K = 7 convolutional code at 1/2 … 7/8, usually with V.35 scrambling, often differential or NRZI.'],
+  decsat: ['Identify: "QPSK, no DVB-S2 PLHEADER — possibly DVB-S"; the carrier finder now resolves it as a carrier, not a narrow line.',
+           'The Viterbi decoder finds the rate, puncturing and orientation blind and follows a carrier that turns; the payload search then names HDLC, BSC, IBS, D&I++ or an idle line.']
+},
+{
+  id: 'tdma', name: 'TDMA (MF-TDMA return bursts)', tag: 'bursts · analyser',
+  where: 'VSAT returns: on Intelsat 19 three 1.42 MS/s inroutes in one group (852- and 1135-symbol bursts, 0.61 and 0.81 ms slots, 125 ms frames) and a 735 kS/s one; on Horizons 3e ~100 kS/s carriers on 91 % of the time with ~20 ms gaps.',
+  span: 3.0e6,
+  carriers: [{ f: -1.5e6, rs: 1.42e6, alpha: 0.2, lvl: 16, mod: 'qpsk', burst: 0 }, { f: 0, rs: 1.42e6, alpha: 0.2, lvl: 18, mod: 'qpsk', burst: 1 }, { f: 1.5e6, rs: 1.42e6, alpha: 0.2, lvl: 15, mod: 'qpsk', burst: 2 }],
+  env: { type: 'slots', slotMs: 0.81, frameMs: 125, burstMs: 0.75, occupancy: 0.7, windowMs: 260 },
+  cons: { mods: ['qpsk'], bursty: true },
+  tell: ['In the waterfall the carrier is a column of dashes, not a line: bursts of a few hundred to a few thousand symbols with silence between.',
+         'The power against time shows the slot grid: bursts of one length (or two), a frame that repeats, silent slots where no terminal sent.',
+         'Every burst starts with a preamble (known symbols) and often a short field that names the terminal; the constellation is clean only during a burst and falls back to noise between.',
+         'The spectrum of an averaged display looks like a weak continuous carrier, which is how a burst carrier passes for QPSK at a glance; an instantaneous one flickers.'],
+  decsat: ['Identify: "QPSK in bursts — a TDMA carrier (on 91 % of the time, gaps of ~20 ms, 9 dB deep)".',
+           'The TDMA decoder (one carrier or a whole MF-TDMA group in one VFO): bursts from the envelope, each demodulated on its own, the layout read blind (preamble, pilots, fixed fields), the slot grid and frame, terminals by power, carrier and slot offset or by the preamble field. Record writes every burst\'s symbols to a .bursts file for working out the coding offline.',
+           'The coding inside the bursts is not known yet (a long code; no parity check within 14 bits).']
+},
+{
+  id: 'stdma', name: 'STDMA groups (slotted, self-organising TDMA)', tag: 'bursts · analyser',
+  where: 'The frequency plan\'s "STDMA Group n" slots on Horizons 3e: 115 kHz wide, QPSK at ~100–120 kS/s, several terminals sharing a fixed slot plan; the groups at 12.33 and 12.35 GHz.',
+  span: 500e3,
+  carriers: [{ f: -115e3, rs: 105e3, alpha: 0.05, lvl: 14, mod: 'qpsk', burst: 0 }, { f: 0, rs: 105e3, alpha: 0.05, lvl: 16, mod: 'qpsk', burst: 1 }, { f: 115e3, rs: 105e3, alpha: 0.05, lvl: 13, mod: 'qpsk', burst: 2 }],
+  env: { type: 'slots', slotMs: 22, frameMs: 220, burstMs: 19, occupancy: 0.9, windowMs: 700 },
+  cons: { mods: ['qpsk'], bursty: true },
+  tell: ['Like TDMA but with long bursts and a plan: each terminal keeps a slot, so the same slots fill frame after frame and the gaps sit at fixed places (~20 ms every ~220 ms here).',
+         'Roll-off is tight (0.05) and the groups sit 115 kHz apart.',
+         'The burst preambles recur every 59–72 symbols within a burst, which once fooled the DVB-S2 search into "PLHEADERs every 72 symbols".'],
+  decsat: ['Identify names the bursts (on 89–95 % of the time, gaps of 17–21 ms) and refuses to call it DVB-S2 (proprietary-S2 header spacing must be at least 1000 symbols).',
+           'The TDMA decoder takes it like any burst carrier: slot grid, frame, terminals, the bursts\' symbols to a file. What the bursts carry is open.']
+},
+{
+  id: 'c8psk', name: 'Comtech 8PSK (TPC 2964 on 8PSK)', tag: 'modem · decodes',
+  where: 'An ED-137 radio-over-IP link on Horizons 3e: 477.9 kS/s one way, 238.9 kS/s the other, 8PSK with roll-off 0.25.',
+  span: 1.2e6,
+  carriers: [{ f: 0, rs: 477.9e3, alpha: 0.25, lvl: 18, mod: '8psk' }],
+  env: { type: 'continuous' }, cons: { mods: ['8psk'], phaseNoise: 0.06 },
+  tell: ['An 8PSK ring (eight points) where the SCPC block is otherwise QPSK; the s⁸ spectral line stands 19–23 dB above the s⁴ one.',
+         'Frames of 988 symbols (2964 bits) with the unique word on three-bit symbols.',
+         'The carrier loop must be narrow: wider than 1 kHz it slipped 135 times in 6 s. Watch the ring breathe with the phase noise.'],
+  decsat: ['Identify: "8PSK, TPC 2964 unique word …"; the TPC decoder on 8PSK (Gray-labelled as the manual\'s figure) then EDMAC, bridged Ethernet and the IP: ED-137 RTP with PTT and squelch, SIP, the radio\'s voice played while PTT or squelch is on.']
+},
+{
+  id: 'beacon', name: 'Beacon and CW tones', tag: 'line · no decoder',
+  where: 'The satellite\'s Ku beacons (on Intelsat 19 at 12253.5 and 12256.5 MHz) with telemetry sidebands; test tones; the HackRF\'s own DC spike at the centre.',
+  span: 60e3,
+  carriers: [{ f: 0, rs: 0, alpha: 0, lvl: 40, mod: 'cw', kind: 'cw' }, { f: -8.2e3, rs: 1.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }, { f: 8.2e3, rs: 1.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }],
+  env: { type: 'beacon' }, cons: { mods: ['cw'] },
+  tell: ['A single line: all the power in one or two bins at any FFT size, with the window\'s own leakage skirt and nothing flat on top.',
+         'A beacon carries telemetry as low-rate sidebands a few kHz either side, each far below the line, their level wandering as the telemetry goes.',
+         'The constellation is one spot; the power against time is flat.'],
+  decsat: ['The carrier finder marks it a narrow line (a tick, not a bracket) and Identify says "narrow carrier at +12 Hz (unmodulated, or far narrower than this VFO)".',
+           'A slow modulated carrier that looked like this at 20 MS/s is told apart by a finer look (a flat top at least six fine bins wide).']
+},
+{
+  id: 'hackrf', name: 'HackRF artefacts (not signals)', tag: 'receiver · beware',
+  where: 'Every capture: the DC spike at the centre, spurs at exact 1.25 MHz and 1.875 MHz steps of IF, ~12.7 MHz-spaced bumps, Bluetooth bursts from the 2.4 GHz band, and overload products at too much gain.',
+  span: 10e6,
+  carriers: [{ f: -3.2e6, rs: 1.2e6, alpha: 0.2, lvl: 20, mod: 'qpsk' }, { f: 2.1e6, rs: 95e3, alpha: 0.25, lvl: 14, mod: 'qpsk' }],
+  artefacts: { dc: true, spurs: [-3.75e6, -1.25e6, 1.25e6, 3.75e6], bump: 2.6e6, bt: true },
+  env: { type: 'bluetooth', windowMs: 250 }, cons: { mods: ['qpsk'], phaseNoise: 0.02, blips: true },
+  tell: ['A retune is the test: real carriers stay at the same RF while spurs and bumps move with the tuning. Press "Retune +2 MHz" below and watch.',
+         'Spurs are lines at whole-MHz, 1.25 MHz or 1.875 MHz steps of IF; the bumps are 400–650 kHz wide "carriers" whose IF offset steps with the tuning.',
+         'Bluetooth and Wi-Fi reach the IF as short wideband bursts a millisecond long, scattered in time and frequency: the flecks in the waterfall and the spikes in the power trace.',
+         'Overload (LNA 40 dB on a full Ku slice, input above −25 dBFS) raises the floor beside carriers and makes narrow ones slip, long before the ADC clips.'],
+  decsat: ['The carrier finder leaves narrow lines out of "claim carriers"; Identify calls a spur "narrow carrier" and a bump "VFO too narrow / modulated".',
+           'The status bar\'s input level turns orange above −25 dBFS: lower the LNA gain (24 dB is right on this dish). A carrier that misbehaves at one tuning is usually clean a few MHz either side.',
+           'The generic PSK demodulator coasts through a Bluetooth burst instead of losing lock.'],
+  button: { label: 'Retune +2 MHz', action: 'retune' }
+},
+{
+  id: 'unknown', name: 'Unknown codes (VersaFEC-like QPSK, fast BPSK)', tag: 'no decoder yet',
+  where: 'Two 54 kS/s QPSK carriers in the Horizons 3e block that fit no K = 7 rate (64 000 × 46/45 / (2 × 3/5) = 54.5 kS/s: a rate-3/5 code over a D&I++ stream would fit), and a pair of 937 kS/s BPSK carriers on the same satellite at 12.50–12.52 GHz.',
+  span: 200e3,
+  carriers: [{ f: 0, rs: 54.5e3, alpha: 0.35, lvl: 13, mod: 'qpsk' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['Looks exactly like the Viterbi or DVB-S carriers: plain QPSK or BPSK, nothing periodic.',
+         'The tell is negative: no unique word, no sync word, no PLHEADER, and the Viterbi search tries every rate and phase without a lock ("finding the code rate (171 tries)").',
+         'The symbol rate is the best clue to the code: work back from a likely data rate and overhead.'],
+  decsat: ['Identify: "QPSK, no DVB-S2 PLHEADER — possibly DVB-S (not verified)"; the DVB-S and Viterbi decoders both report no rate found.',
+           'The generic PSK decoder records the symbols for a blind code search offline (the FastLink LDPC was found that way).']
+},
+{
+  id: 'cid', name: 'DVB-CID (carrier ID under a carrier)', tag: 'hidden · decodes',
+  where: 'Under modern uplink modulators\' carriers (none found under the carriers recorded here so far); DecSAT\'s own test signal puts one under a DVB-S2 carrier.',
+  span: 2.0e6,
+  carriers: [{ f: 0, rs: 1.12e6, alpha: 0.2, lvl: 22, mod: 'qpsk' }, { f: 220, rs: 224e3, alpha: 0.2, lvl: -5.5, mod: 'cid', kind: 'cid' }],
+  env: { type: 'continuous' }, cons: { mods: ['qpsk'] },
+  tell: ['Nothing to see: a BPSK signal spread 4096 chips a bit at 224 kchip/s sits 27.5 dB below the host carrier\'s spectral density, 220 Hz above its centre.',
+         'Only correlating with the spreading code brings it out of the noise: one frame every 36 s (18 s on carriers of 512 kBd and up).'],
+  decsat: ['A Carrier ID VFO on the host (at least 1.35 × the chip rate wide) finds the code in under a second and reads the modulator\'s identifier, position, telephone and text, with the tracking shown live.']
+},
+{
+  id: 'wide', name: 'Wide transponders (DTH and trunking)', tag: 'wider than the receiver',
+  where: 'Broadcast and trunk carriers at 27–45 MS/s on the same satellites: 7.2 MS/s 8PSK 5/6 on Intelsat 19 decodes, the 11.6 and 12.39–12.61 GHz transponders do not fit a 20 MHz capture.',
+  span: 10e6,
+  carriers: [{ f: 0, rs: 30e6, alpha: 0.2, lvl: 18, mod: '8psk', kind: 'wide' }],
+  env: { type: 'continuous' }, cons: { mods: ['8psk'] },
+  tell: ['No noise floor anywhere in the capture: the carrier is wider than the HackRF\'s 20 MHz, so its edges are off the screen and Identify sees only a slope or a flat top.',
+         'A 7–8 MS/s carrier still fits with room either side and decodes normally.'],
+  decsat: ['Identify: "VFO too narrow for this carrier — widen it" or "modulated, no PLHEADER"; such carriers are handled from recorded IQ made with a wider receiver, not live.']
+}];
+
+// ------------------------------------------------------------ helpers
+function gauss() { const u = Math.max(Math.random(), 1e-12), v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function rrc(f, rs, alpha) {
+  const a = Math.abs(f), flat = (1 - alpha) * rs / 2, edge = (1 + alpha) * rs / 2;
+  if (a <= flat) return 1; if (a >= edge) return 0;
+  return 0.5 * (1 + Math.cos(Math.PI / (alpha * rs) * (a - flat)));
+}
+function hash01(a, b) { const h = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return h - Math.floor(h); }
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+const CMAP = [[0, 6, 7, 15], [0.3, 27, 27, 110], [0.55, 138, 28, 138], [0.75, 224, 74, 47], [0.9, 255, 176, 32], [1, 255, 255, 224]];
+function cmap(x) {
+  x = Math.max(0, Math.min(1, x));
+  for (let i = 1; i < CMAP.length; i++) if (x <= CMAP[i][0]) {
+    const [a, b] = [CMAP[i - 1], CMAP[i]], t = (x - a[0]) / (b[0] - a[0]);
+    return [a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
+  }
+  return CMAP[CMAP.length - 1].slice(1);
+}
+function setupCanvas(c, w, h) { const dpr = Math.min(window.devicePixelRatio || 1, 2); c.width = w * dpr; c.height = h * dpr; c.style.aspectRatio = `${w} / ${h}`; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); return g; }
+function fmtHz(f) { const a = Math.abs(f); const s = f < 0 ? '−' : (f > 0 ? '+' : ''); if (a >= 1e6) return s + (a / 1e6).toFixed(a % 1e6 ? 1 : 0) + ' MHz'; if (a >= 1e3) return s + (a / 1e3).toFixed(0) + ' kHz'; return s + a.toFixed(0) + ' Hz'; }
+
+// The carrier's level above the floor (dB) at the chosen Es/N0; the floor
+// is the 0 dB reference in every pane.
+function level(c, esn0) { return c.lvl + (esn0 - 10); }
+
+// Time envelope, 0..1, of carrier c at signal time t (ms).
+function envelope(sig, c, t) {
+  const e = sig.env;
+  if (e.type === 'continuous' || e.type === 'bluetooth') return 1;
+  if (e.type === 'beacon') return c.kind === 'cw' ? 1 : 0.55 + 0.45 * Math.sin(t / 9 + c.f);
+  if (e.type === 'slots') {
+    const k = c.burst || 0;
+    const frame = ((t % e.frameMs) + e.frameMs) % e.frameMs;
+    const slot = Math.floor(frame / e.slotMs), inSlot = frame - slot * e.slotMs;
+    const on = hash01(slot + 1, k + 1) < e.occupancy;
+    return on && inSlot > 0.03 * e.slotMs && inSlot < 0.03 * e.slotMs + e.burstMs ? 1 : 0;
+  }
+  return 1;
+}
+// A Bluetooth burst at signal time t: its centre (Hz) and strength, or null.
+function bluetoothAt(sig, t) {
+  const slot = Math.floor(t / 3.2); // bursts of up to ~1 ms every few ms, most slots empty
+  if (hash01(slot, 7) > 0.22) return null;
+  const within = t - slot * 3.2; if (within > 0.9) return null;
+  return { f: (hash01(slot, 3) - 0.5) * 2 * sig.span * 0.9, lvl: 10 + 6 * hash01(slot, 5) };
+}
+// Linear power at offset f, signal time t: carriers (with their envelopes) and artefacts; no noise.
+function powerAt(sig, f, t, esn0, state) {
+  let p = 0;
+  for (const c of sig.carriers) {
+    const e = envelope(sig, c, t); if (e <= 0) continue;
+    const shape = c.kind === 'cw' ? Math.exp(-((f - c.f) ** 2) / (2 * 60 * 60)) : rrc(f - c.f, c.rs, c.alpha);
+    p += Math.pow(10, level(c, esn0) / 10) * shape * e;
+  }
+  if (sig.artefacts) {
+    const A = sig.artefacts, sh = state.retune || 0;
+    if (A.dc) p += Math.pow(10, 30 / 10) * Math.exp(-((f - sh) ** 2) / (2 * 40 * 40));
+    for (const s of A.spurs) p += Math.pow(10, 18 / 10) * Math.exp(-((f - (s + sh)) ** 2) / (2 * 50 * 50));
+    p += Math.pow(10, 8 / 10) * Math.exp(-((f - (A.bump + sh)) ** 2) / (2 * 220e3 * 220e3));
+    if (A.bt) { const b = bluetoothAt(sig, t); if (b && Math.abs(f - b.f) < 500e3) p += Math.pow(10, b.lvl / 10); }
+  }
+  return p;
+}
+
+// ------------------------------------------------------------ panes
+const PW = 300, PH = 170;
+function drawSpectrum(card, t) {
+  const { sig } = card, g = card.g.spectrum, esn0 = state.esn0;
+  const W = PW, H = PH, L = 34, R = 6, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  const top = 40, bottom = -5;
+  g.fillStyle = css('--pane'); g.fillRect(0, 0, W, H);
+  g.strokeStyle = css('--grid'); g.lineWidth = 1;
+  g.font = '10px ' + css('--mono'); g.fillStyle = css('--muted'); g.textAlign = 'right';
+  for (let d = 0; d <= 40; d += 10) { const y = T + ph * (1 - (d - bottom) / (top - bottom)); g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.fillText(d + '', L - 4, y + 3); }
+  const span = sig.span, ticks = 4;
+  for (let i = 0; i <= ticks; i++) { const f = -span + 2 * span * i / ticks; const x = L + pw * i / ticks; g.textAlign = i === 0 ? 'left' : (i === ticks ? 'right' : 'center'); g.fillText(fmtHz(f), x, H - 6); }
+  // A fast display: the trace is this instant's, with its own noise jitter,
+  // so a burst carrier blinks and the floor shimmers.
+  g.beginPath();
+  for (let i = 0; i <= pw; i++) {
+    const f = -span + 2 * span * i / pw;
+    const noise = 1 + 0.35 * gauss();
+    const db = 10 * Math.log10(powerAt(sig, f, t, esn0, state) + Math.max(noise, 0.05));
+    const y = Math.min(Math.max(T + ph * (1 - (db - bottom) / (top - bottom)), T), T + ph);
+    if (i === 0) g.moveTo(L, y); else g.lineTo(L + i, y);
+  }
+  g.strokeStyle = css('--accent'); g.lineWidth = 1.2; g.stroke();
+  g.lineTo(L + pw, T + ph); g.lineTo(L, T + ph); g.closePath(); g.fillStyle = 'rgba(94, 200, 255, 0.12)'; g.fill();
+}
+
+const WF_COLS = 150, WF_ROWS = 85;
+function waterfallRow(card, t, row) {
+  const { sig } = card, esn0 = state.esn0, data = card.wf.data, cols = WF_COLS;
+  for (let x = 0; x < cols; x++) {
+    const f = -sig.span + 2 * sig.span * x / cols;
+    const p = powerAt(sig, f, t, esn0, state) + 0.4 + 1.2 * Math.random();
+    const db = 10 * Math.log10(p);
+    const [r, g, b] = cmap((db + 4) / 34); const i = 4 * (row * cols + x);
+    data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+  }
+}
+function drawWaterfall(card, t) {
+  const { sig } = card, g = card.g.waterfall, wf = card.wf;
+  const win = sig.env.windowMs || 250, rowDt = win / WF_ROWS;
+  if (wf.lastT === null) { // fill the whole history at once
+    for (let y = 0; y < WF_ROWS; y++) waterfallRow(card, t - y * rowDt, y);
+    wf.lastT = t;
+  }
+  let steps = 0;
+  while (t - wf.lastT >= rowDt && steps < WF_ROWS) {
+    wf.lastT += rowDt; steps++;
+    wf.data.copyWithin(WF_COLS * 4, 0, (WF_ROWS - 1) * WF_COLS * 4); // older rows move down
+    waterfallRow(card, wf.lastT, 0);
+  }
+  wf.off.getContext('2d').putImageData(wf.img, 0, 0);
+  g.imageSmoothingEnabled = false; g.drawImage(wf.off, 0, 0, PW, PH);
+  g.font = '10px ' + css('--mono'); g.fillStyle = 'rgba(255,255,255,0.75)'; g.textAlign = 'left';
+  g.fillText('now', 4, 11); g.fillText('−' + Math.round(win) + ' ms', 4, PH - 5);
+}
+
+const POINTS = {
+  bpsk: () => [[1, 0], [-1, 0]],
+  qpsk: () => [[1, 1], [-1, 1], [-1, -1], [1, -1]].map(p => [p[0] / Math.SQRT2, p[1] / Math.SQRT2]),
+  '8psk': () => Array.from({ length: 8 }, (_, k) => [Math.cos(k * Math.PI / 4 + Math.PI / 8), Math.sin(k * Math.PI / 4 + Math.PI / 8)]),
+  '16apsk': () => ring(4, 1, Math.PI / 4).concat(ring(12, 2.85, Math.PI / 12)),
+  '32apsk': () => ring(4, 1, Math.PI / 4).concat(ring(12, 2.84, Math.PI / 12), ring(16, 5.27, 0)),
+  cw: () => [[1, 0]]
+};
+function ring(n, rad, ph) { return Array.from({ length: n }, (_, k) => [rad * Math.cos(2 * Math.PI * k / n + ph), rad * Math.sin(2 * Math.PI * k / n + ph)]); }
+function normalise(pts) { const e = pts.reduce((s, p) => s + p[0] * p[0] + p[1] * p[1], 0) / pts.length; const k = 1 / Math.sqrt(e); return pts.map(p => [p[0] * k, p[1] * k]); }
+const POINTS_N = Object.fromEntries(Object.keys(POINTS).map(k => [k, normalise(POINTS[k]())]));
+
+function drawConstellation(card, t, dt) {
+  const { sig } = card, g = card.g.constellation, esn0 = state.esn0;
+  const W = PW, H = PH;
+  g.fillStyle = css('--pane'); g.fillRect(0, 0, W, H);
+  g.strokeStyle = css('--grid'); g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.moveTo(W / 2 - H / 2, H / 2); g.lineTo(W / 2 + H / 2, H / 2); g.stroke();
+  const sigma = Math.sqrt(1 / (2 * Math.pow(10, esn0 / 10)));
+  const mods = sig.cons.mods, pn = sig.cons.phaseNoise || 0.012;
+  // Carrier recovery holds the picture still; what is left is the phase
+  // noise, a small wander about the locked phase.
+  card.phase = card.phase * 0.95 + pn * gauss() * 0.4;
+  // ACM: a frame of one MODCOD at a time, a new one every so often.
+  const m = sig.cons.perFrame ? mods[Math.floor(t / 90) % mods.length] : mods[0];
+  const pts = POINTS_N[m];
+  const main = sig.carriers.find(cr => cr.burst === 1) || sig.carriers[0];
+  const inBurst = !sig.cons.bursty || envelope(sig, main, t) > 0;
+  const blip = sig.cons.blips && bluetoothAt(sig, t);
+  const n = 520, scale = H / 2 / 1.75;
+  const cs = Math.cos(card.phase), sn = Math.sin(card.phase);
+  for (let i = 0; i < n; i++) {
+    let x, y;
+    if (!inBurst) { x = 2 * sigma * gauss(); y = 2 * sigma * gauss(); g.fillStyle = 'rgba(138, 151, 166, 0.35)'; }
+    else {
+      const p = pts[Math.floor(Math.random() * pts.length)];
+      const s = blip ? sigma * 2.5 : sigma;
+      x = p[0] * cs - p[1] * sn + s * gauss(); y = p[0] * sn + p[1] * cs + s * gauss();
+      g.fillStyle = 'rgba(94, 200, 255, 0.6)';
+    }
+    g.fillRect(W / 2 + x * scale - 1, H / 2 - y * scale - 1, 2, 2);
+  }
+  g.font = '10px ' + css('--mono'); g.fillStyle = 'rgba(255,255,255,0.7)'; g.textAlign = 'left';
+  const label = sig.cons.perFrame ? `${m.toUpperCase()} frame` : m.toUpperCase();
+  g.fillText(inBurst ? label : 'between bursts: noise', 4, 12);
+}
+
+function drawEnvelope(card, t) {
+  const { sig } = card, g = card.g.envelope, esn0 = state.esn0;
+  const W = PW, H = PH, L = 30, R = 6, T = 8, B = 20, pw = W - L - R, ph = H - T - B;
+  g.fillStyle = css('--pane'); g.fillRect(0, 0, W, H);
+  const win = sig.env.windowMs || 250, t0 = t - win;
+  g.strokeStyle = css('--grid'); g.font = '10px ' + css('--mono'); g.fillStyle = css('--muted');
+  for (let i = 0; i <= 5; i++) { const x = L + pw * i / 5; g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + ph); g.stroke(); g.textAlign = i === 0 ? 'left' : (i === 5 ? 'right' : 'center'); g.fillText(i === 5 ? 'now' : ('−' + Math.round(win * (5 - i) / 5)), x, H - 6); }
+  g.textAlign = 'right'; for (let d = 0; d <= 20; d += 10) { const y = T + ph * (1 - d / 25); g.fillText(d + '', L - 4, y + 3); }
+  // Frame boundaries scroll with the signal.
+  if (sig.env.type === 'slots') {
+    g.strokeStyle = 'rgba(255,179,71,0.35)';
+    for (let f = Math.ceil(t0 / sig.env.frameMs) * sig.env.frameMs; f <= t; f += sig.env.frameMs) { const x = L + pw * (f - t0) / win; g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + ph); g.stroke(); }
+  }
+  const main = sig.carriers.find(cr => cr.burst === 1) || sig.carriers[0];
+  g.beginPath();
+  for (let i = 0; i <= pw; i++) {
+    const ti = t0 + win * i / pw;
+    let p = Math.pow(10, level(main, esn0) / 10) * envelope(sig, main, ti);
+    if (sig.env.type === 'bluetooth') { const b = bluetoothAt(sig, ti); if (b) p += Math.pow(10, b.lvl / 10) * 3; }
+    p += 0.6 + 0.8 * Math.random();
+    const db = 10 * Math.log10(p);
+    const y = T + ph * (1 - Math.max(0, Math.min(25, db)) / 25);
+    if (i === 0) g.moveTo(L, y); else g.lineTo(L + i, y);
+  }
+  g.strokeStyle = css('--good'); g.lineWidth = 1.2; g.stroke();
+}
+
+// ------------------------------------------------------------ page
+const state = { esn0: 14, retune: 0, running: true };
+const cards = [];
+function build() {
+  const nav = document.getElementById('index'), main = document.getElementById('cards');
+  for (const s of SIGNALS) {
+    const a = document.createElement('a'); a.href = '#' + s.id; a.textContent = s.name.replace(/ \(.*$/, ''); nav.appendChild(a);
+    const sec = document.createElement('section'); sec.className = 'card'; sec.id = s.id;
+    sec.innerHTML = `
+      <div class="tag">${s.tag}</div>
+      <h2>${s.name}</h2>
+      <p class="where">${s.where}</p>
+      <div class="panes">
+        <div class="pane"><canvas data-pane="spectrum"></canvas><div class="cap">spectrum · ±${fmtHz(s.span).replace(/^[+−]/, '')} · dB above the floor</div></div>
+        <div class="pane"><canvas data-pane="waterfall"></canvas><div class="cap">waterfall · the last ${Math.round(s.env.windowMs || 250)} ms, newest at the top</div></div>
+        <div class="pane"><canvas data-pane="constellation"></canvas><div class="cap">constellation · live</div></div>
+        <div class="pane"><canvas data-pane="envelope"></canvas><div class="cap">power against time · ms before now, dB above the floor</div></div>
+      </div>
+      <div class="notes">
+        <div><h3>How to tell it</h3><ul>${s.tell.map(t => `<li>${t}</li>`).join('')}</ul></div>
+        <div><h3>What DecSAT does</h3><ul>${s.decsat.map(t => `<li>${t}</li>`).join('')}</ul>${s.button ? `<p><button class="small" id="btn-${s.id}">${s.button.label}</button> <span class="legend" id="note-${s.id}"></span></p>` : ''}</div>
+      </div>`;
+    main.appendChild(sec);
+    const g = {};
+    for (const k of ['spectrum', 'waterfall', 'constellation', 'envelope']) g[k] = setupCanvas(sec.querySelector(`[data-pane=${k}]`), PW, PH);
+    const off = document.createElement('canvas'); off.width = WF_COLS; off.height = WF_ROWS;
+    const img = off.getContext('2d').createImageData(WF_COLS, WF_ROWS);
+    const card = { sig: s, el: sec, g, wf: { off, img, data: img.data, lastT: null }, phase: 0, visible: true, t: 0, last: null };
+    cards.push(card);
+    if (s.button) document.getElementById('btn-' + s.id).addEventListener('click', () => {
+      state.retune = (state.retune + 2e6) % 8e6; card.wf.lastT = null; drawAll(card, card.t, 0);
+      document.getElementById('note-' + s.id).textContent = state.retune ? `tuned ${fmtHz(state.retune)}: the spurs, the bump and the DC spike moved, the two carriers did not` : 'back at the first tuning';
+    });
+  }
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver(entries => { for (const e of entries) { const c = cards.find(c => c.el === e.target); if (c) c.visible = e.isIntersecting; } }, { rootMargin: '120px' });
+    for (const c of cards) io.observe(c.el);
+  }
+}
+function drawAll(card, t, dt) { drawSpectrum(card, t); drawWaterfall(card, t); drawConstellation(card, t, dt); drawEnvelope(card, t); }
+
+// Signal time runs slower than the clock: the pane's window passes in about
+// six seconds, so a 125 ms TDMA frame takes three seconds to cross.
+function frame(ts) {
+  for (const card of cards) {
+    if (card.last === null) card.last = ts;
+    const dtReal = Math.min((ts - card.last) / 1000, 0.1); card.last = ts;
+    if (!state.running || !card.visible) continue;
+    const win = card.sig.env.windowMs || 250;
+    card.t += dtReal * win / 6;
+    drawAll(card, card.t, dtReal);
+  }
+  requestAnimationFrame(frame);
+}
+build();
+for (const card of cards) drawAll(card, 0, 0);
+const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const pause = document.getElementById('pause');
+function setRunning(on) { state.running = on; pause.textContent = on ? '⏸ Pause' : '▶ Run'; pause.setAttribute('aria-pressed', on ? 'false' : 'true'); }
+setRunning(!reduce);
+pause.addEventListener('click', () => setRunning(!state.running));
+requestAnimationFrame(frame);
+const slider = document.getElementById('esn0'), out = document.getElementById('esn0v');
+slider.addEventListener('input', () => { state.esn0 = +slider.value; out.textContent = slider.value + ' dB'; for (const c of cards) { c.wf.lastT = null; if (!state.running) drawAll(c, c.t, 0); } });
+if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { for (const c of cards) drawAll(c, c.t, 0); });
+</script>
+</body>
+</html>

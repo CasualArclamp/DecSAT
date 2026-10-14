@@ -26,6 +26,24 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 > Early development. [`docs/DESIGN.md`](docs/DESIGN.md) holds the scope and the
 > milestone plan, [`docs/STATUS.md`](docs/STATUS.md) what is done.
 
+## Signals you might see
+
+A gallery of what each kind of carrier looks like on the waterfall, in the
+constellation and against time, live and side by side: DVB-S2 with constant
+and adaptive coding, DVB-S, NovelSat NS3/NS4, TPC 2964, Q-Flex FastLink,
+K = 7 Viterbi links, TDMA and STDMA bursts, Comtech 8PSK, beacons and CW,
+the HackRF's own artefacts, codes nothing decodes yet, DVB-CID and
+transponders wider than the receiver. Each card says how to tell the
+signal apart and what DecSAT does with it, with the numbers measured on
+the carriers above.
+
+[`docs/signal-gallery.html`](docs/signal-gallery.html) is one self-contained
+page: download it and open it in a browser, or
+[view it rendered](https://htmlpreview.github.io/?https://github.com/CasualArclamp/DecSAT/blob/main/docs/signal-gallery.html).
+An Es/N0 slider sets the noise in every pane, Pause freezes them, and the
+HackRF card's "Retune" button shows how spurs move with the tuning while
+real carriers stay put.
+
 ## What works now
 
 | | |
