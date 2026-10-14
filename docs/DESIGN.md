@@ -91,6 +91,7 @@ IqSource (HackRF 20 MS/s, or a wideband file)
 | **DVB-S2/S2X → GSE/IP** | Full ACM demod → LDPC/BCH → GSE → IP → PCAP + stream stats | M2–M4 |
 | **DVB-S2/S2X → MPEG-TS** | Same demod, TS-mode BBFRAMEs → `.ts` or UDP | M2, Appendix C |
 | **Generic PSK → symbols** | Any linearly modulated carrier: blind rate, carrier lock, hard decisions to a `.bin`, one byte per symbol | done |
+| **TDMA bursts** | One carrier or an MF-TDMA group: bursts found and demodulated one by one, their layout (preamble, pilots, fixed fields, idle fill) read blind, slot grid, frame and terminals; data symbols to a `.bursts` file. See §3c. | T1–T2 done |
 | **IQ recorder** | That VFO's narrowband IQ to a file | M1 |
 | **Spectrum only** | Zoomed spectrum, level, occupied bandwidth; no decode | done |
 
@@ -129,6 +130,51 @@ over-claiming here would be worse than useless.
   match DVB-S2/S2X", which is honest and still useful.
 - A CW tone or an empty band is called out from the band estimate alone (very
   narrow with a high peak-to-floor, or nothing above the floor).
+
+## 3c. TDMA bursts
+
+Asked for 2026-10-14 ("can you make support for TDMA stuff"). Rory's
+answers: a **burst analyser**, a **burst demodulator** and **payload
+decoding**, in that order; targets **anything bursty** (generic blind tools
+first, vendors as captures come — the kit on the live IS-19 group is not
+known); a **VFO decoder with a burst panel**, one VFO able to span a whole
+group.
+
+`decsat-engine::tdma`, per VFO:
+
+1. **Channels**: the first look's carriers (spectrum), each with its rate
+   (cyclic line of the envelope), roll-off (fit to the masked spectrum) and
+   centre; then a mixer, a light decimating FIR (the matched filter after it
+   removes the neighbours, so it only stops aliases) and the RRC matched
+   filter, at ≥ 3.2 samples a symbol.
+2. **Bursts** (`burst.rs`): envelope over 6 symbols against a forgetting
+   histogram — floor = its 0.3 % point (a loaded carrier shows noise only in
+   its guard times), bursts' level = the median clear of it; hysteresis at
+   60/40 % of the dB span, a state change held 3 symbols; edges then set per
+   burst at half its own level.
+3. **Demodulation** (`demod.rs`), each burst on its own: Oerder & Meyr
+   timing, carrier from the M-th power (FFT, then block phases fitted with
+   a line); once every burst's carrier agrees (terminals locked to the hub)
+   the FFT is skipped.
+4. **Layout** (`layout.rs`): bursts of the commonest length lined up on one
+   (lag and phase), averaged per position; idle fill (bursts matching the
+   average everywhere) set aside; |mean| > 0.6 = fixed. Runs read as
+   preamble (with a varying field inside), pilots (commonest spacing and
+   residue), fixed fields, postamble. Each burst is then fitted: lag and
+   phase from the fixed symbols, phase tracked through them, data symbols
+   out, idle flagged.
+5. **Time plan** (`slots.rs`): slot from consecutive spacings (least
+   squares over 1–4-slot spacings); frame from the empty-slot
+   autocorrelation, made exact on the silences (longest gaps, one a frame):
+   pairwise spacing / frames, median, then least squares. Slots are counted
+   from each frame's start — frames need not hold whole slots.
+   **Terminals**: bursts grouped by power, carrier and offset in the slot
+   (the carrier tolerance scaled to the measured scatter).
+
+Next (T3): the coding inside the bursts — the data symbols per burst are in
+the `.bursts` file; candidates are a turbo product code (Comtech, iDirect),
+DVB-RCS2's turbo code and LDPC. Weak carriers (≤ 7 dB) still fragment;
+detecting bursts on their preamble once the layout is known is the fix.
 
 ## 4. Workspace layout
 
@@ -218,6 +264,7 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
 - **M5 — S2X framing & ACM polish**: superframe (Annex E), multistream/ISI filtering, gold-code index, ACM/VCM across changing MODCODs, SNR estimate per frame.
 - **M6 — modulator (TX)**: full encode chain → HackRF TX / IQ file; scripted ACM MODCOD schedules; end-to-end loopback test.
   *Started 2026-10-11 with Rory's choices:* DVB-S2/S2X **DATV from an MPEG-TS** first (a file paced by its PCRs, a UDP stream from ffmpeg/OBS, or the test stream; null packets fill the channel); output to the **HackRF live** and to **IQ files**; used **into a cable/dummy load only**; controlled from a **GUI transmit panel** (`decsat tx` for files). Safety: the HackRF transmits only when the panel is armed and Transmit pressed; TX VGA starts at 0 dB and the amplifier off every time; antenna power never; the radio is put back to off on Stop, closing or quitting; a HackRF receive session is stopped first (half duplex). Claude never keys the radio itself: checks are by IQ file and loopback through DecSAT's own receiver. ACM schedules and GSE/IP payloads come later.
+- **T — TDMA** *(2026-10-14, §3c)*: T1 analyser (bursts, layout, slots, frame, terminals) and T2 per-burst demodulation through the layout — done, on the live IS-19 group; T3 payload decoding next.
 - **M7 — GUI polish + release**: stream table, ACM timeline, per-MODCOD constellation, throughput; portable exe + first public release.
 
 ## 10. Testing

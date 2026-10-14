@@ -403,6 +403,16 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             }
             None => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "3× TDMA 4900/s": the carriers in it and their bursts a second.
+        DecoderKind::Tdma => match &st.tdma {
+            Some(t) if !t.channels.is_empty() => {
+                let per_s: f32 = t.channels.iter().map(|c| c.per_s).sum();
+                let rec = if st.recording_active { " ● REC" } else { "" };
+                format!("{}× TDMA {per_s:.0}/s{rec}", t.channels.len())
+            }
+            Some(t) if t.progress >= 1.0 => "no TDMA".into(),
+            _ => format!("{:.0} %", st.progress * 100.0),
+        },
         DecoderKind::IqRecord => st
             .recording
             .as_ref()

@@ -47,6 +47,7 @@ TPC 2964 carrier). Every carrier was found and identified blind.*
 | **Radar feeds** on CDM-570/570L links: track reports in IBM bisync blocks, **ASTERIX** categories 034 and 048 in HDLC (the Mode S registers in them read too) and ADS-B (category 021) in IP — a track table, a CSV log, and the **radar scope**: a PPI with trails and leaders, a map, airports and runways, ADS-B aircraft over a radar's picture, callsigns from a decoded ADS-B feed or (switched on) adsb.lol | ✅ on live carriers |
 | **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers | ✅ |
+| **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals; a burst map; each burst's data symbols to a `.bursts` file | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -423,6 +424,39 @@ No CID to hand? `decsat cid` writes one under a DVB-S2 carrier, with your
 choice of identifier, position, telephone and text (see
 [`tests/`](tests/README.md)).
 
+### TDMA bursts
+
+Drop a VFO over one TDMA carrier or a whole group (an MF-TDMA return) and
+choose **TDMA bursts**. Each carrier in it is found and given its own
+down-converter and matched filter; then, for each:
+
+- **bursts** are found by their envelope and demodulated one by one —
+  timing and carrier from each burst alone, as no two come from the same
+  terminal;
+- once a hundred or so are in, the **layout** every burst shares is read
+  blind: the preamble (and a varying field inside it), pilot blocks, fixed
+  fields, the data symbols — and the share of bursts that are idle fill
+  (terminals with nothing to send repeat one burst);
+- the **slots** (length, guard time, how closely terminals are ranged), the
+  **frame** they repeat in (from the silence that closes each), and the
+  **terminals**, told apart by power, carrier offset and where in its slot
+  each sends.
+
+The **burst map** shows the last quarter second, a row a carrier (brighter
+is stronger, idle fill dimmed). **● Record** writes each burst's data
+symbols (the ones between the layout's fixed symbols) to
+`decsat-<VFO>-<RF>MHz-tdma-<time>.bursts`, and a line per burst to a `.csv`;
+the format is at the top of `crates/decsat-engine/src/tdma/mod.rs`.
+
+On Intelsat 19 at 12.49 GHz a group of three 1.42 MS/s QPSK inroutes reads
+as 852- and 1135-symbol bursts with a 35-symbol preamble and two pilot
+symbols every 30, slots of 0.6089–0.8102 ms, 125 ms frames each closed by a
+2–3 ms silence, about half the bursts idle fill.
+
+```bash
+decsat decode capture_20Msps.cs8 --decoder tdma --offset -4.27e6 --bandwidth 5.3e6 --out dir
+```
+
 ### Generic PSK → symbols
 
 For carriers that are not DVB-S2 — SCPC data, telemetry, DVB-S — a VFO locks
@@ -615,6 +649,7 @@ decsat decode --hackrf 1635.0 --decoder fastlink --offset 640e3 --bandwidth 200e
 decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   # a Q-Flex's call voice to a .wav
 decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf   # a DVB-S2 carrier, its good BBFRAMEs kept
 decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
+decsat decode capture_20Msps.cs8 --decoder tdma --offset -4.27e6 --bandwidth 5.3e6 --out dir   # a TDMA group: layout, slots, frame, terminals; bursts to a file
 decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
 decsat decode --hackrf 1748 --rate 4000000 --decoder tpc --offset -915e3 --bandwidth 640e3 --wireshark   # a modem's IP live in Wireshark
 decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back

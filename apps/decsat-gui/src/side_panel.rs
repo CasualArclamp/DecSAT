@@ -377,6 +377,39 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
+            if s.decoder == DecoderKind::Tdma {
+                ui.label("Constellation");
+                let txt = s.psk_modulation.map_or("auto (from the bursts)", |m| m.name());
+                egui::ComboBox::from_id_salt("tdma_modulation")
+                    .selected_text(txt)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut s.psk_modulation, None, "auto (from the bursts)");
+                        for m in [Modulation::Bpsk, Modulation::Qpsk, Modulation::Psk8] {
+                            ui.selectable_value(&mut s.psk_modulation, Some(m), m.name());
+                        }
+                    });
+                ui.end_row();
+
+                ui.label("Bursts");
+                ui.horizontal(|ui| {
+                    let (label, tip) = if s.record {
+                        ("⏹ Stop", "Close the .bursts file")
+                    } else {
+                        (
+                            "● Record",
+                            "Write every burst's data symbols to a .bursts file (and a line \
+                             per burst to a .csv): the symbols between the layout's known \
+                             ones once it is read, all of them before",
+                        )
+                    };
+                    let b = egui::Button::new(label).selected(s.record);
+                    if ui.add(b).on_hover_text(tip).clicked() {
+                        s.record = !s.record;
+                    }
+                });
+                ui.end_row();
+            }
+
             if s.decoder == DecoderKind::CarrierId {
                 // The receiver's clock correction: one value for every VFO,
                 // kept between sessions.
@@ -868,6 +901,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         && let Some(c) = &st.cid
     {
         cid_card(ui, c);
+    }
+
+    if v.settings.decoder == DecoderKind::Tdma
+        && let Some(t) = &st.tdma
+    {
+        tdma_card(ui, t, inp.rf_center + v.settings.offset_hz, v.id);
     }
 
     // The chain running (the CDM type-found model's, once picked) and the
@@ -4073,4 +4112,220 @@ fn vfo_spectrum(ui: &mut Ui, db: &[f32], rate: f64) {
         .allow_zoom(false)
         .allow_scroll(false)
         .show(ui, |pl| pl.line(Line::new("power", p)));
+}
+
+/// Seconds of bursts the TDMA burst map shows: two of the 125 ms frames
+/// seen live, so a frame's closing silence shows twice.
+const BURST_MAP_S: f64 = 0.26;
+
+/// A TDMA VFO: the burst map, then each carrier's bursts, layout, slots,
+/// frame and terminals.
+fn tdma_card(ui: &mut Ui, t: &decsat_engine::TdmaView, rf_center: f64, id: VfoId) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("TDMA").strong()).on_hover_text(
+        "Each carrier in the VFO gets its own down-converter and matched filter; bursts are \
+             found by their envelope and demodulated one by one (timing and carrier from each \
+             burst alone). Once enough are in, what every burst has in common — preamble, \
+             pilots, fixed fields — is read blind, and each burst is lined up on it. Terminals \
+             idling send the same fill burst after burst: those are counted as idle.",
+    );
+    if t.channels.is_empty() {
+        ui.label(RichText::new(&t.message).weak());
+        return;
+    }
+    burst_map(ui, t);
+    for (i, c) in t.channels.iter().enumerate() {
+        ui.add_space(4.0);
+        let title = format!(
+            "#{i}  {}  ·  {} {}  ·  {:.0} bursts/s",
+            if rf_center.abs() > 1e6 {
+                format::freq(rf_center + c.center_hz)
+            } else {
+                format!("{:+.1} kHz", c.center_hz / 1e3)
+            },
+            c.modulation.map_or("?", |m| m.name()),
+            format::rate(c.symbol_rate),
+            c.per_s
+        );
+        egui::CollapsingHeader::new(RichText::new(title).color(channel_color(i)))
+            .id_salt(("tdma", id, i))
+            .default_open(true)
+            .show(ui, |ui| tdma_channel(ui, c, i, id));
+    }
+}
+
+/// A carrier's colour in the burst map and its header.
+fn channel_color(i: usize) -> Color32 {
+    const C: [Color32; 6] = [
+        Color32::from_rgb(110, 200, 255),
+        Color32::from_rgb(255, 180, 90),
+        Color32::from_rgb(140, 230, 130),
+        Color32::from_rgb(230, 130, 220),
+        Color32::from_rgb(240, 230, 110),
+        Color32::from_rgb(150, 160, 255),
+    ];
+    C[i % C.len()]
+}
+
+/// Bursts over the last quarter second, a row a carrier, newest at the
+/// right; brighter for stronger bursts, idle fill dimmed.
+fn burst_map(ui: &mut Ui, t: &decsat_engine::TdmaView) {
+    let rows = t.channels.len().max(1);
+    let w = ui.available_width().min(320.0);
+    let row_h = 16.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, row_h * rows as f32 + 14.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(2), Color32::from_gray(18));
+    let x_of = |s: f64| rect.left() + ((s - (t.now_s - BURST_MAP_S)) / BURST_MAP_S) as f32 * w;
+    // Each carrier's levels, for the brightness.
+    let mut lo = vec![f32::MAX; rows];
+    let mut hi = vec![f32::MIN; rows];
+    for m in &t.marks {
+        if m.channel < rows {
+            lo[m.channel] = lo[m.channel].min(m.power_db);
+            hi[m.channel] = hi[m.channel].max(m.power_db);
+        }
+    }
+    for m in t
+        .marks
+        .iter()
+        .filter(|m| m.t_s + m.dur_s > t.now_s - BURST_MAP_S)
+    {
+        let r = m.channel.min(rows - 1);
+        let top = rect.top() + r as f32 * row_h + 2.0;
+        let x0 = x_of(m.t_s).max(rect.left());
+        let x1 = x_of(m.t_s + m.dur_s).max(x0 + 1.0);
+        let span = (hi[r] - lo[r]).max(1.0);
+        let level = 0.45 + 0.55 * ((m.power_db - lo[r]) / span).clamp(0.0, 1.0);
+        let base = channel_color(r);
+        let k = if m.idle { level * 0.35 } else { level };
+        let c = Color32::from_rgb(
+            (base.r() as f32 * k) as u8,
+            (base.g() as f32 * k) as u8,
+            (base.b() as f32 * k) as u8,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(pos2(x0, top), pos2(x1, top + row_h - 4.0)),
+            CornerRadius::ZERO,
+            c,
+        );
+    }
+    // A 10 ms scale bar.
+    let y = rect.bottom() - 6.0;
+    let x1 = rect.right() - 6.0;
+    let x0 = x1 - (0.01 / BURST_MAP_S) as f32 * w;
+    painter.line_segment([pos2(x0, y), pos2(x1, y)], (1.0, Color32::from_gray(160)));
+    painter.text(
+        pos2(x0 - 4.0, y),
+        egui::Align2::RIGHT_CENTER,
+        "10 ms",
+        egui::FontId::proportional(10.0),
+        Color32::from_gray(160),
+    );
+    resp.on_hover_text(
+        "The last quarter second of bursts, a row a carrier (newest at the right). Brighter is \
+         stronger; idle fill is dimmed. A frame's closing silence shows as a gap down a row.",
+    );
+}
+
+fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: VfoId) {
+    let ms = |sym: f64| sym / c.symbol_rate * 1e3;
+    egui::Grid::new(("tdma_grid", id, i))
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("Bursts");
+            ui.label(format!(
+                "{} · on {:.0} % of the time · {}",
+                c.bursts,
+                100.0 * c.duty,
+                c.len_symbols.map_or("length ?".into(), |l| format!(
+                    "{l} symbols ({:.3} ms)",
+                    ms(l as f64)
+                ))
+            ));
+            ui.end_row();
+            ui.label("Signal");
+            ui.label(format!(
+                "MER {:.1} dB · {:.1} dB over the floor · α {:.2}",
+                c.mer_db, c.snr_db, c.alpha
+            ));
+            ui.end_row();
+            if c.idle_share > 0.005 {
+                ui.label("Idle fill");
+                ui.label(format!("{:.0} % of bursts", 100.0 * c.idle_share));
+                ui.end_row();
+            }
+            ui.label("Layout");
+            match &c.layout {
+                Some(l) => ui.label(l.describe()).on_hover_text(format!(
+                    "Read from {} bursts of this length, lined up on each other: positions \
+                     every burst sends the same are fixed (preamble, pilots, unique words, \
+                     constant fields); the rest carry data. {} data symbols a burst = {} coded \
+                     bits.",
+                    l.bursts,
+                    l.data.len(),
+                    l.data.len() * l.modulation.bits_per_symbol() as usize
+                )),
+                None => ui.label(RichText::new("gathering bursts…").weak()),
+            };
+            ui.end_row();
+            if let Some(g) = &c.grid {
+                ui.label("Slots");
+                ui.label(format!(
+                    "{:.2} symbols ({:.4} ms) · guard {:.1} · {:.0} % used · ranged ±{:.2} symbols",
+                    g.period,
+                    ms(g.period),
+                    g.guard,
+                    100.0 * g.occupancy,
+                    g.spread
+                ));
+                ui.end_row();
+                if let Some(f) = &g.frame {
+                    ui.label("Frame");
+                    ui.label(format!(
+                        "{:.3} ms · {:.2} slots + a {:.3} ms silence",
+                        ms(f.period),
+                        f.slots(g.period),
+                        ms(f.silence)
+                    ));
+                    ui.end_row();
+                }
+            }
+        });
+    if !c.terminals.is_empty() {
+        egui::CollapsingHeader::new(format!("Terminals ({})", c.terminals.len()))
+            .id_salt(("tdma_terms", id, i))
+            .show(ui, |ui| {
+                egui::Grid::new(("tdma_terms_grid", id, i))
+                    .num_columns(5)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for h in ["bursts", "idle", "power", "carrier", "in slot"] {
+                            ui.label(RichText::new(h).small().weak());
+                        }
+                        ui.end_row();
+                        for t in c.terminals.iter().take(24) {
+                            ui.label(t.bursts.to_string());
+                            ui.label(format!(
+                                "{:.0} %",
+                                100.0 * t.idle as f64 / t.bursts.max(1) as f64
+                            ));
+                            ui.label(format!("{:+.1} dB", t.power_db));
+                            ui.label(format!("{:+.0} Hz", t.freq_hz - c.center_hz));
+                            ui.label(format!("{:+.2}", t.offset));
+                            ui.end_row();
+                        }
+                    });
+                ui.label(
+                    RichText::new(
+                        "Told apart by power, carrier offset and where in its slot each \
+                         sends — a terminal's own hardware and ranging. Terminals locked to \
+                         the hub share a carrier offset; two at the same power and timing \
+                         look like one.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+    }
 }

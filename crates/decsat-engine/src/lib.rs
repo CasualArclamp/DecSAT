@@ -17,6 +17,7 @@ pub mod psk;
 pub mod radar;
 pub mod rf;
 pub mod spectrum;
+pub mod tdma;
 pub mod tx;
 pub mod vfo;
 pub mod wireshark;
@@ -42,6 +43,7 @@ pub use identify::{
 pub use psk::PskDemod;
 pub use radar::RadarStageView;
 pub use spectrum::Spectrum;
+pub use tdma::{BurstMark, ChannelView as TdmaChannelView, TdmaView};
 pub use vfo::{CarrierState, DecoderKind, VfoId, VfoSettings, VfoStatus};
 
 use decsat_core::{Iq, Metrics, Result, RxConfig};

@@ -3624,3 +3624,55 @@ from the 2026-10-11 survey captures (10 s each).
   (5.5 bits/byte, structured); the encrypted carrier now parses with no
   errors. GUI: a "Framing" row, "reassembled (n by frame CRC)" in GSE
   variants; CLI: a trailer line. Tests build the vendor's frames by hand.
+
+## TDMA bursts: analyser and demodulator (2026-10-14)
+
+Rory, on Intelsat 19: "can you make support for TDMA stuff" — then chose
+the burst analyser, burst demodulator and payload decoding, for anything
+bursty, as a VFO decoder with a burst panel (DESIGN §3c).
+
+**The live group** (12489–12497 MHz, LO 10600; 4 s at 20 MS/s, LNA 24):
+three QPSK inroutes at 1420.7 kS/s beside a 1.27 MS/s DVB-S2 TS carrier —
+which turned out to be NZ radio distribution (Newstalk ZB, ZM, Hauraki… as
+multicast AAC), not their outbound. Prototyped in Python first, then
+measured by the new decoder:
+
+| carrier | burst | slot | frame | idle |
+|---|---|---|---|---|
+| 12491.29 | 852 symbols | 869.00 symbols, 0.6117 ms, guard 17 | 125.000 ms = 200 slots + 2.678 ms silence | 47 % |
+| 12492.96 | 852 symbols | 865.00 symbols, 0.6089 ms, guard 13 | 125.000 ms = 201 slots + 2.615 ms silence | ~50 % |
+| 12489.62 | 1135 symbols | 1151.0 symbols, 0.8101 ms, guard 18 | 125.0 ms = 152 slots + ~1.9 ms silence | ? |
+
+Layout of the 852-symbol bursts: preamble 0–35 with symbols 13–17 varying
+(an ID or type field?), two pilot symbols every 30 (0/1, 30/31 … 840/841),
+an 18-symbol fixed field at 704–721 (three of its symbols vary on one
+carrier), ~750 data symbols = ~1500 coded bits. The 1135-symbol bursts
+share the preamble and pilots, ~980 data symbols. Every terminal's carrier
+is within ±80 Hz (locked to the hub); they separate by power (6 dB spread)
+and by slot offset (±0.3–4 symbols). 125 ms frames are what iDirect
+inroutes use — a hint, not an identification.
+
+**Built** (`decsat-engine::tdma`, `DecoderKind::Tdma`, CLI `--decoder tdma`,
+GUI panel with a burst map, `.bursts` + `.csv` on Record): see DESIGN §3c.
+Lessons on the way, each from the live capture:
+
+- the noise floor must be a deep percentile (0.3 %): the carrier is on 98 %
+  of the time and noise shows only in the 13–18-symbol guard times;
+- thresholds placed in dB fire 3 symbols early at high SNR, in linear power
+  miss terminals 3 dB under the rest: detect in dB, then set each burst's
+  edges at half its own level;
+- a state change must hold 3 symbols, or a 7 dB carrier's bursts break up;
+- a frame need not hold whole slots (204¼ here): one grid over many frames
+  smeared to "±104 symbols"; slots are now counted from each frame's start,
+  the frame found on its silences;
+- bursts merging over a 13-symbol guard (8 %) are split again a slot apart;
+- per-burst carrier estimates scatter ±300 Hz at 6 dB: terminal grouping
+  scales its tolerance to the measured scatter;
+- speed: a VFO-style down-converter per channel (2.9 s of every 4 s) →
+  mixer + ~30-tap anti-alias FIR; a planner per FFT and a log per sample
+  were the rest. Three carriers now take 2.4 s per 4 s; carrier discovery
+  0.3 s (Identify in full took 1.7 s).
+
+**Open**: the weakest carrier (6.9 dB over the floor) still breaks a third
+of its bursts — burst detection on the preamble is the fix; the coding in
+the data symbols (T3).

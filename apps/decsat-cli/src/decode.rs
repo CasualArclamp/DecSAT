@@ -68,8 +68,9 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "auto" | "cdm-auto" => DecoderKind::CdmAuto,
         "cid" | "carrier-id" => DecoderKind::CarrierId,
         "psk" => DecoderKind::PskSymbols,
+        "tdma" => DecoderKind::Tdma,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma)"
         ),
     })
 }
@@ -319,6 +320,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(t) = &st.text {
         print_bit_text("text", t);
+    }
+    if let Some(t) = &st.tdma {
+        print_tdma(t);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text};
@@ -959,5 +963,62 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
             100.0 * ch.change_4ms,
             100.0 * ch.ones
         );
+    }
+}
+
+/// A TDMA VFO's carriers: their bursts, layout, slot grid and terminals.
+pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
+    for (i, c) in v.channels.iter().enumerate() {
+        println!(
+            "tdma #{i}: {:+.1} kHz, {:.1} kS/s α {:.2}, {} · {} bursts ({:.0}/s, on {:.0} %) · {} · MER {:.1} dB, {:.1} dB over the floor",
+            c.center_hz / 1e3,
+            c.symbol_rate / 1e3,
+            c.alpha,
+            c.modulation.map_or("modulation ?", |m| m.name()),
+            c.bursts,
+            c.per_s,
+            100.0 * c.duty,
+            c.len_symbols
+                .map_or("length ?".to_string(), |l| format!("{l} symbols")),
+            c.mer_db,
+            c.snr_db
+        );
+        match &c.layout {
+            Some(l) => println!("  layout: {} (from {} bursts)", l.describe(), l.bursts),
+            None => println!("  layout: not read yet"),
+        }
+        if let Some(g) = &c.grid {
+            let ms = |sym: f64| sym / c.symbol_rate * 1e3;
+            println!(
+                "  slots: {:.2} symbols ({:.4} ms), guard {:.1} symbols, ranged within ±{:.2} symbols, {:.0} % used",
+                g.period,
+                ms(g.period),
+                g.guard,
+                g.spread,
+                100.0 * g.occupancy,
+            );
+            if let Some(f) = &g.frame {
+                println!(
+                    "  frame: {:.3} ms = {:.2} slots + a {:.0}-symbol ({:.3} ms) silence",
+                    ms(f.period),
+                    f.slots(g.period),
+                    f.silence,
+                    ms(f.silence)
+                );
+            }
+        }
+        if !c.terminals.is_empty() {
+            println!("  terminals ({}):", c.terminals.len());
+            for t in c.terminals.iter().take(12) {
+                println!(
+                    "    {:6} bursts ({:3.0} % idle)  {:+6.1} dB  {:+8.0} Hz  {:+.2} symbols into the slot",
+                    t.bursts,
+                    100.0 * t.idle as f64 / t.bursts.max(1) as f64,
+                    t.power_db,
+                    t.freq_hz,
+                    t.offset
+                );
+            }
+        }
     }
 }

@@ -77,6 +77,11 @@ pub enum DecoderKind {
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol.
     PskSymbols,
+    /// TDMA: the carriers in the VFO (one, or an MF-TDMA group), their
+    /// bursts found and demodulated one by one, the bursts' layout
+    /// (preamble, pilots, fixed fields) read blind, the slot grid, frame and
+    /// terminals; each burst's data symbols to a `.bursts` file on Record.
+    Tdma,
     /// Record the VFO's narrowband IQ.
     IqRecord,
     /// Zoomed spectrum and level only.
@@ -84,7 +89,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 15] = [
+    pub const ALL: [DecoderKind; 16] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -98,6 +103,7 @@ impl DecoderKind {
         DecoderKind::Viterbi,
         DecoderKind::CarrierId,
         DecoderKind::PskSymbols,
+        DecoderKind::Tdma,
         DecoderKind::IqRecord,
         DecoderKind::Spectrum,
     ];
@@ -117,6 +123,7 @@ impl DecoderKind {
             DecoderKind::Viterbi => "Viterbi K=7 (IESS-308/309 SCPC) → data",
             DecoderKind::CarrierId => "Carrier ID (DVB-CID)",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin)",
+            DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::IqRecord => "IQ recorder",
             DecoderKind::Spectrum => "Spectrum only",
         }
@@ -139,6 +146,7 @@ impl DecoderKind {
             DecoderKind::Viterbi => "viterbi",
             DecoderKind::CarrierId => "carrier-id",
             DecoderKind::PskSymbols => "psk",
+            DecoderKind::Tdma => "tdma",
             DecoderKind::IqRecord => "iq-record",
             DecoderKind::Spectrum => "spectrum",
         }
@@ -259,6 +267,7 @@ impl DecoderKind {
             DecoderKind::Viterbi => "VIT",
             DecoderKind::CarrierId => "CID",
             DecoderKind::PskSymbols => "PSK",
+            DecoderKind::Tdma => "TDMA",
             DecoderKind::IqRecord => "REC",
             DecoderKind::Spectrum => "SPEC",
         }
@@ -448,6 +457,8 @@ pub struct VfoStatus {
     pub text: Option<decsat_modem::text::TextView>,
     /// DVB-CID: the despreader and what the identifier said.
     pub cid: Option<crate::cid::CidView>,
+    /// TDMA: the carriers, their bursts, layouts, slots and terminals.
+    pub tdma: Option<crate::tdma::TdmaView>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -737,6 +748,8 @@ enum Decoder {
         buf: Vec<Iq>,
         worker: Option<crate::cid::CidWorker>,
     },
+    /// TDMA: the analyser runs on the VFO's baseband from the start.
+    Tdma(Box<crate::tdma::TdmaAnalyser>),
     Psk {
         buf: Vec<Iq>,
         demod: Option<Box<PskDemod>>,
@@ -1011,6 +1024,10 @@ impl Worker {
                 buf: Vec::new(),
                 worker: None,
             },
+            DecoderKind::Tdma => Decoder::Tdma(Box::new(crate::tdma::TdmaAnalyser::new(
+                ddc.out_rate(),
+                s.bandwidth_hz.min(ddc.out_rate()),
+            ))),
             DecoderKind::PskSymbols => Decoder::Psk {
                 buf: Vec::new(),
                 demod: None,
@@ -1234,6 +1251,8 @@ impl Worker {
             } => {
                 let _ = w.flush();
             }
+            // Closes (and flushes) the burst files.
+            Decoder::Tdma(mut a) => a.set_recording(false, &self.settings.record_dir, ""),
             _ => {}
         }
     }
@@ -1554,6 +1573,15 @@ impl Worker {
                     }
                 }
             },
+            Decoder::Tdma(a) => {
+                a.push(&self.bb, self.settings.psk_modulation);
+                let tag = format!(
+                    "{}-{}",
+                    self.settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(self.settings.offset_hz)
+                );
+                a.set_recording(self.settings.record, &self.settings.record_dir, &tag);
+            }
             Decoder::Psk {
                 buf,
                 demod,
@@ -1690,6 +1718,7 @@ impl Worker {
         st.recording_active = false;
         st.carrier = None;
         st.fec = None;
+        st.tdma = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -1917,6 +1946,24 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Tdma(a) => {
+                let v = a.view();
+                st.progress = if v.progress < 1.0 { v.progress } else { 0.0 };
+                st.message = match a.recording() {
+                    Some((p, _, _)) if a.open_failed() => {
+                        format!("{} — cannot write {}", v.message, p.display())
+                    }
+                    Some((_, n, true)) => format!("{} — recording, {n} bursts", v.message),
+                    _ => v.message.clone(),
+                };
+                if let Some((p, n, active)) = a.recording() {
+                    st.recording = Some((p, n));
+                    st.recording_active = active;
+                }
+                st.scatter = a.scatter();
+                st.symbol_rate = v.channels.first().map(|c| c.symbol_rate);
+                st.tdma = Some(v);
+            }
             Decoder::Psk {
                 buf,
                 demod,
@@ -2263,7 +2310,7 @@ impl PskFile<'_> {
 }
 
 /// Seconds since the Unix epoch, for file names.
-fn unix_stamp() -> u64 {
+pub(crate) fn unix_stamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
