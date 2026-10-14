@@ -4317,6 +4317,115 @@ fn burst_map(ui: &mut Ui, t: &decsat_engine::TdmaView) {
     );
 }
 
+/// A layout in a line the panel's width holds: the whole of it (live, a
+/// slow return's, with 17 fixed fields) ran the panel off the side; it is
+/// on hover.
+fn layout_summary(l: &decsat_engine::tdma::layout::Layout) -> String {
+    let d = l.describe();
+    if d.chars().count() <= 70 {
+        return d;
+    }
+    let mut parts = vec![format!("{} symbols", l.len)];
+    if let Some(p) = &l.preamble {
+        parts.push(format!("preamble {}–{}", p.start, p.end - 1));
+    }
+    if let Some(p) = &l.pilots {
+        parts.push(format!("{} pilots every {}", p.block, p.period));
+    }
+    if !l.fields.is_empty() {
+        parts.push(format!("{} fixed fields", l.fields.len()));
+    }
+    if let Some(p) = &l.postamble {
+        parts.push(format!("postamble {}–{}", p.start, p.end - 1));
+    }
+    parts.push(format!("{} data symbols", l.data.len()));
+    let mut s = parts.join(", ");
+    if l.fill.is_some() {
+        s += &format!("; {:.0} % idle", 100.0 * l.idle_share);
+    }
+    s
+}
+
+/// A TDMA channel's header fields: where each sits in the burst, its
+/// latest values (newest first), how many it has taken and how often it
+/// changes from one burst to the next.
+fn tdma_header(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: VfoId) {
+    egui::CollapsingHeader::new(format!("Header fields ({})", c.header.len()))
+        .id_salt(("tdma_header", id, i))
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new(("tdma_header_grid", id, i))
+                .num_columns(5)
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in ["symbols", "latest", "before", "values", "changes"] {
+                        ui.label(RichText::new(h).small().weak());
+                    }
+                    ui.end_row();
+                    for f in &c.header {
+                        ui.label(if f.from == f.to {
+                            format!("{}", f.from)
+                        } else {
+                            format!("{}–{}", f.from, f.to)
+                        });
+                        let latest = f.history.first().map_or("–", |v| v.as_str());
+                        // A field that has just changed shows bright.
+                        let fresh = f.history.get(1).is_some_and(|b| b != latest);
+                        let mut text = RichText::new(latest).monospace();
+                        if fresh {
+                            text = text.color(Color32::from_rgb(110, 220, 110));
+                        }
+                        ui.label(text);
+                        ui.label(
+                            RichText::new(
+                                f.history
+                                    .iter()
+                                    .skip(1)
+                                    .take(3)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            )
+                            .monospace()
+                            .weak(),
+                        );
+                        let values = if f.distinct >= decsat_engine::tdma::HEADER_VALUES_KEPT {
+                            format!("{}+", f.distinct)
+                        } else {
+                            f.distinct.to_string()
+                        };
+                        ui.label(format!("{values} · {:.0} % one", 100.0 * f.commonest_share))
+                            .on_hover_text(
+                                "Values seen, and the share of bursts that sent the commonest.",
+                            );
+                        ui.label(if f.bursts < 2 {
+                            "–".to_string()
+                        } else if f.change_share < 0.005 {
+                            "never".to_string()
+                        } else {
+                            format!("{:.0} % of bursts", 100.0 * f.change_share)
+                        });
+                        ui.end_row();
+                    }
+                });
+            ui.label(
+                RichText::new(
+                    "The short fields ahead of the payload that vary from burst to burst: \
+                     those inside the preamble, and the short runs of data before the payload \
+                     (which starts after the last fixed run of three symbols or more). Values \
+                     are the symbols as numbered points (QPSK 0–3, counter-clockwise from the \
+                     first quadrant, in the layout's own orientation): what the system means \
+                     by them, and how its bits map, is not known. A field changing in every \
+                     burst is a count or a time; one that never changes on a carrier but \
+                     differs between carriers names the terminal. The recording's .csv has \
+                     every burst's values.",
+                )
+                .small()
+                .weak(),
+            );
+        });
+}
+
 fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: VfoId) {
     let ms = |sym: f64| sym / c.symbol_rate * 1e3;
     egui::Grid::new(("tdma_grid", id, i))
@@ -4346,11 +4455,12 @@ fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: V
             }
             ui.label("Layout");
             match &c.layout {
-                Some(l) => ui.label(l.describe()).on_hover_text(format!(
-                    "Read from {} bursts of this length, lined up on each other: positions \
-                     every burst sends the same are fixed (preamble, pilots, unique words, \
-                     constant fields); the rest carry data. {} data symbols a burst = {} coded \
-                     bits.",
+                Some(l) => ui.label(layout_summary(l)).on_hover_text(format!(
+                    "{}\n\nRead from {} bursts of this length, lined up on each other: \
+                     positions every burst sends the same are fixed (preamble, pilots, unique \
+                     words, constant fields); the rest carry data. {} data symbols a burst = {} \
+                     coded bits.",
+                    l.describe(),
                     l.bursts,
                     l.data.len(),
                     l.data.len() * l.modulation.bits_per_symbol() as usize
@@ -4403,6 +4513,9 @@ fn tdma_channel(ui: &mut Ui, c: &decsat_engine::TdmaChannelView, i: usize, id: V
                 }
             }
         });
+    if !c.header.is_empty() {
+        tdma_header(ui, c, i, id);
+    }
     if !c.terminals.is_empty() {
         egui::CollapsingHeader::new(format!("Terminals ({})", c.terminals.len()))
             .id_salt(("tdma_terms", id, i))

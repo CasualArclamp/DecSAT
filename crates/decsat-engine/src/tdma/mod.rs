@@ -15,7 +15,9 @@
 //!    sending them.
 //!
 //! Recording writes every burst's data symbols to a `.bursts` file (and a
-//! line per burst to a `.csv`), for working out the coding offline:
+//! line per burst to a `.csv`, with its header fields' values — the short
+//! fields ahead of the payload, [`layout::Layout::header_runs`]), for
+//! working out the coding offline:
 //!
 //! ```text
 //! "DSTDMA01"                          8-byte magic, once
@@ -203,6 +205,90 @@ pub struct ChannelView {
     pub terminals: Vec<Terminal>,
     /// The look for a convolutional code in the bursts' data.
     pub code: CodeView,
+    /// The header fields, once the layout is read.
+    pub header: Vec<HeaderFieldView>,
+}
+
+/// One of a channel's header fields ([`Layout::header_runs`]): what it
+/// has read, burst by burst. Values are the symbols as numbered points
+/// (QPSK 0–3 counter-clockwise from the first quadrant, in the layout's
+/// orientation): what they mean, and how the bits map, is the system's own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeaderFieldView {
+    /// The symbols, `from..=to` in the burst.
+    pub from: usize,
+    pub to: usize,
+    /// The latest values, newest first.
+    pub history: Vec<String>,
+    /// Values seen (at most [`HEADER_VALUES_KEPT`] counted), and the share
+    /// of bursts the commonest took.
+    pub distinct: usize,
+    pub commonest_share: f32,
+    /// The share of bursts whose value differed from the one before.
+    pub change_share: f32,
+    pub bursts: u64,
+}
+
+/// Values of a header field counted, at most; and latest values shown.
+pub const HEADER_VALUES_KEPT: usize = 512;
+const HEADER_HISTORY: usize = 6;
+
+/// A header field's values as they come.
+struct FieldTrack {
+    run: layout::Run,
+    history: VecDeque<Vec<u8>>,
+    counts: std::collections::HashMap<Vec<u8>, u64>,
+    changes: u64,
+    bursts: u64,
+}
+
+impl FieldTrack {
+    fn new(run: layout::Run) -> Self {
+        FieldTrack {
+            run,
+            history: VecDeque::new(),
+            counts: std::collections::HashMap::new(),
+            changes: 0,
+            bursts: 0,
+        }
+    }
+
+    /// A fitted burst's symbols ([`layout::Fitted::labels`]).
+    fn push(&mut self, labels: &[u8]) {
+        let Some(v) = labels.get(self.run.clone()) else {
+            return;
+        };
+        if v.contains(&layout::NO_SYMBOL) {
+            return;
+        }
+        if self
+            .history
+            .front()
+            .is_some_and(|last| last.as_slice() != v)
+        {
+            self.changes += 1;
+        }
+        self.bursts += 1;
+        if self.counts.len() < HEADER_VALUES_KEPT || self.counts.contains_key(v) {
+            *self.counts.entry(v.to_vec()).or_insert(0) += 1;
+        }
+        self.history.push_front(v.to_vec());
+        self.history.truncate(HEADER_HISTORY);
+    }
+
+    fn view(&self) -> HeaderFieldView {
+        let text = |v: &Vec<u8>| v.iter().map(|&d| char::from(b'0' + d.min(9))).collect();
+        HeaderFieldView {
+            from: self.run.start,
+            to: self.run.end - 1,
+            history: self.history.iter().map(text).collect(),
+            distinct: self.counts.len(),
+            commonest_share: self.counts.values().copied().max().unwrap_or(0) as f32
+                / self.bursts.max(1) as f32,
+            change_share: self.changes as f32 / self.bursts.saturating_sub(1).max(1) as f32,
+            bursts: self.bursts,
+        }
+    }
 }
 
 /// What the look for a convolutional code in a channel's bursts has found.
@@ -437,6 +523,7 @@ struct Channel {
     snr_db: f32,
     idle_share: f32,
     code: CodeSearch,
+    header: Vec<FieldTrack>,
     /// The VFO's time at the channel's first sample, s (a carrier found
     /// later starts from the kept history).
     t0_s: f64,
@@ -458,6 +545,8 @@ struct Done {
     fitted: bool,
     modulation: Modulation,
     symbols: Vec<Iq>,
+    /// The header fields' values, '.' between ("" unless fitted).
+    header: String,
 }
 
 impl Channel {
@@ -507,6 +596,7 @@ impl Channel {
             filtered: Vec::new(),
             raw: Vec::new(),
             code: CodeSearch::default(),
+            header: Vec::new(),
             t0_s: 0.0,
         }
     }
@@ -703,6 +793,7 @@ impl Channel {
         }
         let modulation_now = self.modulation.unwrap_or(b.modulation);
         let mut field = Vec::new();
+        let mut header = String::new();
         let (t_sym, symbols, mer, idle, fitted) = match self.layout.as_ref().and_then(|l| {
             // Only bursts of the layout's length.
             ((len as f64 - l.len as f64).abs() <= l.len as f64 * 0.02 + 1.0)
@@ -711,6 +802,21 @@ impl Channel {
         }) {
             Some(f) => {
                 field = f.field;
+                for h in &mut self.header {
+                    h.push(&f.labels);
+                }
+                // For the file: each field's symbols, '.' between fields.
+                header = self
+                    .header
+                    .iter()
+                    .map(|h| {
+                        f.labels[h.run.clone()]
+                            .iter()
+                            .map(|&d| char::from(b'0' + d.min(9)))
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
                 (
                     b.t0 / self.sps + f.lag as f64,
                     f.data,
@@ -786,6 +892,7 @@ impl Channel {
             fitted,
             modulation: modulation_now,
             symbols,
+            header,
         })
     }
 
@@ -796,6 +903,7 @@ impl Channel {
         };
         let refs: Vec<&[Iq]> = self.gathered.iter().map(|g| g.as_slice()).collect();
         if let Some(l) = find_layout(&refs, len, self.modulation.unwrap_or(Modulation::Qpsk)) {
+            self.header = l.header_runs().into_iter().map(FieldTrack::new).collect();
             self.layout = Some(l);
             self.gathered = Vec::new();
         }
@@ -831,6 +939,7 @@ impl Channel {
                 self.by_id.list(TERMINAL_MIN)
             },
             code: self.code.view,
+            header: self.header.iter().map(|h| h.view()).collect(),
         }
     }
 }
@@ -1326,7 +1435,7 @@ impl TdmaAnalyser {
                     let mut csv = BufWriter::new(File::create(dir.join(format!("{stem}.csv")))?);
                     writeln!(
                         csv,
-                        "channel,time_s,duration_s,power_db,freq_hz,mer_db,idle,fitted,symbols"
+                        "channel,time_s,duration_s,power_db,freq_hz,mer_db,idle,fitted,symbols,header"
                     )?;
                     Ok(Writer {
                         bin,
@@ -1717,7 +1826,7 @@ fn write_burst(w: &mut Writer, d: &Done) -> std::io::Result<()> {
     b.write_all(&labels)?;
     writeln!(
         w.csv,
-        "{},{:.7},{:.7},{:.2},{:.1},{:.2},{},{},{}",
+        "{},{:.7},{:.7},{:.2},{:.1},{:.2},{},{},{},{}",
         d.channel,
         d.t_s,
         d.dur_s,
@@ -1726,7 +1835,8 @@ fn write_burst(w: &mut Writer, d: &Done) -> std::io::Result<()> {
         d.mer_db,
         d.idle as u8,
         d.fitted as u8,
-        d.symbols.len()
+        d.symbols.len(),
+        d.header
     )?;
     w.bursts += 1;
     Ok(())
@@ -1928,15 +2038,16 @@ mod tests {
             // Every twelfth slot empty: a frame of twelve.
             let f = g.frame.expect("a frame");
             assert!((f.period - 12.0 * 870.0).abs() < 3.0, "{f:?}");
-            assert!(
-                c.terminals.len() >= 3,
-                "{:?} layout {} clock {} rate {}",
-                c.terminals,
-                l.describe(),
-                c.symbol_rate,
-                c.mer_db
-            );
+            assert!(c.terminals.len() >= 3, "{:?}", c.terminals);
             assert!(c.mer_db > 10.0, "MER {}", c.mer_db);
+            // The header: the terminals' field in the preamble, changing
+            // from slot to slot as the terminals take turns (three values,
+            // and now and then a symbol misread).
+            assert_eq!(c.header.len(), 1, "{:?}", c.header);
+            let h = &c.header[0];
+            assert!((4..=5).contains(&(h.to - h.from + 1)), "{h:?}");
+            assert!(h.distinct >= 3 && h.commonest_share < 0.6, "{h:?}");
+            assert!(h.change_share > 0.4 && h.bursts > 100, "{h:?}");
         }
     }
 }

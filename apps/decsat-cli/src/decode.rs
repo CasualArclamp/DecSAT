@@ -1044,6 +1044,23 @@ pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
             None => println!("  layout: not read yet"),
         }
         println!("  code: {}", tdma_code_text(&c.code, c.layout.is_some()));
+        if !c.header.is_empty() {
+            println!("  header fields (symbols: latest ← before · values · changes):");
+            for f in &c.header {
+                let at = if f.from == f.to {
+                    format!("{}", f.from)
+                } else {
+                    format!("{}–{}", f.from, f.to)
+                };
+                println!(
+                    "    {at:>9}: {} · {} values ({:.0} % one) · changes in {:.0} % of bursts",
+                    f.history.join(" ← "),
+                    f.distinct,
+                    100.0 * f.commonest_share,
+                    100.0 * f.change_share
+                );
+            }
+        }
         if let Some(g) = &c.grid {
             let ms = |sym: f64| sym / c.symbol_rate * 1e3;
             println!(

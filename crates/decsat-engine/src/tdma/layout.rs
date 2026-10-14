@@ -119,7 +119,53 @@ impl Layout {
             .enumerate()
             .filter_map(|(i, k)| k.map(|v| (i, v)))
     }
+
+    /// Where the burst's header fields are: the runs that vary inside the
+    /// preamble, and the short runs of data (at most [`HEADER_RUN_MAX`]
+    /// symbols) between it and the payload. The payload starts at the first
+    /// longer run of data, or after the last fixed run of three or more
+    /// symbols ahead of the postamble (pilots, a symbol or two, do not end
+    /// it), whichever is first. Live (Intelsat 19, the slow return): ~25
+    /// fields ahead of a 255-symbol payload of 15-symbol runs between
+    /// single pilots, some changing burst by burst; the 1.42 MS/s inroute:
+    /// the terminal's field in the preamble, then 28-symbol runs.
+    pub fn header_runs(&self) -> Vec<Run> {
+        let end = self.postamble.as_ref().map_or(self.len, |p| p.start);
+        let is_known: Vec<bool> = self.known.iter().map(|k| k.is_some()).collect();
+        let pre = self.preamble.clone().unwrap_or(0..0);
+        let after_fixed = runs(&is_known[..end.min(self.len)])
+            .into_iter()
+            .filter(|r| r.len() >= 3)
+            .map(|r| r.end)
+            .max()
+            .unwrap_or(0);
+        let is_data: Vec<bool> = (0..end.min(self.len))
+            .map(|i| !is_known[i] && i >= pre.end)
+            .collect();
+        let first_long = runs(&is_data)
+            .into_iter()
+            .find(|r| r.len() > HEADER_RUN_MAX)
+            .map_or(self.len, |r| r.start);
+        let payload = after_fixed.min(first_long).max(pre.end);
+        let mut out: Vec<Run> = self.varying_in_preamble.clone();
+        // Not before the preamble's end: ahead of it are the burst's ramp
+        // and symbols the edge took.
+        let varying: Vec<bool> = (0..payload).map(|i| !is_known[i] && i >= pre.end).collect();
+        out.extend(
+            runs(&varying)
+                .into_iter()
+                .filter(|r| r.len() <= HEADER_RUN_MAX),
+        );
+        out.sort_by_key(|r| r.start);
+        out.truncate(HEADER_FIELDS_MAX);
+        out
+    }
 }
+
+/// The longest run of data symbols taken as a header field, and the most
+/// fields kept.
+pub const HEADER_RUN_MAX: usize = 16;
+pub const HEADER_FIELDS_MAX: usize = 32;
 
 fn run_text(r: &Run) -> String {
     if r.len() == 1 {
@@ -506,7 +552,13 @@ pub struct Fitted {
     /// The symbols of the field inside the preamble (their constellation
     /// points' numbers): live, a few values, one a terminal.
     pub field: Vec<u8>,
+    /// Every position's symbol as a point's number, in the layout's
+    /// orientation (`NO_SYMBOL` where the burst had none).
+    pub labels: Vec<u8>,
 }
+
+/// A position a burst did not reach, in [`Fitted::labels`].
+pub const NO_SYMBOL: u8 = u8::MAX;
 
 /// Fit `sym` (a demodulated burst) to `layout`.
 pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
@@ -570,6 +622,7 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
         }
     }
     let mut field = Vec::new();
+    let mut labels = vec![NO_SYMBOL; layout.len];
     for (i, v) in row.iter().enumerate() {
         let Some(v) = v else { continue };
         let ph = phase_at(i);
@@ -583,8 +636,12 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
         if data_set[i] {
             data.push(c);
         }
+        let label = nearest(c, pts) as u8;
+        if let Some(l) = labels.get_mut(i) {
+            *l = label;
+        }
         if in_field[i] {
-            field.push(nearest(c, pts) as u8);
+            field.push(label);
         }
     }
     let idle = layout.fill.as_ref().is_some_and(|f| {
@@ -599,6 +656,7 @@ pub fn fit(layout: &Layout, sym: &[Iq]) -> Option<Fitted> {
         mer_db: (10.0 * (sig / err.max(1e-12)).log10()) as f32,
         idle,
         field,
+        labels,
     })
 }
 
@@ -674,11 +732,18 @@ pub(crate) mod tests {
         assert_eq!((pil.period, pil.block), (30, 2), "{d}");
         assert!(l.fields.iter().any(|f| f.len() >= 16), "{d}");
         assert!((740..770).contains(&l.data.len()), "{d}");
+        // Its header: the field inside the preamble; the data between the
+        // pilots run past `HEADER_RUN_MAX` and are payload.
+        assert_eq!(l.header_runs(), l.varying_in_preamble, "{d}");
         // A new burst fits, its data come out in the layout's orientation.
         let b = live_like(&mut r, false, &fill, &fixed);
         let nb = noisy(&b, 0.2, 2.0, &mut r);
         let f = fit(&l, &nb).unwrap();
         assert!(f.match_known > 0.8 && !f.idle && f.mer_db > 9.0, "{f:?}");
+        // Every position's symbol, the field's among them.
+        assert_eq!(f.labels.len(), l.len);
+        let run = l.varying_in_preamble[0].clone();
+        assert_eq!(f.labels[run].to_vec(), f.field);
         let idle = noisy(&live_like(&mut r, true, &fill, &fixed), 0.2, 1.0, &mut r);
         assert!(fit(&l, &idle).unwrap().idle);
     }

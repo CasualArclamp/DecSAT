@@ -486,13 +486,19 @@ blocks, so a whole group never holds the VFO up. Then, for each carrier:
   **frame** they repeat in (from the silence that closes each), and the
   **terminals** — by the short field in the preamble when the bursts have
   one (live, one value a terminal), else by power, carrier offset and where
-  in its slot each sends.
+  in its slot each sends;
+- the **header fields**: the short fields ahead of the payload that vary
+  from burst to burst (inside the preamble, and short runs of data before
+  the payload), each with its latest values, how many it has taken and how
+  often it changes — a count, a time, a terminal's name — read as numbered
+  constellation points, since what they mean is the system's own.
 
 The **burst map** shows the last quarter second, a row a carrier (brighter
 is stronger, idle fill dimmed). **● Record** writes each burst's data
 symbols (the ones between the layout's fixed symbols) to
-`decsat-<VFO>-<RF>MHz-tdma-<time>.bursts`, and a line per burst to a `.csv`;
-the format is at the top of `crates/decsat-engine/src/tdma/mod.rs`.
+`decsat-<VFO>-<RF>MHz-tdma-<time>.bursts`, and a line per burst to a `.csv`
+(with its header fields' values); the format is at the top of
+`crates/decsat-engine/src/tdma/mod.rs`.
 
 On Intelsat 19 at 12.49 GHz a group of three 1.42 MS/s QPSK inroutes reads
 as 852- and 1135-symbol bursts with a 35-symbol preamble and two pilot

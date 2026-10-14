@@ -4017,3 +4017,45 @@ terminals colliding).
   on misreads; now fields no turn or shift makes of another. Open: a field
   symbol is still misread now and then on the synthetic group (both before
   and after these changes).
+
+## TDMA header readout (2026-10-14)
+
+Rory, after the slow return's bursts would not decode ("not sure what
+network it is"): "yes add the header readout to the TDMA panel".
+
+What the bursts hold (analysed from the 150 s recording, every burst of
+the 16 carriers lined up on the preamble; scratch tools, not kept): 1008
+symbols = a 32-symbol BPSK sequence repeated 5½ times (0–175), a fixed QPSK
+word (176–215), a header sent straight onto the symbols (216–688: fields
+changing burst by burst — 216–219 like a terminal's count, one bit every
+burst, the next every two — and one 110-bit group different in 8 % of
+bursts, a second message type), a payload of 16 blocks of a BPSK pilot and
+15 data symbols (689–944), a fixed 64-symbol postamble. Channels 0–5 burst
+~100 ms before 6–15. The payload's I rail is random burst to burst; its Q
+rail partly repeats (between bursts at the same places, and in 7-symbol
+periods); short parity checks hold in 95–98 % of bursts, but no rate-½
+convolutional code (K ≤ 10, any rail or order, differential or not), no
+window-rank deficit up to 32 bits, no text or HDLC under any mapping — most
+likely enciphered or keyed per burst. Web searches matched nothing
+published (6.4 kBd, 7.7 kHz spacing, 2 s frame, Intelsat 19).
+
+- `Layout::header_runs`: the runs varying inside the preamble and the data
+  runs of ≤ 16 symbols after it, up to the payload — the first longer data
+  run, or after the last fixed run of ≥ 3 symbols ahead of the postamble,
+  whichever is first (pilots of a symbol or two do not end it). On the
+  slow return ~28 fields; on the 1.42 MS/s inroute the terminal's field.
+- `Fitted::labels`: every position's symbol as a point's number.
+- Channel `FieldTrack` per field → `ChannelView::header`
+  (`HeaderFieldView`: latest values, distinct values (≤ 512 counted), the
+  commonest's share, the share of bursts it changed in).
+- GUI: "Header fields (n)" under each TDMA carrier (symbols, latest — green
+  when it just changed — the three before, values, changes). The Layout row
+  shows a summary when the layout runs long (the slow return's, 18 fixed
+  fields on one line, pushed the panel off the side); the whole on hover.
+- CLI: `header fields` lines in the TDMA report. The burst `.csv` gains a
+  `header` column (each field's symbols, `.` between).
+- Tests: the live-layout test reads the terminal field as the only header
+  field and `labels` agrees with `field`; the group test's header field has
+  the three terminals' values, changing slot to slot. That test's terminal
+  fields are now values no turn or shift of another makes: it reads exactly
+  three values (with the old fields it read 11, the misreads noted above).
