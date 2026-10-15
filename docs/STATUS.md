@@ -4790,3 +4790,33 @@ mute in the output callback; `VideoPlayer::set_volume` keeps it in the
 player's shared state and hands it to each audio player it makes, so an
 ffmpeg restart keeps it; the window remembers it as `tv_volume` in the
 prefs (1.0 when never set) and sets it on each player it starts.
+
+## The top bar: menus, a HackRF Start button, the input level (2026-10-15)
+
+Rory: redo the frequency bar and toolbar, and put a HackRF play button
+on it. He picked layout D of five menu-bar mockups. New module
+`apps/decsat-gui/src/top_bar.rs` replaces `freq_bar`/`toolbar`:
+
+- **Menu bar:** File (Open IQ…, HackRF settings…, Output folder…, the raw
+  IQ rate/format/loop/real time), View (FFT size, Full span, DC removal,
+  auto levels and the manual levels), Satellite (Plan…, Put the plan away,
+  Align LO trim to the plan, keep it aligned, Reset labels), Tools
+  (Survey…, Beacons…, Transmit…), Audio (output device, one voice at a time
+  and its hold). Menus close on a click outside, so toggles and values can
+  be set without reopening them; the actions close their menu.
+- **Right of the menus:** the source (*● HackRF · 16.000 MS/s* green while
+  live, or the file's name, rate and format), itself a menu: HackRF, HackRF
+  settings…, Open IQ…. Beside it, only while true: *⟳ Apply* (a file's
+  settings changed), *📡 Transmitting* (red), *Surveying…* (green).
+- **The row under it:** a big play button (▶ Start / ⏹ Stop for the
+  HackRF, starting it with its saved settings without the HackRF window;
+  ▶ Play / ⏸ Pause for a file; green while running), the input level as a
+  bar from −60 to 0 dBFS with a tick at `STRONG_INPUT_DBFS` (orange above
+  it) and *input −31 dBFS · 0 drops* (USB buffers lost since Start), the
+  frequency readout with its tuning/LO line (the help text is now its
+  tooltip), and flush right the satellite, LO trim and the master volume.
+  The input level left the status bar.
+
+Checked with the release build on the synthetic scene and live on the
+HackRF (1929.125 MHz + LO 10.6 GHz, 16 MS/s, receive only): the three
+states (HackRF stopped, running, a file) look as mocked up.
