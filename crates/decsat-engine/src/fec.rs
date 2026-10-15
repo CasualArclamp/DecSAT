@@ -1315,6 +1315,9 @@ impl TerminalView {
 /// Where and whether a VFO's FEC writes its output.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FecOutput {
+    /// The engine's plan feed and this VFO's id: a hub's burst plan read in
+    /// the TS goes there for a return VFO to time its bursts by.
+    pub plan_link: Option<crate::plan_feed::PlanLink>,
     /// Write a modem's data to a `.bin` file (and the TS to a `.ts`).
     pub record: bool,
     /// Write IP packets to a PCAP file.
@@ -2142,6 +2145,8 @@ struct TsStage {
     /// DVB-RCS signalling, and its view as of the last report.
     rcs: decsat_ts::rcs::RcsRx,
     rcs_view: Option<decsat_ts::rcs::RcsView>,
+    /// Signal time since the burst plan's view was last posted, s.
+    since_plan: f64,
 }
 
 impl TsStage {
@@ -2176,6 +2181,7 @@ impl TsStage {
             tap: None,
             rcs: decsat_ts::rcs::RcsRx::new(),
             rcs_view: None,
+            since_plan: 0.0,
         }
     }
 
@@ -2239,6 +2245,18 @@ impl TsStage {
         self.rcs.at_source(t);
     }
 
+    /// A burst plan read here, to `link` for the other VFOs: its frames as
+    /// they come, its view every half second of signal.
+    fn post_plan(&mut self, link: &crate::plan_feed::PlanLink) {
+        link.feed.post_frames(link.id, self.rcs.take_plan_frames());
+        if self.since_plan >= 0.5
+            && let Some(v) = self.rcs.plan_view()
+        {
+            self.since_plan = 0.0;
+            link.feed.post_view(link.id, v);
+        }
+    }
+
     fn data_field(&mut self, field: &[u8], h: &BbHeader) {
         self.issy |= h.issyi;
         self.packets.clear();
@@ -2300,6 +2318,7 @@ impl TsStage {
     fn tick(&mut self, secs: f64) {
         self.analyser.tick(secs);
         self.rcs.tick(secs);
+        self.since_plan += secs;
         self.win.1 += secs;
         if self.win.1 >= 2.0 || (self.ts_bps == 0.0 && self.win.1 > 0.2) {
             self.ts_bps = self.win.0 * 8.0 / self.win.1;
@@ -3057,6 +3076,9 @@ fn run(
         for (&isi, t) in ts.iter_mut() {
             t.follow(&ts_output(&o, primary == Some(isi)));
             t.tick(secs);
+            if let Some(link) = &o.plan_link {
+                t.post_plan(link);
+            }
         }
         for st in streams.values_mut() {
             st.tick(secs);

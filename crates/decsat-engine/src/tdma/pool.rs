@@ -16,15 +16,18 @@
 //!   slot — and the multiple of it the envelope's fold explains best — the
 //!   frame.
 //!
-//! - **the slots**: once the grid is known, its phase (a guard time's
-//!   centre) on the receiver's source clock, and each slot's spectrum — the
-//!   FFTs inside it, its guard times left out — a row a slot for the last
-//!   half minute ([`SpectrumRows`]), with the latest FFTs themselves for a
-//!   waterfall fine enough to show the slots.
+//! - **the slots**: once the frame is known, the slots inside it
+//!   ([`SlotGrid`]: their pitch, which need not divide the frame, and the
+//!   frame's start on the receiver's source clock, from where the guard
+//!   times fold), and each slot's spectrum — the FFTs inside it, its guard
+//!   times left out — a row a slot for the last half minute
+//!   ([`SpectrumRows`]), with the latest FFTs themselves for a waterfall
+//!   fine enough to show the slots.
 //!
 //! Seen live (Eutelsat 172B, a Newtec outbound's return): a 770 kHz pool of
 //! roll-off-0.05 carriers resized every 1–3 s, the top of it bursting into
-//! 5.025 ms slots of a 40.20 ms frame — the period of the outbound's private
+//! 5 ms slots of a 40.20 ms frame (eight, 0.2 ms over) — the period of the
+//! outbound's private
 //! D1h table and NCR, which ties the pool to that outbound. That table is
 //! the hub's burst plan; [`match_plan`] finds where its frequencies sit in
 //! the VFO, [`align_plan`] when its frames land, and [`terminal_levels`]
@@ -181,6 +184,46 @@ impl SpectrumRows {
     }
 }
 
+/// A pool's slots on the receiver's source clock: frames `frame_s` long,
+/// each `slots` slots `pitch_s` apart from its start — the frame's leftover
+/// (`frame_s` − `slots` × `pitch_s`; 0.2 ms on 172B) after the last.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlotGrid {
+    pub frame_s: f64,
+    pub pitch_s: f64,
+    pub slots: usize,
+    /// A frame's start (its first slot's), s. With a pitch that divides
+    /// the frame, any slot's start: the pool alone cannot tell which is
+    /// first.
+    pub start_s: f64,
+}
+
+impl SlotGrid {
+    /// Slot `k` of frame `frame` (counted from `start_s`), its start, s.
+    pub fn slot_start(&self, frame: i64, k: usize) -> f64 {
+        self.start_s + frame as f64 * self.frame_s + k as f64 * self.pitch_s
+    }
+
+    /// The first slot starting no earlier than a quarter pitch before `t`:
+    /// (its frame, its slot).
+    pub fn slot_after(&self, t: f64) -> (i64, usize) {
+        let t = t - self.pitch_s / 4.0;
+        let f = ((t - self.start_s) / self.frame_s).floor() as i64;
+        let into = t - (self.start_s + f as f64 * self.frame_s);
+        let k = (into / self.pitch_s).ceil().max(0.0) as usize;
+        if k < self.slots { (f, k) } else { (f + 1, 0) }
+    }
+
+    /// The slot after `(frame, k)`.
+    pub fn next(&self, (f, k): (i64, usize)) -> (i64, usize) {
+        if k + 1 < self.slots {
+            (f, k + 1)
+        } else {
+            (f + 1, 0)
+        }
+    }
+}
+
 /// What the pool tracker sees, for display.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PoolView {
@@ -197,9 +240,10 @@ pub struct PoolView {
     /// a minute.
     pub changes: u32,
     pub changes_per_min: f64,
-    /// The grid: the shortest repeat (a slot), and the frame — the multiple
-    /// of it the envelope's fold explains best — with the strength of the
-    /// repeat (normalised autocorrelation).
+    /// The grid: the shortest repeat (about a slot), and the frame — the
+    /// multiple of it the envelope's fold explains best — with the strength
+    /// of the repeat (normalised autocorrelation). The slots themselves are
+    /// in `grid`.
     pub slot_s: Option<f64>,
     pub frame_s: Option<f64>,
     pub grid_strength: f64,
@@ -211,9 +255,9 @@ pub struct PoolView {
     pub spectrum: Vec<f32>,
     pub spectrum_start_hz: f64,
     pub spectrum_bin_hz: f64,
-    /// The grid's phase: a slot boundary (a guard time's centre) on the
-    /// receiver's source clock, s, once the grid is found.
-    pub boundary_s: Option<f64>,
+    /// The slots in the frame, on the receiver's source clock, once the
+    /// frame is found.
+    pub grid: Option<SlotGrid>,
     /// The source clock at the end of the signal looked at, s.
     pub now_s: f64,
     /// The pool slot by slot on that grid, the last half minute: each row
@@ -223,6 +267,9 @@ pub struct PoolView {
     /// The latest FFTs, about a millisecond each: the pool's own
     /// waterfall, fine enough to show the slots.
     pub fine: Arc<SpectrumRows>,
+    /// Its bursts demodulated by an outbound's plan (filled in by the VFO,
+    /// not the tracker).
+    pub bursts: Option<Arc<super::pool_bursts::BurstsView>>,
 }
 
 /// Follows a return pool's carriers and finds its frame grid.
@@ -280,10 +327,10 @@ pub struct PoolTracker {
     /// after row.
     slot_t: VecDeque<f64>,
     slot_levels: VecDeque<f32>,
-    /// The grid on the source clock (a slot, a boundary), and where the
-    /// next slot row starts.
-    grid: Option<(f64, f64)>,
-    next_slot: Option<f64>,
+    /// The slots on the source clock, and the next slot row's (frame,
+    /// slot).
+    grid: Option<SlotGrid>,
+    next_slot: Option<(i64, usize)>,
     /// When the view's fine and slot rows were last taken, source clock.
     fine_taken: f64,
     slots_taken: f64,
@@ -463,7 +510,7 @@ impl PoolTracker {
     /// Slot rows for every slot the FFTs now reach past: the mean of the
     /// FFTs wholly inside it (its ends left out), in dB over the floor.
     fn build_slots(&mut self) {
-        let (Some((slot, boundary)), true) = (self.grid, self.floor > 0.0) else {
+        let (Some(grid), true) = (self.grid, self.floor > 0.0) else {
             return;
         };
         let (Some(first), Some(last)) = (self.fine.front(), self.fine.back()) else {
@@ -471,12 +518,17 @@ impl PoolTracker {
         };
         let dur = self.step_s();
         let latest = last.0 + dur;
-        let mut next = self
+        let slot = grid.pitch_s;
+        let mut at = self
             .next_slot
-            .unwrap_or_else(|| boundary + ((first.0 - boundary) / slot).ceil() * slot);
+            .unwrap_or_else(|| grid.slot_after(first.0 + slot / 4.0));
         let margin = SLOT_MARGIN * slot;
         let mut sum = vec![0f32; self.row_bins];
-        while next + slot - margin <= latest {
+        loop {
+            let next = grid.slot_start(at.0, at.1);
+            if next + slot - margin > latest {
+                break;
+            }
             let (a, b) = (next + margin, next + slot - margin);
             sum.fill(0.0);
             let mut k = 0;
@@ -502,13 +554,14 @@ impl PoolTracker {
                 self.slot_levels
                     .extend(sum.iter().map(|p| 10.0 * (p * scale).max(1e-3).log10()));
             }
-            next += slot;
+            at = grid.next(at);
         }
-        self.next_slot = Some(next);
+        self.next_slot = Some(at);
+        let newest = grid.slot_start(at.0, at.1);
         while self
             .slot_t
             .front()
-            .is_some_and(|&t| t < next - SLOTS_KEEP_S)
+            .is_some_and(|&t| t < newest - SLOTS_KEEP_S)
         {
             self.slot_t.pop_front();
             self.slot_levels.drain(..self.row_bins);
@@ -543,12 +596,12 @@ impl PoolTracker {
             });
         }
         if now - self.slots_taken >= SLOTS_EVERY_S
-            && let Some((slot, _)) = self.grid
+            && let Some(grid) = self.grid
         {
             self.slots_taken = now;
             self.view.slot_rows = Arc::new(SpectrumRows {
                 t_s: self.slot_t.iter().copied().collect(),
-                dur_s: slot,
+                dur_s: grid.pitch_s,
                 bins: self.row_bins,
                 start_hz,
                 bin_hz,
@@ -711,57 +764,118 @@ impl PoolTracker {
         // slot's width of error), within a sample step of k slots.
         self.view.frame_s = frame.map(|f| refine(&dips, dt, f));
         self.view.grid_strength = top;
-        // The slots' phase, on the frame's slot when there is one (k times
-        // as precise): where the dips fold to their deepest.
-        let slot = match self.view.frame_s {
-            Some(f) => f / (f / slot).round(),
-            None => slot,
+        // The slots inside the frame: their pitch and the frame's start,
+        // from the dips folded over the frame.
+        let Some(frame) = self.view.frame_s else {
+            return;
         };
-        let boundary = dip_phase(&dips, dt, self.env_t0, slot) + self.src_offset;
-        self.view.boundary_s = Some(boundary);
-        self.grid = Some((slot, boundary));
-        // The next slot row onto the new grid: its nearest boundary, never
-        // far back over a row already made.
-        if let Some(t) = self.next_slot {
-            let mut at = boundary + ((t - boundary) / slot).round() * slot;
-            if at < t - slot / 4.0 {
-                at += slot;
-            }
-            self.next_slot = Some(at);
+        let n = ((frame / slot).round() as usize).max(1);
+        let (pitch, start) = frame_grid(&e, dt, self.env_t0, frame, n);
+        let grid = SlotGrid {
+            frame_s: frame,
+            pitch_s: pitch,
+            slots: n,
+            start_s: start + self.src_offset,
+        };
+        // The next slot row onto the new grid: the first slot starting at
+        // or after the old one (less a quarter slot).
+        if let (Some(old), Some(at)) = (self.grid, self.next_slot) {
+            self.next_slot = Some(grid.slot_after(old.slot_start(at.0, at.1)));
+        }
+        self.grid = Some(grid);
+        self.view.grid = Some(grid);
+    }
+}
+
+/// The slots in a frame, from the envelope `e` (sampled every `dt`, the
+/// first at `t0` on the tracker's clock) folded over the `frame`: `n` slots
+/// a pitch apart from the frame's start, the leftover after the last.
+///
+/// Bursts start at the same point in every slot, every terminal to a few
+/// µs (172B), so the envelope's rises — its climb over two samples, as a
+/// share of its level — fold into `n` sharp peaks, where the guard times'
+/// dips fold into flat-bottomed ones a few tenths of a millisecond wide
+/// that a busy pool's traffic shoves about. The peaks are found (each at
+/// least 60 % of a slot from the others, refined by a parabola); the one
+/// after the longest gap (the leftover's) is slot 0; then a line through
+/// them gives the pitch and the frame's start — where its first bursts
+/// start, a guard after the slot's own edge. (Pitch, start within
+/// `0..frame` on the tracker's clock.) A pitch that divides the frame
+/// leaves the start known only to a slot: the plan settles which is first.
+fn frame_grid(e: &[f64], dt: f64, t0: f64, frame: f64, n: usize) -> (f64, f64) {
+    let bins = ((frame / dt).round() as usize).max(8);
+    let bin = frame / bins as f64;
+    let even = frame / n as f64;
+    if e.len() < 3 || n < 2 {
+        return (even, 0.0);
+    }
+    // Rises: the climb from the sample before to the one after, over their
+    // mean; a sample's rise is timed at its own centre.
+    let mut fold = vec![0f64; bins];
+    for i in 1..e.len() - 1 {
+        let m = (e[i - 1] + e[i + 1]) / 2.0;
+        if m <= 0.0 {
+            continue;
+        }
+        let r = ((e[i + 1] - e[i - 1]) / m).max(0.0);
+        let t = t0 + (i as f64 + 0.5) * dt;
+        fold[((t / frame).rem_euclid(1.0) * bins as f64) as usize % bins] += r;
+    }
+    let wrap = |k: i64| k.rem_euclid(bins as i64) as usize;
+    let apart = ((0.6 * even / bin) as i64).max(1);
+    let mut taken = vec![false; bins];
+    let mut peaks = Vec::with_capacity(n);
+    for _ in 0..n {
+        let Some(m) = (0..bins)
+            .filter(|&k| !taken[k])
+            .max_by(|&a, &b| fold[a].total_cmp(&fold[b]))
+        else {
+            break;
+        };
+        let (l, c, r) = (fold[wrap(m as i64 - 1)], fold[m], fold[wrap(m as i64 + 1)]);
+        let den = l - 2.0 * c + r;
+        let d = if den < 0.0 { 0.5 * (l - r) / den } else { 0.0 };
+        peaks.push(((m as f64 + 0.5 + d) * bin).rem_euclid(frame));
+        for o in -apart..=apart {
+            taken[wrap(m as i64 + o)] = true;
         }
     }
-}
-
-/// Where in a slot the dips `d` (sampled every `dt`, the first at `t0` on
-/// the tracker's clock) fold to their deepest — a guard time's centre — as
-/// a time on that clock within `0..slot`: the fold smoothed over three
-/// bins, its peak refined by a parabola.
-fn dip_phase(d: &[f64], dt: f64, t0: f64, slot: f64) -> f64 {
-    let bins = ((slot / dt).round() as usize).max(4);
-    let mut fold = vec![0f64; bins];
-    for (i, &v) in d.iter().enumerate() {
-        let t = t0 + (i as f64 + 0.5) * dt;
-        let ph = (t / slot).rem_euclid(1.0);
-        fold[(ph * bins as f64) as usize % bins] += v;
+    if peaks.len() < n {
+        return (even, peaks.first().copied().unwrap_or(0.0));
     }
-    let at = |k: usize| fold[k % bins];
-    let smooth: Vec<f64> = (0..bins)
-        .map(|k| at(k + bins - 1) + at(k) + at(k + 1))
-        .collect();
-    let m = (0..bins)
-        .max_by(|&a, &b| smooth[a].total_cmp(&smooth[b]))
+    peaks.sort_by(f64::total_cmp);
+    // The gap after each peak, round the frame; slot 0's peak follows the
+    // longest.
+    let gap = |i: usize| {
+        let next = peaks[(i + 1) % n] + if i + 1 == n { frame } else { 0.0 };
+        next - peaks[i]
+    };
+    let first = (0..n)
+        .max_by(|&a, &b| gap((a + n - 1) % n).total_cmp(&gap((b + n - 1) % n)))
         .unwrap_or(0);
-    let (l, c, r) = (
-        smooth[(m + bins - 1) % bins],
-        smooth[m],
-        smooth[(m + 1) % bins],
-    );
-    let den = l - 2.0 * c + r;
-    let d = if den < 0.0 { 0.5 * (l - r) / den } else { 0.0 };
-    ((m as f64 + 0.5 + d) / bins as f64 * slot).rem_euclid(slot)
+    // The line through them, from that one: slot k's rise at start + k ×
+    // pitch.
+    let g0 = peaks[first];
+    let pts: Vec<(f64, f64)> = (0..n)
+        .map(|k| {
+            let mut c = peaks[(first + k) % n];
+            if c < g0 {
+                c += frame;
+            }
+            (k as f64, c)
+        })
+        .collect();
+    let m = n as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / m;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / m;
+    let sxx: f64 = pts.iter().map(|p| (p.0 - mx).powi(2)).sum();
+    let sxy: f64 = pts.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+    let pitch = (sxy / sxx).clamp(0.97 * even, even);
+    let start = my - pitch * mx;
+    (pitch, start.rem_euclid(frame))
 }
 
-/// The shortfall of `e` from its mean over `half` samples either side, as
+/// The shortfall of `e` from its mean over `half` samples either side, as/// The shortfall of `e` from its mean over `half` samples either side, as
 /// a share of that mean: the short dips, nothing else.
 fn short_dips(e: &[f64], half: usize) -> Vec<f64> {
     let mut prefix = Vec::with_capacity(e.len() + 1);
@@ -1134,7 +1248,140 @@ pub struct LeadScores {
     pub tried: Vec<(f64, f64, usize)>,
 }
 
-/// The correlation at every lead [`align_plan`] looks at.
+/// The pool's slot rows ready to score a plan against: running sums along
+/// each row of its levels (clamped to 0–30 dB: a peak or a deep null weighs
+/// no more than on or off) and of their squares, so any band's sums are two
+/// lookups.
+struct RowSums<'a> {
+    rows: &'a SpectrumRows,
+    sum: Vec<f32>,
+    sq: Vec<f32>,
+}
+
+impl<'a> RowSums<'a> {
+    fn new(rows: &'a SpectrumRows) -> Self {
+        let w = rows.bins + 1;
+        let (mut sum, mut sq) = (vec![0f32; rows.len() * w], vec![0f32; rows.len() * w]);
+        for j in 0..rows.len() {
+            for (k, &v) in rows.row(j).iter().enumerate() {
+                let y = v.clamp(0.0, 30.0);
+                sum[j * w + k + 1] = sum[j * w + k] + y;
+                sq[j * w + k + 1] = sq[j * w + k] + y * y;
+            }
+        }
+        RowSums { rows, sum, sq }
+    }
+
+    /// Row `j`'s sum and sum of squares over the bins `r`.
+    fn band(&self, j: usize, r: &std::ops::Range<usize>) -> (f64, f64) {
+        let w = self.rows.bins + 1;
+        (
+            f64::from(self.sum[j * w + r.end] - self.sum[j * w + r.start]),
+            f64::from(self.sq[j * w + r.end] - self.sq[j * w + r.start]),
+        )
+    }
+}
+
+/// A plan frame to score: its arrival on the line, and its bursts as (first
+/// slot, slots, their bins in the rows).
+type PlanCells = (f64, Vec<(usize, usize, std::ops::Range<usize>)>);
+
+/// The plan's frames as cells of `rows`, each burst's edges by `edges`
+/// moved `offset_hz`, clipped to `span`; frames `frame_s` apart on the
+/// arrival line.
+fn plan_cells(
+    plan: &decsat_ts::newtec::PlanView,
+    clock: &decsat_ts::newtec::PlanClock,
+    frame_s: f64,
+    rows: &SpectrumRows,
+    offset_hz: f64,
+    span: &std::ops::Range<usize>,
+    edges: &dyn Fn(&decsat_ts::newtec::PlanBurst) -> Option<(f64, f64)>,
+) -> Vec<PlanCells> {
+    plan.recent
+        .iter()
+        .map(|f| {
+            let bursts = f
+                .bursts
+                .iter()
+                .filter_map(|b| {
+                    let (a, c) = edges(b)?;
+                    let r = rows.bins_in(a + offset_hz, c + offset_hz);
+                    let r = r.start.max(span.start)..r.end.min(span.end);
+                    (!r.is_empty()).then(|| (usize::from(b.slot), usize::from(b.slots()), r))
+                })
+                .collect();
+            (arrival(clock, f.counter, frame_s), bursts)
+        })
+        .collect()
+}
+
+/// How well the pool follows the plan with each frame's first slot `lead`
+/// after its arrival and its slots `pitch` apart: the correlation, over
+/// every slot and bin of `span`, of where the plan puts a burst (1, else
+/// 0) with the pool's level; and the plan slots found in the pool.
+fn correlate(
+    sums: &RowSums,
+    frames: &[PlanCells],
+    span: &std::ops::Range<usize>,
+    slots: usize,
+    pitch: f64,
+    lead: f64,
+) -> (f64, usize) {
+    let w = span.len() as f64;
+    let (mut n, mut sx, mut sy, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut matched = 0;
+    let mut row_of = vec![None; slots];
+    for (at, bursts) in frames {
+        for (k, r) in row_of.iter_mut().enumerate() {
+            *r = sums.rows.row_at(at + lead + k as f64 * pitch);
+            if let Some(j) = *r {
+                let (s, q) = sums.band(j, span);
+                matched += 1;
+                n += w;
+                sy += s;
+                syy += q;
+            }
+        }
+        for (k0, len, r) in bursts {
+            for &j in row_of[*k0..(k0 + len).min(slots)].iter().flatten() {
+                sx += r.len() as f64;
+                sxy += sums.band(j, r).0;
+            }
+        }
+    }
+    let cov = sxy - sx * sy / n.max(1.0);
+    let var = (sx - sx * sx / n.max(1.0)) * (syy - sy * sy / n.max(1.0));
+    (if var > 0.0 { cov / var.sqrt() } else { 0.0 }, matched)
+}
+
+/// The pool's grid, if it is the plan's (the same frame within 0.3 %): it
+/// is then the better measure of the frame (on the receiver's clock). The
+/// slot pitch is the hub's, though, where its slots fit the frame
+/// ([`decsat_ts::newtec::SLOT_S`], measured on the bursts themselves to a
+/// µs): the pool's own, from the rises of a busy envelope, wanders by
+/// 5–10 µs. The start moves with it about the middle of the frame's slots,
+/// where the pool's line through them is surest.
+fn shared_grid(pool: &PoolView, clock: &decsat_ts::newtec::PlanClock) -> Option<SlotGrid> {
+    let g = pool
+        .grid
+        .filter(|g| (g.frame_s / clock.period_s - 1.0).abs() <= 0.003)?;
+    let hub = decsat_ts::newtec::SLOT_S * g.frame_s / clock.period_s;
+    let fits = g.slots as f64 * hub <= g.frame_s && (g.pitch_s / hub - 1.0).abs() < 0.01;
+    Some(if fits {
+        SlotGrid {
+            pitch_s: hub,
+            start_s: g.start_s + (g.slots - 1) as f64 / 2.0 * (g.pitch_s - hub),
+            ..g
+        }
+    } else {
+        g
+    })
+}
+
+/// The correlation at every lead [`align_plan`] looks at: each that puts
+/// the plan's frames on the pool's (the pool's frame start known only to a
+/// slot, every slot of it tried as the first).
 pub fn lead_scores(
     pool: &PoolView,
     plan: &decsat_ts::newtec::PlanView,
@@ -1146,103 +1393,83 @@ pub fn lead_scores(
     if rows.len() < 4 * slots || plan.recent.len() < 25 {
         return None;
     }
-    // The pool's grid must be the plan's; it is then the better measure.
-    if (rows.dur_s * slots as f64 / clock.period_s - 1.0).abs() > 0.003 {
-        return None;
-    }
-    let slot = rows.dur_s;
-    let frame = slot * slots as f64;
+    let grid = shared_grid(pool, clock)?;
+    let (frame, pitch) = (grid.frame_s, grid.pitch_s);
     let (lo, hi) = plan.span?;
     let span = rows.bins_in(lo + offset_hz, hi + offset_hz);
-    let w = span.len();
-    if w < 4 {
+    if span.len() < 4 {
         return None;
     }
-    // Each row over the span: levels clamped (a peak or a deep null weighs
-    // no more than on or off), their running sums (`prefix`, so a burst's
-    // sum is two lookups), sum and sum of squares.
-    let mut prefix = vec![0f32; rows.len() * (w + 1)];
-    let mut sums = vec![(0f64, 0f64); rows.len()];
-    for (j, s) in sums.iter_mut().enumerate() {
-        let p = &mut prefix[j * (w + 1)..(j + 1) * (w + 1)];
-        for (k, &v) in rows.row(j)[span.clone()].iter().enumerate() {
-            let y = v.clamp(0.0, 30.0);
-            p[k + 1] = p[k] + y;
-            s.0 += f64::from(y);
-            s.1 += f64::from(y * y);
+    let sums = RowSums::new(rows);
+    let frames = plan_cells(plan, clock, frame, rows, offset_hz, &span, &|b| {
+        plan.edges(b)
+    });
+    // Leads that put a plan frame's start on one of the pool's slot starts.
+    let d0 = (grid.start_s - frames.last()?.0).rem_euclid(frame);
+    let m_lo = (LEAD_MIN_FRAMES - 1.0).floor() as i64;
+    let m_hi = LEAD_MAX_FRAMES.ceil() as i64;
+    let mut tried = Vec::new();
+    for m in m_lo..=m_hi {
+        for j in 0..grid.slots {
+            let lead = d0 + m as f64 * frame + j as f64 * pitch;
+            if lead < LEAD_MIN_FRAMES * frame || lead > LEAD_MAX_FRAMES * frame {
+                continue;
+            }
+            let (r, matched) = correlate(&sums, &frames, &span, slots, pitch, lead);
+            tried.push((lead, r, matched));
         }
     }
-    // Each plan frame: its arrival on the line, and its bursts as (first
-    // slot, slots, first bin in the span, bin past the last).
-    type Burst = (usize, usize, usize, usize);
-    let frames: Vec<(f64, Vec<Burst>)> = plan
-        .recent
-        .iter()
-        .map(|f| {
-            let bursts = f
-                .bursts
-                .iter()
-                .filter_map(|b| {
-                    let (a, c) = plan.edges(b)?;
-                    let r = rows.bins_in(a + offset_hz, c + offset_hz);
-                    let (b0, b1) = (r.start.max(span.start), r.end.min(span.end));
-                    (b1 > b0).then(|| {
-                        (
-                            usize::from(b.slot),
-                            usize::from(b.slots()),
-                            b0 - span.start,
-                            b1 - span.start,
-                        )
-                    })
-                })
-                .collect();
-            (arrival(clock, f.counter, frame), bursts)
-        })
-        .collect();
-    let score = |lead: f64| -> (f64, usize) {
-        let (mut n, mut sx, mut sy, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        let mut matched = 0;
-        let mut row_of = vec![None; slots];
-        for (at, bursts) in &frames {
-            for (k, r) in row_of.iter_mut().enumerate() {
-                *r = rows.row_at(at + lead + k as f64 * slot);
-                if let Some(j) = *r {
-                    matched += 1;
-                    n += w as f64;
-                    sy += sums[j].0;
-                    syy += sums[j].1;
-                }
-            }
-            for &(k0, len, b0, b1) in bursts {
-                for j in row_of[k0..(k0 + len).min(slots)].iter().flatten() {
-                    let p = &prefix[j * (w + 1)..];
-                    sx += (b1 - b0) as f64;
-                    sxy += f64::from(p[b1] - p[b0]);
-                }
-            }
-        }
-        let cov = sxy - sx * sy / n.max(1.0);
-        let var = (sx - sx * sx / n.max(1.0)) * (syy - sy * sy / n.max(1.0));
-        (if var > 0.0 { cov / var.sqrt() } else { 0.0 }, matched)
-    };
-    // Leads whose slots start on the pool's: the newest frame's arrival
-    // against the latest row, a slot at a time.
-    let d0 = (rows.t_s[rows.len() - 1] - frames.last()?.0).rem_euclid(slot);
-    let m_lo = ((LEAD_MIN_FRAMES * frame - d0) / slot).ceil() as i64;
-    let m_hi = ((LEAD_MAX_FRAMES * frame - d0) / slot).floor() as i64;
-    let tried = (m_lo..=m_hi)
-        .map(|m| {
-            let lead = d0 + m as f64 * slot;
-            let (r, matched) = score(lead);
-            (lead, r, matched)
-        })
-        .collect();
     Some(LeadScores {
         frame_s: frame,
-        slot_s: slot,
+        slot_s: pitch,
         slots,
         tried,
     })
+}
+
+/// A burst's band from its code's symbol rate (roll-off 0.05), centred on
+/// its plan frequency — not the learned extents, which lean wherever an
+/// off-tune terminal that uses a code puts it.
+fn rate_edges(b: &decsat_ts::newtec::PlanBurst) -> Option<(f64, f64)> {
+    let half = decsat_ts::newtec::code_rate(b.code)?.symbol_rate_hz * 1.05 / 2.0;
+    Some((b.freq_hz() - half, b.freq_hz() + half))
+}
+
+/// The plan's zero more exactly than [`match_plan`] finds it (whose mean
+/// spectrum smears where off-tune terminals land), once the plan is timed:
+/// each burst's band from its code's symbol rate on its plan frequency,
+/// moved within ±40 kHz of `offset_hz` (1 kHz steps, then 100 Hz) and
+/// scored slot by slot against the pool at `timing`'s lead. (Offset, its
+/// correlation.)
+pub fn refine_offset(
+    pool: &PoolView,
+    plan: &decsat_ts::newtec::PlanView,
+    timing: &PlanTiming,
+    offset_hz: f64,
+) -> Option<(f64, f64)> {
+    let rows = &*pool.slot_rows;
+    let clock = plan.clock.as_ref()?;
+    let slots = usize::from(plan.slots.max(1));
+    let (lo, hi) = plan.span?;
+    let span = rows.bins_in(lo + offset_hz - 50e3, hi + offset_hz + 50e3);
+    if rows.len() < 4 * slots || span.len() < 4 {
+        return None;
+    }
+    let sums = RowSums::new(rows);
+    let score = |off: f64| {
+        let frames = plan_cells(plan, clock, timing.frame_s, rows, off, &span, &rate_edges);
+        correlate(&sums, &frames, &span, slots, timing.slot_s, timing.lead_s).0
+    };
+    let best = |from: f64, step: f64, n: i32| {
+        (-n..=n)
+            .map(|k| {
+                let off = from + f64::from(k) * step;
+                (off, score(off))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    };
+    let (coarse, _) = best(offset_hz, 1e3, 40)?;
+    best(coarse, 100.0, 10)
 }
 
 /// A burst's C/N as the pool received it, dB: the mean power over its
@@ -1393,7 +1620,8 @@ mod tests {
     }
 
     /// A hub's plan for 30 s of 40.2 ms frames: four 130.6 kHz one-slot
-    /// bursts (code 0104h) packed upwards from 250 kHz in each of 8 slots,
+    /// bursts (code 0104h) packed upwards from 250 kHz in each of 8 slots
+    /// (5 ms apart, 0.2 ms over),
     /// each place filled three times in four, by one of 12 terminals; each
     /// frame's section arriving `lead` before the frame starts in the pool
     /// (at `t0` and a frame after frame), give or take 20 ms. With the
@@ -1402,7 +1630,7 @@ mod tests {
     /// terminal's C/N for its slot, noise elsewhere.
     fn planned_pool(t0: f64, lead: f64) -> (decsat_ts::newtec::PlanView, PoolView) {
         use decsat_ts::newtec::{PlanBurst, PlanFrame, PlanRx};
-        let (slot, frames, width) = (0.040_2 / 8.0, 750u32, 2612u32);
+        let (slot, frames, width) = (0.005, 750u32, 2612u32);
         let mut seed = 5u32;
         let mut rnd = move |n: u32| {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -1440,7 +1668,7 @@ mod tests {
                     let hz = rows.start_hz + j as f64 * rows.bin_hz + 600e3;
                     if let Some(b) = bursts
                         .iter()
-                        .find(|b| b.slot == k && (hz - b.freq_hz()).abs() < f64::from(width) * 25.0)
+                        .find(|b| b.slot == k && (hz - b.freq_hz()).abs() < 122.6e3 / 2.0)
                     {
                         *v = 10.0 * (1.0 + 10f32.powf(cn_of(b.terminal) / 10.0)).log10();
                     }
@@ -1460,6 +1688,12 @@ mod tests {
         }
         let pool = PoolView {
             slot_rows: Arc::new(rows),
+            grid: Some(SlotGrid {
+                frame_s: 0.0402,
+                pitch_s: slot,
+                slots: 8,
+                start_s: t0 + 0.0402 * 3.0,
+            }),
             ..Default::default()
         };
         (rx.view(), pool)
@@ -1475,8 +1709,13 @@ mod tests {
         assert!((t.lead_s - lead).abs() < 1.5e-3, "{t:?}");
         assert!((t.lead_frames() - 7.33).abs() < 0.05, "{t:?}");
         // Other leads (a slot or a frame off) score well below.
-        assert!(t.corr > 0.8 && t.corr > t.next_corr + 0.5, "{t:?}");
+        assert!(t.corr > 0.7 && t.corr > t.next_corr + 0.5, "{t:?}");
         assert!(t.frames > 700, "{t:?}");
+        assert!((t.slot_s - 0.005).abs() < 1e-12, "{t:?}");
+        // The zero, from the codes' rates on their plan frequencies: the
+        // bands come out 600 kHz down to a bin.
+        let (off, corr) = refine_offset(&pool, &plan, &t, -590e3).expect("an offset");
+        assert!((off + 600e3).abs() < 2.1e3, "{off} ({corr})");
         // A prior a frame off is not kept against a far better lead...
         let wrong = PlanTiming {
             lead_s: t.lead_s + t.frame_s,
@@ -1499,13 +1738,14 @@ mod tests {
 
     #[test]
     fn slot_rows_follow_the_pool_on_the_source_clock() {
-        // 500 kS/s: a 125 kS/s carrier bursting in 5.025 ms slots, a
-        // 0.4 ms guard about each boundary, the frame's last slot empty;
+        // 500 kS/s: a 125 kS/s carrier bursting as on 172B — 40.2 ms
+        // frames of eight 5.000 ms slots, 0.2 ms over after the last — a
+        // 0.2 ms guard at each end of a slot, the last slot 10 dB weaker;
         // the signal's first sample at 7.5 s on the receiver's clock, its
-        // slot boundaries at 3.1 ms past each multiple of the slot there.
+        // frames starting 3.1 ms past each multiple of the frame there.
         let rate = 500e3;
         let n = 3_500_000;
-        let (slot, phase, t0) = (0.005_025, 0.003_1, 7.5);
+        let (frame, pitch, phase, t0) = (0.0402, 0.005, 0.003_1, 7.5);
         let c = carrier(n, 4, 0.1, 9);
         let mut s = 7u64;
         let mut noise = move || {
@@ -1514,16 +1754,19 @@ mod tests {
             s ^= s << 17;
             ((s >> 11) as f32 / (1u64 << 53) as f32 - 0.5) * 0.05
         };
-        // Slot index and place in the slot of a time on the source clock.
+        // Slot (8: the leftover) and place in it of a time on the source
+        // clock.
         let at = |t: f64| {
-            let u = (t - phase) / slot;
-            (u.floor() as i64, (u - u.floor()) * slot)
+            let into = (t - phase).rem_euclid(frame);
+            let k = ((into / pitch).floor() as usize).min(8);
+            (k, into - k as f64 * pitch)
         };
         let x: Vec<Iq> = (0..n)
             .map(|k| {
-                let (i, r) = at(t0 + k as f64 / rate);
-                let on = r > 0.0002 && r < slot - 0.0002 && i.rem_euclid(8) != 7;
-                (if on { c[k] } else { Iq::new(0.0, 0.0) }) + Iq::new(noise(), noise())
+                let (slot, r) = at(t0 + k as f64 / rate);
+                let on = slot < 8 && r > 0.0002 && r < pitch - 0.0002;
+                let a = if slot == 7 { 0.316 } else { 1.0 };
+                (if on { c[k] * a } else { Iq::new(0.0, 0.0) }) + Iq::new(noise(), noise())
             })
             .collect();
         let mut p = PoolTracker::new(rate, 400e3);
@@ -1531,30 +1774,37 @@ mod tests {
             p.push_at(chunk, t0 + (j * 20_000) as f64 / rate);
         }
         let v = p.view();
-        let b = v.boundary_s.expect("the grid's phase");
-        let off = (b - phase) / slot;
-        assert!(
-            (off - off.round()).abs() * slot < 1e-4,
-            "boundary {b} against {phase}"
-        );
+        let g = v.grid.expect("the slot grid");
+        assert_eq!(g.slots, 8, "{g:?}");
+        assert!((g.frame_s - frame).abs() < 1e-6, "{g:?}");
+        assert!((g.pitch_s - pitch).abs() < 5e-6, "{g:?}");
+        // The start: where the frame's first bursts start, 0.2 ms in.
+        let (k, r) = at(g.start_s);
+        assert!(k == 0 && (r - 0.0002).abs() < 5e-5, "{g:?} against {phase}");
         assert!((v.now_s - (t0 + n as f64 / rate)).abs() < 1e-6);
         let rows = &v.slot_rows;
         assert!(rows.len() > 100, "{} rows", rows.len());
-        assert!((rows.dur_s - slot).abs() < 2e-6, "{}", rows.dur_s);
-        // Rows on the boundaries; the empty slot quiet, the others not,
-        // across the carrier (25 kHz either side of +50 kHz).
+        assert!((rows.dur_s - pitch).abs() < 5e-6, "{}", rows.dur_s);
+        // Rows from the bursts' starts; the weak slot 10 dB down, across
+        // the carrier (25 kHz either side of +50 kHz).
         let band = rows.bins_in(25e3, 75e3);
+        let (mut weak, mut strong) = (Vec::new(), Vec::new());
         for i in 0..rows.len() {
-            let (k, r) = at(rows.t_s[i] + slot / 2.0);
-            assert!((r - slot / 2.0).abs() < 1e-4, "row {i} at {}", rows.t_s[i]);
+            let (k, r) = at(rows.t_s[i] + pitch / 2.0);
+            assert!(k < 8, "row {i} in the leftover");
+            assert!(
+                (r - pitch / 2.0 - 0.0002).abs() < 5e-5,
+                "row {i} at {}",
+                rows.t_s[i]
+            );
             let level = rows.row(i)[band.clone()].iter().sum::<f32>() / band.len() as f32;
-            if k.rem_euclid(8) == 7 {
-                assert!(level < 1.5, "empty slot {k}: {level} dB");
-            } else {
-                assert!(level > 10.0, "slot {k}: {level} dB");
-                assert!(rows.occupied_hz(i) > 100e3, "slot {k}");
-            }
+            assert!(level > 12.0, "slot {k}: {level} dB");
+            assert!(rows.occupied_hz(i) > 100e3, "slot {k}");
+            if k == 7 { &mut weak } else { &mut strong }.push(level);
         }
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let (w, s) = (mean(&weak), mean(&strong));
+        assert!((s - w - 10.0).abs() < 1.0, "weak {w} dB, the rest {s} dB");
         // The fine rows: the latest quarter second (as of the last tenth),
         // a millisecond an FFT.
         let fine = &v.fine;

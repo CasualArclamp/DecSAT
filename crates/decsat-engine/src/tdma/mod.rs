@@ -49,6 +49,7 @@ pub mod burst_demod;
 pub mod demod;
 pub mod layout;
 pub mod pool;
+pub mod pool_bursts;
 pub mod slots;
 
 use std::collections::VecDeque;

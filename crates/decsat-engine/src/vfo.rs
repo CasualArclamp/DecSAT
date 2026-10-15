@@ -796,8 +796,14 @@ fn out_of_span(s: &VfoSettings, in_rate: f64) -> bool {
 }
 
 /// `lossless`: wait for the worker rather than dropping blocks (a file
-/// played as fast as possible).
-pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoHandle {
+/// played as fast as possible). `plans`: the engine's plan feed and this
+/// VFO's id on it.
+pub(crate) fn spawn(
+    in_rate: f64,
+    settings: VfoSettings,
+    lossless: bool,
+    plans: Option<crate::plan_feed::PlanLink>,
+) -> VfoHandle {
     let (tx, rx) = mpsc::sync_channel(QUEUE_DEPTH);
     let status = Arc::new(Mutex::new(VfoStatus::default()));
     let dropped = Arc::new(AtomicU64::new(0));
@@ -820,6 +826,7 @@ pub(crate) fn spawn(in_rate: f64, settings: VfoSettings, lossless: bool) -> VfoH
             .spawn(move || {
                 let mut w = Worker::new(in_rate, settings, status, dropped);
                 w.lossless = lossless;
+                w.plans = plans;
                 w.lost = lost;
                 w.pending = pending;
                 // `run` takes the worker by value: it is dropped when the
@@ -906,8 +913,12 @@ enum Decoder {
     },
     /// TDMA: the analyser runs on the VFO's baseband from the start.
     Tdma(Box<crate::tdma::TdmaAnalyser>),
-    /// A return pool: the tracker on the VFO's baseband from the start.
-    Pool(Box<crate::tdma::pool::PoolTracker>),
+    /// A return pool: the tracker on the VFO's baseband from the start, and
+    /// its bursts demodulated by an outbound's plan once one is followed.
+    Pool(
+        Box<crate::tdma::pool::PoolTracker>,
+        Box<crate::tdma::pool_bursts::PoolBursts>,
+    ),
     /// The Intelsat 19 DAMA outbound: Identify's first look centres the
     /// carrier, then QPSK at the measured rate into the framer.
     Is19 {
@@ -1104,6 +1115,9 @@ struct Worker {
     /// The block being worked on: its first sample and its end on the
     /// source clock, s.
     block_s: (f64, f64),
+    /// The engine's plan feed and this VFO's id on it: a TS VFO posts a
+    /// hub's burst plan there, a return pool reads it.
+    plans: Option<crate::plan_feed::PlanLink>,
 }
 
 /// How much signal (s) each check of a blind symbol rate looks at.
@@ -1167,6 +1181,7 @@ impl Worker {
             rate_watch: Vec::new(),
             rate_moves: 0,
             block_s: (0.0, 0.0),
+            plans: None,
         }
     }
 
@@ -1243,12 +1258,16 @@ impl Worker {
                 ddc.out_rate(),
                 s.bandwidth_hz.min(ddc.out_rate()),
             ))),
-            DecoderKind::ReturnPool => {
-                Decoder::Pool(Box::new(crate::tdma::pool::PoolTracker::new(
+            DecoderKind::ReturnPool => Decoder::Pool(
+                Box::new(crate::tdma::pool::PoolTracker::new(
                     ddc.out_rate(),
                     s.bandwidth_hz.min(ddc.out_rate()),
-                )))
-            }
+                )),
+                Box::new(crate::tdma::pool_bursts::PoolBursts::new(
+                    ddc.out_rate(),
+                    crate::tdma::pool_bursts::PoolBursts::default_workers(),
+                )),
+            ),
             DecoderKind::PskSymbols => Decoder::Psk {
                 buf: Vec::new(),
                 demod: None,
@@ -1326,7 +1345,7 @@ impl Worker {
         | Decoder::Modem { fec: Some(w), .. }
         | Decoder::Psk { fec: Some(w), .. } = &self.decoder
         {
-            w.set_output(fec_output(&self.settings, &self.ddc));
+            w.set_output(fec_output(&self.settings, &self.ddc, &self.plans));
         }
         // A recorder keeps its file across a retune (a new file per drag frame
         // would be worse); everything that analyses the signal starts afresh.
@@ -1665,7 +1684,7 @@ impl Worker {
                             d.process(&shifted, &mut self.frames);
                             let w = FecWorker::spawn(
                                 rs,
-                                fec_output(&self.settings, &self.ddc),
+                                fec_output(&self.settings, &self.ddc, &self.plans),
                                 self.pending.clone(),
                             )
                             .lossless(self.lossless);
@@ -1776,7 +1795,7 @@ impl Worker {
                                 .set_offset(self.settings.offset_hz + id.center_offset_hz);
                             let w = FecWorker::spawn(
                                 rs,
-                                fec_output(&self.settings, &self.ddc),
+                                fec_output(&self.settings, &self.ddc, &self.plans),
                                 self.pending.clone(),
                             )
                             .lossless(self.lossless);
@@ -1915,7 +1934,26 @@ impl Worker {
                     files.write(&frames, &points, rx.carried_total());
                 }
             }
-            Decoder::Pool(p) => p.push_at(&self.bb, self.block_s.0),
+            Decoder::Pool(p, b) => {
+                p.push_at(&self.bb, self.block_s.0);
+                let tag = format!(
+                    "{}-{}",
+                    self.settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(self.settings.offset_hz)
+                );
+                let record = self
+                    .settings
+                    .record
+                    .then_some((self.settings.record_dir.as_path(), tag.as_str()));
+                b.set_lossless(self.lossless);
+                b.push(
+                    &self.bb,
+                    self.block_s.0,
+                    p.view(),
+                    self.plans.as_ref(),
+                    record,
+                );
+            }
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
                 let tag = format!(
@@ -2004,7 +2042,7 @@ impl Worker {
                             ) {
                                 let w = FecWorker::spawn(
                                     rs,
-                                    fec_output(&self.settings, &self.ddc),
+                                    fec_output(&self.settings, &self.ddc, &self.plans),
                                     self.pending.clone(),
                                 )
                                 .lossless(self.lossless);
@@ -2333,16 +2371,28 @@ impl Worker {
                 };
                 st.beacon = Some(v);
             }
-            Decoder::Pool(p) => {
-                let v = p.view().clone();
+            Decoder::Pool(p, b) => {
+                let mut v = p.view().clone();
+                let bursts = b.view();
                 st.message = match (v.slot_s, v.frame_s) {
                     _ if v.seconds < 1.0 => "listening…".into(),
-                    (Some(s), Some(f)) => format!(
-                        "{} carriers · {:.3} ms slots · {:.3} ms frame",
+                    _ if bursts.timing.is_some() => format!(
+                        "{} carriers · {:.0} bursts/s demodulated ({} of {} planned)",
                         v.carriers.len(),
-                        s * 1e3,
-                        f * 1e3
+                        bursts.per_s,
+                        bursts.demodulated,
+                        bursts.planned
                     ),
+                    (Some(_), Some(f)) => match v.grid {
+                        Some(g) => format!(
+                            "{} carriers · {} slots of {:.3} ms in a {:.3} ms frame",
+                            v.carriers.len(),
+                            g.slots,
+                            g.pitch_s * 1e3,
+                            f * 1e3
+                        ),
+                        None => format!("{} carriers · {:.3} ms frame", v.carriers.len(), f * 1e3),
+                    },
                     (Some(s), None) => format!(
                         "{} carriers · repeats every {:.3} ms",
                         v.carriers.len(),
@@ -2350,6 +2400,11 @@ impl Worker {
                     ),
                     _ => format!("{} carriers · finding the grid…", v.carriers.len()),
                 };
+                if let Some((p, n)) = &bursts.recording {
+                    st.recording = Some((p.clone(), *n));
+                }
+                st.recording_active = bursts.recording.is_some();
+                v.bursts = Some(Arc::new(bursts));
                 st.pool = Some(v);
             }
             Decoder::Tdma(a) => {
@@ -2796,8 +2851,9 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
     )
 }
 
-fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
+fn fec_output(s: &VfoSettings, ddc: &Ddc, plans: &Option<crate::plan_feed::PlanLink>) -> FecOutput {
     FecOutput {
+        plan_link: plans.clone().filter(|_| s.decoder.outputs_ts()),
         record: s.record
             && matches!(
                 s.decoder.chain(),

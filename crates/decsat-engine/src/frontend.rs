@@ -113,6 +113,8 @@ struct Shared {
     front: Mutex<FrontStatus>,
     rows: Mutex<VecDeque<(u64, Vec<f32>)>>,
     vfos: Mutex<BTreeMap<VfoId, VfoHandle>>,
+    /// Burst plans passed between the VFOs.
+    plans: Arc<crate::plan_feed::PlanFeed>,
 }
 
 enum Cmd {
@@ -149,6 +151,7 @@ impl Engine {
             }),
             rows: Mutex::new(VecDeque::with_capacity(ROW_BACKLOG)),
             vfos: Mutex::new(BTreeMap::new()),
+            plans: Default::default(),
         });
         let (cmd, rx) = mpsc::channel();
         let thread = {
@@ -211,7 +214,11 @@ impl Engine {
     pub fn add_vfo(&mut self, settings: VfoSettings) -> VfoId {
         let id = self.next_id;
         self.next_id += 1;
-        let handle = vfo::spawn(self.sample_rate, settings, self.lossless);
+        let link = crate::plan_feed::PlanLink {
+            id,
+            feed: Arc::clone(&self.shared.plans),
+        };
+        let handle = vfo::spawn(self.sample_rate, settings, self.lossless, Some(link));
         self.shared.vfos.lock().unwrap().insert(id, handle);
         id
     }
@@ -241,6 +248,7 @@ impl Engine {
     /// Delete a VFO. Returns at once: its threads stop after the block in
     /// hand and are joined in the background.
     pub fn remove_vfo(&self, id: VfoId) {
+        self.shared.plans.forget(id);
         let h = self.shared.vfos.lock().unwrap().remove(&id);
         if let Some(h) = h {
             h.discard();
@@ -735,6 +743,45 @@ mod tests {
                 return;
             };
             let Some(p) = p.pool else { return };
+            if let Some(b) = &p.bursts {
+                println!(
+                    "{:.1} s: bursts from VFO {:?}: zero {:+.0} Hz, lead {:?} ms; planned {} cut {} \
+                     demodulated {} failed {} late {} dropped {} unknown {}; {:.0}/s, load {:.2} \
+                     ({} workers)",
+                    p.now_s,
+                    b.from,
+                    b.offset_hz,
+                    b.timing.map(|t| t.lead_s * 1e3),
+                    b.planned,
+                    b.cut,
+                    b.demodulated,
+                    b.failed,
+                    b.late,
+                    b.dropped,
+                    b.unknown,
+                    b.per_s,
+                    b.load,
+                    b.workers
+                );
+                if last {
+                    for t in &b.terminals {
+                        println!(
+                            "  terminal {:3}: {} of {} cut, MER {:.1} dB, {:+.0} Hz, {:+.1} µs, \
+                             fit {:.2}, code {:04X}h {:?} {:.0} Bd",
+                            t.id,
+                            t.demodulated,
+                            t.cut,
+                            t.mer_db,
+                            t.freq_hz,
+                            t.timing_us,
+                            t.fit,
+                            t.code,
+                            t.waveform,
+                            t.symbol_rate
+                        );
+                    }
+                }
+            }
             let Some(plan) = o
                 .fec
                 .and_then(|f| f.ts)
@@ -746,13 +793,14 @@ mod tests {
             };
             let m = match_plan(&p, &plan);
             println!(
-                "{:.1} s: plan {} frames, clock {:?}; pool slot {:?} frame {:?} boundary {:?},                  {} slot rows; frequency {:?}",
+                "{:.1} s: plan {} frames, clock {:?}; pool slot {:?} frame {:?} grid {:?}, \
+                 {} slot rows; frequency {:?}",
                 p.now_s,
                 plan.frames,
                 plan.clock,
                 p.slot_s,
                 p.frame_s,
-                p.boundary_s,
+                p.grid,
                 p.slot_rows.len(),
                 m
             );
@@ -762,6 +810,12 @@ mod tests {
                 "  timing {t:?} ({:.2} frames)",
                 t.map_or(0.0, |t| t.lead_frames())
             );
+            if let Some(t) = &t {
+                println!(
+                    "  zero refined: {:?}",
+                    crate::tdma::pool::refine_offset(&p, &plan, t, m.offset_hz)
+                );
+            }
             if last && let Some(s) = lead_scores(&p, &plan, m.offset_hz) {
                 for (lead, r, n) in &s.tried {
                     println!(

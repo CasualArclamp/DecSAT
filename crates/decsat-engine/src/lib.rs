@@ -15,6 +15,7 @@ pub mod floor;
 pub mod frontend;
 pub mod identify;
 pub mod period;
+pub mod plan_feed;
 pub mod programme;
 pub mod psk;
 pub mod radar;

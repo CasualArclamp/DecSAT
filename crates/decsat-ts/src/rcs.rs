@@ -383,8 +383,14 @@ pub struct RcsRx {
     cmt_logons: BTreeSet<u16>,
     tim_macs: BTreeSet<[u8; 6]>,
     plan: Option<crate::newtec::PlanRx>,
+    /// Plan frames read since [`RcsRx::take_plan_frames`] last took them
+    /// (at most `FRESH_FRAMES`: nobody may be taking them).
+    fresh: Vec<crate::newtec::PlanFrame>,
     view: RcsView,
 }
+
+/// Plan frames kept for [`RcsRx::take_plan_frames`].
+const FRESH_FRAMES: usize = 64;
 
 /// A 27 MHz PCR count from a 33-bit base and 9-bit extension (ISO/IEC
 /// 13818-1 §2.4.3.5).
@@ -549,6 +555,17 @@ impl RcsRx {
         self.source_s = Some(t);
     }
 
+    /// The burst plan's frames read since the last call, oldest first, each
+    /// with its arrival: for a return VFO to time its bursts by.
+    pub fn take_plan_frames(&mut self) -> Vec<crate::newtec::PlanFrame> {
+        std::mem::take(&mut self.fresh)
+    }
+
+    /// The burst plan as it stands, if one is being read.
+    pub fn plan_view(&self) -> Option<crate::newtec::PlanView> {
+        self.plan.as_ref().map(|p| p.view())
+    }
+
     /// Something RCS has been seen: declared tables, an NCR, or an RCS table.
     pub fn active(&self) -> bool {
         !self.declared.is_empty() || !self.view.tables.is_empty()
@@ -665,9 +682,17 @@ impl RcsRx {
             0xB0 => self.tim(s),
             crate::newtec::PLAN_TABLE => {
                 if let Some(f) = crate::newtec::parse_plan(s) {
+                    let now = self.source_s.unwrap_or(self.clock);
+                    if self.fresh.len() == FRESH_FRAMES {
+                        self.fresh.remove(0);
+                    }
+                    self.fresh.push(crate::newtec::PlanFrame {
+                        arrival_s: now,
+                        ..f.clone()
+                    });
                     self.plan
                         .get_or_insert_with(crate::newtec::PlanRx::new)
-                        .push(f, self.source_s.unwrap_or(self.clock));
+                        .push(f, now);
                 }
             }
             _ => {}
