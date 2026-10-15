@@ -1073,6 +1073,12 @@ pub(crate) fn print_is19(v: &decsat_modem::is19::OutboundView) {
             println!("    {:8.3}  {}", e.t_s, e.describe());
         }
     }
+    if !v.calls.is_empty() {
+        println!("  calls (calling terminal (its channel) ↔ called terminal (its channel)):");
+        for c in &v.calls {
+            println!("    {:8.3}  {}", c.t_s, c.describe());
+        }
+    }
 }
 
 pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {

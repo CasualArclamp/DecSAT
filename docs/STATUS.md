@@ -4331,3 +4331,48 @@ Built:
 - Open: what the packets say (fields still 55h/AAh-heavy: another layer),
   the rate-⅔ code (soft decoding would help OB2), times are seconds since
   the decoder started (no wall clock), the call channels' voice (encrypted).
+
+## Intelsat 19 outbound: the terminals and call channels the signalling names (2026-10-15)
+
+Rory: "work out the assignment and ack packets' fields next: which call
+channel and which terminal each one names". Read off the 27 acks and 18
+assignments of the 180 s recording against which call carriers came up for
+which call (STATUS above). No inner code: no convolutional code in the
+stream or in the control packets (full-rank windows); control packets'
+even bits are mostly 1 and odd mostly 0 (idle = `1010…`), traffic even.
+
+- **Terminal**: bytes 2–5 after the type field, the same in a terminal's
+  acks and in the assignments sent to it; byte 4 is always `?Dh`, its top
+  three bits flags: 20h in assignments (and a few acks), C0h on every
+  terminal the second outbound serves (its acks and assignments go out
+  there). Seen: 92a80d69, 80ac0d54, 80a80d54, b4ee0d54, b4ee0d6f, 9eae0d6a,
+  80ae0d6a, aeae0d6b, 84ee0d62, 84ee0d57.
+- **Ends**: type 0Bh goes to the **calling** terminal (its request was
+  acked just before), 31h to the **called** one (acked 0.3–0.4 s after its
+  carrier goes steady: the answer — 8.6, 44.9, 112.9, 142.7 s for L3, 178.7
+  s for L7). Each call's two assignments go out on the outbounds serving its
+  two ends (here always different ones).
+- **Call reference**: byte 9 & 7Fh, the same in both ends' assignments
+  (56, 32, 48, 44, 60, 36, 52, 43, 59).
+- **Channels**: a byte `1010 1xyz` (receive) and, four bytes on, after a
+  byte ending in 5h, `?1?0 1xyz` (send); the channel is the last three bits
+  with the first sent least significant. The calling end sends on 2n and
+  receives on 2n + 1, the called end the reverse — every call: 0/1 for the
+  L2/L3 calls (and the unanswered set-up at 84 s), 2/3 for L4/L5, 4/5 for
+  L6/L7, i.e. the carriers from the lowest seen up, 6.16 kHz apart; the
+  calling end's carrier is the one that keys up first. The set-up at 114.4
+  s that never keyed up (acks of both ends, then release acks) names 2/3:
+  the same pair the same two terminals used 3 s later. Channels below L2
+  (the always-on pair at −12.3 and −6.2 kHz) would be −2/−1: the field (3
+  bits seen varying) may be wider or the numbering may wrap — not seen.
+- One caller assignment had C5h where F5h stands before the send channel
+  (bit errors or a variant), so the anchor is the byte's 5h nibble plus
+  both channel bytes' fixed bits; the bytes before vary in length (one
+  call's had a longer field there — the number dialled?).
+
+Built: `Packet::terminal`, `flags`, `assignment` (`Assignment`: `CallEnd`,
+`call_ref`, `tx`, `rx`), acks matched to assignments by terminal, `Call`
+summaries per reference (`OutboundView::calls`), acks marked with the call
+their terminal is in; CLI prints the events and a calls table; the CSV gains
+terminal, flags, end, call, tx and rx channel; GUI card: a **Calls** table.
+Checked on both outbounds: every call's ends and channels as above.

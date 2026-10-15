@@ -1989,6 +1989,45 @@ fn is19_card(ui: &mut Ui, o: &decsat_engine::is19::OutboundView, id: VfoId) {
         return;
     }
     ui.add_space(4.0);
+    ui.label(RichText::new("Calls").strong()).on_hover_text(
+        "Each call as its channel assignments name it: the calling terminal and the \
+         call channel it transmits on, the called terminal and its channel (the two \
+         ends' assignments go out on the outbounds that serve them, so one outbound \
+         may show only one end). Call channels are numbered up from the lowest of \
+         the call carriers, 6.16 kHz apart, a call taking an even one and the next: \
+         on 2026-10-15 channel 0 was at 12 335.436 GHz.",
+    );
+    if o.calls.is_empty() {
+        ui.label(RichText::new("none yet").weak());
+    } else {
+        let term = |t: Option<u32>| t.map_or("?".to_string(), |t| format!("{t:08x}"));
+        let ch = |c: Option<u8>| c.map_or("?".to_string(), |c| format!("ch {c}"));
+        egui::Grid::new(("is19_calls", id))
+            .num_columns(4)
+            .spacing([18.0, 2.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new("time").small().weak());
+                ui.label(RichText::new("call").small().weak());
+                ui.label(RichText::new("calling terminal").small().weak());
+                ui.label(RichText::new("called terminal").small().weak());
+                ui.end_row();
+                for c in o.calls.iter().rev().take(12) {
+                    ui.label(RichText::new(format!("{:.2} s", c.t_s)).monospace());
+                    ui.label(c.call_ref.to_string());
+                    ui.label(
+                        RichText::new(format!("{} · {}", term(c.calling), ch(c.calling_tx)))
+                            .monospace(),
+                    );
+                    ui.label(
+                        RichText::new(format!("{} · {}", term(c.called), ch(c.called_tx)))
+                            .monospace(),
+                    );
+                    ui.end_row();
+                }
+            });
+    }
+    ui.add_space(4.0);
     ui.label(RichText::new("Call signalling").strong())
         .on_hover_text(
             "A request ack goes out ~0.37 s after a terminal's request burst on the call \

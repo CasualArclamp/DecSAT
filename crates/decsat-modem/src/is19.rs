@@ -32,11 +32,28 @@
 //!
 //! What the packets *mean* was read from their timing against the call
 //! carriers in the same recording ([`PacketKind`]): a short packet answers
-//! every request burst ~0.37 s after it (the hub's acknowledgement, with a
-//! field that names the terminal), and ~0.42 s before each of the seven
-//! calls' carriers keyed up, two assignment packets went out, one on each
-//! outbound. Their contents are not decoded further (the fields still look
-//! line-coded: runs of 0x55 and 0xAA).
+//! every request burst ~0.37 s after it (the hub's acknowledgement), and
+//! ~0.42 s before each of the seven calls' carriers keyed up, two
+//! assignment packets went out, one on each outbound — one to each end of
+//! the call. Their fields, lined up against which carriers came up for which
+//! call ([`Packet::terminal`], [`Assignment`]):
+//!
+//! - **Terminal**: bytes 2–5 after the type field (as sent, first bit most
+//!   significant) name the terminal, in its acks and in the assignments it
+//!   is sent alike; byte 4 is always `?D`, its top three bits flags — 20h in
+//!   assignments, C0h on every terminal the second outbound serves.
+//! - **Call reference**: byte 9's last seven bits, the same in both ends'
+//!   assignments.
+//! - **Channels**: two bytes four apart, `1010 1xyz` (receive) and
+//!   `?1?0 1xyz` (transmit, after a byte ending in 5h): the call channel is
+//!   `zyx` — the last three bits, the first sent least significant. The calling
+//!   end transmits on 2n and receives on 2n + 1, the called end the other way
+//!   round; channels 0–5 were the call carriers from the lowest seen up,
+//!   6.16 kHz apart (12 335.436 GHz for channel 0 on 2026-10-15, LNB
+//!   10 599.955 MHz), in pairs.
+//!
+//! The rest is not read (the fields look coded further: runs of 0x55 and
+//! 0xAA where there is nothing to say).
 
 use std::collections::VecDeque;
 use std::sync::OnceLock;
@@ -549,12 +566,13 @@ pub enum PacketKind {
     /// Type 0x1E, 275 bytes, about 35 a second: the bulk of the outbound.
     Traffic,
     /// Type 0x32, 12–13 bytes: sent ~0.37 s after each request burst a
-    /// terminal makes on the call channels (set-ups and releases alike).
-    /// Bits 15–46 after the type field differ by terminal ([`Packet::tag`]).
+    /// terminal makes on the call channels (set-ups and releases alike, and
+    /// a called terminal's answer), naming the terminal
+    /// ([`Packet::terminal`]).
     RequestAck,
-    /// Type 0x0B (~41 bytes) or 0x31 (~60 bytes): sent ~0.42 s before a
-    /// call's pair of carriers keys up, one of each on the two outbounds —
-    /// the channel assignments to the call's two ends.
+    /// Type 0x0B (~41 bytes, to the calling end) or 0x31 (~60 bytes, to the
+    /// called end): sent ~0.42 s before a call's pair of carriers keys up —
+    /// the channel assignments ([`Packet::assignment`]).
     Assignment,
     /// Type 0x3F, 49 bytes, every 2.004 s: the slow TDMA group's bursts
     /// come 0.30 and 0.40 s after it — its frame timing.
@@ -622,8 +640,79 @@ pub struct Packet {
     /// The 6 bits after the two equal bits that end the opening.
     pub type_code: Option<u8>,
     pub kind: PacketKind,
-    /// A request ack's terminal field (bits 15–46).
-    pub tag: Option<u32>,
+    /// The terminal an ack or an assignment names: bytes 2–5 after the type
+    /// field as sent, byte 4's three flag bits cleared.
+    pub terminal: Option<u32>,
+    /// Those flag bits (byte 4 & E0h).
+    pub flags: Option<u8>,
+    /// What an assignment says.
+    pub assignment: Option<Assignment>,
+}
+
+/// Which end of a call an assignment goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallEnd {
+    /// The terminal that asked for the call (its request acked just before):
+    /// type 0x0B.
+    Calling,
+    /// The terminal called (acked when it answers): type 0x31.
+    Called,
+}
+
+impl CallEnd {
+    pub fn name(self) -> &'static str {
+        match self {
+            CallEnd::Calling => "calling",
+            CallEnd::Called => "called",
+        }
+    }
+}
+
+/// A channel assignment's fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assignment {
+    pub end: CallEnd,
+    /// The call's reference (7 bits), in both ends' assignments.
+    pub call_ref: u8,
+    /// The call channels the terminal is to transmit and receive on, when
+    /// found (see the module notes).
+    pub tx: Option<u8>,
+    pub rx: Option<u8>,
+}
+
+/// A channel number from its byte: the last three bits, the first sent the
+/// least significant.
+fn channel_of(b: u8) -> u8 {
+    ((b >> 2) & 1) | ((b >> 1) & 1) << 1 | (b & 1) << 2
+}
+
+/// The packet's terminal field, flags and assignment, from its bytes (the
+/// first the type field's).
+fn read_fields(by: &[u8], kind: PacketKind) -> (Option<u32>, Option<u8>, Option<Assignment>) {
+    if !kind.is_call_event() || by.len() < 6 {
+        return (None, None, None);
+    }
+    let terminal = u32::from_be_bytes([by[2], by[3], by[4] & 0x1f, by[5]]);
+    let flags = by[4] & 0xe0;
+    let assignment = (kind == PacketKind::Assignment && by.len() > 9).then(|| {
+        // The transmit channel's byte follows one ending in 5h; the receive
+        // channel's is four before it. Their fixed bits keep the search
+        // from taking another byte.
+        let at = (12..by.len().saturating_sub(1).min(26)).find(|&k| {
+            by[k] & 0x0f == 0x05 && by[k + 1] & 0xd8 == 0x48 && by[k - 3] & 0xf0 == 0xa0
+        });
+        Assignment {
+            end: if by[0] == 0x0b {
+                CallEnd::Calling
+            } else {
+                CallEnd::Called
+            },
+            call_ref: by[9] & 0x7f,
+            tx: at.map(|k| channel_of(by[k + 1])),
+            rx: at.map(|k| channel_of(by[k - 3])),
+        }
+    });
+    (Some(terminal), Some(flags), assignment)
 }
 
 impl Packet {
@@ -639,15 +728,24 @@ impl Packet {
         let bits = run[s0..].to_vec();
         let type_code = (bits.len() >= 8).then(|| bits[2..8].iter().fold(0u8, |a, &b| a << 1 | b));
         let kind = PacketKind::of(type_code, bits.len() / 8);
-        let tag = (kind == PacketKind::RequestAck && bits.len() >= 47)
-            .then(|| bits[15..47].iter().fold(0u32, |a, &b| a << 1 | b as u32));
+        // Rust note: `as_chunks` views the bits as whole 8-element arrays (the
+        // partial byte at the end left aside).
+        let by: Vec<u8> = bits
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| c.iter().fold(0u8, |a, &b| a << 1 | b))
+            .collect();
+        let (terminal, flags, assignment) = read_fields(&by, kind);
         Packet {
             t_s,
             bits,
             preamble: s0,
             type_code,
             kind,
-            tag,
+            terminal,
+            flags,
+            assignment,
         }
     }
 
@@ -819,41 +917,116 @@ impl PacketParser {
 pub struct CallEvent {
     pub t_s: f64,
     pub kind: PacketKind,
-    pub tag: Option<u32>,
+    pub terminal: Option<u32>,
+    pub flags: Option<u8>,
+    pub assignment: Option<Assignment>,
     pub bytes: usize,
     pub hex: String,
-    /// For an ack: an assignment followed on this outbound within
-    /// [`ASSIGN_AFTER_ACK_S`] (`Some(true)`), none did (`Some(false)`), not
-    /// yet known (`None`). For an assignment: the ack it followed, if any
-    /// (its tag and the gap, s).
+    /// For an ack: an assignment to the same terminal followed on this
+    /// outbound within [`ASSIGN_AFTER_ACK_S`] (`Some(true)`), none did
+    /// (`Some(false)`), not yet known (`None`). For an assignment: the gap
+    /// after the ack it followed, s.
     pub assigned: Option<bool>,
-    pub after_ack: Option<(Option<u32>, f64)>,
+    pub after_ack: Option<f64>,
+    /// For an ack: a call (from the last [`IN_CALL_S`]) that has this
+    /// terminal at one end — its reference and which end (a called
+    /// terminal is acked when it answers; either end when it hangs up).
+    pub in_call: Option<(u8, CallEnd)>,
 }
+
+/// How long after its assignment a call is looked to by its ends' acks, s.
+pub const IN_CALL_S: f64 = 300.0;
 
 impl CallEvent {
     /// One line on what it was.
     pub fn describe(&self) -> String {
-        let tag = |t: Option<u32>| t.map_or(String::new(), |t| format!(" {t:08x}"));
-        match self.kind {
-            PacketKind::RequestAck => format!(
-                "request acknowledged (terminal{}){}",
-                tag(self.tag),
+        let term = self.terminal.map_or("?".into(), |t| format!("{t:08x}"));
+        let ch = |c: Option<u8>| c.map_or("?".into(), |c| c.to_string());
+        match (self.kind, self.assignment) {
+            (PacketKind::RequestAck, _) => format!(
+                "request ack: terminal {term}{}{}",
+                match self.in_call {
+                    Some((r, e)) => format!(" (the {} end of call {r})", e.name()),
+                    None => String::new(),
+                },
                 match self.assigned {
                     Some(true) => " → channel assigned",
-                    Some(false) => " → no assignment here (a release, or the other outbound's)",
+                    Some(false) =>
+                        " → no assignment here (a release, an answer, or the other outbound's)",
                     None => "",
                 }
             ),
-            PacketKind::Assignment => format!(
-                "channel assignment ({} bytes): a call's carriers key up ~0.4 s later{}",
-                self.bytes,
+            (PacketKind::Assignment, Some(a)) => format!(
+                "call {}: {} terminal {term} to send on channel {}, receive on {}{}",
+                a.call_ref,
+                a.end.name(),
+                ch(a.tx),
+                ch(a.rx),
                 match self.after_ack {
-                    Some((t, dt)) => format!(", {:.2} s after the ack of{}", dt, tag(t)),
+                    Some(dt) => format!(" ({dt:.2} s after its ack)"),
                     None => String::new(),
                 }
             ),
-            k => k.name().to_string(),
+            (k, _) => k.name().to_string(),
         }
+    }
+}
+
+/// A call as its assignments on this outbound tell it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub call_ref: u8,
+    /// When the first of its assignments went out, s.
+    pub t_s: f64,
+    pub calling: Option<u32>,
+    pub called: Option<u32>,
+    /// The channels the calling and the called end transmit on.
+    pub calling_tx: Option<u8>,
+    pub called_tx: Option<u8>,
+}
+
+impl Call {
+    fn take(&mut self, terminal: Option<u32>, a: &Assignment) {
+        // The calling end receives what the called end sends, and so on.
+        let (own, other) = (a.tx, a.rx);
+        match a.end {
+            CallEnd::Calling => {
+                self.calling = terminal.or(self.calling);
+                self.calling_tx = own.or(self.calling_tx);
+                self.called_tx = other.or(self.called_tx);
+            }
+            CallEnd::Called => {
+                self.called = terminal.or(self.called);
+                self.called_tx = own.or(self.called_tx);
+                self.calling_tx = other.or(self.calling_tx);
+            }
+        }
+    }
+
+    /// One line on it.
+    pub fn describe(&self) -> String {
+        let term = |t: Option<u32>| t.map_or("?".into(), |t| format!("{t:08x}"));
+        let ch = |c: Option<u8>| c.map_or("?".into(), |c| c.to_string());
+        format!(
+            "call {}: {} (channel {}) ↔ {} (channel {})",
+            self.call_ref,
+            term(self.calling),
+            ch(self.calling_tx),
+            term(self.called),
+            ch(self.called_tx)
+        )
+    }
+}
+
+/// Two assignments with the same reference this close are one call's, s.
+const SAME_CALL_S: f64 = 2.0;
+/// Calls kept for display.
+const KEEP_CALLS: usize = 32;
+
+impl CallEvent {
+    /// Its call, when it is an assignment.
+    pub fn call_ref(&self) -> Option<u8> {
+        self.assignment.map(|a| a.call_ref)
     }
 }
 
@@ -895,6 +1068,8 @@ pub struct OutboundView {
     pub stats: OutboundStats,
     /// Call signalling, oldest first.
     pub events: Vec<CallEvent>,
+    /// The calls assigned, oldest first.
+    pub calls: Vec<Call>,
     /// The last control packets (all but traffic), oldest first.
     pub recent: Vec<Packet>,
 }
@@ -911,6 +1086,7 @@ pub struct OutboundRx {
     expect: Option<u64>,
     stats: OutboundStats,
     events: VecDeque<CallEvent>,
+    calls: VecDeque<Call>,
     recent: VecDeque<Packet>,
 }
 
@@ -926,6 +1102,7 @@ impl OutboundRx {
             expect: None,
             stats: OutboundStats::default(),
             events: VecDeque::new(),
+            calls: VecDeque::new(),
             recent: VecDeque::new(),
         }
     }
@@ -997,24 +1174,72 @@ impl OutboundRx {
         if p.kind.is_call_event() {
             let mut after_ack = None;
             // Rust note: `if a && let Some(x) = …` (a let chain) tests the
-            // kind and finds the ack in one condition.
+            // kind and finds the ack in one condition: the same terminal's,
+            // just before.
             if p.kind == PacketKind::Assignment
                 && let Some(e) = self.events.iter_mut().rev().find(|e| {
                     e.kind == PacketKind::RequestAck
+                        && e.terminal == p.terminal
                         && (0.0..=ASSIGN_AFTER_ACK_S).contains(&(p.t_s - e.t_s))
                 })
             {
                 e.assigned = Some(true);
-                after_ack = Some((e.tag, p.t_s - e.t_s));
+                after_ack = Some(p.t_s - e.t_s);
             }
+            if let Some(a) = &p.assignment {
+                let call = match self
+                    .calls
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.call_ref == a.call_ref && p.t_s - c.t_s <= SAME_CALL_S)
+                {
+                    Some(c) => c,
+                    None => {
+                        self.calls.push_back(Call {
+                            call_ref: a.call_ref,
+                            t_s: p.t_s,
+                            calling: None,
+                            called: None,
+                            calling_tx: None,
+                            called_tx: None,
+                        });
+                        while self.calls.len() > KEEP_CALLS {
+                            self.calls.pop_front();
+                        }
+                        self.calls.back_mut().expect("just pushed")
+                    }
+                };
+                call.take(p.terminal, a);
+            }
+            // An ack from a terminal already in a call.
+            let in_call = (p.kind == PacketKind::RequestAck)
+                .then(|| {
+                    self.calls
+                        .iter()
+                        .rev()
+                        .filter(|c| p.t_s - c.t_s <= IN_CALL_S)
+                        .find_map(|c| {
+                            if p.terminal.is_some() && c.calling == p.terminal {
+                                Some((c.call_ref, CallEnd::Calling))
+                            } else if p.terminal.is_some() && c.called == p.terminal {
+                                Some((c.call_ref, CallEnd::Called))
+                            } else {
+                                None
+                            }
+                        })
+                })
+                .flatten();
             self.events.push_back(CallEvent {
                 t_s: p.t_s,
                 kind: p.kind,
-                tag: p.tag,
+                terminal: p.terminal,
+                flags: p.flags,
+                assignment: p.assignment,
                 bytes: p.bytes(),
                 hex: p.hex(),
                 assigned: None,
                 after_ack,
+                in_call,
             });
             while self.events.len() > KEEP_EVENTS {
                 self.events.pop_front();
@@ -1034,6 +1259,7 @@ impl OutboundRx {
         OutboundView {
             stats: self.stats.clone(),
             events: self.events.iter().cloned().collect(),
+            calls: self.calls.iter().cloned().collect(),
             recent: self.recent.iter().cloned().collect(),
         }
     }
@@ -1194,14 +1420,34 @@ mod tests {
     fn packets_are_typed_as_seen_on_the_air() {
         let p = Packet::from_run(0.0, &hex_bits(ACK));
         assert_eq!(p.kind, PacketKind::RequestAck);
-        assert_eq!(p.tag, Some(0x4954_06b4));
+        assert_eq!(p.terminal, Some(0x92a8_0d69));
+        assert_eq!(p.flags, Some(0));
+        // The call of 2026-10-15 04.68 s: the calling end (92a80d69) sends on
+        // channel 0, the called end (80ac0d54) on channel 1.
+        let a = Packet::from_run(0.0, &hex_bits(ASSIGN_A));
+        assert_eq!(a.kind, PacketKind::Assignment);
+        assert_eq!(a.terminal, Some(0x92a8_0d69));
         assert_eq!(
-            Packet::from_run(0.0, &hex_bits(ASSIGN_A)).kind,
-            PacketKind::Assignment
+            a.assignment,
+            Some(Assignment {
+                end: CallEnd::Calling,
+                call_ref: 56,
+                tx: Some(0),
+                rx: Some(1)
+            })
         );
+        let b = Packet::from_run(0.0, &hex_bits(ASSIGN_B));
+        assert_eq!(b.kind, PacketKind::Assignment);
+        assert_eq!(b.terminal, Some(0x80ac_0d54));
+        assert_eq!(b.flags, Some(0xe0));
         assert_eq!(
-            Packet::from_run(0.0, &hex_bits(ASSIGN_B)).kind,
-            PacketKind::Assignment
+            b.assignment,
+            Some(Assignment {
+                end: CallEnd::Called,
+                call_ref: 56,
+                tx: Some(1),
+                rx: Some(0)
+            })
         );
         assert_eq!(
             Packet::from_run(0.0, &hex_bits(STATUS)).kind,
@@ -1280,7 +1526,7 @@ mod tests {
         let sent = Packet::from_run(0.0, &hex_bits(ACK));
         assert!(ack.bits.len() + 16 >= sent.bits.len());
         assert_eq!(ack.bits[..], sent.bits[..ack.bits.len()]);
-        assert_eq!(ack.tag, Some(0x4954_06b4));
+        assert_eq!(ack.terminal, Some(0x92a8_0d69));
         // Times rise with the stream, within a frame of each other.
         assert!(got.windows(2).all(|w| w[1].t_s > w[0].t_s));
         assert!(got[0].t_s > 1234.0 / SYMBOL_RATE && got[0].t_s < FRAME_SECONDS + 0.02);
@@ -1288,6 +1534,18 @@ mod tests {
         assert_eq!(v.events.len(), 2);
         assert_eq!(v.events[0].assigned, Some(true));
         assert!(v.events[1].after_ack.is_some());
+        // The call the assignment named: its calling end and channels.
+        assert_eq!(
+            v.calls,
+            [Call {
+                call_ref: 56,
+                t_s: v.events[1].t_s,
+                calling: Some(0x92a8_0d69),
+                called: None,
+                calling_tx: Some(0),
+                called_tx: Some(1),
+            }]
+        );
         assert_eq!(st.count(PacketKind::Traffic), 20);
         assert!(st.load() > 0.0 && st.load() < 1.0);
     }

@@ -2460,7 +2460,10 @@ impl Is19File {
                 match File::create(&p) {
                     Ok(f) => {
                         let mut w = BufWriter::new(f);
-                        let _ = writeln!(w, "t_s,kind,type,bytes,tag,hex");
+                        let _ = writeln!(
+                            w,
+                            "t_s,kind,type,bytes,terminal,flags,end,call,tx_channel,rx_channel,hex"
+                        );
                         self.writer = Some(w);
                         self.written = 0;
                     }
@@ -2485,12 +2488,22 @@ impl Is19File {
         for p in packets {
             let ok = writeln!(
                 w,
-                "{:.4},{},{},{},{},{}",
+                "{:.4},{},{},{},{},{},{},{},{},{},{}",
                 p.t_s,
                 p.kind.name(),
                 p.type_code.map_or(String::new(), |t| format!("{t:02x}")),
                 p.bytes(),
-                p.tag.map_or(String::new(), |t| format!("{t:08x}")),
+                p.terminal.map_or(String::new(), |t| format!("{t:08x}")),
+                p.flags.map_or(String::new(), |f| format!("{f:02x}")),
+                p.assignment.map_or("", |a| a.end.name()),
+                p.assignment
+                    .map_or(String::new(), |a| a.call_ref.to_string()),
+                p.assignment
+                    .and_then(|a| a.tx)
+                    .map_or(String::new(), |c| c.to_string()),
+                p.assignment
+                    .and_then(|a| a.rx)
+                    .map_or(String::new(), |c| c.to_string()),
                 p.hex()
             );
             if ok.is_err() {
@@ -3944,7 +3957,11 @@ mod tests {
             "{}",
             st.message
         );
-        assert_eq!(v.events[0].tag, Some(0x4954_06b4));
+        assert_eq!(v.events[0].terminal, Some(0x92a8_0d69));
+        // The assignment: the calling end of call 56, on channels 0 and 1.
+        let a = v.events[1].assignment.expect("no assignment fields");
+        assert_eq!((a.call_ref, a.tx, a.rx), (56, Some(0), Some(1)));
+        assert_eq!(v.calls.len(), 1);
         assert_eq!(v.events[0].assigned, Some(true));
         assert!(st.carrier.is_some_and(|c| c.locked && c.mer_db > 12.0));
     }

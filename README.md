@@ -540,17 +540,31 @@ go again. Drop a VFO on an outbound (about 125 kHz wide) and choose
   idle fill between packets; the card shows the load (about three
   quarters), the 275-byte traffic packets and the rest by type;
 - **call signalling**: a *request ack* ~0.37 s after a terminal's request
-  burst on the call channels (with a field that names the terminal), a
-  *channel assignment* ~0.42 s before a call's carriers key up — one on each
-  outbound, so a VFO on each sees both ends. Newest first, the packet's hex
-  on hover; times are seconds since the decoder started.
+  burst on the call channels, naming the terminal; a *channel assignment*
+  ~0.42 s before a call's carriers key up, one to each end — the
+  **calling terminal** and the **called terminal**, each told the **call
+  channel** to send on and the one to receive on, with the call's
+  reference. The two go out on the outbounds that serve the two terminals,
+  so a VFO on each outbound sees both ends. An ack from a terminal in a
+  call says which end it is (a called terminal is acked as it answers).
+  The **Calls** table puts each call's ends and channels together. Newest
+  first, the packet's hex on hover; times are seconds since the decoder
+  started.
+
+**Terminals** are named by the 32-bit field the network uses (`92a80d69`),
+the same in their acks and assignments. **Call channels** are numbered up
+from the lowest of the call carriers, 6.16 kHz apart, a call taking an
+even one (the calling end's) and the next: on the recording channel 0 was
+at 12 335.436 GHz (LNB 10 599.955 MHz) — the pair the first calls took,
+the next pair up channels 2 and 3, and so on.
 
 **● Record** writes every packet, one a line (time, kind, type, length,
-terminal field, hex), to `decsat-<VFO>-<RF>MHz-is19-<time>.csv`. What the
-packets say inside is not decoded (their fields are coded further), nor is
-the rate-⅔ code (the information bits are clean enough as sent), nor the
-calls' voice, which is encrypted. The decoder was worked out from one
-recording; how it was found is in `docs/STATUS.md` (2026-10-15).
+terminal, flags, call end, call reference, send and receive channel, hex),
+to `decsat-<VFO>-<RF>MHz-is19-<time>.csv`. The rest of the packets is not
+read (their fields look coded further), nor is the rate-⅔ code (the
+information bits are clean enough as sent), nor the calls' voice, which is
+encrypted. The decoder was worked out from one recording; how it was found
+is in `docs/STATUS.md` (2026-10-15).
 
 ```bash
 decsat decode capture_4Msps.cs8 --decoder is19 --offset -803.8e3 --bandwidth 125e3 --out dir
