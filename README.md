@@ -126,7 +126,14 @@ runs and applies to existing VFOs too.
 
 The side bar lists the VFOs with their CPU load (✕ removes one), and shows the
 selected one's settings, its Identify result or demodulator state (lock, Es/N0 and Eb/N0,
-residual offset), a carrier-locked constellation and a zoomed spectrum. The
+residual offset), a carrier-locked constellation and a zoomed spectrum. A
+DVB-S, S2 or S2X VFO opens with a card in the standard's colour (S2X blue,
+S2 green, DVB-S yellow): the standard, CCM or ACM and the symbol rate in
+its title bar; the MODCOD being received, large, with its margin over the
+quasi-error-free Es/N0 of EN 302 307's tables and an Es/N0 bar; then the
+receive chain stage by stage with health dots — demodulator, PL frames,
+LDPC and BCH (an ACM carrier's MODCODs with their share, frames good and
+margin), the FEC thread's load, the baseband. The
 status bar counts the carriers and narrow lines, and shows the front end's
 load and the input level — orange when the HackRF's gain is too high (see
 *HackRF One* below).
