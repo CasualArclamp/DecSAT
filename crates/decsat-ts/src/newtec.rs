@@ -272,7 +272,6 @@ impl PlanView {
 #[derive(Default)]
 struct Tally {
     bursts: u64,
-    slots: u64,
     codes: BTreeMap<u16, u64>,
     lo: u32,
     hi: u32,
@@ -332,7 +331,6 @@ impl PlanRx {
                 ..Tally::default()
             });
             t.bursts += 1;
-            t.slots += u64::from(b.slots());
             *t.codes.entry(b.code).or_default() += 1;
             t.lo = t.lo.min(b.freq);
             t.hi = t.hi.max(b.freq);

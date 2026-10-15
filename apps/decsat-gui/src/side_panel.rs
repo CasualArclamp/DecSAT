@@ -4037,7 +4037,9 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
             ))
             .small(),
         );
-        plan_strip(ui, p, 2, lo, hi, 0.0, 128.0);
+        plan_strip(ui, p, 2, lo, hi, 0.0, 128.0, &|hz| {
+            format!("{:.1} kHz from the plan's zero", hz / 1e3)
+        });
     }
     egui::CollapsingHeader::new(
         RichText::new(format!("Terminals in the plan ({})", p.terminals.len()))
@@ -4134,7 +4136,9 @@ fn terminal_color(id: u16) -> Color32 {
 /// The latest `frames` of a burst plan, a row a slot (time down, the
 /// newest frame at the bottom), across `lo_hz..hi_hz` of display frequency
 /// — a burst's plan frequency plus `offset_hz` — each burst a box in its
-/// terminal's colour, its terminal written in it where there is room.
+/// terminal's colour, its terminal written in it where there is room;
+/// `label` writes a display frequency for the hover.
+#[allow(clippy::too_many_arguments)]
 fn plan_strip(
     ui: &mut Ui,
     p: &decsat_ts::newtec::PlanView,
@@ -4143,6 +4147,7 @@ fn plan_strip(
     hi_hz: f64,
     offset_hz: f64,
     height: f32,
+    label: &dyn Fn(f64) -> String,
 ) {
     let slots = usize::from(p.slots.max(1));
     let shown: Vec<&decsat_ts::newtec::PlanFrame> =
@@ -4189,7 +4194,7 @@ fn plan_strip(
             }
             if pointer.is_some_and(|q| r.contains(q)) {
                 hover = Some(format!(
-                    "terminal {} · frame {} · slot {}{} · {:.1} kHz wide at {:.1} kHz (code {:04X}h)",
+                    "terminal {} · frame {} · slot {}{} · {:.1} kHz wide at {} (code {:04X}h)",
                     b.terminal,
                     f.counter,
                     b.slot,
@@ -4199,7 +4204,7 @@ fn plan_strip(
                         String::new()
                     },
                     (c - a) / 1e3,
-                    (b.freq_hz() + offset_hz) / 1e3,
+                    label((a + c) / 2.0 + offset_hz),
                     b.code
                 ));
             }
@@ -6145,7 +6150,7 @@ fn pool_section(
                     "The plan's occupancy (how often each of its frequencies is in a burst)                      slid across this pool's mean spectrum: the offset where they match best.                      Below, the plan's latest frame on this VFO's band, a row a slot — sent                      eight frames (a third of a second) ahead of the bursts it schedules",
                 );
                 let half = p.half_band_hz.max(1.0);
-                plan_strip(ui, plan, 1, -half, half, m.offset_hz, 72.0);
+                plan_strip(ui, plan, 1, -half, half, m.offset_hz, 72.0, &freq);
             }
             Some(m) if p.seconds > 10.0 => {
                 ui.label(
