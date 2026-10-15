@@ -15,7 +15,9 @@ pub mod sync;
 pub mod vlsnr;
 mod vlsnr_tables;
 
-pub use bbframe::{BBHEADER_LEN, BbHeader, BbHeaderError, StreamFormat, bb_scramble, crc8};
+pub use bbframe::{
+    BBHEADER_LEN, BbHeader, BbHeaderError, RollOffReader, StreamFormat, bb_scramble, crc8, ro_bits,
+};
 pub use defs::*;
 pub use plsc::{PlsInfo, PlscDecoder, PlscDemap, PlscEncoder};
 pub use rm::ReedMuller;

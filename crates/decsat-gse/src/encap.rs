@@ -79,6 +79,16 @@ impl GseEncapsulator {
 
     /// Fill one data field of `len` bytes from the queue.
     pub fn fill(&mut self, len: usize) -> Vec<u8> {
+        let mut out = self.packets(len);
+        // Padding: zeros, which read as the padding header.
+        out.resize(len, 0);
+        out
+    }
+
+    /// Whole GSE packets from the queue, at most `len` bytes of them and no
+    /// padding: a run of packets to slice across data fields, as GSE-HEM
+    /// does (EN 302 307-2 §5.1.7).
+    pub fn packets(&mut self, len: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);
         let max_body = self.max_body();
         while let Some(p) = self.queue.front() {
@@ -152,8 +162,6 @@ impl GseEncapsulator {
                 }
             }
         }
-        // Padding: zeros, which read as the padding header.
-        out.resize(len, 0);
         out
     }
 }

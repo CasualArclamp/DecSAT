@@ -20,6 +20,7 @@ pub mod psk;
 pub mod radar;
 pub mod rf;
 pub mod spectrum;
+pub mod streams;
 pub mod tdma;
 pub mod tx;
 pub mod vfo;
@@ -41,7 +42,7 @@ pub use demod::{Demod, LockState, PlFrame};
 pub use estimate::{BandEstimate, estimate_band};
 pub use fec::{
     BbFrame, CallVoiceView, E1View, FecDecoder, FecOutput, FecStats, GseView, MIX as VOICE_MIX,
-    TsView, hdlc_ip,
+    TerminalView, TsView, hdlc_ip,
 };
 pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, SourceState};
 pub use identify::{
@@ -52,6 +53,7 @@ pub use programme::ProgrammeView;
 pub use psk::PskDemod;
 pub use radar::RadarStageView;
 pub use spectrum::Spectrum;
+pub use streams::{StreamContent, StreamView};
 pub use tdma::{BurstMark, ChannelView as TdmaChannelView, TdmaView};
 pub use vfo::{CarrierState, DecoderKind, SignalMode, VfoId, VfoSettings, VfoStatus};
 

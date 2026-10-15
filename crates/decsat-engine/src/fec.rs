@@ -32,8 +32,10 @@ use decsat_fec::vlsnr::VlsnrCode;
 use decsat_fec::{Bch, BchError, DecodeOutcome, FecParams, LdpcCode, LdpcDecoder};
 use decsat_frame::pi2bpsk::pi2_soft;
 use decsat_frame::vlsnr::{self as vl, Slot};
-use decsat_frame::{BBHEADER_LEN, BbHeader, BbHeaderError, PlsInfo, StreamFormat, bb_scramble};
-use decsat_gse::{GseIp, IpPacket, Source, Variant, VariantReport};
+use decsat_frame::{BBHEADER_LEN, BbHeader, BbHeaderError, PlsInfo, RollOffReader, bb_scramble};
+use decsat_gse::{
+    GseIp, HemDeframer, HemStats, IpPacket, Label, LabelStats, Source, Variant, VariantReport,
+};
 use decsat_ip::mcast::{NowPlaying, udp_payload};
 use decsat_ip::{
     AudioRelay, AudioStream, Codec, Flow, IpInfo, IpStats, McastScanner, PcapWriter, PlayTarget,
@@ -45,6 +47,7 @@ use decsat_ts::{
 };
 
 use crate::demod::{PILOT_AFTER, PILOT_PERIOD, PlFrame};
+use crate::streams::{StreamContent, StreamTally, StreamView};
 use decsat_audio::{AudioHandle, AudioPlayer, AudioRecorder, OutputKind};
 
 /// What the FEC thread works on: DVB-S2 frames, or DVB-S symbols.
@@ -329,8 +332,14 @@ pub struct FecStats {
     pub es_n0_db: Option<f32>,
     /// The latest valid BBHEADER.
     pub last_header: Option<BbHeader>,
-    /// Good frames per input stream (ISI; 0 for a single stream).
-    pub streams: BTreeMap<u8, u64>,
+    /// The roll-off the BBHEADERs announce, read the S2X way (the low range
+    /// when RO alternates with `11`, EN 302 307-2 §5.1.6).
+    pub roll_off: Option<decsat_core::RollOff>,
+    /// The input streams: one for a single-stream carrier, one per ISI for
+    /// a multistream one, each with what it carries.
+    pub streams: Vec<StreamView>,
+    /// The stream whose transport stream `ts` is (multistream carriers).
+    pub ts_isi: Option<u8>,
     /// (good, total) per MODCOD index.
     pub per_modcod: BTreeMap<u8, (u64, u64)>,
     /// Useful bit rate (BBHEADER DFL) over the last couple of seconds of
@@ -1272,6 +1281,32 @@ pub struct GseView {
     /// Its voice, played and recorded as a call's is (▶ and ● set
     /// `tdm_play` and `tdm_record`; `voice_auto` plays it once it talks).
     pub radio_voice: Option<CallVoiceView>,
+    /// The GSE labels (terminals, on a hub's outbound) sent the most bytes,
+    /// with the MODCODs their PDUs went in; and how many labels in all.
+    pub terminals: Vec<TerminalView>,
+    pub labels: usize,
+    /// GSE-HEM: slices put back together, all streams.
+    pub hem: Option<HemStats>,
+}
+
+/// Terminals listed at most (the busiest).
+const TERMINALS_SHOWN: usize = 64;
+
+/// One GSE label's traffic: on a VSAT hub's ACM outbound, one terminal's,
+/// and the MODCODs the hub chose for it — its downlink as the hub sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalView {
+    pub label: Label,
+    /// The input stream it was seen on.
+    pub isi: u8,
+    pub stats: LabelStats,
+}
+
+impl TerminalView {
+    /// The MODCOD that carried most of its bytes.
+    pub fn main_modcod(&self) -> Option<u8> {
+        self.stats.modcods.iter().max_by_key(|e| *e.1).map(|e| *e.0)
+    }
 }
 
 /// Where and whether a VFO's FEC writes its output.
@@ -1306,6 +1341,9 @@ pub struct FecOutput {
     pub biss: Option<[u8; 8]>,
     /// Hand a copy of the MPEG-TS to the in-app player.
     pub ts_tap: Option<TsTap>,
+    /// A multistream carrier: the input stream whose transport stream the
+    /// TS outputs, the player and the analyser take; `None` for the first.
+    pub ts_isi: Option<u8>,
     /// Play this multicast audio stream (group:port): in the app, or
     /// relayed to an external player when `audio_external`.
     pub audio_play: Option<SocketAddr>,
@@ -1509,7 +1547,15 @@ impl Drop for FecWorker {
 
 /// The GSE → IP → PCAP end of the FEC thread.
 struct IpStage {
-    gse: GseIp,
+    /// GSE per input stream (each its own fragments and variant).
+    gse: BTreeMap<u8, GseIp>,
+    /// GSE-HEM streams' slices, per input stream.
+    hem: BTreeMap<u8, HemDeframer>,
+    hem_buf: Vec<u8>,
+    forced: Option<Variant>,
+    /// The busiest labels, ranked with the flows.
+    terminals: Vec<TerminalView>,
+    labels: usize,
     stats: IpStats,
     packets: Vec<IpPacket>,
     pcap: Option<PcapWriter>,
@@ -1590,7 +1636,12 @@ impl IpStage {
             radio_talk_until: f64::NEG_INFINITY,
             clock: 0.0,
             asterix: Vec::new(),
-            gse: GseIp::new(),
+            gse: BTreeMap::new(),
+            hem: BTreeMap::new(),
+            hem_buf: Vec::new(),
+            forced: None,
+            terminals: Vec::new(),
+            labels: 0,
             stats: IpStats::default(),
             packets: Vec::new(),
             pcap: None,
@@ -1611,7 +1662,10 @@ impl IpStage {
     /// `o.wireshark`, and start or stop playing audio to match
     /// `o.audio_play`.
     fn follow(&mut self, o: &FecOutput) {
-        self.gse.forced = o.gse_variant;
+        self.forced = o.gse_variant;
+        for g in self.gse.values_mut() {
+            g.forced = o.gse_variant;
+        }
         if o.wireshark != self.wireshark_ask {
             self.wireshark_ask = o.wireshark;
             self.wireshark = None;
@@ -1720,15 +1774,84 @@ impl IpStage {
         }
     }
 
-    /// One good GS-mode frame: its BBHEADER and data field (up to DFL).
-    fn bbframe(&mut self, bbframe: &[u8]) {
+    /// The GSE reader of input stream `isi`, made on first use, told the
+    /// MODCOD of the frame it is about to read.
+    fn gse_for(&mut self, isi: u8, modcod: u8) -> &mut GseIp {
+        let forced = self.forced;
+        let g = self.gse.entry(isi).or_insert_with(|| {
+            let mut g = GseIp::new();
+            g.forced = forced;
+            g
+        });
+        g.set_modcod(modcod);
+        g
+    }
+
+    /// One good GS-mode frame of stream `isi`, sent at `modcod`: its
+    /// BBHEADER and data field (up to DFL).
+    fn bbframe(&mut self, isi: u8, modcod: u8, bbframe: &[u8]) {
         let mut packets = std::mem::take(&mut self.packets);
         packets.clear();
-        self.gse.bbframe(bbframe, &mut packets);
+        self.gse_for(isi, modcod).bbframe(bbframe, &mut packets);
         for p in &packets {
             self.ip(&p.data, &p.info);
         }
         self.packets = packets;
+    }
+
+    /// One good GSE-HEM frame's data field: the sliced GSE packets put back
+    /// together (SYNCD gives the first that starts in it), then read as GSE.
+    fn hem_field(&mut self, isi: u8, modcod: u8, syncd: u16, field: &[u8]) {
+        let mut whole = std::mem::take(&mut self.hem_buf);
+        whole.clear();
+        self.hem
+            .entry(isi)
+            .or_default()
+            .data_field(field, syncd, &mut whole);
+        let mut packets = std::mem::take(&mut self.packets);
+        packets.clear();
+        self.gse_for(isi, modcod).data_field(&whole, &mut packets);
+        for p in &packets {
+            self.ip(&p.data, &p.info);
+        }
+        self.packets = packets;
+        self.hem_buf = whole;
+    }
+
+    /// A frame was lost: GSE-HEM packets cut across it are gone.
+    fn discontinuity(&mut self) {
+        for h in self.hem.values_mut() {
+            h.discontinuity();
+        }
+    }
+
+    /// The stream whose GSE says the most: the most IP, else the most
+    /// PDUs of other kinds.
+    fn main_gse(&self) -> Option<&GseIp> {
+        self.gse.values().max_by_key(|g| {
+            let ip: u64 = g.reports().iter().map(|r| r.ip_packets).max().unwrap_or(0);
+            let other: u64 = g.other_protocols.values().sum();
+            (ip, other)
+        })
+    }
+
+    /// Every stream's labels, the busiest first.
+    fn rank_terminals(&mut self) {
+        let mut all: Vec<TerminalView> = self
+            .gse
+            .iter()
+            .flat_map(|(&isi, g)| {
+                g.labels().iter().map(move |(l, st)| TerminalView {
+                    label: *l,
+                    isi,
+                    stats: st.clone(),
+                })
+            })
+            .collect();
+        self.labels = all.len();
+        all.sort_by_key(|t| std::cmp::Reverse(t.stats.bytes));
+        all.truncate(TERMINALS_SHOWN);
+        self.terminals = all;
     }
 
     /// IP datagrams from MPE (a transport stream).
@@ -1854,6 +1977,7 @@ impl IpStage {
         let new_flows = self.top.len() < 8 && self.stats.flow_count() != self.top.len();
         if self.last_top.elapsed().as_millis() >= 500 || new_flows {
             self.top = self.stats.top_flows(8);
+            self.rank_terminals();
             self.last_top = Instant::now();
         }
         // Few flows, cheap to list: always current.
@@ -1862,13 +1986,35 @@ impl IpStage {
             self.wireshark = None;
         }
 
+        let main = self.main_gse();
+        let mut other_protocols = BTreeMap::new();
+        for g in self.gse.values() {
+            for (&t, &n) in &g.other_protocols {
+                *other_protocols.entry(t).or_default() += n;
+            }
+        }
+        let hem = (!self.hem.is_empty()).then(|| {
+            self.hem
+                .values()
+                .fold(HemStats::default(), |a, h| HemStats {
+                    fields: a.fields + h.stats.fields,
+                    packets: a.packets + h.stats.packets,
+                    joined: a.joined + h.stats.joined,
+                    resyncs: a.resyncs + h.stats.resyncs,
+                    unsynced: a.unsynced + h.stats.unsynced,
+                    mismatches: a.mismatches + h.stats.mismatches,
+                })
+        });
         GseView {
-            source: self.gse.source(),
-            variants: self.gse.reports(),
-            other_protocols: self.gse.other_protocols.clone(),
-            other_entropy: self.gse.other_entropy(),
-            other_encrypted: self.gse.other_encrypted(),
-            trailers: self.gse.trailers(),
+            source: main.and_then(GseIp::source),
+            variants: main.map_or_else(Vec::new, GseIp::reports),
+            other_protocols,
+            other_entropy: main.and_then(GseIp::other_entropy),
+            other_encrypted: main.is_some_and(GseIp::other_encrypted),
+            trailers: self.gse.values().map(GseIp::trailers).sum(),
+            terminals: self.terminals.clone(),
+            labels: self.labels,
+            hem,
             packets: self.stats.packets,
             bytes: self.stats.bytes,
             ipv4: self.stats.ipv4,
@@ -1960,6 +2106,8 @@ impl Drop for IpStage {
 
 /// The MPEG-TS end of the FEC thread.
 struct TsStage {
+    /// Added to file names: the input stream on a multistream carrier.
+    tag: String,
     deframer: TsDeframer,
     analyser: TsAnalyser,
     packets: Vec<[u8; TS_LEN]>,
@@ -1992,7 +2140,13 @@ struct TsStage {
 
 impl TsStage {
     fn new() -> Self {
+        Self::tagged(String::new())
+    }
+
+    /// A stage whose files are named with `tag` (`-isi0`).
+    fn tagged(tag: String) -> Self {
         TsStage {
+            tag,
             deframer: TsDeframer::new(),
             analyser: TsAnalyser::new(),
             packets: Vec::new(),
@@ -2030,9 +2184,10 @@ impl TsStage {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let path = o.dir.join(format!(
-                    "decsat-{}-{}-{stamp}.ts",
+                    "decsat-{}-{}{}-{stamp}.ts",
                     o.name.replace(' ', "_"),
-                    crate::rf::freq_tag(o.carrier_hz)
+                    crate::rf::freq_tag(o.carrier_hz),
+                    self.tag
                 ));
                 let _ = std::fs::create_dir_all(&o.dir);
                 match TsFile::create(&path) {
@@ -2345,7 +2500,11 @@ fn run(
 ) {
     let mut dec = FecDecoder::new();
     let mut ip: Option<IpStage> = None;
-    let mut ts: Option<TsStage> = None;
+    // A TS stage per input stream that carries transport packets (the
+    // modems' TS is stream 0), and every DVB-S2 stream's counts.
+    let mut ts: BTreeMap<u8, TsStage> = BTreeMap::new();
+    let mut streams: BTreeMap<u8, StreamTally> = BTreeMap::new();
+    let mut roll_off = RollOffReader::new();
     // Payload rate window: DFL bits and signal seconds.
     let (mut win_bits, mut win_secs) = (0f64, 0f64);
     let mut busy = 0f64;
@@ -2538,7 +2697,7 @@ fn run(
                             .push(0, bits);
                     }
                     if !payload_out.ts.is_empty() {
-                        let stage = ts.get_or_insert_with(TsStage::new);
+                        let stage = ts.entry(0).or_insert_with(TsStage::new);
                         stage.follow(&o);
                         stage.packets_in(&payload_out.ts);
                         if !stage.datagrams.is_empty() || ip.is_some() {
@@ -2622,7 +2781,7 @@ fn run(
                         ipst.asterix.clear();
                     }
                 }
-                if let Some(stage) = &mut ts {
+                if let Some(stage) = ts.get_mut(&0) {
                     stage.follow(&o);
                     stage.tick(secs);
                 }
@@ -2696,7 +2855,7 @@ fn run(
                 s.raw_file = raw.path.clone().map(|p| (p, raw.bytes));
                 s.raw_triggered = raw.triggered;
                 s.raw_active = raw.file.is_some();
-                if let Some(stage) = &mut ts {
+                if let Some(stage) = ts.get_mut(&0) {
                     s.ts = Some(stage.view());
                 }
                 if let Some(stage) = &mut ip {
@@ -2711,7 +2870,7 @@ fn run(
                 let rx = dvbs.get_or_insert_with(decsat_modem::dvbs::DvbsRx::new);
                 dvbs_out.clear();
                 rx.push(&sym, &mut dvbs_out);
-                let stage = ts.get_or_insert_with(TsStage::new);
+                let stage = ts.entry(0).or_insert_with(TsStage::new);
                 stage.follow(&output.lock().unwrap());
                 stage.packets_in(&dvbs_out);
                 stage.tick(secs);
@@ -2743,6 +2902,7 @@ fn run(
         };
         let secs = f.pls.plframe_len as f64 / symbol_rate;
         let out = dec.decode(&f);
+        let o = output.lock().unwrap().clone();
 
         // A stream reassembled across frames breaks at any frame missing in
         // between: one the demodulator never saw (lock regained), one dropped
@@ -2750,12 +2910,17 @@ fn run(
         let broken = f.after_gap
             || gap.swap(false, Ordering::Relaxed)
             || out.as_ref().is_some_and(|b| !b.ok());
-        if broken && let Some(t) = &mut ts {
-            t.deframer.discontinuity();
+        if broken {
+            for t in ts.values_mut() {
+                t.deframer.discontinuity();
+            }
+            if let Some(i) = &mut ip {
+                i.discontinuity();
+            }
         }
         if let Some(b) = &out
             && b.ok()
-            && let Some(path) = output.lock().unwrap().bbframes.clone()
+            && let Some(path) = &o.bbframes
         {
             use std::io::Write;
             // Rust note: the file is opened per frame (a few hundred a
@@ -2772,52 +2937,61 @@ fn run(
                 let _ = fh.write_all(&rec);
             }
         }
-        let wants_ts = output.lock().unwrap().ts;
-        if let Some(b) = &out
+
+        // Each good frame to its input stream's stage, by what the stream
+        // carries: transport packets to that stream's TS stage, GSE and
+        // GSE-HEM to IP (each stream its own GSE reader).
+        if let Some(b) = out.as_ref().filter(|b| b.ok())
             && let Ok(h) = &b.header
-            && b.ok()
-            && h.format == StreamFormat::Transport
-            && wants_ts
         {
+            roll_off.push(h.ro);
+            let isi = if h.single_stream { 0 } else { h.isi };
             let end = (BBHEADER_LEN + h.dfl as usize / 8).min(b.bytes.len());
-            let stage = ts.get_or_insert_with(TsStage::new);
-            stage.follow(&output.lock().unwrap());
-            stage.data_field(&b.bytes[BBHEADER_LEN..end], h);
-            // IP by MPE joins the IP stage (statistics, multicast audio).
-            if !stage.datagrams.is_empty() || ip.is_some() {
-                let ipst = ip.get_or_insert_with(IpStage::new);
-                ipst.follow(&output.lock().unwrap());
-                ipst.mpe(&stage.datagrams, &stage.mpe.stats);
+            let content = StreamContent::of(h);
+            streams.entry(isi).or_default().frame(h, b.pls.modcod);
+            if content.is_ts() {
+                ts.entry(isi).or_insert_with(|| {
+                    TsStage::tagged(if h.single_stream {
+                        String::new()
+                    } else {
+                        format!("-isi{isi}")
+                    })
+                });
+                let primary = primary_isi(&o, &ts);
+                let stage = ts.get_mut(&isi).expect("just made");
+                stage.follow(&ts_output(&o, primary == Some(isi)));
+                stage.data_field(&b.bytes[BBHEADER_LEN..end], h);
+                // IP by MPE joins the IP stage (statistics, multicast audio).
+                if !stage.datagrams.is_empty() || ip.is_some() {
+                    let ipst = ip.get_or_insert_with(IpStage::new);
+                    ipst.follow(&o);
+                    ipst.mpe(&stage.datagrams, &stage.mpe.stats);
+                }
+            } else if content == StreamContent::Gse {
+                // The header goes too: a vendor's CRC at the end of the
+                // field covers it.
+                let stage = ip.get_or_insert_with(IpStage::new);
+                stage.follow(&o);
+                stage.bbframe(isi, b.pls.modcod, &b.bytes[..end]);
+            } else if content == StreamContent::GseHem {
+                let stage = ip.get_or_insert_with(IpStage::new);
+                stage.follow(&o);
+                stage.hem_field(isi, b.pls.modcod, h.syncd, &b.bytes[BBHEADER_LEN..end]);
             }
-        } else if let Some(t) = &mut ts {
-            // Keep Record/UDP/TCP responsive between TS frames.
-            t.follow(&output.lock().unwrap());
         }
-        if let Some(t) = &mut ts {
+        // Signal time passes for every stage; Record/UDP/TCP stay
+        // responsive between the frames that feed them.
+        let primary = primary_isi(&o, &ts);
+        for (&isi, t) in ts.iter_mut() {
+            t.follow(&ts_output(&o, primary == Some(isi)));
             t.tick(secs);
         }
-
-        // GSE/IP on good generic-stream frames (UPL 0: continuous; GSE also
-        // turns up flagged as packetized with UPL 0). The header goes too:
-        // a vendor's CRC at the end of the field covers it.
-        let gs = out.as_ref().and_then(|b| match &b.header {
-            Ok(h) if b.ok() && h.format != StreamFormat::Transport && h.upl == 0 => {
-                let end = (BBHEADER_LEN + h.dfl as usize / 8).min(b.bytes.len());
-                Some(&b.bytes[..end])
-            }
-            _ => None,
-        });
-        if let Some(bbframe) = gs {
-            let stage = ip.get_or_insert_with(IpStage::new);
-            stage.follow(&output.lock().unwrap());
-            stage.bbframe(bbframe);
+        for st in streams.values_mut() {
+            st.tick(secs);
         }
         if let Some(stage) = &mut ip {
+            stage.follow(&o);
             stage.tick(secs);
-            if gs.is_none() {
-                // Keep Record/Stop responsive between GS frames.
-                stage.follow(&output.lock().unwrap());
-            }
         }
 
         let used = t0.elapsed().as_secs_f64();
@@ -2840,17 +3014,28 @@ fn run(
                     s.ok += 1;
                     s.bch_corrected += *c as u64;
                     s.last_header = Some(*h);
-                    *s.streams
-                        .entry(if h.single_stream { 0 } else { h.isi })
-                        .or_default() += 1;
                     s.per_modcod.entry(b.pls.modcod).or_default().0 += 1;
                     win_bits += h.dfl as f64;
-                    if h.format == StreamFormat::Transport {
+                    if StreamContent::of(h) == StreamContent::Ts {
                         s.ts_frames += 1;
                     }
                 }
             }
         }
+        s.roll_off = roll_off.roll_off();
+        s.streams = streams
+            .values()
+            .map(|t| {
+                let mut v = t.view.clone();
+                if let Some(st) = ts.get(&v.isi).filter(|_| v.content.is_ts()) {
+                    v.ts_packets = st.deframer.stats.packets;
+                    v.ts_crc_errors = st.deframer.stats.crc_errors;
+                    v.ts_pids = st.analyser.pids.len();
+                    v.ts_primary = primary == Some(v.isi);
+                }
+                v
+            })
+            .collect();
         if win_secs >= 2.0 {
             s.payload_bps = win_bits / win_secs;
             (win_bits, win_secs) = (0.0, 0.0);
@@ -2861,10 +3046,38 @@ fn run(
         if let Some(stage) = &mut ip {
             s.gse = Some(stage.view());
         }
-        if let Some(t) = &mut ts {
+        if let Some(p) = primary
+            && let Some(t) = ts.get_mut(&p)
+        {
             s.ts = Some(t.view());
+            s.ts_isi = Some(p);
         }
     }
+}
+
+/// The input stream whose TS stage takes the outputs and is shown: the one
+/// chosen, else the first that carries transport packets.
+fn primary_isi(o: &FecOutput, ts: &BTreeMap<u8, TsStage>) -> Option<u8> {
+    o.ts_isi
+        .filter(|i| ts.contains_key(i))
+        .or_else(|| ts.keys().next().copied())
+}
+
+/// What one TS stage writes: the shown stream all the outputs asked for,
+/// the others only their files. A VFO decoding IP writes its transport
+/// streams (a multistream carrier's signalling) while it records its PCAP.
+fn ts_output(o: &FecOutput, primary: bool) -> FecOutput {
+    let mut t = o.clone();
+    if !o.ts {
+        t.ts_record = o.pcap;
+    }
+    if !primary || !o.ts {
+        t.ts_udp = None;
+        t.ts_tcp = None;
+        t.ts_tap = None;
+        t.biss = None;
+    }
+    t
 }
 
 #[cfg(test)]
@@ -2963,7 +3176,7 @@ mod tests {
         assert_eq!(ped.points[0].changes, 2);
     }
     use decsat_frame::StreamFormat;
-    use decsat_mod::{FrameSpec, PlFramer, Shaper, TsBbFramer};
+    use decsat_mod::{FrameSpec, GseBbFramer, MultiStream, PlFramer, Shaper, TsBbFramer};
     use std::f64::consts::TAU;
 
     /// A D&I timeslot carrying G.728 (as the CDM-600L's: bits 2–3 of each
@@ -3375,7 +3588,25 @@ mod tests {
         seed: u64,
         gold: u32,
     ) -> Vec<Iq> {
-        let mut framer = PlFramer::new(gold, seed);
+        signal_from(
+            PlFramer::new(gold, seed),
+            schedule,
+            n_sym,
+            cycles,
+            esn0_db,
+            seed,
+        )
+    }
+
+    /// [`signal`] with the frames from `framer` (its own BBFRAME source).
+    fn signal_from(
+        mut framer: PlFramer,
+        schedule: &[FrameSpec],
+        n_sym: usize,
+        cycles: f64,
+        esn0_db: f64,
+        seed: u64,
+    ) -> Vec<Iq> {
         let syms = framer.build_schedule(schedule, n_sym);
         let mut sh = Shaper::new(4, 0.25, 16);
         let mut x = Vec::new();
@@ -3432,6 +3663,102 @@ mod tests {
                 Some(f)
             })
             .collect()
+    }
+
+    /// The FEC thread's view of a signal (4 samples a symbol): demodulated,
+    /// every frame handed to a lossless FEC worker with `output`.
+    fn fec_stats(x: &[Iq], output: FecOutput) -> FecStats {
+        let mut d = Demod::new(4.0, 1.0, 0.25, 0);
+        let w = FecWorker::spawn(1.0, output, Pending::default()).lossless(true);
+        let mut frames = Vec::new();
+        for chunk in x.chunks(50_000) {
+            frames.clear();
+            d.process(chunk, &mut frames);
+            for f in frames.drain(..) {
+                w.offer(f);
+            }
+        }
+        let stats = Arc::clone(&w.stats);
+        drop(w); // works through the queue, then ends
+        stats.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_multistream_outbound_is_read_stream_by_stream() {
+        // As the live VSAT hub sends it: S2X low roll-off, ISI 0 the
+        // signalling as transport packets in a generic stream (SYNC BBh),
+        // ISI 1 IP over GSE to three terminals, in ACM.
+        let terminals = [1u8, 2, 3].map(|k| decsat_gse::Label::Six([0, 6, 0x39, 0, 0, k]));
+        let source = MultiStream::new()
+            .with_generic_ts(0, Box::new(TsBbFramer::new(3)), 0xBB)
+            .with(
+                1,
+                Box::new(GseBbFramer::new(4, Variant::STANDARD).with_labels(terminals.to_vec())),
+            );
+        let mut framer = PlFramer::new(0, 5).with_source(Box::new(source));
+        framer.set_roll_off(decsat_core::RollOff::R05);
+        // Three MODCODs against two streams: each stream gets all three.
+        let schedule = [
+            FrameSpec::new(4, true, true),
+            FrameSpec::new(12, true, true),
+            FrameSpec::new(6, true, true),
+        ];
+        let x = signal_from(framer, &schedule, 700_000, 0.001, 16.0, 6);
+        let s = fec_stats(&x, FecOutput::default());
+
+        assert!(s.ok > 40, "{} good frames", s.ok);
+        assert_eq!(s.roll_off, Some(decsat_core::RollOff::R05));
+        assert_eq!(s.streams.len(), 2, "{:?}", s.streams);
+        let (sig, ip) = (&s.streams[0], &s.streams[1]);
+        assert_eq!((sig.isi, ip.isi), (0, 1));
+        assert_eq!(sig.content, StreamContent::TsPackets { sync: 0xBB });
+        assert_eq!(ip.content, StreamContent::Gse);
+        assert_eq!(sig.modcods.len(), 3);
+        // The signalling stream reads as a transport stream: every CRC-8
+        // holds and its tables name the programme.
+        assert!(sig.ts_primary && sig.ts_packets > 100, "{sig:?}");
+        assert_eq!(sig.ts_crc_errors, 0);
+        assert_eq!(s.ts_isi, Some(0));
+        let ts = s.ts.as_ref().expect("TS from ISI 0");
+        assert!(
+            ts.report
+                .programmes
+                .iter()
+                .any(|p| p.name.as_deref() == Some("DecSAT test signal")),
+            "{:?}",
+            ts.report.programmes
+        );
+        // ISI 1's IP, and its three terminals with the MODCODs they got.
+        let g = s.gse.as_ref().expect("IP");
+        assert!(g.packets > 50, "{} IP packets", g.packets);
+        assert!(g.labels >= 3, "{} labels", g.labels);
+        for t in terminals {
+            let v = g.terminals.iter().find(|v| v.label == t).expect("terminal");
+            assert_eq!(v.isi, 1);
+            assert!(v.stats.ip > 0 && !v.stats.modcods.is_empty(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn a_gse_hem_carrier_decodes_to_ip() {
+        let mut framer =
+            PlFramer::new(0, 8).with_source(Box::new(GseBbFramer::new(9, Variant::STANDARD).hem()));
+        framer.set_roll_off(decsat_core::RollOff::R10);
+        let schedule = [FrameSpec::new(4, true, true)];
+        let x = signal_from(framer, &schedule, 600_000, 0.001, 14.0, 9);
+        let s = fec_stats(&x, FecOutput::default());
+        assert!(s.ok > 20, "{} good frames", s.ok);
+        assert_eq!(s.roll_off, Some(decsat_core::RollOff::R10));
+        assert_eq!(s.streams.len(), 1);
+        assert_eq!(s.streams[0].content, StreamContent::GseHem);
+        assert!(s.streams[0].hem);
+        let g = s.gse.as_ref().expect("IP");
+        let h = g.hem.expect("HEM stats");
+        assert!(h.joined > 10, "{h:?}");
+        assert_eq!(h.mismatches, 0, "{h:?}");
+        assert!(g.packets > 40, "{} IP packets", g.packets);
+        // Every UDP checksum holds: the slices went back together right.
+        assert_eq!(g.encrypted_flows, 0);
     }
 
     fn decode_all(x: &[Iq]) -> Vec<BbFrame> {

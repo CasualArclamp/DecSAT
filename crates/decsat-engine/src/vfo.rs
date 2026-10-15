@@ -432,6 +432,9 @@ pub struct VfoSettings {
     /// DVB-S2 → MPEG-TS: a copy of the (descrambled) stream for the in-app
     /// player.
     pub ts_tap: Option<decsat_ts::TsTap>,
+    /// A multistream carrier: the input stream (ISI) whose transport stream
+    /// is shown and output; `None` for the first that carries one.
+    pub ts_isi: Option<u8>,
     /// DVB-S2 → IP or TS: play this multicast audio stream (group:port), in
     /// the app or (`audio_external`) relayed to a media player.
     pub audio_play: Option<std::net::SocketAddr>,
@@ -500,6 +503,7 @@ impl VfoSettings {
             ts_tcp: "127.0.0.1:8001".into(),
             biss_key: String::new(),
             ts_tap: None,
+            ts_isi: None,
             audio_play: None,
             audio_external: false,
             audio_record: None,
@@ -2763,6 +2767,7 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
             .map(|k| k.cw)
             .filter(|_| s.decoder.outputs_ts()),
         ts_tap: s.ts_tap.clone().filter(|_| s.decoder.outputs_ts()),
+        ts_isi: s.ts_isi,
         audio_play: s.audio_play,
         audio_external: s.audio_external,
         audio_record: s.audio_record,

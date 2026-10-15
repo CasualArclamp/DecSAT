@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use decsat_core::{FecFrame, RollOff};
 use decsat_fec::vlsnr::VlsnrCode;
 use decsat_fec::{Bch, FecParams, LdpcCode};
-use decsat_frame::{BBHEADER_LEN, BbHeader, StreamFormat, bb_scramble, crc8};
+use decsat_frame::{BBHEADER_LEN, BbHeader, StreamFormat, bb_scramble, crc8, ro_bits};
 use decsat_gse::{GseEncapsulator, Label, Variant};
 
 /// Where a framer's BBFRAMEs come from.
@@ -102,6 +102,8 @@ pub struct TsBbFramer {
     pub roll_off: RollOff,
     /// CCM (one MODCOD) or ACM/VCM, for MATYPE.
     pub ccm: bool,
+    /// BBFRAMEs made: the low roll-offs' RO alternates frame by frame.
+    frames: u64,
     /// A multicast radio in MPE on TEST_MPE_PID, and its packets queued.
     radio: TestRadio,
     mpe_queue: std::collections::VecDeque<[u8; TS_LEN]>,
@@ -135,6 +137,7 @@ impl TsBbFramer {
             prev_crc: 0,
             roll_off: RollOff::R35,
             ccm: true,
+            frames: 0,
             radio: TestRadio::new([239, 255, 1, 2], "DecSAT test radio (MPE)"),
             mpe_queue: Default::default(),
             mpe_cc: 0,
@@ -231,7 +234,7 @@ impl BbFrameSource for TsBbFramer {
             ccm: self.ccm,
             issyi: false,
             npd: false,
-            roll_off: Some(self.roll_off),
+            ro: ro_bits(self.roll_off, self.frames),
             isi: 0,
             upl: (TS_LEN * 8) as u16,
             dfl: (field * 8) as u16,
@@ -239,6 +242,7 @@ impl BbFrameSource for TsBbFramer {
             syncd,
             high_efficiency: false,
         };
+        self.frames += 1;
         let mut frame = Vec::with_capacity(bytes);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(&data);
@@ -257,6 +261,16 @@ pub struct GseBbFramer {
     seq: u32,
     pub roll_off: RollOff,
     pub ccm: bool,
+    /// BBFRAMEs made (see `TsBbFramer::frames`).
+    frames: u64,
+    /// GSE-HEM (S2X): packets sliced across frames rather than each frame
+    /// holding whole ones — the packets waiting to go out, and where in
+    /// them each starts.
+    hem: bool,
+    pending: Vec<u8>,
+    starts: std::collections::VecDeque<usize>,
+    /// The labels the PDUs go to, in turn (terminals of a test network).
+    labels: Vec<Label>,
 }
 
 impl GseBbFramer {
@@ -268,7 +282,63 @@ impl GseBbFramer {
             seq: 0,
             roll_off: RollOff::R35,
             ccm: true,
+            frames: 0,
+            hem: false,
+            pending: Vec::new(),
+            starts: Default::default(),
+            labels: vec![Label::Six([0x02, 0, 0, 0, 0, 0x01])],
         }
+    }
+
+    /// GSE-HEM framing (EN 302 307-2 §5.1.7): TS/GS `10`, CRC8_MODE =
+    /// CRC-8 ⊕ 1, GSE packets (standard lengths) sliced across BBFRAMEs with
+    /// SYNCD at the first that starts in each.
+    pub fn hem(mut self) -> Self {
+        self.hem = true;
+        self
+    }
+
+    /// Send the PDUs to these labels in turn.
+    pub fn with_labels(mut self, labels: Vec<Label>) -> Self {
+        assert!(!labels.is_empty());
+        self.labels = labels;
+        self
+    }
+
+    /// Queue PDUs until at least `n` are waiting.
+    fn top_up(&mut self, n: usize) {
+        while self.enc.queued() < n {
+            let p = self.packet();
+            let label = self.labels[self.seq as usize % self.labels.len()];
+            self.enc.push(0x0800, label, p);
+        }
+    }
+
+    /// GSE-HEM: the next `field` bytes of the packet stream, and SYNCD.
+    fn hem_field(&mut self, field: usize) -> (Vec<u8>, u16) {
+        while self.pending.len() < field {
+            self.top_up(4);
+            let run = self.enc.packets(4096);
+            let mut q = 0;
+            while q + 2 <= run.len() {
+                self.starts.push_back(self.pending.len() + q);
+                q += 2 + (u16::from_be_bytes([run[q], run[q + 1]]) & 0x0FFF) as usize;
+            }
+            self.pending.extend_from_slice(&run);
+        }
+        let data: Vec<u8> = self.pending.drain(..field).collect();
+        let syncd = self
+            .starts
+            .front()
+            .filter(|&&s| s < field)
+            .map_or(0xFFFF, |&s| (s * 8) as u16);
+        for s in self.starts.iter_mut() {
+            *s = s.wrapping_sub(field);
+        }
+        while self.starts.front().is_some_and(|&s| s > usize::MAX / 2) {
+            self.starts.pop_front();
+        }
+        (data, syncd)
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -316,32 +386,134 @@ impl BbFrameSource for GseBbFramer {
 
     fn next_frame(&mut self, bytes: usize) -> Vec<u8> {
         let field = bytes - BBHEADER_LEN;
-        // Keep the queue topped up so every frame is full.
-        while self.enc.queued() < 4 {
-            let p = self.packet();
-            self.enc
-                .push(0x0800, Label::Six([0x02, 0, 0, 0, 0, 0x01]), p);
-        }
-        let data = self.enc.fill(field);
+        let (data, syncd) = if self.hem {
+            self.hem_field(field)
+        } else {
+            // Keep the queue topped up so every frame is full.
+            self.top_up(4);
+            (self.enc.fill(field), 0)
+        };
         let header = BbHeader {
-            format: StreamFormat::GenericContinuous,
+            format: if self.hem {
+                StreamFormat::GseHem
+            } else {
+                StreamFormat::GenericContinuous
+            },
             single_stream: true,
             ccm: self.ccm,
             issyi: false,
             npd: false,
-            roll_off: Some(self.roll_off),
+            ro: ro_bits(self.roll_off, self.frames),
             isi: 0,
             upl: 0,
             dfl: (field * 8) as u16,
             sync: 0,
-            syncd: 0,
-            high_efficiency: false,
+            syncd,
+            high_efficiency: self.hem,
         };
+        self.frames += 1;
         let mut frame = Vec::with_capacity(bytes);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(&data);
         bb_scramble(&mut frame);
         frame
+    }
+}
+
+/// One input stream of a [`MultiStream`].
+struct Input {
+    isi: u8,
+    source: Box<dyn BbFrameSource>,
+    /// Re-flag TS-mode frames as a generic stream of 188-byte packets with
+    /// this SYNC byte.
+    generic_sync: Option<u8>,
+}
+
+/// Several BBFRAME sources as one multistream signal (MIS, EN 302 307-1
+/// §5.1.6): frames taken from each in turn, their MATYPE rewritten — the
+/// stream's ISI, MIS, ACM, and the RO bits run over all the streams together
+/// (EN 302 307-2 §5.1.6 wants the low roll-offs' alternation evident across
+/// every ISI). A stream added with [`Self::with_generic_ts`] keeps its
+/// transport packets (CRC-8 in place of each sync byte) but is flagged a
+/// generic continuous stream with UPL 188 bytes and its own SYNC byte, as a
+/// live VSAT hub sends its signalling.
+pub struct MultiStream {
+    inputs: Vec<Input>,
+    next: usize,
+    frames: u64,
+    roll_off: RollOff,
+}
+
+impl Default for MultiStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultiStream {
+    pub fn new() -> Self {
+        MultiStream {
+            inputs: Vec::new(),
+            next: 0,
+            frames: 0,
+            roll_off: RollOff::R35,
+        }
+    }
+
+    pub fn with(mut self, isi: u8, source: Box<dyn BbFrameSource>) -> Self {
+        self.inputs.push(Input {
+            isi,
+            source,
+            generic_sync: None,
+        });
+        self
+    }
+
+    /// A TS-mode source sent as transport packets in a generic stream.
+    pub fn with_generic_ts(mut self, isi: u8, source: Box<dyn BbFrameSource>, sync: u8) -> Self {
+        self.inputs.push(Input {
+            isi,
+            source,
+            generic_sync: Some(sync),
+        });
+        self
+    }
+}
+
+impl BbFrameSource for MultiStream {
+    fn set_roll_off(&mut self, roll_off: RollOff) {
+        self.roll_off = roll_off;
+        for i in &mut self.inputs {
+            i.source.set_roll_off(roll_off);
+        }
+    }
+
+    fn set_ccm(&mut self, _ccm: bool) {
+        // A multistream signal is flagged ACM whatever its MODCODs.
+        for i in &mut self.inputs {
+            i.source.set_ccm(false);
+        }
+    }
+
+    fn next_frame(&mut self, bytes: usize) -> Vec<u8> {
+        let k = self.next % self.inputs.len();
+        self.next += 1;
+        let input = &mut self.inputs[k];
+        let mut f = input.source.next_frame(bytes);
+        bb_scramble(&mut f);
+        let mut h = BbHeader::parse(&f).expect("a source's own header");
+        h.single_stream = false;
+        h.ccm = false;
+        h.isi = input.isi;
+        h.ro = ro_bits(self.roll_off, self.frames);
+        if let Some(sync) = input.generic_sync {
+            h.format = StreamFormat::GenericContinuous;
+            h.sync = sync;
+        }
+        f[..BBHEADER_LEN].copy_from_slice(&h.to_bytes());
+        self.frames += 1;
+        bb_scramble(&mut f);
+        f
     }
 }
 
@@ -428,6 +600,73 @@ mod tests {
         for w in stream.as_chunks::<TS_LEN>().0.windows(2) {
             assert_eq!(w[1][0], crc8(&w[0][1..]));
         }
+    }
+
+    #[test]
+    fn hem_frames_slice_packets_and_point_at_the_first() {
+        let p = FecParams::new(FecFrame::Short, CodeRate::new(1, 2)).unwrap();
+        let mut f = GseBbFramer::new(5, Variant::STANDARD).hem();
+        let mut stream = Vec::new();
+        let mut sliced = 0;
+        for _ in 0..30 {
+            let mut fr = f.next_frame(p.bbframe_bytes());
+            bb_scramble(&mut fr);
+            let h = BbHeader::parse(&fr).unwrap();
+            assert_eq!(h.format, StreamFormat::GseHem);
+            assert!(h.high_efficiency);
+            let field = &fr[BBHEADER_LEN..BBHEADER_LEN + h.dfl as usize / 8];
+            if h.syncd != 0 {
+                sliced += 1;
+            }
+            if h.syncd != 0xFFFF {
+                // SYNCD lands on a packet start of the whole stream.
+                let at = stream.len() + h.syncd as usize / 8;
+                let mut q = 0;
+                while q < at {
+                    q += 2
+                        + (u16::from_be_bytes([
+                            stream_or(&stream, field, q),
+                            stream_or(&stream, field, q + 1),
+                        ]) & 0x0FFF) as usize;
+                }
+                assert_eq!(q, at);
+            }
+            stream.extend_from_slice(field);
+        }
+        assert!(sliced > 10, "{sliced}");
+
+        fn stream_or(stream: &[u8], field: &[u8], i: usize) -> u8 {
+            if i < stream.len() {
+                stream[i]
+            } else {
+                field[i - stream.len()]
+            }
+        }
+    }
+
+    #[test]
+    fn a_multistream_signal_flags_each_stream() {
+        let p = FecParams::new(FecFrame::Short, CodeRate::new(1, 2)).unwrap();
+        let mut m = MultiStream::new()
+            .with_generic_ts(0, Box::new(TsBbFramer::new(1)), 0xBB)
+            .with(1, Box::new(GseBbFramer::new(2, Variant::STANDARD)));
+        m.set_roll_off(RollOff::R05);
+        let mut rd = decsat_frame::RollOffReader::new();
+        for n in 0..6 {
+            let mut fr = m.next_frame(p.bbframe_bytes());
+            bb_scramble(&mut fr);
+            let h = BbHeader::parse(&fr).unwrap();
+            rd.push(h.ro);
+            assert!(!h.single_stream && !h.ccm);
+            assert_eq!(h.isi, n % 2);
+            assert_eq!(h.format, StreamFormat::GenericContinuous);
+            if n % 2 == 0 {
+                assert_eq!((h.upl, h.sync), (1504, 0xBB));
+            } else {
+                assert_eq!(h.upl, 0);
+            }
+        }
+        assert_eq!(rd.roll_off(), Some(RollOff::R05));
     }
 
     #[test]

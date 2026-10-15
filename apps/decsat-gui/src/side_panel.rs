@@ -217,15 +217,20 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     };
     let st = inp.statuses.get(&v.id).cloned().unwrap_or_default();
     ui.separator();
+    // A multistream carrier's stream picked for the TS card.
+    let mut ts_pick = None;
     if matches!(
         v.settings.decoder,
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
     ) {
-        dvb_card(ui, v.settings.decoder, &st);
+        ts_pick = dvb_card(ui, v.settings.decoder, &st);
         ui.add_space(6.0);
     }
 
     let mut s = v.settings.clone();
+    if let Some(isi) = ts_pick {
+        s.ts_isi = Some(isi);
+    }
     egui::Grid::new("vfo_settings")
         .num_columns(2)
         .spacing([8.0, 4.0])
@@ -4156,6 +4161,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
     if let Some(r) = &g.radio {
         radio_section(ui, r);
     }
+    if g.labels >= 2 {
+        terminals_section(ui, g);
+    }
     if g.mpe.is_some() && g.source.is_none() {
         return; // no GSE to compare variants of
     }
@@ -4184,6 +4192,97 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                 }
             });
         });
+}
+
+/// A GSE label as text: a MAC (6 bytes), 3 bytes, or broadcast.
+fn label_text(l: &decsat_gse::Label) -> String {
+    match l {
+        decsat_gse::Label::None => "broadcast".into(),
+        decsat_gse::Label::Three(b) => format!("{:02x}{:02x}{:02x}", b[0], b[1], b[2]),
+        decsat_gse::Label::Six(b) => b
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    }
+}
+
+/// What the terminals table says.
+const TERMINALS_TIP: &str = "Each GSE label is a receiver address — on a VSAT hub's \
+     outbound, a terminal's MAC. On an ACM outbound the hub picks each frame's MODCOD for \
+     the terminals whose data it carries, from the reception they report, so the MODCODs a \
+     terminal is sent are its downlink as the hub sees it: one sent 16APSK 3/4 has at least \
+     that MODCOD's QEF Es/N0 at its dish. 'Needs' is the QEF of the MODCOD that carried \
+     most of its bytes. Broadcast PDUs carry no label.";
+
+/// The GSE labels (terminals) the most bytes went to, with the MODCODs the
+/// hub sent each in.
+fn terminals_section(ui: &mut Ui, g: &GseView) {
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new(
+        RichText::new(format!("Terminals ({} GSE labels)", g.labels))
+            .small()
+            .strong(),
+    )
+    .id_salt("terminals")
+    .default_open(true)
+    .show(ui, |ui| {
+        ui.label(
+            RichText::new("hover for what the MODCODs say")
+                .small()
+                .weak(),
+        )
+        .on_hover_text(TERMINALS_TIP);
+        egui::Grid::new("terminal_rows")
+            .num_columns(4)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["label", "data", "MODCODs", "needs"] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for t in g.terminals.iter().take(24) {
+                    let total = t.stats.bytes.max(1) as f64;
+                    let mut mc: Vec<(&u8, &u64)> = t.stats.modcods.iter().collect();
+                    mc.sort_by(|a, b| b.1.cmp(a.1));
+                    let shares: Vec<String> = mc
+                        .iter()
+                        .take(2)
+                        .map(|&(&m, &b)| {
+                            format!(
+                                "{} {:.0}%",
+                                decsat_core::modcod_name(m),
+                                100.0 * b as f64 / total
+                            )
+                        })
+                        .collect();
+                    let addrs: Vec<String> = t.stats.addrs.iter().map(|a| a.to_string()).collect();
+                    let r = ui.label(RichText::new(label_text(&t.label)).monospace().small());
+                    if !addrs.is_empty() {
+                        r.on_hover_text(format!(
+                            "IP to {}{}",
+                            addrs.join(", "),
+                            if t.isi > 0 {
+                                format!(" · ISI {}", t.isi)
+                            } else {
+                                String::new()
+                            }
+                        ));
+                    }
+                    ui.label(
+                        RichText::new(format!("{:.1} kB", t.stats.bytes as f64 / 1e3)).small(),
+                    );
+                    ui.label(RichText::new(shares.join(" · ")).small());
+                    let needs = t
+                        .main_modcod()
+                        .and_then(decsat_core::qef_es_n0_db)
+                        .map_or("–".to_string(), |q| format!("{q:.1} dB"));
+                    ui.label(RichText::new(needs).small())
+                        .on_hover_text(TERMINALS_TIP);
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 /// ED-137 radio over IP: each stream's signalling now and so far, the SIP
@@ -4509,7 +4608,7 @@ const RIGHT_PAD: f32 = 6.0;
 /// while the lock is confirmed, grey while searching; the link margin beside
 /// it and an Es/N0 bar ticked at the MODCOD's ideal QEF Es/N0. Then the
 /// receive chain, stage by stage ([`dvb_chain`]).
-fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
+fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) -> Option<u8> {
     let grey = ui.visuals().weak_text_color();
     // A lock being confirmed: the standard's colour, half lit.
     let dim = |c: Color32| c.gamma_multiply(0.55);
@@ -4773,7 +4872,7 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
         }
     });
 
-    dvb_chain(ui, st, dvbs, es_n0, standard);
+    dvb_chain(ui, st, dvbs, es_n0, standard)
 }
 
 /// A link margin's colour: red below 0 dB, amber within 1 dB, else green.
@@ -4787,11 +4886,20 @@ fn margin_colour(margin: Option<f32>) -> Color32 {
 
 /// The receive chain under the DVB card's header, one line per stage with a
 /// health dot, on a rule down the left: demodulator, PL frames, LDPC + BCH
-/// (an ACM carrier's MODCODs inside it), the FEC thread and the baseband —
-/// for DVB-S the Viterbi and Reed–Solomon in place of the S2 stages.
-fn dvb_chain(ui: &mut Ui, st: &VfoStatus, dvbs: bool, es_n0: Option<f32>, standard: Color32) {
+/// (an ACM carrier's MODCODs inside it), the FEC thread and the baseband (a
+/// multistream carrier's streams inside it) — for DVB-S the Viterbi and
+/// Reed–Solomon in place of the S2 stages. Returns a stream of transport
+/// packets clicked, to show in the TS card.
+fn dvb_chain(
+    ui: &mut Ui,
+    st: &VfoStatus,
+    dvbs: bool,
+    es_n0: Option<f32>,
+    standard: Color32,
+) -> Option<u8> {
     let grey = ui.visuals().weak_text_color();
     let fec = st.fec.as_ref();
+    let mut ts_pick = None;
     ui.add_space(6.0);
     let chain = ui.horizontal(|ui| {
         ui.add_space(10.0);
@@ -4951,25 +5059,24 @@ fn dvb_chain(ui: &mut Ui, st: &VfoStatus, dvbs: bool, es_n0: Option<f32>, standa
             if !dvbs && let Some(f) = fec {
                 match &f.last_header {
                     Some(h) => {
-                        let mut text = h.format.label().to_string();
-                        if h.single_stream {
-                            text.push_str(" · single stream");
+                        let multi = !h.single_stream || f.streams.len() > 1;
+                        let mut text = if multi {
+                            format!("multistream, {} input streams", f.streams.len())
                         } else {
-                            let isis: Vec<String> =
-                                f.streams.keys().map(|i| i.to_string()).collect();
-                            text.push_str(&format!(" · multistream, ISI {}", isis.join(", ")));
-                        }
-                        if h.high_efficiency {
-                            text.push_str(" · HEM");
-                        }
-                        if h.upl > 0 {
-                            text.push_str(&format!(
-                                " · {}-byte packets, sync 0x{:02X}",
-                                h.upl / 8,
-                                h.sync
-                            ));
-                        }
-                        if let Some(r) = h.roll_off {
+                            let mut t = f.streams.first().map_or_else(
+                                || h.format.label().to_string(),
+                                |v| v.content.label(),
+                            );
+                            t.push_str(" · single stream");
+                            if h.high_efficiency {
+                                t.push_str(" · HEM");
+                            }
+                            if h.gse_lite() {
+                                t.push_str(" · GSE-Lite");
+                            }
+                            t
+                        };
+                        if let Some(r) = f.roll_off {
                             text.push_str(&format!(" · roll-off {:.2}", r.as_f64()));
                         }
                         if f.payload_bps > 0.0 {
@@ -4980,7 +5087,15 @@ fn dvb_chain(ui: &mut Ui, st: &VfoStatus, dvbs: bool, es_n0: Option<f32>, standa
                             if f.ok > 0 { HEALTH_OK } else { grey },
                             "Baseband",
                             text,
+                        )
+                        .on_hover_text(
+                            "What the BBHEADERs say. The roll-off is read the S2X way: \
+                             RO codes sent alternately with 11 are the low range (0.15, \
+                             0.10, 0.05), not S2's 0.35, 0.25, 0.20 (EN 302 307-2 §5.1.6).",
                         );
+                        if multi {
+                            ts_pick = stream_rows(ui, f);
+                        }
                     }
                     None => {
                         stage(ui, grey, "Baseband", "no BBHEADER yet".into());
@@ -4995,6 +5110,79 @@ fn dvb_chain(ui: &mut Ui, st: &VfoStatus, dvbs: bool, es_n0: Option<f32>, standa
         r.y_range(),
         egui::Stroke::new(2.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
     );
+    ts_pick
+}
+
+/// A multistream carrier's input streams, inside the chain's Baseband
+/// stage: each one's ISI, what it carries, its MODCOD (or how many an ACM
+/// stream uses) and its rate. A stream of transport packets can be clicked
+/// to show its TS in the card below; returns the one clicked.
+fn stream_rows(ui: &mut Ui, f: &FecStats) -> Option<u8> {
+    use decsat_engine::StreamContent;
+    const SIZE: f32 = 11.0;
+    let mono = |s: String| RichText::new(s).monospace().size(SIZE);
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.vertical(|ui| {
+            for v in &f.streams {
+                let what = match v.content {
+                    StreamContent::Gse if v.npd => "GSE-Lite".to_string(),
+                    StreamContent::Gse => "GSE".into(),
+                    StreamContent::GseHem => "GSE-HEM".into(),
+                    StreamContent::Ts => "TS".into(),
+                    StreamContent::TsPackets { sync } => format!("TS packets {sync:02X}h"),
+                    StreamContent::Packets { bytes, .. } => format!("{bytes}-byte packets"),
+                };
+                let mc = match (v.modcods.len(), v.main_modcod()) {
+                    (1, Some(m)) => decsat_core::modcod_name(m),
+                    (n, _) if n > 1 => format!("ACM, {n} MODCODs"),
+                    _ => "–".into(),
+                };
+                let extra = if v.content.is_ts() {
+                    format!(" · {} PIDs", v.ts_pids)
+                } else {
+                    String::new()
+                };
+                let text = format!(
+                    "ISI {:<3} {:<15} {:<15} {:>11}{extra}",
+                    v.isi,
+                    what,
+                    mc,
+                    format::bitrate(v.bps)
+                );
+                if v.content.is_ts() {
+                    let r = ui
+                        .selectable_label(v.ts_primary, mono(text))
+                        .on_hover_text(format!(
+                            "{}: {} packets, {} with a failed CRC-8. Click to show this \
+                             stream's TS in the card below; a VFO decoding IP writes it to \
+                             a .ts while it records its PCAP.",
+                            v.content.label(),
+                            v.ts_packets,
+                            v.ts_crc_errors
+                        ));
+                    if r.clicked() {
+                        picked = Some(v.isi);
+                    }
+                } else {
+                    let modcods: Vec<String> = v
+                        .modcods
+                        .iter()
+                        .rev()
+                        .map(|(&m, &n)| format!("{} ×{n}", decsat_core::modcod_name(m)))
+                        .collect();
+                    ui.label(mono(text)).on_hover_text(format!(
+                        "{}: {} good frames — {}",
+                        v.content.label(),
+                        v.frames,
+                        modcods.join(", ")
+                    ));
+                }
+            }
+        });
+    });
+    picked
 }
 
 /// One stage of the receive chain: its health dot, its name, what it says.

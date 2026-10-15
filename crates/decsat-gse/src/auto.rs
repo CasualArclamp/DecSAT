@@ -76,6 +76,29 @@ pub fn ip_of(pdu: &Pdu) -> Option<(&[u8], IpInfo)> {
     Some((&ip[..info.len], info))
 }
 
+/// Labels tracked at most: a network has hundreds of terminals, not more.
+const MAX_LABELS: usize = 4096;
+/// Destination addresses kept per label.
+const MAX_ADDRS: usize = 4;
+
+/// What one GSE label — a terminal's address on an outbound: a MAC (6
+/// bytes), 3 bytes, or none for broadcast — has been sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabelStats {
+    pub pdus: u64,
+    pub bytes: u64,
+    /// IP packets among the PDUs.
+    pub ip: u64,
+    /// PDU bytes by the MODCOD of the BBFRAME each PDU completed in. On an
+    /// ACM outbound the hub picks the MODCOD per terminal from the reception
+    /// that terminal reports, so this is the terminal's link as the hub
+    /// sees it.
+    pub modcods: std::collections::BTreeMap<u8, u64>,
+    /// Destinations of its IP packets, the first few (on an outbound: the
+    /// terminal's own addresses).
+    pub addrs: Vec<std::net::IpAddr>,
+}
+
 /// Per-variant view, for display.
 #[derive(Debug, Clone, Copy)]
 pub struct VariantReport {
@@ -101,6 +124,10 @@ pub struct GseIp {
     other_bytes: [u64; 256],
     /// Data fields that ended in a vendor CRC (`frame_trailer`).
     trailers: u64,
+    /// What each label has been sent (the variant in use's PDUs).
+    labels: std::collections::HashMap<crate::decode::Label, LabelStats>,
+    /// The MODCOD of the frames being decoded ([`Self::set_modcod`]).
+    modcod: u8,
 }
 
 impl Default for GseIp {
@@ -123,6 +150,37 @@ impl GseIp {
             other_protocols: Default::default(),
             other_bytes: [0; 256],
             trailers: 0,
+            labels: Default::default(),
+            modcod: 0,
+        }
+    }
+
+    /// The MODCOD (DVB-S2 number, or S2X PLS code) of the frames that
+    /// follow, for [`Self::labels`].
+    pub fn set_modcod(&mut self, modcod: u8) {
+        self.modcod = modcod;
+    }
+
+    /// What each GSE label has been sent, by the variant in use (or, while
+    /// none carries IP, the one that fits best).
+    pub fn labels(&self) -> &std::collections::HashMap<crate::decode::Label, LabelStats> {
+        &self.labels
+    }
+
+    /// Count a PDU against its label.
+    fn count_label(&mut self, p: &Pdu) {
+        if self.labels.len() >= MAX_LABELS && !self.labels.contains_key(&p.label) {
+            return;
+        }
+        let e = self.labels.entry(p.label).or_default();
+        e.pdus += 1;
+        e.bytes += p.data.len() as u64;
+        *e.modcods.entry(self.modcod).or_default() += p.data.len() as u64;
+        if let Some((_, info)) = ip_of(p) {
+            e.ip += 1;
+            if e.addrs.len() < MAX_ADDRS && !e.addrs.contains(&info.dst) {
+                e.addrs.push(info.dst);
+            }
         }
     }
 
@@ -260,6 +318,9 @@ impl GseIp {
             None => self.best_fit(),
         };
         let pdus = std::mem::take(&mut self.pdus[k]);
+        for p in &pdus {
+            self.count_label(p);
+        }
         if self.chosen().is_some() {
             for p in &pdus {
                 match ip_of(p) {

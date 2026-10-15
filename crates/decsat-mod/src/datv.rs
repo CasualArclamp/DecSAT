@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use decsat_core::{FecFrame, Iq, RollOff};
 use decsat_fec::FecParams;
-use decsat_frame::{BBHEADER_LEN, BbHeader, StreamFormat, bb_scramble, crc8};
+use decsat_frame::{BBHEADER_LEN, BbHeader, StreamFormat, bb_scramble, crc8, ro_bits};
 
 use crate::fec::{BbFrameSource, TsBbFramer};
 use crate::framer::{FrameSpec, PlFramer};
@@ -352,6 +352,8 @@ pub struct TsFeed {
     prev_crc: u8,
     roll_off: RollOff,
     ccm: bool,
+    /// BBFRAMEs made: the low roll-offs' RO alternates frame by frame.
+    frames: u64,
     pub counters: Arc<FeedCounters>,
     /// The input's description, refreshed as frames go.
     pub described: Arc<Mutex<String>>,
@@ -367,6 +369,7 @@ impl TsFeed {
             prev_crc: 0,
             roll_off: RollOff::R35,
             ccm: true,
+            frames: 0,
             counters: Arc::new(FeedCounters::default()),
             described,
         }
@@ -428,7 +431,7 @@ impl BbFrameSource for TsFeed {
             ccm: self.ccm,
             issyi: false,
             npd: false,
-            roll_off: Some(self.roll_off),
+            ro: ro_bits(self.roll_off, self.frames),
             isi: 0,
             upl: (TS_LEN * 8) as u16,
             dfl: (field * 8) as u16,
@@ -436,6 +439,7 @@ impl BbFrameSource for TsFeed {
             syncd,
             high_efficiency: false,
         };
+        self.frames += 1;
         let mut frame = Vec::with_capacity(bytes);
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(&data);

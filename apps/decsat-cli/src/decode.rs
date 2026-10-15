@@ -452,9 +452,23 @@ pub(crate) fn report(st: &VfoStatus) {
                 }
             );
         }
-        if f.streams.len() > 1 {
-            let s: Vec<String> = f.streams.iter().map(|(i, n)| format!("{i}: {n}")).collect();
-            println!("  streams (ISI: good frames): {}", s.join(", "));
+        if let Some(r) = f.roll_off {
+            let low = matches!(
+                r,
+                decsat_core::RollOff::R15 | decsat_core::RollOff::R10 | decsat_core::RollOff::R05
+            );
+            println!(
+                "  roll-off {:.2}{}",
+                r.as_f64(),
+                if low {
+                    " (S2X low range: RO alternates with 11)"
+                } else {
+                    ""
+                }
+            );
+        }
+        for v in &f.streams {
+            print_stream(v, f.streams.len() > 1);
         }
         if f.ts_frames > 0 {
             println!("  {} TS-mode frames", f.ts_frames);
@@ -463,6 +477,12 @@ pub(crate) fn report(st: &VfoStatus) {
             println!("  payload {:.1} kbit/s (DFL)", f.payload_bps / 1e3);
         }
         if let Some(g) = &f.gse {
+            if let Some(h) = &g.hem {
+                println!(
+                    "  gse-hem: {} packets ({} rebuilt from slices), {} resyncs, {} mismatches",
+                    h.packets, h.joined, h.resyncs, h.mismatches
+                );
+            }
             if g.trailers > 0 {
                 println!(
                     "  vendor CRC-32 at the end of the data field (over BBHEADER and field, \
@@ -709,14 +729,123 @@ pub(crate) fn report(st: &VfoStatus) {
         if let Some(r) = &g.radio {
             crate::pcap::print_radio(r);
         }
+        print_terminals(g);
         print_byte_text("ip text", &g.text);
     }
     if let Some(t) = &f.ts {
-        println!("ts: {} packets, {} CC errors", t.packets, t.cc_errors);
+        let isi = match f.ts_isi {
+            Some(i) if f.streams.len() > 1 => format!(" (ISI {i})"),
+            _ => String::new(),
+        };
+        println!("ts{isi}: {} packets, {} CC errors", t.packets, t.cc_errors);
         for p in &t.report.programmes {
             println!("  programme {:?}", p.name);
         }
         print_byte_text("ts text", &t.text);
+    }
+}
+
+/// One input stream of a DVB-S2/S2X carrier.
+fn print_stream(v: &decsat_engine::StreamView, multi: bool) {
+    let isi = if multi {
+        format!("ISI {}", v.isi)
+    } else {
+        "single stream".into()
+    };
+    let mut flags = Vec::new();
+    if v.issyi {
+        flags.push("ISSY");
+    }
+    if v.npd {
+        flags.push(if v.content.is_ts() {
+            "null-packet deletion"
+        } else {
+            "GSE-Lite"
+        });
+    }
+    if v.hem {
+        flags.push("high-efficiency mode");
+    }
+    let modcods: Vec<String> = v
+        .modcods
+        .iter()
+        .rev()
+        .map(|(&m, &n)| format!("{} ×{n}", decsat_core::modcod_name(m)))
+        .collect();
+    println!(
+        "  stream {isi}: {}{}, {} frames, {:.1} kbit/s, {}",
+        v.content.label(),
+        if flags.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", flags.join(", "))
+        },
+        v.frames,
+        v.bps / 1e3,
+        modcods.join(", ")
+    );
+    if v.content.is_ts() {
+        println!(
+            "    ts: {} packets, {} CRC-8 failed, {} PIDs{}",
+            v.ts_packets,
+            v.ts_crc_errors,
+            v.ts_pids,
+            if v.ts_primary { " (shown below)" } else { "" }
+        );
+    }
+}
+
+/// A GSE label as text: a MAC, 3 bytes, or broadcast.
+pub(crate) fn label_text(l: &decsat_gse::Label) -> String {
+    match l {
+        decsat_gse::Label::None => "broadcast".into(),
+        decsat_gse::Label::Three(b) => format!("{:02x}{:02x}{:02x}", b[0], b[1], b[2]),
+        decsat_gse::Label::Six(b) => b
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    }
+}
+
+/// The GSE labels (terminals, on a hub's outbound) and the MODCODs the hub
+/// sends each of them.
+fn print_terminals(g: &decsat_engine::GseView) {
+    if g.labels < 2 {
+        return;
+    }
+    println!(
+        "terminals: {} GSE labels, the busiest (bytes, MODCODs by share, addresses):",
+        g.labels
+    );
+    for t in g.terminals.iter().take(12) {
+        let total = t.stats.bytes.max(1) as f64;
+        let mut mc: Vec<(&u8, &u64)> = t.stats.modcods.iter().collect();
+        mc.sort_by(|a, b| b.1.cmp(a.1));
+        let mc: Vec<String> = mc
+            .iter()
+            .take(3)
+            .map(|&(&m, &b)| {
+                format!(
+                    "{} {:.0} %",
+                    decsat_core::modcod_name(m),
+                    100.0 * b as f64 / total
+                )
+            })
+            .collect();
+        let addrs: Vec<String> = t.stats.addrs.iter().map(|a| a.to_string()).collect();
+        println!(
+            "  {:<17} {:>10} B  {:>6} PDUs  {}{}",
+            label_text(&t.label),
+            t.stats.bytes,
+            t.stats.pdus,
+            mc.join(", "),
+            if addrs.is_empty() {
+                String::new()
+            } else {
+                format!("  → {}", addrs.join(" "))
+            }
+        );
     }
 }
 
