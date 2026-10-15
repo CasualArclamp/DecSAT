@@ -221,7 +221,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         v.settings.decoder,
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
     ) {
-        modcod_header(ui, v.settings.decoder, &st);
+        dvb_card(ui, v.settings.decoder, &st);
         ui.add_space(6.0);
     }
 
@@ -977,95 +977,20 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         text_card(ui, t);
     }
 
+    // DVB-S/S2: the demodulator and FEC are in the card at the top; what
+    // the frames carry follows here.
     if matches!(
         v.settings.decoder,
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts
-    ) && st.lock.is_some()
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
+    ) && let Some(f) = &st.fec
     {
-        ui.add_space(6.0);
-        ui.label(RichText::new("Physical layer").strong());
-        egui::Grid::new("pl").num_columns(2).show(ui, |ui| {
-            ui.label("Lock");
-            let (txt, col) = match st.lock {
-                Some(LockState::Locked) => ("locked", Color32::from_rgb(110, 220, 110)),
-                Some(LockState::Found) => ("confirming", Color32::from_rgb(240, 200, 80)),
-                _ => ("searching", Color32::from_rgb(230, 110, 110)),
-            };
-            ui.colored_label(col, txt);
-            ui.end_row();
-            ui.label("Frames");
-            ui.label(format!("{} ({} lock losses)", st.frames, st.lock_losses));
-            ui.end_row();
-            if let Some(c) = &st.carrier {
-                carrier_rows(ui, c);
-            }
-            if let Some(rs) = st.symbol_rate {
-                ui.label("Symbol rate");
-                ui.label(format::rate(rs));
-                ui.end_row();
-            }
-        });
-        if let Some(f) = &st.fec {
-            fec_card(ui, f);
-            if let Some(g) = &f.gse {
-                gse_card(ui, g, v.id, &mut actions);
-            }
-            if let Some(t) = &f.ts {
-                ts_card(ui, t, v.id, &mut actions);
-            }
-            data_text(ui, f, v.settings.decoder);
+        if let Some(g) = &f.gse {
+            gse_card(ui, g, v.id, &mut actions);
         }
-    }
-
-    if v.settings.decoder == DecoderKind::DvbsTs
-        && let Some(c) = &st.carrier
-    {
-        ui.add_space(6.0);
-        ui.label(RichText::new("DVB-S").strong());
-        let dv = st.fec.as_ref().and_then(|f| f.dvbs.as_ref());
-        egui::Grid::new("dvbs").num_columns(2).show(ui, |ui| {
-            carrier_rows(ui, c);
-            if let Some(rs) = st.symbol_rate {
-                ui.label("Symbol rate");
-                ui.label(format::rate(rs));
-                ui.end_row();
-            }
-            if let Some(d) = dv {
-                ui.label("Code rate");
-                match d.rate {
-                    Some(r) => ui.label(format!(
-                        "{} (found) · channel BER {:.1e}",
-                        r.name(),
-                        d.channel_ber
-                    )),
-                    None => ui.label("searching…"),
-                };
-                ui.end_row();
-                ui.label("Reed–Solomon");
-                let col = if d.rs_failed == 0 {
-                    Color32::from_rgb(110, 220, 110)
-                } else {
-                    Color32::from_rgb(240, 200, 80)
-                };
-                ui.colored_label(
-                    col,
-                    format!(
-                        "{} packets · {} bytes corrected · {} lost",
-                        d.packets, d.rs_corrected, d.rs_failed
-                    ),
-                );
-                ui.end_row();
-            }
-        });
-        if let Some(f) = &st.fec {
-            if let Some(g) = &f.gse {
-                gse_card(ui, g, v.id, &mut actions);
-            }
-            if let Some(t) = &f.ts {
-                ts_card(ui, t, v.id, &mut actions);
-            }
-            data_text(ui, f, v.settings.decoder);
+        if let Some(t) = &f.ts {
+            ts_card(ui, t, v.id, &mut actions);
         }
+        data_text(ui, f, v.settings.decoder);
     }
 
     if v.settings.decoder == DecoderKind::CarrierId
@@ -1266,13 +1191,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         ui.label(RichText::new(format!("{what} {}", path.display())).small());
     }
 
-    // MODCOD counts and acquisition details, after the plots.
-    if matches!(
-        v.settings.decoder,
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts
-    ) {
-        modcod_table(ui, &st.modcods);
-    }
+    // Acquisition details, after the plots.
     if demodulates && let Some(id) = &st.identification {
         ui.add_space(6.0);
         egui::CollapsingHeader::new("Acquisition (Identify)")
@@ -3291,89 +3210,6 @@ fn tdm_card(ui: &mut Ui, t: &decsat_engine::TdmStats, triggered: Option<u64>) {
 
 /// What FEC made of a DVB-S2 VFO's frames, and the stream the BBHEADERs
 /// describe.
-fn fec_card(ui: &mut Ui, f: &FecStats) {
-    ui.add_space(6.0);
-    ui.label(RichText::new("FEC").strong());
-    egui::Grid::new("fec").num_columns(2).show(ui, |ui| {
-        ui.label("BBFRAMEs");
-        let pct = 100.0 * f.ok as f64 / f.frames.max(1) as f64;
-        let col = if f.frames == 0 {
-            ui.visuals().weak_text_color()
-        } else if f.ok == f.frames {
-            Color32::from_rgb(110, 220, 110)
-        } else if f.ok > 0 {
-            Color32::from_rgb(240, 200, 80)
-        } else {
-            Color32::from_rgb(230, 110, 110)
-        };
-        ui.colored_label(col, format!("{} of {} good ({pct:.1} %)", f.ok, f.frames));
-        ui.end_row();
-        if f.bch_failed + f.crc_failed > 0 {
-            ui.label("Failed");
-            ui.label(format!(
-                "{} LDPC/BCH, {} header CRC",
-                f.bch_failed, f.crc_failed
-            ));
-            ui.end_row();
-        }
-        if f.frames > 0 {
-            ui.label("LDPC");
-            ui.label(format!(
-                "{:.1} iterations avg · BCH fixed {} bits",
-                f.iterations as f64 / f.frames as f64,
-                f.bch_corrected
-            ));
-            ui.end_row();
-        }
-        if let Some(e) = f.es_n0_db {
-            ui.label("Es/N0");
-            ui.label(format!("{e:.1} dB (pilots and headers)"));
-            ui.end_row();
-        }
-        if f.payload_bps > 0.0 {
-            ui.label("Payload");
-            ui.label(format::bitrate(f.payload_bps));
-            ui.end_row();
-        }
-        if let Some(h) = &f.last_header {
-            ui.label("Stream");
-            let streams = if h.single_stream {
-                "single stream".to_string()
-            } else {
-                let isis: Vec<String> = f.streams.keys().map(|i| i.to_string()).collect();
-                format!("multistream, ISI {}", isis.join(", "))
-            };
-            ui.label(format!(
-                "{} · {} · {}{}",
-                h.format.label(),
-                if h.ccm { "CCM" } else { "ACM/VCM" },
-                streams,
-                if h.high_efficiency { " · HEM" } else { "" }
-            ));
-            ui.end_row();
-            if h.upl > 0 {
-                ui.label("Packets");
-                ui.label(format!("{} bytes, sync 0x{:02X}", h.upl / 8, h.sync));
-                ui.end_row();
-            }
-            if let Some(r) = h.roll_off {
-                ui.label("Roll-off");
-                ui.label(format!("{:.2} (BBHEADER)", r.as_f64()));
-                ui.end_row();
-            }
-        }
-        if f.dropped > 0 || f.load > 0.5 {
-            ui.label("FEC load");
-            ui.label(format!(
-                "{:.0} % · {} frames dropped",
-                f.load * 100.0,
-                f.dropped
-            ));
-            ui.end_row();
-        }
-    });
-}
-
 /// What the stations say is playing, from `<nowplaying>` messages in the IP:
 /// station, artist and title, and what kind of item it is.
 fn now_playing_card(ui: &mut Ui, g: &GseView) {
@@ -4627,24 +4463,30 @@ fn identification_card(
     });
 }
 
-/// The MODCOD being received (for DVB-S, its code rate), big, at the top of
-/// a DVB-S/S2/S2X VFO, in the standard's colour once locked — DVB-S2X blue,
-/// DVB-S2 green, DVB-S yellow — dimmed while the lock is being confirmed,
-/// grey while searching. Beside it the link margin, and under it a bar of
-/// the measured Es/N0 with a tick at the ideal QEF Es/N0 of that MODCOD, so
-/// how close the carrier is to falling over reads at a glance.
-fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
-    const GOOD: Color32 = Color32::from_rgb(110, 220, 110);
-    const WAIT: Color32 = Color32::from_rgb(240, 200, 80);
-    const BAD: Color32 = Color32::from_rgb(230, 110, 110);
-    const S2X: Color32 = Color32::from_rgb(100, 170, 255);
-    const S2: Color32 = GOOD;
-    const S1: Color32 = Color32::from_rgb(240, 230, 90);
-    // Clear of the panel's scroll bar, which egui floats over the content.
-    const RIGHT_PAD: f32 = 6.0;
+// The DVB card's colours: each standard's, and a stage's health in the
+// app's usual green, amber and red.
+const DVB_S2X: Color32 = Color32::from_rgb(100, 170, 255);
+const DVB_S2: Color32 = Color32::from_rgb(110, 220, 110);
+const DVB_S: Color32 = Color32::from_rgb(240, 230, 90);
+const HEALTH_OK: Color32 = Color32::from_rgb(110, 220, 110);
+const HEALTH_WARN: Color32 = Color32::from_rgb(240, 200, 80);
+const HEALTH_BAD: Color32 = Color32::from_rgb(230, 110, 110);
+/// Clear of the side panel's scroll bar, which egui floats over the content.
+const RIGHT_PAD: f32 = 6.0;
+
+/// A DVB-S/S2/S2X VFO's card, at the top of its panel. A title bar in the
+/// standard's colour — DVB-S2X blue, DVB-S2 green, DVB-S yellow — names
+/// the standard, CCM or ACM, and the symbol rate. Under it the MODCOD being
+/// received (DVB-S: the code rate), big, in that colour once locked, dimmed
+/// while the lock is confirmed, grey while searching; the link margin beside
+/// it and an Es/N0 bar ticked at the MODCOD's ideal QEF Es/N0. Then the
+/// receive chain, stage by stage ([`dvb_chain`]).
+fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
     let grey = ui.visuals().weak_text_color();
     // A lock being confirmed: the standard's colour, half lit.
     let dim = |c: Color32| c.gamma_multiply(0.55);
+    let dvbs = decoder == DecoderKind::DvbsTs;
+    let fec = st.fec.as_ref();
 
     // The data MODCODs this carrier has sent more than now and then (a
     // misread header names a stray one once in a while).
@@ -4668,21 +4510,37 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
     let es_n0 = st
         .carrier
         .map(|c| c.esn0_db())
-        .or(st.fec.as_ref().and_then(|f| f.es_n0_db));
+        .or(fec.and_then(|f| f.es_n0_db));
+
+    // The standard is the carrier's, not the frame's: an S2X carrier may
+    // send S2 MODCODs too, and its colour should not flicker as it does.
+    let s2x =
+        !dvbs && (carried.iter().any(|m| m.is_s2x()) || st.last_modcod.is_some_and(|m| m >= 128));
+    let (kind, standard) = if dvbs {
+        ("DVB-S", DVB_S)
+    } else if s2x {
+        ("DVB-S2X", DVB_S2X)
+    } else {
+        ("DVB-S2", DVB_S2)
+    };
+    // CCM or ACM: as the BBHEADER says, else by the MODCODs seen.
+    let mode = match fec.and_then(|f| f.last_header.as_ref()) {
+        _ if dvbs => None,
+        Some(h) => Some(if h.ccm { "CCM" } else { "ACM" }),
+        None if carried.len() > 1 => Some("ACM"),
+        None if carried.len() == 1 => Some("CCM"),
+        None => None,
+    };
 
     // What is shown: the name (None while there is none), its colour, what
     // it is in words, its QEF Es/N0, and whether the lock is settled.
-    let (name, colour, about, qef, locked) = if decoder == DecoderKind::DvbsTs {
-        let rate = st
-            .fec
-            .as_ref()
-            .and_then(|f| f.dvbs.as_ref())
-            .and_then(|d| d.rate);
+    let (name, colour, about, qef, locked) = if dvbs {
+        let rate = fec.and_then(|f| f.dvbs.as_ref()).and_then(|d| d.rate);
         let carrier = st.carrier.is_some_and(|c| c.locked);
         match rate {
             Some(r) => (
                 Some(format!("QPSK {}", r.name())),
-                if carrier { S1 } else { dim(S1) },
+                if carrier { standard } else { dim(standard) },
                 format!(
                     "DVB-S, code rate {} found. QEF: EN 300 421's figure, which \
                      has 0.8 dB of modem implementation margin in it.",
@@ -4693,7 +4551,7 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
             ),
             None if carrier => (
                 None,
-                dim(S1),
+                dim(standard),
                 "DVB-S: finding the code rate".into(),
                 None,
                 false,
@@ -4701,12 +4559,6 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
             None => (None, grey, "DVB-S: searching".into(), None, false),
         }
     } else {
-        // ACM (or VCM) once more than one data MODCOD has been seen.
-        let mode = if carried.len() > 1 { "ACM" } else { "CCM" };
-        // The carrier's standard, not the frame's: an S2X carrier may send
-        // S2 MODCODs too, and its colour should not flicker as it does.
-        let s2x = carried.iter().any(|m| m.is_s2x()) || st.last_modcod.is_some_and(|m| m >= 128);
-        let standard = if s2x { S2X } else { S2 };
         let colour = match st.lock {
             Some(LockState::Locked) => standard,
             Some(LockState::Found) => dim(standard),
@@ -4715,7 +4567,7 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
         let locked = st.lock == Some(LockState::Locked);
         match st.last_modcod {
             Some(m) if st.lock.is_some_and(|l| l != LockState::Searching) => {
-                let kind = if m >= 128 { "DVB-S2X" } else { "DVB-S2" };
+                let frame_kind = if m >= 128 { "DVB-S2X" } else { "DVB-S2" };
                 // "  QPSK 1/2" under "16APSK 26/45": the modulation right-
                 // aligned in its column. Rust note: `{:>width$}` pads to a
                 // width taken from the variable `width`.
@@ -4730,7 +4582,7 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
                     Some(text),
                     colour,
                     format!(
-                        "{kind} MODCOD {m}, {mode}. QEF: the ideal figure of EN 302 307 \
+                        "{frame_kind} MODCOD {m}. QEF: the ideal figure of EN 302 307 \
                          ({}); this receiver needs about 1 dB more.",
                         if m >= 128 {
                             "-2 Tables 20a/20c"
@@ -4761,12 +4613,58 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
         .filter(|_| locked)
         .and(es_n0.zip(qef))
         .map(|(e, q)| e - q);
-    let margin_colour = match margin {
-        Some(m) if m < 0.0 => BAD,
-        Some(m) if m < 1.0 => WAIT,
-        _ => GOOD,
-    };
+    let margin_colour = margin_colour(margin);
 
+    // ---- the title bar: standard · mode, and the symbol rate
+    let title = match mode {
+        Some(m) => format!("{kind} · {m}"),
+        None => kind.to_string(),
+    };
+    let (rate, unit) = match st.symbol_rate {
+        Some(r) if r >= 1e6 => (format!("{:.3}", r / 1e6), "MS/s"),
+        Some(r) => (format!("{:.1}", r / 1e3), "kS/s"),
+        None => ("–".to_string(), ""),
+    };
+    let strong = ui.visuals().strong_text_color();
+    let bar = egui::Frame::new()
+        .fill(colour.gamma_multiply(0.15))
+        .corner_radius(CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        })
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 8 + RIGHT_PAD as i8,
+            top: 3,
+            bottom: 3,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .monospace()
+                        .size(14.0)
+                        .strong()
+                        .color(colour),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(unit).size(11.0).weak());
+                    ui.label(RichText::new(rate).monospace().size(20.0).color(strong));
+                });
+            });
+        })
+        .response;
+    ui.painter().hline(
+        bar.rect.x_range(),
+        bar.rect.bottom(),
+        egui::Stroke::new(2.0, colour),
+    );
+    ui.add_space(4.0);
+
+    // ---- the MODCOD and its margin
     let resp = ui
         .horizontal(|ui| {
             ui.label(
@@ -4794,7 +4692,7 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
          1 dB a fade drops frames."
     ));
 
-    // The Es/N0 bar: a fixed scale (so it does not jump as the reading
+    // ---- the Es/N0 bar: a fixed scale (so it does not jump as the reading
     // moves), from below zero for the S2X codes that work there, wider for
     // the 64–256APSKs.
     let lo = if qef.is_some_and(|q| q < 0.0) {
@@ -4824,11 +4722,10 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
                 pos2(x + 1.0, rect.bottom() + 3.0),
             ),
             CornerRadius::ZERO,
-            ui.visuals().strong_text_color(),
+            strong,
         );
     }
     ui.horizontal(|ui| {
-        let dvbs = decoder == DecoderKind::DvbsTs;
         let left = match (es_n0, &name) {
             (Some(e), Some(_)) => format!("Es/N0 {e:.1} dB"),
             (None, Some(_)) => "Es/N0 not measured yet".into(),
@@ -4846,6 +4743,371 @@ fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
                 ui.label(RichText::new(format!("QEF {q:.1} dB")).size(12.0).weak());
             });
         }
+    });
+
+    dvb_chain(ui, st, dvbs, es_n0, standard);
+}
+
+/// A link margin's colour: red below 0 dB, amber within 1 dB, else green.
+fn margin_colour(margin: Option<f32>) -> Color32 {
+    match margin {
+        Some(m) if m < 0.0 => HEALTH_BAD,
+        Some(m) if m < 1.0 => HEALTH_WARN,
+        _ => HEALTH_OK,
+    }
+}
+
+/// The receive chain under the DVB card's header, one line per stage with a
+/// health dot, on a rule down the left: demodulator, PL frames, LDPC + BCH
+/// (an ACM carrier's MODCODs inside it), the FEC thread and the baseband —
+/// for DVB-S the Viterbi and Reed–Solomon in place of the S2 stages.
+fn dvb_chain(ui: &mut Ui, st: &VfoStatus, dvbs: bool, es_n0: Option<f32>, standard: Color32) {
+    let grey = ui.visuals().weak_text_color();
+    let fec = st.fec.as_ref();
+    ui.add_space(6.0);
+    let chain = ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.vertical(|ui| {
+            match &st.carrier {
+                Some(c) if c.locked => {
+                    let gold = st
+                        .gold_code
+                        .filter(|&g| g != 0)
+                        .map(|g| format!(" · Gold code {g}"))
+                        .unwrap_or_default();
+                    stage(
+                        ui,
+                        HEALTH_OK,
+                        "Demodulator",
+                        format!(
+                            "{} locked · {:+.0} Hz{gold}",
+                            c.modulation.name(),
+                            c.offset_hz
+                        ),
+                    );
+                }
+                Some(c) => {
+                    stage(
+                        ui,
+                        HEALTH_WARN,
+                        "Demodulator",
+                        format!("{} not locked", c.modulation.name()),
+                    );
+                }
+                None if !dvbs && st.lock.is_none() => {
+                    stage(
+                        ui,
+                        grey,
+                        "Demodulator",
+                        format!("acquiring {:.0} %", st.progress * 100.0),
+                    );
+                }
+                None => {
+                    stage(ui, grey, "Demodulator", "starting".into());
+                }
+            }
+
+            if dvbs {
+                let carrier = st.carrier.is_some_and(|c| c.locked);
+                match fec.and_then(|f| f.dvbs.as_ref()) {
+                    Some(d) => {
+                        match d.rate {
+                            Some(r) => stage(
+                                ui,
+                                HEALTH_OK,
+                                "Viterbi",
+                                format!("rate {} · channel BER {:.1e}", r.name(), d.channel_ber),
+                            ),
+                            None => stage(
+                                ui,
+                                if carrier { HEALTH_WARN } else { grey },
+                                "Viterbi",
+                                "finding the code rate…".into(),
+                            ),
+                        };
+                        let colour = if d.packets == 0 {
+                            grey
+                        } else if d.rs_failed == 0 {
+                            HEALTH_OK
+                        } else {
+                            HEALTH_WARN
+                        };
+                        stage(
+                            ui,
+                            colour,
+                            "Reed–Solomon",
+                            format!(
+                                "{} packets · {} bytes corrected · {} lost",
+                                d.packets, d.rs_corrected, d.rs_failed
+                            ),
+                        );
+                    }
+                    None => {
+                        stage(ui, grey, "Viterbi", "waiting for the carrier".into());
+                    }
+                }
+            } else {
+                let (colour, state) = match st.lock {
+                    Some(LockState::Locked) => (HEALTH_OK, ""),
+                    Some(LockState::Found) => (HEALTH_WARN, "confirming · "),
+                    Some(_) => (HEALTH_BAD, "searching · "),
+                    None => (grey, "acquiring · "),
+                };
+                stage(
+                    ui,
+                    colour,
+                    "PL frames",
+                    format!("{state}{} · {} lock losses", st.frames, st.lock_losses),
+                );
+                if let Some(f) = fec {
+                    if f.frames == 0 {
+                        stage(ui, grey, "LDPC + BCH", "no data frames yet".into());
+                    } else {
+                        let pct = 100.0 * f.ok as f64 / f.frames as f64;
+                        let colour = if f.ok == f.frames {
+                            HEALTH_OK
+                        } else if f.ok > 0 {
+                            HEALTH_WARN
+                        } else {
+                            HEALTH_BAD
+                        };
+                        let crc = if f.crc_failed > 0 {
+                            format!(" · {} header CRC", f.crc_failed)
+                        } else {
+                            String::new()
+                        };
+                        stage(
+                            ui,
+                            colour,
+                            "LDPC + BCH",
+                            format!(
+                                "{pct:.1} % good · {} failed{crc} · {:.1} it · BCH {} bits",
+                                f.bch_failed,
+                                f.iterations as f64 / f.frames as f64,
+                                f.bch_corrected
+                            ),
+                        )
+                        .on_hover_text(format!(
+                            "{} of {} BBFRAMEs good; LDPC iterations a frame on average; \
+                             bits BCH corrected in all",
+                            f.ok, f.frames
+                        ));
+                        modcod_rows(ui, f, st.last_modcod, es_n0, standard);
+                    }
+                }
+            }
+
+            // The FEC thread: amber when it is near its limit or has had to
+            // drop frames, red while it cannot keep up.
+            if let Some(f) = fec.filter(|f| f.load > 0.0 || f.dropped > 0) {
+                let colour = if f.load > 1.0 {
+                    HEALTH_BAD
+                } else if f.load > 0.8 || f.dropped > 0 {
+                    HEALTH_WARN
+                } else {
+                    HEALTH_OK
+                };
+                let dropped = if f.dropped > 0 {
+                    format!(" · {} frames dropped", f.dropped)
+                } else {
+                    String::new()
+                };
+                stage(
+                    ui,
+                    colour,
+                    "FEC thread",
+                    format!("{:.0} % load{dropped}", f.load * 100.0),
+                );
+            }
+
+            if !dvbs && let Some(f) = fec {
+                match &f.last_header {
+                    Some(h) => {
+                        let mut text = h.format.label().to_string();
+                        if h.single_stream {
+                            text.push_str(" · single stream");
+                        } else {
+                            let isis: Vec<String> =
+                                f.streams.keys().map(|i| i.to_string()).collect();
+                            text.push_str(&format!(" · multistream, ISI {}", isis.join(", ")));
+                        }
+                        if h.high_efficiency {
+                            text.push_str(" · HEM");
+                        }
+                        if h.upl > 0 {
+                            text.push_str(&format!(
+                                " · {}-byte packets, sync 0x{:02X}",
+                                h.upl / 8,
+                                h.sync
+                            ));
+                        }
+                        if let Some(r) = h.roll_off {
+                            text.push_str(&format!(" · roll-off {:.2}", r.as_f64()));
+                        }
+                        if f.payload_bps > 0.0 {
+                            text.push_str(&format!(" · {}", format::bitrate(f.payload_bps)));
+                        }
+                        stage(
+                            ui,
+                            if f.ok > 0 { HEALTH_OK } else { grey },
+                            "Baseband",
+                            text,
+                        );
+                    }
+                    None => {
+                        stage(ui, grey, "Baseband", "no BBHEADER yet".into());
+                    }
+                }
+            }
+        });
+    });
+    let r = chain.response.rect;
+    ui.painter().vline(
+        r.left() + 2.0,
+        r.y_range(),
+        egui::Stroke::new(2.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
+}
+
+/// One stage of the receive chain: its health dot, its name, what it says.
+fn stage(ui: &mut Ui, health: Color32, name: &str, text: String) -> egui::Response {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(RichText::new("●").color(health));
+        ui.label(RichText::new(name).strong());
+        ui.label(text);
+    })
+    .response
+}
+
+/// An ACM carrier's MODCODs, inside the chain's LDPC stage: each one's
+/// share of the frames, how many of them decoded, and its margin at the
+/// Es/N0 now; the one being received highlighted in the standard's colour.
+/// In MODCOD order, so the rows stay where they are.
+fn modcod_rows(
+    ui: &mut Ui,
+    f: &FecStats,
+    current: Option<u8>,
+    es_n0: Option<f32>,
+    standard: Color32,
+) {
+    const BAR: f32 = 70.0;
+    const SIZE: f32 = 11.0;
+    // S2X MODCODs by their PLS code with the pilot bit clear.
+    let key = |m: u8| if m >= 128 { m & 0xFE } else { m };
+    let total: u64 = f.per_modcod.values().map(|&(_, n)| n).sum();
+    // As for the header: leave out the stray MODCODs of misread headers.
+    let rows: Vec<(u8, u64, u64)> = f
+        .per_modcod
+        .iter()
+        .filter(|&(_, &(_, n))| n >= 3 && n * 1000 >= total)
+        .map(|(&m, &(good, n))| (m, good, n))
+        .collect();
+    if rows.len() < 2 {
+        return;
+    }
+    let names: Vec<String> = rows
+        .iter()
+        .map(|&(m, _, _)| decsat_core::modcod_name(m))
+        .collect();
+    let w = names
+        .iter()
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(6)
+        .max(6);
+    let mono = |s: String| RichText::new(s).monospace().size(SIZE);
+
+    // One row: name, a share bar (or its heading), frames good, margin; a
+    // highlight painted behind it afterwards — `Shape::Noop` holds its place
+    // in the paint order so it lands under the text.
+    let row = |ui: &mut Ui,
+               name: RichText,
+               share: Option<f32>,
+               good: RichText,
+               margin: RichText,
+               lit: Option<Color32>| {
+        let behind = ui.painter().add(egui::Shape::Noop);
+        let r = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(name);
+                let (rect, _) = ui.allocate_exact_size(vec2(BAR, SIZE), Sense::hover());
+                match share {
+                    Some(s) => {
+                        let bar = egui::Rect::from_min_size(
+                            pos2(rect.left(), rect.center().y - 3.5),
+                            vec2(BAR * s.clamp(0.0, 1.0), 7.0),
+                        );
+                        let c = lit.unwrap_or(Color32::from_gray(85));
+                        ui.painter().rect_filled(bar, CornerRadius::same(2), c);
+                    }
+                    None => {
+                        ui.painter().text(
+                            rect.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            "share",
+                            egui::FontId::monospace(SIZE),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
+                ui.label(good);
+                ui.label(margin);
+            })
+            .response;
+        if let Some(c) = lit {
+            ui.painter().set(
+                behind,
+                egui::Shape::rect_filled(
+                    r.rect.expand(1.0),
+                    CornerRadius::same(2),
+                    c.gamma_multiply(0.18),
+                ),
+            );
+        }
+    };
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.vertical(|ui| {
+            row(
+                ui,
+                mono(format!("{:<w$}", "MODCOD")).weak(),
+                None,
+                mono(format!("{:>5}", "good")).weak(),
+                mono(format!("{:>6}", "margin")).weak(),
+                None,
+            );
+            for ((m, good, n), name) in rows.iter().zip(names) {
+                let pct = 100.0 * *good as f64 / (*n).max(1) as f64;
+                let good_colour = if pct >= 99.0 {
+                    HEALTH_OK
+                } else if pct >= 50.0 {
+                    HEALTH_WARN
+                } else {
+                    HEALTH_BAD
+                };
+                let margin = es_n0.zip(decsat_core::qef_es_n0_db(*m)).map(|(e, q)| e - q);
+                let margin_text = match margin {
+                    Some(v) => mono(format!("{v:>+6.1}")).color(margin_colour(margin)),
+                    None => mono(format!("{:>6}", "–")).weak(),
+                };
+                let now = current.is_some_and(|c| key(c) == key(*m));
+                let mut name = mono(format!("{name:<w$}"));
+                if now {
+                    name = name.strong();
+                }
+                row(
+                    ui,
+                    name,
+                    Some(*n as f32 / total.max(1) as f32),
+                    mono(format!("{:>5}", format!("{pct:.0} %"))).color(good_colour),
+                    margin_text,
+                    now.then_some(standard),
+                );
+            }
+        });
     });
 }
 

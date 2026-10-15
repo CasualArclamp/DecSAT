@@ -4644,3 +4644,18 @@ short 16APSK 8/9 decodes 0/52 at 12.5 dB, 13/52 at 12.7, 41/52 at 12.9,
 carrier costs ~0.5 dB more than AWGN at the same reading (the ring
 compression, transponder/HackRF distortion), which puts it just under the
 cliff. A bigger dish would decode it; the receiver can't.
+
+## One DVB card: title bar, MODCOD, receive chain (2026-10-15)
+
+Rory chose header 4 + body A from the mockups. `dvb_card` (side_panel.rs)
+now opens every DVB-S/S2/S2X VFO: a title bar tinted in the standard's
+colour (S2X blue, S2 green, DVB-S yellow) with "DVB-S2X · ACM" (CCM/ACM
+from the BBHEADER) and the symbol rate large; the MODCOD, margin and Es/N0
+bar under it; then `dvb_chain`, one line per stage with a health dot —
+Demodulator, PL frames, LDPC + BCH (an ACM carrier's MODCODs inside it from
+`FecStats::per_modcod`: share, frames good, margin at today's Es/N0, the
+current one lit), FEC thread (amber > 80 % load or drops, red > 100 %),
+Baseband (format, streams, packets, roll-off, payload). DVB-S has Viterbi
+and Reed–Solomon in place of the S2 stages. The old Physical layer, FEC and
+DVB-S grids and the MODCOD table under the plots are gone (`fec_card`
+removed; `modcod_table` stays for Identify).
