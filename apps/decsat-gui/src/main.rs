@@ -9,6 +9,7 @@ mod auto_pick;
 mod automation;
 mod band_view;
 mod beacon_card;
+mod beacon_list;
 mod carrier_caps;
 mod filename;
 mod format;
@@ -56,7 +57,7 @@ fn main() -> eframe::Result {
             eprintln!("decsat-gui: {e}");
             eprintln!(
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
-                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|rec|spec[,…]] \
+                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--wireshark]"
             );
@@ -105,6 +106,7 @@ fn main() -> eframe::Result {
                 app.load_plan(p);
             }
             app.tx.open |= opts.tx_panel;
+            app.beacon_window.open |= opts.beacons;
             // Claimed VFOs keep `VfoSettings::new`'s temp-dir output folder.
             if let Some(k) = opts.decoder {
                 app.new_decoder = k;
@@ -155,6 +157,10 @@ struct App {
     satellite_edit: String,
     /// Every carrier in the span tried in turn.
     survey: survey::Survey,
+    /// The Ku-band beacon list, and whose beacons the waterfall marks
+    /// ("auto", "none" or a satellite's title).
+    beacon_window: beacon_list::BeaconWindow,
+    beacon_marks: String,
     /// Carriers claimed from their brackets: Identify, then their decoder.
     auto_pick: auto_pick::AutoPick,
     /// The beacon decoder's pointing tone.
@@ -232,6 +238,8 @@ impl Default for App {
             unnamed_kept: prefs::unnamed_kept(),
             satellite_edit: String::new(),
             survey: Default::default(),
+            beacon_window: Default::default(),
+            beacon_marks: prefs::beacon_marks(),
             auto_pick: Default::default(),
             tone: Default::default(),
             selected: None,
@@ -947,6 +955,36 @@ impl App {
         }
     }
 
+    /// Put a beacon-decoder VFO on a beacon at `rf_hz`: a live radio is
+    /// retuned so it sits a quarter of the span right of the centre (clear
+    /// of the DC spike); a recording must hold it already. The VFO is made
+    /// against the tuning as it is, then the retune carries it into place.
+    fn tune_to_beacon(&mut self, rf_hz: f64, name: String) {
+        let centre = self.rf_center();
+        if centre <= 0.0 {
+            self.note = "Set the radio's frequency and LNB LO first".into();
+            return;
+        }
+        let span = self.band.span().max(1.0);
+        let bw = 200e3f64.min(span / 4.0);
+        let live = self.can_retune();
+        if !live && (rf_hz - centre).abs() > span / 2.0 - bw / 2.0 {
+            self.note = format!(
+                "{name} ({}) is outside this recording's span",
+                format::freq(rf_hz)
+            );
+            return;
+        }
+        let mut s =
+            decsat_engine::VfoSettings::new(name.clone(), rf_hz - centre, bw, DecoderKind::Beacon);
+        s.record_dir = band_view::default_record_dir();
+        self.apply(Action::Create(s));
+        if live {
+            self.set_rf_center(rf_hz - span / 4.0);
+        }
+        self.note = format!("{name}: {}", format::freq(rf_hz));
+    }
+
     /// The source is a running HackRF, so the view can tune it.
     fn can_retune(&self) -> bool {
         #[cfg(feature = "hackrf")]
@@ -1128,6 +1166,17 @@ impl App {
                 .clicked()
             {
                 self.survey.open = !self.survey.open;
+            }
+            if ui
+                .button("Beacons…")
+                .on_hover_text(
+                    "The Ku-band beacons of the satellites from 110°E to 180°E: tune to one \
+                     and put a beacon decoder on it; the dish's satellite's beacons are marked \
+                     on the waterfall",
+                )
+                .clicked()
+            {
+                self.beacon_window.open = !self.beacon_window.open;
             }
             if ui
                 .add_enabled(
@@ -1726,6 +1775,8 @@ impl eframe::App for App {
         // is: live, its tuning; a file, the tuning its name gives.
         let bluetooth =
             decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0);
+        // The dish's satellite's beacons, marked on the waterfall.
+        let beacon_marks = beacon_list::marks(&self.beacon_marks, &self.satellite);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1744,6 +1795,7 @@ impl eframe::App for App {
                     plan: &self.plan,
                     caps: &self.carrier_caps,
                     bluetooth: &bluetooth,
+                    beacons: &beacon_marks,
                 };
                 actions.extend(self.band.show(ui, &inp));
             });
@@ -1757,6 +1809,16 @@ impl eframe::App for App {
             self.carrier_caps.count(),
         );
         self.apply_survey(reqs);
+        let marks_was = self.beacon_marks.clone();
+        let req = self
+            .beacon_window
+            .show(ui.ctx(), &mut self.beacon_marks, &self.satellite);
+        if self.beacon_marks != marks_was {
+            prefs::set_beacon_marks(&self.beacon_marks);
+        }
+        if let Some(beacon_list::Request::Tune { rf_hz, name }) = req {
+            self.tune_to_beacon(rf_hz, name);
+        }
         if let Some(req) = self.tx.show(ui.ctx()) {
             match req {
                 #[cfg(feature = "hackrf")]

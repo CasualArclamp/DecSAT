@@ -4560,3 +4560,32 @@ Open: the word meanings (the maker's); no CCSDS capture yet (checked
 against the book's constants and self-consistency only); FM/FM, turbo and
 LDPC CCSDS, space packets; the pointing tone not heard here (no way to
 listen unattended) — Rory to try.
+
+## Beacons placed by hand; a Ku beacon list for 110–180°E (2026-10-15)
+
+Rory, on an Optus/Koreasat beacon at 160°E with strong lines at ±30 kHz and
+its data further out: make the beacon decoder movable about the carrier.
+`beacon::Tune` (VfoSettings::beacon_tune): subcarrier offset (0 = on the
+phase), data reach, bit rate, each blind when unset; `BeaconRx::set_tune`
+restarts only the telemetry search. `pm::subcarrier_at` snaps to the φ²
+line within 3 % and measures the reach from the part of the spectrum
+mirrored about the subcarrier, after a 9-bin median (a strong tone beside it
+had made the width 34 kHz and the bit rate 32 kHz). Side-panel rows and
+draggable dashed TLM marks on the waterfall (901a6e7).
+
+Then: Ku beacons for every satellite 110–180°E, shown in a Beacons window
+and marked on the waterfall (Rory's choices: window + marks; operator
+figures first, others flagged). Four research agents covered the arc
+(operator pages, FCC/ITU, satbeams, frequencyplansatellites.altervista.org,
+reception reports); merged into `apps/decsat-gui/src/ku_beacons.csv`: 54
+satellites with a Ku payload, 87 beacons, 7 satellites with operator or
+regulator figures (Optus D1/C1/D3/10 payload PDFs; FCC grants for Intelsat
+19, Eutelsat 172B, 174A). Notable: Optus D1 now at 152E, Optus 10 at 156E,
+D2 retired April 2025, Koreasat 6 at 160E (its 116E beacon 12251.5 seen at
+160E by Rory's receiver at 12251.46), Superbird-C2 moved to 136E (JSAT-136E),
+JCSAT-16 now JSAT-144C at 144E, Express AT2 left 140E for 56E; Intelsat 19's
+FCC grant lists 12253.5/12254.0/12256.0/12256.5 MHz telemetry (12253.5
+decoded here). Many satellites publish no Ku beacon (APSTAR 6C/6D/6E/9,
+ChinaSat 6D/6E/10R/19, Superbird-B3, Koreasat 6's 160E figure). Tune makes
+the VFO against the current tuning and then retunes (the carry places it).
+`--beacons` opens the window unattended.

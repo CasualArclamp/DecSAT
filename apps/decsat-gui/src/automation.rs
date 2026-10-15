@@ -57,6 +57,8 @@ pub struct Options {
     pub tx_panel: bool,
     /// Open the survey and start it once the carriers are found.
     pub survey: bool,
+    /// Open the Ku-band beacon list.
+    pub beacons: bool,
 }
 
 impl Options {
@@ -141,6 +143,7 @@ impl Options {
                     o.plan = Some(PathBuf::from(args.next().ok_or("--plan needs a file")?));
                 }
                 Some("--tx-panel") => o.tx_panel = true,
+                Some("--beacons") => o.beacons = true,
                 Some("--survey") => o.survey = true,
                 Some("--select") => {
                     let v = args.next().ok_or("--select needs a VFO number")?;

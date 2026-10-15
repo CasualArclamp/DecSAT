@@ -1,0 +1,109 @@
+position_e,satellite,aliases,mhz,pol,kind,confirmed,source,note
+# Ku-band (10.7-12.75 GHz) beacons of the satellites 110-180 E, researched 2026-10-15.
+# confirmed = 1: frequencies from the operator or a regulator (FCC grant); 0: community lists (satbeams, frequencyplansatellites.altervista.org, reception reports).
+# A satellite with no frequency row: its Ku beacons are not published anywhere that was checked.
+110.0,BSAT-3b,,11707.1,,telemetry,0,satbeams.com; altervista BSAT-3 plan,No polarisation published (BS band, circular).
+110.0,BSAT-3c / JCSAT-110R,BSAT-3c;JCSAT-110R,11701.5,,telemetry,0,altervista JCSAT-110R/BSAT-3C plan and beacon list (Aug 2026),Sources disagree: altervista 11701.5, satbeams 11707.5.
+110.0,BSAT-4a,,11702.9,LHCP,telemetry,0,satbeams.com; altervista BSAT-4A plan,
+110.0,BSAT-4a,,11704.3,LHCP,telemetry,0,satbeams.com; altervista BSAT-4A plan,
+110.0,BSAT-4b,,11704.3,LHCP,telemetry,0,altervista BSAT-4B plan,Co-located backup of BSAT-4a: probably only one of them sends 11704.3 at a time.
+110.0,BSAT-4b,,11705.7,,telemetry,0,altervista BSAT-4B plan,Co-located backup of BSAT-4a: probably only one of them sends 11704.3 at a time.
+110.0,BSAT-4b,,11708.5,LHCP,telemetry,0,altervista BSAT-4B plan,Co-located backup of BSAT-4a: probably only one of them sends 11704.3 at a time.
+110.0,JCSAT-110A,JCSAT-15,12201,RHCP,telemetry,0,frequencyplansatellites.altervista.org JCSAT-15 plan; satbeams.com,RHCP on the Japan beam on station; the same frequencies in H via the omni in emergencies.
+110.0,JCSAT-110A,JCSAT-15,12203,RHCP,telemetry,0,frequencyplansatellites.altervista.org JCSAT-15 plan; satbeams.com,RHCP on the Japan beam on station; the same frequencies in H via the omni in emergencies.
+110.5,ChinaSat 10R,Zhongxing-10R,,,,0,satbeams.com; altervista beacon list,Launched Feb 2025, replacing ChinaSat 10 (whose Ku beacons were 12741 V / 12745 H); no beacon published for 10R.
+113.0,Koreasat 5,,12250.5,H,,0,altervista beacon list (Aug 2026); satbeams.com,Inclined orbit, near end of life (off KT SAT's fleet list).
+113.0,Koreasat 5,,12749.5,V,,0,altervista beacon list (Aug 2026); satbeams.com,Inclined orbit, near end of life (off KT SAT's fleet list).
+113.0,Koreasat 5A,KOREASAT 5A,12252.5,H,,0,altervista beacon list (Aug 2026); satbeams.com,H or circular, and V or circular.
+113.0,Koreasat 5A,KOREASAT 5A,12747.5,V,,0,altervista beacon list (Aug 2026); satbeams.com,H or circular, and V or circular.
+113.0,Merah Putih 2,Telkomsat 113BT;HTS 113BT,,,,0,satbeams.com; altervista beacon list,C + Ku HTS (2024); no beacon published.
+115.5,ChinaSat 6E,Zhongxing-6E,,,,0,altervista beacon list,C, Ku and Ka; no Ku beacon published.
+116.0,Koreasat 6A,,12253.5,,,0,altervista beacon list (Aug 2026),Single source, no polarisation. Koreasat 6 left 116E for 160E in 2025.
+116.0,Koreasat 6A,,12747.5,,,0,altervista beacon list (Aug 2026),Single source, no polarisation. Koreasat 6 left 116E for 160E in 2025.
+116.0,Koreasat 7,,12250.1,H,,0,satbeams.com; altervista beacon list,H or circular, and V or circular.
+116.0,Koreasat 7,,12749.9,V,,0,satbeams.com; altervista beacon list,H or circular, and V or circular.
+118.0,Telkom-3S,,11611,H,CW,0,altervista Telkom-3S plan,Single source.
+119.1,Bangabandhu-1,BD-1,,,,0,satbeams.com; altervista plan,26 Ku transponders; only C-band beacons published.
+119.5,Thaicom 4,IPSTAR;IPSTAR-1,11451,,telemetry,0,altervista Thaicom 4 plan; satbeams.com,Being retired (iPSTAR service ended June 2026; slot extension under review in Sept 2026): may be off. Inclined.
+119.5,Thaicom 4,IPSTAR;IPSTAR-1,11453,,telemetry,0,altervista Thaicom 4 plan; satbeams.com,Being retired (iPSTAR service ended June 2026; slot extension under review in Sept 2026): may be off. Inclined.
+122.0,AsiaSat 9,,12251,,,0,altervista beacon list (Aug 2026),Single source, no polarisation.
+124.0,JCSAT-4B,JCSAT-13,12748,,,0,altervista beacon list (Aug 2026),Single source, no polarisation.
+124.0,JCSAT-4B,JCSAT-13,12749,,,0,altervista beacon list (Aug 2026),Single source, no polarisation.
+125.0,ChinaSat 6D,ZX-6D,,,,0,satbeams.com/satellites?norad=52255,No Ku beacon found (Ku payload exists: China beam + steerable).
+128.0,JCSAT-3A,JCSAT-10,12248.5,H,,0,satbeams.com/satellites?norad=29272,No JSAT-published beacon found; still at 128E per the Aug 2026 JSAT fleet table.
+128.0,JCSAT-3A,JCSAT-10,12747.2,V,,0,satbeams.com/satellites?norad=29272,No JSAT-published beacon found; still at 128E per the Aug 2026 JSAT fleet table.
+128.5,LaoSat-1,APStar L,10946,H,,0,satbeams.com/satellites?norad=41034,Inside the 10.70-10.95 GHz Ku downlink band the Lao ministry gives to the ITU.
+128.5,LaoSat-1,APStar L,10948,V,,0,satbeams.com/satellites?norad=41034,Inside the 10.70-10.95 GHz Ku downlink band the Lao ministry gives to the ITU.
+131.8,VINASAT-2,,,,,0,satbeams.com/satellites?norad=38332,No Ku beacon found (Satbeams lists only C-band figures for this Ku satellite).
+132.0,JCSAT-5A,JCSAT-9,12249,H,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5A,JCSAT-9,12747.4,V,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5A,JCSAT-9,12748.5,V,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5A,JCSAT-9,12748.5,H,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5A,JCSAT-9,12749.5,V,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5A,JCSAT-9,12749.5,H,,0,satbeams.com/satellites?norad=29045,Satbeams runs the figures together; split by hand. Probably selectable or redundant beacons: not all on.
+132.0,JCSAT-5B,JCSAT-12,12248.5,,,0,satbeams.com/satellites?norad=35755,No polarisations given; figures split by hand from a run-together list.
+132.0,JCSAT-5B,JCSAT-12,12747.2,,,0,satbeams.com/satellites?norad=35755,No polarisations given; figures split by hand from a run-together list.
+132.0,JCSAT-5B,JCSAT-12,12748.35,,,0,satbeams.com/satellites?norad=35755,No polarisations given; figures split by hand from a run-together list.
+132.0,JCSAT-5B,JCSAT-12,12749.75,,,0,satbeams.com/satellites?norad=35755,No polarisations given; figures split by hand from a run-together list.
+132.0,VINASAT-1,,11699,H,,0,satbeams.com/satellites?norad=32767,Past its design life (2008); reported expired in 2024, still listed active by Satbeams: may be off.
+134.0,APSTAR 6C,,,,,0,apstar.com/resource/yt6c.html,No Ku beacon published by APT or listed by Satbeams. Co-located with APSTAR 6D and 6E.
+134.0,APSTAR 6D,,,,,0,apstar.com/resource/yt6d.html,Ku HTS (90 Ku beams); no beacon published.
+134.0,APSTAR 6E,MPSat-3,,,,0,apstar.com/resource/yt6e-mpsat-3.html,Small Ku HTS for Indonesia; no beacon published.
+136.0,JCSAT-17,,,,,0,satbeams.com/satellites?norad=45245,No beacon found.
+136.0,JSAT-136E,Superbird-C2,12250,V,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+136.0,JSAT-136E,Superbird-C2,12749.75,V,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+136.0,JSAT-136E,Superbird-C2,12199,V,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+136.0,JSAT-136E,Superbird-C2,12252,H,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+136.0,JSAT-136E,Superbird-C2,12255,H,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+136.0,JSAT-136E,Superbird-C2,12254,V,,0,satbeams.com/satellites?norad=33274,Moved from 144E to 136E (SES capacity deal, Nov 2025); the beacon list predates the move and not all are likely on.
+138.0,Telstar 18 VANTAGE,APSTAR 5C,,,,0,www.telesat.com/geo-satellites/,No Ku beacon found (Telesat specs behind registration).
+140.0,Express AM5,,11199.5,RHCP,,0,satbeams.com/satellites?norad=39487,Circular beacon though the Ku traffic is linear. Express AT2 left 140E for 56E in March 2026.
+142.0,APSTAR 9,,,,,0,apstar.com/resource/yt9.html,No Ku beacon found (14 Ku transponders).
+144.0,JSAT-144C,JCSAT-16,12201.5,H,,0,satbeams.com/satellites?norad=41729,Now the 144E occupant; the beacon entry may date from its time at 162E.
+144.0,JSAT-144C,JCSAT-16,12203.5,H,,0,satbeams.com/satellites?norad=41729,Now the 144E occupant; the beacon entry may date from its time at 162E.
+146.0,Nusantara Satu,PSN-6;N1,,,,0,satbeams.com; psn.co.id,Ku spot beams; only C-band beacons published.
+150.0,JCSAT-1C,JCSAT-18;Kacific-1,12748.5,RHCP,,0,satbeams.com,Ku and Ka (Kacific). Circular polarisation doubtful for a linear Ku payload; may be figures inherited from JCSAT-1B at the same slot.
+150.0,JCSAT-1C,JCSAT-18;Kacific-1,12749.5,RHCP,,0,satbeams.com,Ku and Ka (Kacific). Circular polarisation doubtful for a linear Ku payload; may be figures inherited from JCSAT-1B at the same slot.
+150.5,BRIsat,,,,,0,satbeams.com,9 Ku transponders; only C-band beacons published.
+152.0,Optus D1,D1,12243.25,H,telemetry,1,Optus D Series Payload Information (optus.com.au) tables 4.8 and 4.9,12749.5 LHCP is the uplink-power-control/tracking beacon (+-10 kHz a day). TM3 (standby) shares 12243.25. Moved from 160E to 152E in 2023; inclined about 3.3 deg.
+152.0,Optus D1,D1,12245.25,H,telemetry,1,Optus D Series Payload Information (optus.com.au) tables 4.8 and 4.9,12749.5 LHCP is the uplink-power-control/tracking beacon (+-10 kHz a day). TM3 (standby) shares 12243.25. Moved from 160E to 152E in 2023; inclined about 3.3 deg.
+152.0,Optus D1,D1,12749.5,LHCP,CW,1,Optus D Series Payload Information (optus.com.au) tables 4.8 and 4.9,12749.5 LHCP is the uplink-power-control/tracking beacon (+-10 kHz a day). TM3 (standby) shares 12243.25. Moved from 160E to 152E in 2023; inclined about 3.3 deg.
+154.0,JCSAT-2B,JCSAT-14,11451,H,,0,satbeams.com; altervista JCSAT-2B plan,
+154.0,JCSAT-2B,JCSAT-14,12748,V,,0,satbeams.com; altervista JCSAT-2B plan,
+156.0,Optus 10,,12233.5,V,telemetry,1,Optus 10 Satellite Payload Information (optus.com.au) tables 4.7 and 4.8; goughlui.com reception 2015,12202.1 LHCP is the tracking beacon. Moved from 164E to 156E.
+156.0,Optus 10,,12235.5,V,telemetry,1,Optus 10 Satellite Payload Information (optus.com.au) tables 4.7 and 4.8; goughlui.com reception 2015,12202.1 LHCP is the tracking beacon. Moved from 164E to 156E.
+156.0,Optus 10,,12237.5,V,telemetry,1,Optus 10 Satellite Payload Information (optus.com.au) tables 4.7 and 4.8; goughlui.com reception 2015,12202.1 LHCP is the tracking beacon. Moved from 164E to 156E.
+156.0,Optus 10,,12202.1,LHCP,CW,1,Optus 10 Satellite Payload Information (optus.com.au) tables 4.7 and 4.8; goughlui.com reception 2015,12202.1 LHCP is the tracking beacon. Moved from 164E to 156E.
+156.0,Optus C1,C1,12747.75,H,telemetry,1,Optus C1 Payload Information (optus.com.au) tables 4.1 and 4.2,12750.0 LHCP is the tracking beacon. Heavily inclined (about 7 deg) and its Ku traffic moved to Optus 10: the Ku beacons may be off.
+156.0,Optus C1,C1,12748.75,H,telemetry,1,Optus C1 Payload Information (optus.com.au) tables 4.1 and 4.2,12750.0 LHCP is the tracking beacon. Heavily inclined (about 7 deg) and its Ku traffic moved to Optus 10: the Ku beacons may be off.
+156.0,Optus C1,C1,12750,LHCP,CW,1,Optus C1 Payload Information (optus.com.au) tables 4.1 and 4.2,12750.0 LHCP is the tracking beacon. Heavily inclined (about 7 deg) and its Ku traffic moved to Optus 10: the Ku beacons may be off.
+156.0,Optus D3,D3,12239.25,V,telemetry,1,Optus D Series Payload Information (optus.com.au) tables 6.8 and 6.9,12201.1 LHCP is the tracking beacon. A Northrop MEV appears docked.
+156.0,Optus D3,D3,12241.25,V,telemetry,1,Optus D Series Payload Information (optus.com.au) tables 6.8 and 6.9,12201.1 LHCP is the tracking beacon. A Northrop MEV appears docked.
+156.0,Optus D3,D3,12201.1,LHCP,CW,1,Optus D Series Payload Information (optus.com.au) tables 6.8 and 6.9,12201.1 LHCP is the tracking beacon. A Northrop MEV appears docked.
+159.0,ABS-6,ABS-1;LMI-1,12500.5,V,,0,satbeams.com,At the edges of its 12.50-12.75 GHz Ku downlink (northern beam V, southern H). Long past its design life.
+159.0,ABS-6,ABS-1;LMI-1,12749.5,H,,0,satbeams.com,At the edges of its 12.50-12.75 GHz Ku downlink (northern beam V, southern H). Long past its design life.
+160.0,Koreasat 6,KOREASAT 6,12251.5,H,,0,altervista Koreasat 6 plan (from its 116E service); a beacon at 12251.46 MHz received at 160E with DecSAT on 2026-10-15,Took over 160E from Optus D2 on 15 April 2025 (Sky NZ / Freeview). No 160E beacon is published; the figures are its 116E ones, and the 12251.5 one was seen at 160E.
+160.0,Koreasat 6,KOREASAT 6,12748.5,V,,0,altervista Koreasat 6 plan (from its 116E service); a beacon at 12251.46 MHz received at 160E with DecSAT on 2026-10-15,Took over 160E from Optus D2 on 15 April 2025 (Sky NZ / Freeview). No 160E beacon is published; the figures are its 116E ones, and the 12251.5 one was seen at 160E.
+160.0,MEASAT-3a,,12200,H,,0,satbeams.com,Moved from 91.5E to 160E (MEASAT confirms the move). One frequency on both polarisations: perhaps one beacon heard on both.
+160.0,MEASAT-3a,,12200,V,,0,satbeams.com,Moved from 91.5E to 160E (MEASAT confirms the move). One frequency on both polarisations: perhaps one beacon heard on both.
+162.0,Superbird-B3,Superbird-8;DSN-1,,,,0,jsat.skyperfectjsat.space; satbeams.com,Ku and Ka; beacons only in JSAT's customer documents.
+163.0,ChinaSat 19,Zhongxing-19;ZX-19,,,,0,chinasatcom.com,C, Ku and Ka; China Satcom says Ku has two orthogonal beacons but publishes no frequency.
+166.0,Intelsat 19,IS-19;IS19,12253.5,V,telemetry,1,FCC DA 12-864 (frequencies); frequencyplansatellites.altervista.org Intelsat 19 plan (polarisation; 12257),The FCC grant lists the four telemetry frequencies; polarisation (V, global beam) and the 12257 CW beacon are from a transcribed Intelsat plan, which also gives the telemetry on LHCP (alternate path). 12253.5 V checked by DecSAT on 2026-10-15: PCM/PSK/PM, 4800 bit/s on a 48 kHz subcarrier.
+166.0,Intelsat 19,IS-19;IS19,12254,V,telemetry,1,FCC DA 12-864 (frequencies); frequencyplansatellites.altervista.org Intelsat 19 plan (polarisation; 12257),The FCC grant lists the four telemetry frequencies; polarisation (V, global beam) and the 12257 CW beacon are from a transcribed Intelsat plan, which also gives the telemetry on LHCP (alternate path). 12253.5 V checked by DecSAT on 2026-10-15: PCM/PSK/PM, 4800 bit/s on a 48 kHz subcarrier.
+166.0,Intelsat 19,IS-19;IS19,12256,V,telemetry,1,FCC DA 12-864 (frequencies); frequencyplansatellites.altervista.org Intelsat 19 plan (polarisation; 12257),The FCC grant lists the four telemetry frequencies; polarisation (V, global beam) and the 12257 CW beacon are from a transcribed Intelsat plan, which also gives the telemetry on LHCP (alternate path). 12253.5 V checked by DecSAT on 2026-10-15: PCM/PSK/PM, 4800 bit/s on a 48 kHz subcarrier.
+166.0,Intelsat 19,IS-19;IS19,12256.5,V,telemetry,1,FCC DA 12-864 (frequencies); frequencyplansatellites.altervista.org Intelsat 19 plan (polarisation; 12257),The FCC grant lists the four telemetry frequencies; polarisation (V, global beam) and the 12257 CW beacon are from a transcribed Intelsat plan, which also gives the telemetry on LHCP (alternate path). 12253.5 V checked by DecSAT on 2026-10-15: PCM/PSK/PM, 4800 bit/s on a 48 kHz subcarrier.
+166.0,Intelsat 19,IS-19;IS19,12257,V,CW,1,FCC DA 12-864 (frequencies); frequencyplansatellites.altervista.org Intelsat 19 plan (polarisation; 12257),The FCC grant lists the four telemetry frequencies; polarisation (V, global beam) and the 12257 CW beacon are from a transcribed Intelsat plan, which also gives the telemetry on LHCP (alternate path). 12253.5 V checked by DecSAT on 2026-10-15: PCM/PSK/PM, 4800 bit/s on a 48 kHz subcarrier.
+166.7,Luch 5A,,,,,0,satbeams.com; altervista beacon list,Russian data relay (S/Ku), inclined; no beacon published.
+167.2,ChinaSat 3B,Zhongxing-3B,,,,0,satbeams.com,Launched May 2025 (Ku); no beacon published.
+169.0,Horizons 3e,H3e;Horizons-3e,11451,RHCP,CW,0,frequencyplansatellites.altervista.org Horizons 3e plan (provisional); satbeams.com,Telemetry is C-band only. Circular beacons: seen on either linear polarisation.
+169.0,Horizons 3e,H3e;Horizons-3e,12200.25,RHCP,CW,0,frequencyplansatellites.altervista.org Horizons 3e plan (provisional); satbeams.com,Telemetry is C-band only. Circular beacons: seen on either linear polarisation.
+172.0,Eutelsat 172B,E172B;172B,11200.6,V,telemetry,1,FCC DA 17-1186 and DA 18-430 (frequencies); altervista plan (polarisation),Polarisation from a transcribed plan: V and H on the station antenna, circular on the omni.
+172.0,Eutelsat 172B,E172B;172B,12250.1,H,telemetry,1,FCC DA 17-1186 and DA 18-430 (frequencies); altervista plan (polarisation),Polarisation from a transcribed plan: V and H on the station antenna, circular on the omni.
+174.0,Eutelsat 174A,E174A;Eutelsat 172A;GE-23;AMC-23,11199,H,,1,FCC STA (Nov 2017); goughlui.com reception 2015,Inclined orbit (about 4 deg): expect diurnal motion. Satbeams gives a different set (11451.5H, 11698.5V, 12251.5H, 12748.5V).
+174.0,Eutelsat 174A,E174A;Eutelsat 172A;GE-23;AMC-23,12749,V,,1,FCC STA (Nov 2017); goughlui.com reception 2015,Inclined orbit (about 4 deg): expect diurnal motion. Satbeams gives a different set (11451.5H, 11698.5V, 12251.5H, 12748.5V).
+176.0,NSS-11,AAP-1;GE-1A;Worldsat 1,12250.5,V,,0,frequencyplansatellites.altervista.org beacon list (Aug 2026); satbeams.com,V on the global beam, or H on the omni. Inclined orbit.
+176.0,NSS-11,AAP-1;GE-1A;Worldsat 1,12251.5,V,,0,frequencyplansatellites.altervista.org beacon list (Aug 2026); satbeams.com,V on the global beam, or H on the omni. Inclined orbit.
+176.0,NSS-11,AAP-1;GE-1A;Worldsat 1,12749.5,V,,0,frequencyplansatellites.altervista.org beacon list (Aug 2026); satbeams.com,V on the global beam, or H on the omni. Inclined orbit.
+180.0,Intelsat 18,IS-18;IS18,11198,RHCP,CW,0,frequencyplansatellites.altervista.org Intelsat 18 plan; satbeams.com; goughlui.com reception 2015,Telemetry is C-band only. Received unmodulated and equally strong on both linear polarisations (circular).
+180.0,Intelsat 18,IS-18;IS18,11452,RHCP,CW,0,frequencyplansatellites.altervista.org Intelsat 18 plan; satbeams.com; goughlui.com reception 2015,Telemetry is C-band only. Received unmodulated and equally strong on both linear polarisations (circular).
+180.0,Intelsat 18,IS-18;IS18,12502,RHCP,CW,0,frequencyplansatellites.altervista.org Intelsat 18 plan; satbeams.com; goughlui.com reception 2015,Telemetry is C-band only. Received unmodulated and equally strong on both linear polarisations (circular).

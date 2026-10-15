@@ -615,7 +615,23 @@ beacon**:
 - **♪ Pointing tone**: a tone whose pitch follows the C/N0 a tenth of a
   second at a time — two semitones a dB up from 600 Hz at the level when it
   was switched on (**re-centre** to start again) — so the dish can be
-  peaked by ear.
+  peaked by ear;
+- **where to look**: the subcarrier is found blind, or set by hand — its
+  offset from the carrier (0 for data on the carrier's phase), how far its
+  data reach either side, and the bit rate — in the VFO's settings, or by
+  dragging the dashed **TLM** marks either side of the carrier on the
+  waterfall. A subcarrier placed by hand snaps to its own line nearby.
+
+**Beacons…** (toolbar) lists the Ku-band beacons of the satellites from
+110°E to 180°E — 54 satellites, 87 beacons, researched October 2026: the
+operators' own figures where they publish them (Optus's payload documents,
+FCC grants for Intelsat 19 and Eutelsat 172B/174A), community lists
+(satbeams, frequencyplansatellites, reception reports) marked
+*unconfirmed* otherwise, and the satellites whose beacons are not published
+at all. Click a frequency to retune the radio there and put a beacon VFO on
+it; the toolbar's satellite's beacons (by name, or by a position such as
+`160`) are marked on the waterfall. The list is
+`apps/decsat-gui/src/ku_beacons.csv`.
 
 **● Record** writes the frames raw to `decsat-<VFO>-<RF>MHz-beacon-<time>.bin`
 (one after another), a line each (time, counter, hex) to the `.csv` beside

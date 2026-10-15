@@ -274,6 +274,19 @@ pub fn set_radar_internet(on: bool) {
     let _ = write_key("radar_internet", if on { "1" } else { "0" });
 }
 
+/// Whose Ku beacons the waterfall marks: "auto" (the toolbar's
+/// satellite), "none", or a satellite's title from the beacon list.
+pub fn beacon_marks() -> String {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "beacon_marks")
+        .map_or_else(|| "auto".to_string(), |(_, v)| v)
+}
+
+pub fn set_beacon_marks(v: &str) {
+    let _ = write_key("beacon_marks", v);
+}
+
 /// The beacon card's pinned word plots, as the card writes them
 /// ("200,1,*;43,0,7": byte, 16 bits or not, minor frame or every one).
 pub fn beacon_pins() -> String {

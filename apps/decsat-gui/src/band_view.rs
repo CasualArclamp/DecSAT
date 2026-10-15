@@ -83,6 +83,9 @@ pub struct BandInput<'a> {
     /// Where Bluetooth would leak in, were the source a HackRF tuned as it
     /// is (offsets, Hz): bursty bands there are marked as such.
     pub bluetooth: &'a [f64],
+    /// Beacons of the dish's satellite (RF Hz, label), marked where they
+    /// fall.
+    pub beacons: &'a [(f64, String)],
 }
 
 /// The decoder for a VFO made over offsets `lo..hi` (Hz from the band's
@@ -1045,6 +1048,35 @@ impl BandView {
                     ),
                     FontId::proportional(11.0),
                     colour,
+                );
+            }
+        }
+
+        // ---- the satellite's beacons: an amber tick and a label
+        if inp.rf_center > 0.0 {
+            let amber = Color32::from_rgb(255, 196, 80);
+            for (rf, label) in inp.beacons {
+                let off = rf - inp.rf_center;
+                if off < lo || off > hi {
+                    continue;
+                }
+                let x = x_of(off);
+                let y = spec.top() + 50.0;
+                painter.line_segment(
+                    [pos2(x, y), pos2(x, spec.bottom())],
+                    Stroke::new(1.0, amber.gamma_multiply(0.35)),
+                );
+                painter.add(egui::Shape::convex_polygon(
+                    vec![pos2(x - 4.0, y - 6.0), pos2(x + 4.0, y - 6.0), pos2(x, y)],
+                    amber,
+                    Stroke::NONE,
+                ));
+                painter.text(
+                    pos2(x + 6.0, y - 6.0),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    amber,
                 );
             }
         }
