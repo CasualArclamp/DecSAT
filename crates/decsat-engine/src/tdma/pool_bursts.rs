@@ -487,11 +487,13 @@ impl PoolBursts {
         self.lossless = on;
     }
 
-    /// Workers for a machine: a quarter of its threads, one to four.
+    /// Workers for a machine: half its threads, one to eight. A busy pool
+    /// (172B: 400 bursts a second) takes about three cores' worth; the
+    /// spare workers soak up the frames whose plans come together.
     pub fn default_workers() -> usize {
         std::thread::available_parallelism()
-            .map_or(2, |n| n.get() / 4)
-            .clamp(1, 4)
+            .map_or(2, |n| n.get() / 2)
+            .clamp(1, 8)
     }
 
     /// The pool's signal from `src_s` on the source clock, the tracker's

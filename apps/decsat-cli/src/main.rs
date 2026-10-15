@@ -224,6 +224,11 @@ enum Command {
         /// (it captures from its standard input); closing it ends the run.
         #[arg(long)]
         wireshark: bool,
+        /// pool: also run an MPEG-TS VFO at OFFSET_HZ:BW_HZ on the hub's
+        /// outbound, whose burst plan (a Newtec hub's D1h) times the pool's
+        /// bursts: they are then demodulated, and reported per terminal.
+        #[arg(long, value_name = "OFFSET_HZ:BW_HZ", allow_hyphen_values = true)]
+        plan_from: Option<String>,
     },
 }
 
@@ -358,6 +363,7 @@ fn main() -> Result<()> {
             bits,
             bbframes,
             wireshark,
+            plan_from,
         } => decode::decode(decode::DecodeArgs {
             file,
             hackrf,
@@ -384,6 +390,7 @@ fn main() -> Result<()> {
             bits,
             bbframes,
             wireshark,
+            plan_from,
         }),
     }
 }

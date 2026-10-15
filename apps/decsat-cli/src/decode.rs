@@ -53,6 +53,9 @@ pub struct DecodeArgs {
     pub bbframes: Option<PathBuf>,
     /// Feed the IP live to a Wireshark started for it.
     pub wireshark: bool,
+    /// pool: an outbound VFO (offset:bandwidth, Hz) whose burst plan times
+    /// the pool's bursts.
+    pub plan_from: Option<String>,
 }
 
 fn decoder_by_name(name: &str) -> Result<DecoderKind> {
@@ -198,6 +201,24 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     }
     s.programme_record = a.programme_record;
     let id = eng.add_vfo(s);
+    // The hub's outbound beside the pool, read for its burst plan.
+    let plan_vfo = match &a.plan_from {
+        Some(spec) => {
+            if kind != DecoderKind::ReturnPool {
+                bail!("--plan-from goes with --decoder pool");
+            }
+            let (off, bw) = spec
+                .split_once(':')
+                .and_then(|(o, b)| {
+                    Some((o.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
+                })
+                .with_context(|| format!("--plan-from `{spec}`: want OFFSET_HZ:BW_HZ"))?;
+            let mut o = VfoSettings::new("outbound", off, bw, DecoderKind::Dvbs2Ts);
+            o.voice_auto = false;
+            Some(eng.add_vfo(o))
+        }
+        None => None,
+    };
 
     let t0 = Instant::now();
     let mut last_line = Instant::now();
@@ -251,6 +272,14 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                         String::new()
                     }
                 );
+                if let Some(b) = st.pool.as_ref().and_then(|p| p.bursts.as_deref()) {
+                    println!("        {}", bursts_line(b));
+                }
+            }
+            if let Some(o) = plan_vfo.and_then(|o| eng.vfo_status(o))
+                && !live
+            {
+                println!("        outbound: {}", o.message);
             }
             last_line = Instant::now();
         }
@@ -268,6 +297,18 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                     SETTLE_CAP.as_secs(),
                     eng.pending_work()
                 );
+            }
+            if let Some(o) = plan_vfo.and_then(|o| eng.vfo_status(o)) {
+                println!("\n== outbound: {}", o.message);
+                if let Some(p) = o
+                    .fec
+                    .as_ref()
+                    .and_then(|f| f.ts.as_ref())
+                    .and_then(|t| t.rcs.as_ref())
+                    .and_then(|r| r.plan.as_ref())
+                {
+                    print_plan(p);
+                }
             }
             match eng.vfo_status(id) {
                 Some(st) => report(&st),
@@ -756,6 +797,50 @@ pub(crate) fn report(st: &VfoStatus) {
 }
 
 /// The VFO as a return pool: its carriers over time, its grid.
+/// The live burst demodulator in a line.
+fn bursts_line(b: &decsat_engine::tdma::pool_bursts::BurstsView) -> String {
+    match (b.from, b.timing) {
+        (Some(from), Some(t)) => format!(
+            "bursts by VFO {from}'s plan (lead {:.1} ms, zero {:+.1} kHz): {:.0}/s, {} of {} \
+             cut ok ({:.1} %), {} late, {} let go; demodulator {:.2} s a second on {} workers",
+            t.lead_s * 1e3,
+            b.offset_hz / 1e3,
+            b.per_s,
+            b.demodulated,
+            b.cut,
+            100.0 * b.demodulated as f64 / b.cut.max(1) as f64,
+            b.late,
+            b.dropped,
+            b.load,
+            b.workers
+        ),
+        _ => "bursts: no outbound's plan timed on the pool yet".into(),
+    }
+}
+
+/// The bursts per terminal.
+fn print_bursts(b: &decsat_engine::tdma::pool_bursts::BurstsView) {
+    println!("  {}", bursts_line(b));
+    for t in &b.terminals {
+        println!(
+            "    terminal {:3}: {:5} of {:5} ok, MER {:4.1} dB, {:+7.2} kHz, {:+6.1} µs, \
+             latest {:04X}h {} {:.2} kBd",
+            t.id,
+            t.demodulated,
+            t.cut,
+            t.mer_db,
+            t.freq_hz / 1e3,
+            t.timing_us,
+            t.code,
+            t.waveform.map_or("?", |w| w.name()),
+            t.symbol_rate / 1e3
+        );
+    }
+    if let Some((dir, n)) = &b.recording {
+        println!("  {n} bursts written to {}", dir.display());
+    }
+}
+
 pub(crate) fn print_pool(p: &decsat_engine::tdma::pool::PoolView) {
     println!(
         "pool: {} carriers now{}, {} layout changes ({:.1} a minute) over {:.0} s",
@@ -783,6 +868,17 @@ pub(crate) fn print_pool(p: &decsat_engine::tdma::pool::PoolView) {
             p.grid_strength
         ),
         _ => println!("  grid: none found yet"),
+    }
+    if let Some(g) = &p.grid {
+        println!(
+            "  slots: {} of {:.3} ms, {:.3} ms of the frame left after the last",
+            g.slots,
+            g.pitch_s * 1e3,
+            (g.frame_s - g.slots as f64 * g.pitch_s) * 1e3
+        );
+    }
+    if let Some(b) = &p.bursts {
+        print_bursts(b);
     }
     let show = |cs: &[decsat_engine::tdma::pool::PoolCarrier]| -> String {
         cs.iter()

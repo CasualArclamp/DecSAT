@@ -434,6 +434,29 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
+            if s.decoder == DecoderKind::ReturnPool {
+                ui.label("Bursts");
+                ui.horizontal(|ui| {
+                    let (label, tip) = if s.record {
+                        ("⏹ Stop", "Close the terminals' files")
+                    } else {
+                        (
+                            "● Record",
+                            "Once an outbound's burst plan is timed on this pool: each \
+                             terminal's demodulated bursts to a .rbursts file of its own — \
+                             per burst its frame, slot, code, waveform, MER, offsets, the \
+                             data symbols and their soft bits (the format is in \
+                             decsat-engine's tdma::pool_bursts)",
+                        )
+                    };
+                    let b = egui::Button::new(label).selected(s.record);
+                    if ui.add(b).on_hover_text(tip).clicked() {
+                        s.record = !s.record;
+                    }
+                });
+                ui.end_row();
+            }
+
             if s.decoder == DecoderKind::CarrierId {
                 // The receiver's clock correction: one value for every VFO,
                 // kept between sessions.
@@ -1069,7 +1092,13 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 Some((o.id, o.settings.name.clone(), rcs))
             })
             .collect();
-        pool_section(ui, p, inp.rf_center + v.settings.offset_hz, &outbounds);
+        pool_section(
+            ui,
+            p,
+            inp.rf_center + v.settings.offset_hz,
+            &outbounds,
+            v.id,
+        );
     }
 
     // The chain running (the CDM type-found model's, once picked) and the
@@ -6092,6 +6121,7 @@ fn pool_section(
     p: &decsat_engine::tdma::pool::PoolView,
     rf_center: f64,
     outbounds: &[Outbound],
+    id: VfoId,
 ) {
     ui.add_space(6.0);
     ui.label(RichText::new("Return pool").strong())
@@ -6132,6 +6162,31 @@ fn pool_section(
             );
     }
     match (p.slot_s, p.frame_s) {
+        (Some(_), Some(f)) if p.grid.is_some() => {
+            let g = p.grid.unwrap_or(decsat_engine::tdma::pool::SlotGrid {
+                frame_s: f,
+                pitch_s: f,
+                slots: 1,
+                start_s: 0.0,
+            });
+            let left = g.frame_s - g.slots as f64 * g.pitch_s;
+            ui.label(format!(
+                "grid: {} slots of {:.3} ms{} · {:.3} ms frame",
+                g.slots,
+                g.pitch_s * 1e3,
+                if left > 2e-6 {
+                    format!(" + {:.3} ms", left * 1e3)
+                } else {
+                    String::new()
+                },
+                f * 1e3
+            ))
+            .on_hover_text(
+                "The slots from where the bursts start (the envelope's rises fold into a \
+                 peak a slot), the frame from the guard times' repeat; what the slots leave \
+                 of the frame comes after the last",
+            );
+        }
         (Some(s), Some(f)) => {
             ui.label(format!(
                 "grid: {:.3} ms slots · {:.3} ms frame ({:.0} slots)",
@@ -6190,25 +6245,40 @@ fn pool_section(
     for (vfo, name, rcs) in outbounds {
         let Some(plan) = &rcs.plan else { continue };
         let (m, timed) = pair_plan(ui, p, plan, rf_center, *vfo);
+        // The VFO's own burst demodulator, when it follows this plan.
+        let bursts = p.bursts.as_deref().filter(|b| b.from == Some(*vfo));
         match m {
             Some(m) if m.corr >= 0.5 => {
                 ui.colored_label(
                     Color32::from_rgb(110, 220, 110),
-                    format!(
-                        "{name}'s burst plan lines up here (fit {:.2}): its zero at {}",
-                        m.corr,
-                        freq(m.offset_hz)
-                    ),
+                    match bursts {
+                        Some(b) => format!(
+                            "{name}'s burst plan lines up here: its zero at {} (the bursts \
+                             moved it {:+.2} kHz from the pool's look)",
+                            freq(m.offset_hz),
+                            b.zero_trim_hz / 1e3
+                        ),
+                        None => format!(
+                            "{name}'s burst plan lines up here (fit {:.2}): its zero at {}",
+                            m.corr,
+                            freq(m.offset_hz)
+                        ),
+                    },
                 )
                 .on_hover_text(
                     "The plan's occupancy (how often each of its frequencies is in a burst) \
-                     slid across this pool's mean spectrum: the offset where they match best",
+                     slid across this pool's mean spectrum: the offset where they match best; \
+                     once timed, each code's band at its symbol rate matched slot by slot; \
+                     once bursts are demodulated, moved by their carriers' median offset",
                 );
                 let timed = timed.unwrap_or_default();
                 if let (Some(t), Some(clock)) = (timed.timing.filter(sure), &plan.clock) {
                     lead_line(ui, &t, clock);
-                    pool_waterfall(ui, p, Some((plan, clock, &t, m.offset_hz)), &freq);
-                    heard_table(ui, plan, &timed.levels);
+                    pool_waterfall(ui, p, Some((plan, clock, &t, m.offset_hz)), bursts, &freq);
+                    match bursts {
+                        Some(b) => burst_section(ui, b, plan, &timed.levels, id),
+                        None => heard_table(ui, plan, &timed.levels),
+                    }
                     drawn = true;
                 } else {
                     match timed.timing {
@@ -6246,7 +6316,7 @@ fn pool_section(
         }
     }
     if !drawn {
-        pool_waterfall(ui, p, None, &freq);
+        pool_waterfall(ui, p, None, None, &freq);
     }
     pool_map(ui, p);
 }
@@ -6277,9 +6347,30 @@ fn pair_plan(
             m
         }
     };
+    // The pool VFO's own burst demodulator follows this plan: its timing
+    // and zero, trimmed by the bursts themselves, win. Its frames are put
+    // on this plan view's arrival line (the two lines differ by their fits).
+    if let (Some(b), Some(clock)) = (
+        p.bursts.as_deref().filter(|b| b.from == Some(vfo)),
+        &plan.clock,
+    ) && let (Some(t), Some(fc)) = (b.timing, b.frames)
+    {
+        let given = decsat_engine::tdma::pool::PlanTiming {
+            lead_s: fc.start(clock.counter) - clock.at_s,
+            frame_s: fc.frame_s,
+            slot_s: fc.slot_s,
+            ..t
+        };
+        let m = decsat_engine::tdma::pool::PlanMatch {
+            offset_hz: b.offset_hz,
+            corr: m.map_or(1.0, |m| m.corr),
+        };
+        let timed = plan_timing(ui, p, plan, b.offset_hz, vfo, rf_center, Some(given));
+        return (Some(m), Some(timed));
+    }
     let timed = m
         .filter(|m| m.corr >= 0.5)
-        .map(|m| plan_timing(ui, p, plan, m.offset_hz, vfo, rf_center));
+        .map(|m| plan_timing(ui, p, plan, m.offset_hz, vfo, rf_center, None));
     (m, timed)
 }
 
@@ -6307,6 +6398,182 @@ fn time_plans(ui: &mut Ui, inp: &SideInput) {
     }
 }
 
+/// The burst demodulator's tip.
+const BURSTS_TIP: &str = "Each burst the plan names cut out of this VFO's signal once its \
+     slots are in (from a second and a half kept) and demodulated by what the plan says of it \
+     — terminal, slot, frequency, and its code's symbol rate and waveform — on worker \
+     threads: the preamble found, timing, carrier and phase from the known symbols, an \
+     equaliser, soft bits. A burst is counted demodulated when its preamble fits and its MER \
+     is 6 dB or more. Δf: the terminal's carrier against its plan frequency (the plan's zero \
+     as the bursts put it); Δt: its first symbol against the slot's start as the pool's \
+     envelope and the bursts put it. Late: its plan came after the ring had let its slots \
+     go; let go: the workers behind. Click a terminal for its constellation.";
+
+/// The pool's bursts as demodulated by the plan: how many, and each
+/// terminal's MER, carrier, timing and constellation.
+fn burst_section(
+    ui: &mut Ui,
+    b: &decsat_engine::tdma::pool_bursts::BurstsView,
+    plan: &decsat_ts::newtec::PlanView,
+    levels: &[decsat_engine::tdma::pool::TerminalLevel],
+    id: VfoId,
+) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("Bursts demodulated").strong())
+        .on_hover_text(BURSTS_TIP);
+    let share = |n: u64| 100.0 * n as f64 / b.cut.max(1) as f64;
+    ui.label(format!(
+        "{:.0} a second · {} of {} cut ({:.1} %), {} failed",
+        b.per_s,
+        b.demodulated,
+        b.cut,
+        share(b.demodulated),
+        b.failed
+    ));
+    let mut extra = format!(
+        "{} planned · {} late · {} let go · {} workers at {:.0} % ({:.1} s a second)",
+        b.planned,
+        b.late,
+        b.dropped,
+        b.workers,
+        100.0 * b.load / b.workers.max(1) as f64,
+        b.load
+    );
+    if b.unknown > 0 {
+        extra.push_str(&format!(" · {} of unread codes", b.unknown));
+    }
+    ui.label(RichText::new(extra).small());
+    ui.label(
+        RichText::new(format!(
+            "start moved {:+.1} µs by the bursts",
+            b.start_trim_s * 1e6
+        ))
+        .small()
+        .weak(),
+    );
+    if let Some((dir, n)) = &b.recording {
+        ui.label(
+            RichText::new(format!(
+                "● recording each terminal's bursts to {} ({n} so far)",
+                dir.display()
+            ))
+            .small()
+            .color(Color32::from_rgb(230, 110, 110)),
+        );
+    }
+    // The terminal shown: the one clicked, else the busiest.
+    let pick_id = egui::Id::new(("pool_terminal_pick", id));
+    let mut pick: Option<u16> = ui.data(|d| d.get_temp(pick_id));
+    if pick.is_none_or(|t| !b.terminals.iter().any(|x| x.id == t)) {
+        pick = b
+            .terminals
+            .iter()
+            .max_by_key(|t| t.demodulated)
+            .map(|t| t.id);
+    }
+    egui::Grid::new(("pool_burst_rows", id))
+        .num_columns(7)
+        .striped(true)
+        .show(ui, |ui| {
+            for h in ["terminal", "ok", "MER", "C/N", "Δf", "Δt", "code"] {
+                ui.label(RichText::new(h).small().weak());
+            }
+            ui.end_row();
+            // In the plan's order, busiest first; then any it no longer has.
+            let mut order: Vec<u16> = plan.terminals.iter().map(|t| t.id).collect();
+            for t in &b.terminals {
+                if !order.contains(&t.id) {
+                    order.push(t.id);
+                }
+            }
+            for tid in order {
+                let Some(t) = b.terminals.iter().find(|t| t.id == tid) else {
+                    continue;
+                };
+                let r = ui.selectable_label(
+                    pick == Some(t.id),
+                    RichText::new(t.id.to_string())
+                        .small()
+                        .color(terminal_color(t.id)),
+                );
+                if r.clicked() {
+                    pick = Some(t.id);
+                }
+                let ok = 100.0 * t.demodulated as f64 / t.cut.max(1) as f64;
+                let mut okt = RichText::new(format!("{ok:.0} %")).small();
+                if ok < 90.0 {
+                    okt = okt.color(Color32::from_rgb(230, 170, 90));
+                }
+                ui.label(okt).on_hover_text(format!(
+                    "{} of its {} bursts cut demodulated, {} not",
+                    t.demodulated, t.cut, t.failed
+                ));
+                ui.label(
+                    RichText::new(if t.demodulated > 0 {
+                        format!("{:.1} dB", t.mer_db)
+                    } else {
+                        "–".into()
+                    })
+                    .small(),
+                );
+                let level = levels.iter().find(|l| l.id == t.id);
+                ui.label(
+                    RichText::new(
+                        level
+                            .and_then(|l| l.cn_db)
+                            .map_or("–".into(), |c| format!("{c:.1} dB")),
+                    )
+                    .small(),
+                )
+                .on_hover_text(
+                    "C/N in its bursts' band and slots from the pool's spectrum, the median of \
+                     its bursts heard",
+                );
+                let mut df = RichText::new(format!("{:+.2} kHz", t.freq_hz / 1e3)).small();
+                if t.freq_hz.abs() > 3e3 {
+                    df = df.color(Color32::from_rgb(230, 170, 90));
+                }
+                ui.label(df);
+                ui.label(RichText::new(format!("{:+.1} µs", t.timing_us)).small());
+                ui.label(
+                    RichText::new(format!(
+                        "{:04X}h {}",
+                        t.code,
+                        t.waveform.map_or("?", |w| w.name())
+                    ))
+                    .small(),
+                )
+                .on_hover_text(format!(
+                    "Its latest good burst: code {:04X}h, {:.2} kBd, preamble fit {:.2}",
+                    t.code,
+                    t.symbol_rate / 1e3,
+                    t.fit
+                ));
+                ui.end_row();
+            }
+        });
+    ui.data_mut(|d| d.insert_temp(pick_id, pick));
+    if let Some(t) = pick.and_then(|p| b.terminals.iter().find(|t| t.id == p))
+        && !t.symbols.is_empty()
+    {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "Terminal {}: {} at {:.2} kBd, MER {:.1} dB — its latest {} data symbols",
+                t.id,
+                t.waveform.map_or("?", |w| w.name()),
+                t.symbol_rate / 1e3,
+                t.mer_db,
+                t.symbols.len()
+            ))
+            .small(),
+        );
+        ui.push_id(("pool_constellation", id), |ui| {
+            constellation(ui, &t.symbols, 200.0);
+        });
+    }
+}
+
 /// Where a plan's terminal levels are kept for the outbound VFO's own
 /// plan card.
 fn plan_levels_id(vfo: VfoId) -> egui::Id {
@@ -6328,8 +6595,8 @@ fn sure(t: &decsat_engine::tdma::pool::PlanTiming) -> bool {
 }
 
 /// `plan` (from VFO `vfo`, its frequencies `offset_hz` off) timed on the
-/// pool `p`, the last answer followed; the levels also left for the
-/// outbound's own plan card.
+/// pool `p`, the last answer followed — or as `given` (the VFO's own) —
+/// and its terminals' levels, also left for the outbound's own plan card.
 fn plan_timing(
     ui: &mut Ui,
     p: &decsat_engine::tdma::pool::PoolView,
@@ -6337,6 +6604,7 @@ fn plan_timing(
     offset_hz: f64,
     vfo: VfoId,
     rf_center: f64,
+    given: Option<decsat_engine::tdma::pool::PlanTiming>,
 ) -> TimedPlan {
     use decsat_engine::tdma::pool::{align_plan, terminal_levels};
     let id = egui::Id::new(("plan_timing", vfo, rf_center.to_bits()));
@@ -6348,7 +6616,7 @@ fn plan_timing(
         return c.clone();
     }
     let prior = cached.and_then(|c| c.timing);
-    let timing = align_plan(p, plan, offset_hz, prior.as_ref());
+    let timing = given.or_else(|| align_plan(p, plan, offset_hz, prior.as_ref()));
     let levels = timing
         .filter(sure)
         .map(|t| terminal_levels(p, plan, &t, offset_hz))
@@ -6502,6 +6770,8 @@ struct FineTexture {
 /// bottom, across the VFO's band. With a timed plan, each planned burst is
 /// a box in its terminal's colour over the rows its slots land on, its
 /// terminal written in, and each frame's start is marked with its counter.
+/// With the bursts demodulated (`bursts`), a box is its code's band at its
+/// symbol rate on the terminal's own carrier.
 #[allow(clippy::type_complexity)]
 fn pool_waterfall(
     ui: &mut Ui,
@@ -6512,6 +6782,7 @@ fn pool_waterfall(
         &decsat_engine::tdma::pool::PlanTiming,
         f64,
     )>,
+    bursts: Option<&decsat_engine::tdma::pool_bursts::BurstsView>,
     freq: &dyn Fn(f64) -> String,
 ) {
     let rows = &*p.fine;
@@ -6600,7 +6871,22 @@ fn pool_waterfall(
                 );
             }
             for b in &f.bursts {
-                let Some((a, c)) = plan.edges(b) else {
+                // The terminal as demodulated: its carrier, and the code's
+                // band at its rate; else the plan's learned extents.
+                let heard = bursts.and_then(|v| {
+                    v.terminals
+                        .iter()
+                        .find(|x| x.id == b.terminal && x.demodulated > 0)
+                });
+                let edges = match (heard, decsat_ts::newtec::code_rate(b.code)) {
+                    (Some(h), Some(r)) => {
+                        let half = r.symbol_rate_hz * 1.05 / 2.0;
+                        let c = b.freq_hz() + h.freq_hz;
+                        Some((c - half, c + half))
+                    }
+                    _ => plan.edges(b),
+                };
+                let Some((a, c)) = edges else {
                     continue;
                 };
                 let t0 = start + f64::from(b.slot) * t.slot_s;
@@ -6625,8 +6911,16 @@ fn pool_waterfall(
                     );
                 }
                 if pointer.is_some_and(|q| r.contains(q)) {
-                    let cn = fine_cn(rows, t0, t1, a + offset, c + offset)
+                    let mut cn = fine_cn(rows, t0, t1, a + offset, c + offset)
                         .map_or(String::new(), |cn| format!(" · C/N {cn:.1} dB"));
+                    if let Some(h) = heard {
+                        cn.push_str(&format!(
+                            " · its bursts lately: MER {:.1} dB, {:+.2} kHz off its plan \
+                             frequency",
+                            h.mer_db,
+                            h.freq_hz / 1e3
+                        ));
+                    }
                     hover = Some(format!(
                         "terminal {} · frame {} · slot {}{} · {:.1} kHz wide at {} (code \
                          {:04X}h){cn}",
