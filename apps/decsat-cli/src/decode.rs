@@ -751,6 +751,54 @@ pub(crate) fn report(st: &VfoStatus) {
     }
 }
 
+/// The VFO as a return pool: its carriers over time, its grid.
+pub(crate) fn print_pool(p: &decsat_engine::tdma::pool::PoolView) {
+    println!(
+        "pool: {} carriers now{}, {} layout changes ({:.1} a minute) over {:.0} s",
+        p.carriers.len(),
+        p.span.map_or(String::new(), |(a, b)| format!(
+            " in {:+.1}..{:+.1} kHz",
+            a / 1e3,
+            b / 1e3
+        )),
+        p.changes,
+        p.changes_per_min,
+        p.seconds
+    );
+    match (p.slot_s, p.frame_s) {
+        (Some(s), Some(f)) => println!(
+            "  grid: {:.3} ms slots, {:.3} ms frame ({:.1} slots), repeat strength {:.2}",
+            s * 1e3,
+            f * 1e3,
+            f / s,
+            p.grid_strength
+        ),
+        (Some(s), None) => println!(
+            "  grid: repeats every {:.3} ms, strength {:.2}",
+            s * 1e3,
+            p.grid_strength
+        ),
+        _ => println!("  grid: none found yet"),
+    }
+    let show = |cs: &[decsat_engine::tdma::pool::PoolCarrier]| -> String {
+        cs.iter()
+            .map(|c| {
+                format!(
+                    "{:+.0}..{:+.0} ({:.0})",
+                    c.lo_hz / 1e3,
+                    c.hi_hz / 1e3,
+                    c.width_hz() / 1e3
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    println!("  now (kHz, width): {}", show(&p.carriers));
+    for (t, cs) in p.history.iter().rev().take(12).rev() {
+        println!("  from {t:6.1} s: {}", show(cs));
+    }
+}
+
 /// A VSAT hub's DVB-RCS signalling.
 fn print_rcs(r: &decsat_ts::rcs::RcsView) {
     use decsat_ts::rcs::{descriptor_name, table_name};
@@ -1442,6 +1490,9 @@ pub(crate) fn print_is19(v: &decsat_modem::is19::OutboundView) {
 }
 
 pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
+    if let Some(p) = &v.pool {
+        print_pool(p);
+    }
     for (i, c) in v.channels.iter().enumerate() {
         println!(
             "tdma #{i}: {:+.1} kHz, {:.1} kS/s α {:.2}, {} · {} bursts ({:.0}/s, on {:.0} %) · {} · MER {:.1} dB, {:.1} dB over the floor",

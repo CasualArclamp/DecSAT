@@ -1043,6 +1043,28 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     if v.settings.decoder == DecoderKind::Tdma
         && let Some(t) = &st.tdma
     {
+        // Other VFOs' DVB-RCS signalling, to tie a pool's frame to an
+        // outbound's clock.
+        let outbounds: Vec<(String, &decsat_ts::rcs::RcsView)> = inp
+            .vfos
+            .iter()
+            .filter(|o| o.id != v.id)
+            .filter_map(|o| {
+                let rcs = inp
+                    .statuses
+                    .get(&o.id)?
+                    .fec
+                    .as_ref()?
+                    .ts
+                    .as_ref()?
+                    .rcs
+                    .as_ref()?;
+                Some((o.settings.name.clone(), rcs))
+            })
+            .collect();
+        if let Some(p) = &t.pool {
+            pool_section(ui, p, inp.rf_center + v.settings.offset_hz, &outbounds);
+        }
         tdma_card(ui, t, inp.rf_center + v.settings.offset_hz, v.id);
     }
 
@@ -5756,6 +5778,155 @@ fn tdma_card(ui: &mut Ui, t: &decsat_engine::TdmaView, rf_center: f64, id: VfoId
             .default_open(true)
             .show(ui, |ui| tdma_channel(ui, c, i, id));
     }
+}
+
+/// What the return pool section is about.
+const POOL_TIP: &str = "The VFO as a return pool: a block of spectrum a VSAT network's \
+     terminals share. The map is its layout over the last two minutes (time down, newest at \
+     the bottom): the carriers as a 200 ms average shows them, split at guards 3 dB or more \
+     deep — a hub resizing and moving carriers (Mx-DMA) shows as the layout changing; a \
+     block of bursting carriers averages into one. The grid is the repeat of the pool's \
+     short power dips (the bursts' guard times): the slot, and the frame the envelope's fold \
+     explains best. A frame that an outbound's own timing matches — its NCR, or one of its \
+     signalling tables — ties the pool to that outbound.";
+
+/// The VFO as a return pool: a map of its layout, its grid, and whether an
+/// outbound's timing matches it.
+fn pool_section(
+    ui: &mut Ui,
+    p: &decsat_engine::tdma::pool::PoolView,
+    rf_center: f64,
+    outbounds: &[(String, &decsat_ts::rcs::RcsView)],
+) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Return pool").strong())
+        .on_hover_text(POOL_TIP);
+    let freq = |hz: f64| {
+        if rf_center.abs() > 1e6 {
+            format::freq(rf_center + hz)
+        } else {
+            format!("{:+.1} kHz", hz / 1e3)
+        }
+    };
+    let mut line = format!("{} carriers now", p.carriers.len());
+    if let Some((a, b)) = p.span {
+        line.push_str(&format!(
+            " in {} – {} ({:.0} kHz)",
+            freq(a),
+            freq(b),
+            (b - a) / 1e3
+        ));
+    }
+    if p.seconds > 10.0 {
+        line.push_str(&format!(
+            " · {} layout changes ({:.1} a minute)",
+            p.changes, p.changes_per_min
+        ));
+    }
+    ui.label(line);
+    let widths: Vec<String> = p
+        .carriers
+        .iter()
+        .map(|c| format!("{:.0} kHz", c.width_hz() / 1e3))
+        .collect();
+    if !widths.is_empty() {
+        ui.label(RichText::new(format!("widths now: {}", widths.join(", "))).small())
+            .on_hover_text(
+                "Occupied widths. A continuous carrier's symbol rate is about its width \
+                 over 1 + roll-off (1.05 to 1.20 on a modern return)",
+            );
+    }
+    match (p.slot_s, p.frame_s) {
+        (Some(s), Some(f)) => {
+            ui.label(format!(
+                "grid: {:.3} ms slots · {:.3} ms frame ({:.0} slots)",
+                s * 1e3,
+                f * 1e3,
+                f / s
+            ));
+        }
+        (Some(s), None) => {
+            ui.label(format!("grid: repeats every {:.3} ms", s * 1e3));
+        }
+        _ if p.seconds < 10.0 => {
+            ui.label(RichText::new("grid: listening…").weak());
+        }
+        _ => {
+            ui.label(RichText::new("grid: no repeat found").weak());
+        }
+    }
+    // An outbound whose timing matches the frame (or the slot): its NCR
+    // interval or a table's.
+    for period in [p.frame_s, p.slot_s].into_iter().flatten() {
+        for (name, rcs) in outbounds {
+            let close = |x: f64| (x / period - 1.0).abs() < 0.003;
+            let mut why = Vec::new();
+            if let Some(i) = rcs.ncr.as_ref().and_then(|n| n.interval_s)
+                && close(i)
+            {
+                why.push(format!("its NCR every {:.2} ms", i * 1e3));
+            }
+            for (id, t) in &rcs.tables {
+                if let Some(i) = t.interval_s()
+                    && close(i)
+                {
+                    why.push(format!(
+                        "table {id:02X}h ({}) every {:.2} ms",
+                        decsat_ts::rcs::table_name(*id),
+                        i * 1e3
+                    ));
+                }
+            }
+            if !why.is_empty() {
+                ui.colored_label(
+                    Color32::from_rgb(110, 220, 110),
+                    format!(
+                        "{:.3} ms = {name}'s {}: this pool runs on that outbound's clock",
+                        period * 1e3,
+                        why.join(", ")
+                    ),
+                );
+            }
+        }
+    }
+    pool_map(ui, p);
+}
+
+/// The pool's layouts over time: each layout's carriers as bars across the
+/// VFO's band, oldest at the top.
+fn pool_map(ui: &mut Ui, p: &decsat_engine::tdma::pool::PoolView) {
+    const H: f32 = 90.0;
+    const WINDOW_S: f64 = 120.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, H), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    let half = p.half_band_hz.max(1.0);
+    let x_of = |hz: f64| rect.left() + rect.width() * (((hz + half) / (2.0 * half)) as f32);
+    let now = p.seconds;
+    let t0 = (now - WINDOW_S).max(0.0);
+    let span = (now - t0).max(1.0);
+    let y_of = |t: f64| rect.top() + rect.height() * (((t - t0) / span) as f32).clamp(0.0, 1.0);
+    for (k, (start, cs)) in p.history.iter().enumerate() {
+        let end = p.history.get(k + 1).map_or(now, |n| n.0);
+        if end < t0 {
+            continue;
+        }
+        let (y0, y1) = (y_of(*start), y_of(end));
+        for (i, c) in cs.iter().enumerate() {
+            let r = egui::Rect::from_min_max(
+                pos2(x_of(c.lo_hz), y0),
+                pos2(x_of(c.hi_hz), y1.max(y0 + 1.0)),
+            );
+            painter.rect_filled(r, CornerRadius::ZERO, channel_color(i).gamma_multiply(0.6));
+        }
+    }
+    resp.on_hover_text(format!(
+        "The pool's layout over the last {:.0} s, newest at the bottom; across, the VFO's \
+         band ({:.0} kHz)",
+        span,
+        2.0 * half / 1e3
+    ));
 }
 
 /// A carrier's colour in the burst map and its header.
