@@ -200,11 +200,25 @@ fn find_frame(b: &[BurstTime], used: &[bool], slot: f64) -> Option<Frame> {
     if peak <= 0.4 {
         return None;
     }
-    let lag = (2..=8)
+    // Every fraction down to two slots, smallest first: the best lag can
+    // be twenty frames out (lags reach a third of the span), and fractions
+    // only to an eighth read a twelve-slot frame whose 144-slot multiple
+    // had won as 24 slots. A fraction counts where the strongest lag beside
+    // it (the division rounds) is a peak of its own, its share split with
+    // a neighbour added (a frame of a whole-and-a-bit slots spans two
+    // lags): a lag next to the frame's peak is not one (11 for a 12-slot
+    // frame was taken), nor lag 2 beside lag 1, where a silence of several
+    // slots correlates with itself.
+    let lag = (2..=best / 2)
         .rev()
-        .map(|d| best / d)
-        .find(|&l| {
-            l >= 2 && (l.saturating_sub(1)..=l + 1).any(|k| k < r.len() && pair(k) >= 0.5 * peak)
+        .find_map(|d| {
+            let l = (best as f64 / d as f64).round() as usize;
+            let k = (l.max(3) - 1..=l + 1)
+                .filter(|&k| k + 1 < r.len())
+                .max_by(|&a, &b| r[a].total_cmp(&r[b]))?;
+            let own_peak = r[k] >= r[k - 1] && r[k] >= r[k + 1];
+            let split = r[k] + r[k - 1].max(r[k + 1]).max(0.0);
+            (own_peak && split >= 0.5 * peak).then_some(k)
         })
         .unwrap_or(best);
     let rough = lag as f64 * slot;
@@ -520,6 +534,30 @@ mod tests {
         let (k, off) = g.place(t).unwrap();
         assert_eq!(k, 7);
         assert!((off - 0.1).abs() < 0.3, "{off}");
+    }
+
+    #[test]
+    fn a_frame_is_not_taken_for_its_multiple() {
+        // Every twelfth slot empty and nothing else: the empty slots'
+        // autocorrelation is ~1 at every multiple of twelve, and a far one
+        // can edge ahead (144 slots won, and the frame was read as 24).
+        for n_slots in 700..760 {
+            let bursts: Vec<BurstTime> = (0..n_slots)
+                .filter(|k| k % 12 != 5)
+                .map(|k| BurstTime {
+                    t: 100.0 + k as f64 * 870.0,
+                    len: 856.5,
+                    power_db: 0.0,
+                    freq_hz: 0.0,
+                    idle: false,
+                })
+                .collect();
+            let f = find_grid(&bursts).and_then(|g| g.frame).expect("a frame");
+            assert!(
+                (f.period - 12.0 * 870.0).abs() < 1.0,
+                "{n_slots} slots: {f:?}"
+            );
+        }
     }
 
     #[test]
