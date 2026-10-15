@@ -217,6 +217,21 @@ pub struct TelemetryView {
     pub sub_lock: Option<f32>,
     /// A convolutional code found in the bits and decoded.
     pub conv: Option<String>,
+    /// How far the data reach either side of the subcarrier (or of the
+    /// carrier, for data on its phase), Hz.
+    pub half_width_hz: f64,
+}
+
+/// Where to look for the telemetry, set by hand (each `None`: found
+/// blind).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Tune {
+    /// The subcarrier's offset from the carrier, Hz; 0 for data on the
+    /// carrier's phase. Snapped to the subcarrier's own line nearby.
+    pub subcarrier_hz: Option<f64>,
+    /// How far the data reach either side of it, Hz.
+    pub half_width_hz: Option<f64>,
+    pub bit_rate: Option<f64>,
 }
 
 /// The frame synchroniser.
@@ -382,6 +397,8 @@ struct Chain {
     /// Suppressed carriers: the chips' rate (the symbol rate, or twice it
     /// on QPSK) for the bit rate.
     chip_rate: f64,
+    /// The data's reach either side, Hz.
+    half_width: f64,
 }
 
 /// One reading of the bits as convolutionally coded: a Viterbi decoder
@@ -464,6 +481,8 @@ const CONV_GIVE_UP_BITS: u64 = 120_000;
 
 /// The beacon receiver over a VFO's baseband.
 pub struct BeaconRx {
+    /// Where to look for the telemetry, as set by hand.
+    tune: Tune,
     rate: f64,
     band: f64,
     samples: u64,
@@ -525,6 +544,7 @@ impl BeaconRx {
     /// A receiver for baseband at `rate` from a VFO `band` Hz wide.
     pub fn new(rate: f64, band: f64) -> Self {
         BeaconRx {
+            tune: Tune::default(),
             rate,
             band: band.min(rate),
             samples: 0,
@@ -824,7 +844,14 @@ impl BeaconRx {
     fn analyse(&mut self) {
         let phi = std::mem::take(&mut self.analysis);
         self.looks += 1;
-        let found = match pm::find_subcarrier(&phi, self.rate) {
+        let sub = match self.tune.subcarrier_hz {
+            // Placed by hand: snapped to its line, its width measured there.
+            Some(f) if f > 0.0 => pm::subcarrier_at(&phi, self.rate, f, self.tune.half_width_hz),
+            Some(_) => None,
+            None => pm::find_subcarrier(&phi, self.rate),
+        };
+        let direct = self.tune.subcarrier_hz.is_none_or(|f| f <= 0.0);
+        let found = match sub {
             Some(sc) => {
                 let demod = SubDemod::new(self.rate, sc.freq_hz, sc.half_width_hz);
                 self.try_chain(
@@ -833,33 +860,82 @@ impl BeaconRx {
                     Riding::Subcarrier {
                         freq_hz: sc.freq_hz,
                     },
-                    1.6 * sc.half_width_hz,
+                    sc.half_width_hz,
                 )
             }
-            None => match pm::direct_width(&phi, self.rate, 4.0 * self.loop_hz) {
-                Some(w) if w > 8.0 * self.loop_hz => {
-                    let demod = SubDemod::new(self.rate, 0.0, w);
-                    self.try_chain(&phi, demod, Riding::Direct, 1.2 * w)
+            None if direct => {
+                let width = self.tune.half_width_hz.or_else(|| {
+                    pm::direct_width(&phi, self.rate, 4.0 * self.loop_hz)
+                        .filter(|&w| w > 8.0 * self.loop_hz)
+                });
+                match width {
+                    Some(w) => {
+                        let demod = SubDemod::new(self.rate, 0.0, w);
+                        self.try_chain(&phi, demod, Riding::Direct, w)
+                    }
+                    None => false,
                 }
-                _ => false,
-            },
+            }
+            None => false,
         };
-        if !found && self.looks >= MAX_LOOKS {
+        // Set by hand, it is looked for until found.
+        if !found && self.looks >= MAX_LOOKS && self.tune == Tune::default() {
             self.unmodulated = true;
         }
     }
 
-    /// Build the bit chain on `phi` through `demod`, if a clock and a code
-    /// are found in what it gives; run the phase through it.
-    fn try_chain(&mut self, phi: &[f32], mut demod: SubDemod, riding: Riding, hi: f64) -> bool {
+    /// Look for the telemetry where `tune` says (the carrier loop runs
+    /// on; the bits and frames start again).
+    pub fn set_tune(&mut self, tune: Tune) {
+        if tune == self.tune {
+            return;
+        }
+        self.tune = tune;
+        self.chain = None;
+        self.analysis.clear();
+        self.looks = 0;
+        self.unmodulated = false;
+        self.framer = pcm::Framer::new();
+        self.coded = None;
+        self.conv_tried = false;
+        self.tm = None;
+        self.recent.clear();
+        self.counter = None;
+        self.clock = None;
+        self.checksum = None;
+        self.check_counts = (0, 0);
+        self.snr = SnrMeter::default();
+        self.bits_at_lock = self.bits;
+        let mut log = self.log.lock().unwrap_or_else(|e| e.into_inner());
+        log.map.clear();
+        log.changed.clear();
+        log.stats.clear();
+        log.revision += 1;
+    }
+
+    /// Build the bit chain on `phi` through `demod` (data reaching
+    /// `half_width` either side), if a clock and a code are found in what it
+    /// gives (or the bit rate set by hand); run the phase through it.
+    fn try_chain(
+        &mut self,
+        phi: &[f32],
+        mut demod: SubDemod,
+        riding: Riding,
+        half_width: f64,
+    ) -> bool {
         let mut s = Vec::new();
         demod.process(phi, &mut s);
         let settle = demod.settle().min(s.len());
         let rate = demod.out_rate();
-        let Some((line, _)) = pm::find_clock(&s[settle..], rate, 20.0, hi.min(rate / 2.2)) else {
-            return false;
+        let coding = match self.tune.bit_rate {
+            Some(rb) => pm::coding_at(&s[settle..], rate, rb),
+            None => {
+                let hi = (1.6 * half_width).min(rate / 2.2);
+                pm::find_clock(&s[settle..], rate, 20.0, hi)
+                    .and_then(|(line, _)| pm::choose_coding(&s[settle..], rate, line))
+            }
         };
-        let Some((coding, rc, ph)) = pm::choose_coding(&s[settle..], rate, line) else {
+        let Some((coding, rc, ph)) = coding else {
             return false;
         };
         demod.take_lock();
@@ -873,6 +949,7 @@ impl BeaconRx {
             coding,
             biphase: Biphase::default(),
             chip_rate: rc,
+            half_width,
         });
         let chips = std::mem::take(&mut self.chips);
         self.chips_to_bits(&chips);
@@ -946,6 +1023,7 @@ impl BeaconRx {
             coding: Coding::Nrz,
             biphase: Biphase::default(),
             chip_rate: rs * f64::from(modulation.bits_per_symbol()),
+            half_width: rs,
         });
         self.stage = Stage::Suppressed;
         self.last_offset = ddc_offset_hz + id.center_offset_hz;
@@ -1279,6 +1357,7 @@ impl BeaconRx {
                     .as_ref()
                     .and_then(|c| c.locked())
                     .map(|t| t.code.name()),
+                half_width_hz: ch.half_width,
             }
         });
         let framing = self.active_lock().map(|(l, st, coded)| {
@@ -1501,6 +1580,7 @@ mod tests {
                 counter_mod: 32,
             },
             clock_ppm: 15.0,
+            tone: None,
         };
         let x = synth::generate(&spec);
         let rx = run(&x, spec.rate, 250_000.0);
@@ -1552,6 +1632,7 @@ mod tests {
                 counter_mod: 16,
             },
             clock_ppm: 0.0,
+            tone: None,
         };
         let x = synth::generate(&spec);
         let l = look(&x, spec.rate, 250_000.0).expect("carrier");
@@ -1565,6 +1646,52 @@ mod tests {
             "{}",
             l.reach_hz
         );
+    }
+
+    #[test]
+    fn a_subcarrier_placed_by_hand_is_snapped_to_and_read() {
+        // A strong tone at 30 kHz beside the data's 64 kHz subcarrier; the
+        // subcarrier set 300 Hz off, as a drag on the waterfall leaves it.
+        let spec = Spec {
+            rate: 400_000.0,
+            seconds: 10.0,
+            carrier_hz: 500.0,
+            drift_hz_s: 0.0,
+            cn0_dbhz: 62.0,
+            index_rad: 0.9,
+            subcarrier_hz: Some(64_000.0),
+            bit_rate: 8000.0,
+            biphase: false,
+            suppressed: false,
+            framing: Framing::Irig {
+                frame_bytes: 256,
+                counter_mod: 16,
+            },
+            clock_ppm: 0.0,
+            tone: Some((30_000.0, 0.8)),
+        };
+        let x = synth::generate(&spec);
+        let mut rx = BeaconRx::new(spec.rate, 300_000.0);
+        rx.set_tune(Tune {
+            subcarrier_hz: Some(63_700.0),
+            half_width_hz: None,
+            bit_rate: None,
+        });
+        for c in x.chunks(20_000) {
+            rx.push(c, 0.0);
+        }
+        let v = rx.view();
+        let t = v.telemetry.expect("telemetry");
+        match t.riding {
+            Riding::Subcarrier { freq_hz } => {
+                assert!((freq_hz - 64_000.0).abs() < 20.0, "{freq_hz}")
+            }
+            r => panic!("{r:?}"),
+        }
+        assert!((t.bit_rate - 8000.0).abs() < 2.0, "{}", t.bit_rate);
+        let f = v.framing.expect("frames");
+        assert_eq!(f.word_hex, "FAF320");
+        assert!(f.stats.frames >= 20, "{}", f.stats.frames);
     }
 
     #[test]
@@ -1582,6 +1709,7 @@ mod tests {
             suppressed: false,
             framing: Framing::None,
             clock_ppm: 0.0,
+            tone: None,
         };
         let x = synth::generate(&spec);
         let rx = run(&x, spec.rate, 80_000.0);
@@ -1615,6 +1743,7 @@ mod tests {
                 scid: 0x1A5,
             },
             clock_ppm: 0.0,
+            tone: None,
         };
         let x = synth::generate(&spec);
         let rx = run(&x, spec.rate, 150_000.0);

@@ -500,6 +500,105 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             }
 
             if s.decoder == DecoderKind::Beacon {
+                // Where the telemetry is looked for: blind, or set by hand
+                // (offset from the carrier; also dragged on the waterfall).
+                let seen = st.beacon.as_ref().and_then(|b| b.telemetry.as_ref());
+                ui.label("Subcarrier");
+                ui.horizontal(|ui| {
+                    let tune = &mut s.beacon_tune;
+                    let mut blind = tune.subcarrier_hz.is_none();
+                    if ui
+                        .checkbox(&mut blind, "found blind")
+                        .on_hover_text(
+                            "Untick to say where the telemetry is: its subcarrier's offset \
+                             from the carrier (0 for data on the carrier's phase) and how far \
+                             its data reach either side. A subcarrier set by hand is snapped \
+                             to its own line within a few per cent. You can also drag the \
+                             dashed subcarrier marks on the waterfall.",
+                        )
+                        .changed()
+                    {
+                        if blind {
+                            tune.subcarrier_hz = None;
+                            tune.half_width_hz = None;
+                        } else {
+                            let (f, w) = match seen {
+                                Some(t) => match t.riding {
+                                    decsat_engine::beacon::Riding::Subcarrier { freq_hz } => {
+                                        (freq_hz, t.half_width_hz)
+                                    }
+                                    _ => (0.0, t.half_width_hz),
+                                },
+                                None => (s.bandwidth_hz / 4.0, s.bandwidth_hz / 10.0),
+                            };
+                            tune.subcarrier_hz = Some(f);
+                            tune.half_width_hz = Some(w.max(100.0));
+                        }
+                    }
+                    if let Some(f) = &mut tune.subcarrier_hz {
+                        let mut k = *f / 1e3;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut k)
+                                    .speed(0.1)
+                                    .range(0.0..=s.bandwidth_hz / 2e3)
+                                    .max_decimals(3)
+                                    .suffix(" kHz"),
+                            )
+                            .on_hover_text("Offset from the carrier (0: data on its phase)")
+                            .changed()
+                        {
+                            *f = k * 1e3;
+                        }
+                        ui.label("±");
+                        let mut w = tune.half_width_hz.unwrap_or(5e3) / 1e3;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut w)
+                                    .speed(0.1)
+                                    .range(0.1..=s.bandwidth_hz / 2e3)
+                                    .max_decimals(2)
+                                    .suffix(" kHz"),
+                            )
+                            .on_hover_text(
+                                "How far the data reach either side (a bi-phase signal's \
+                                 main lobe reaches twice its bit rate)",
+                            )
+                            .changed()
+                        {
+                            tune.half_width_hz = Some(w * 1e3);
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Bit rate");
+                ui.horizontal(|ui| {
+                    let tune = &mut s.beacon_tune;
+                    let mut blind = tune.bit_rate.is_none();
+                    if ui
+                        .checkbox(&mut blind, "found blind")
+                        .on_hover_text("Untick to give the telemetry's bit rate")
+                        .changed()
+                    {
+                        tune.bit_rate = if blind {
+                            None
+                        } else {
+                            Some(seen.map_or(1000.0, |t| t.bit_rate.round()))
+                        };
+                    }
+                    if let Some(rb) = &mut tune.bit_rate {
+                        ui.add(
+                            egui::DragValue::new(rb)
+                                .speed(1.0)
+                                .range(10.0..=1e6)
+                                .max_decimals(1)
+                                .suffix(" bit/s"),
+                        );
+                    }
+                });
+                ui.end_row();
+
                 ui.label("Frames");
                 ui.horizontal(|ui| {
                     let (label, tip) = if s.record {

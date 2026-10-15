@@ -182,6 +182,11 @@ enum Drag {
     Create {
         start_hz: f64,
     },
+    /// A beacon VFO's subcarrier mark, dragged about its carrier.
+    Subcarrier {
+        id: VfoId,
+        carrier_hz: f64,
+    },
 }
 
 /// A delete cross, drawn rather than typed: egui's fonts have no ✕.
@@ -727,6 +732,9 @@ impl BandView {
 
         // The ✕ on each VFO's label, for the click handler below.
         let mut close_boxes: Vec<(VfoId, Rect)> = Vec::new();
+        // Beacon VFOs' subcarrier marks (VFO, its carrier, the mark's x),
+        // for dragging.
+        let mut sub_marks: Vec<(VfoId, f64, f32)> = Vec::new();
         // The tag rows painted under the labels, kept clear of each other.
         let mut tag_rows: Vec<Rect> = Vec::new();
         for v in inp.vfos {
@@ -775,6 +783,66 @@ impl BandView {
                 [pos2(xc, rect.top()), pos2(xc, rect.bottom())],
                 Stroke::new(1.0, c.gamma_multiply(0.45)),
             );
+
+            // A beacon's telemetry: where its decoder looks, either side of
+            // the carrier — set by hand or found — shaded to the data's
+            // reach, the marks draggable.
+            if s.decoder == DecoderKind::Beacon
+                && let Some(b) = inp.statuses.get(&v.id).and_then(|st| st.beacon.as_ref())
+                && let Some(carrier) = b.carrier
+            {
+                let found = b.telemetry.as_ref();
+                let fsc = s.beacon_tune.subcarrier_hz.or_else(|| {
+                    found.map(|t| match t.riding {
+                        decsat_engine::beacon::Riding::Subcarrier { freq_hz } => freq_hz,
+                        _ => 0.0,
+                    })
+                });
+                let width = s
+                    .beacon_tune
+                    .half_width_hz
+                    .or_else(|| found.map(|t| t.half_width_hz));
+                if let Some(fsc) = fsc {
+                    let fc = carrier.band_offset_hz;
+                    let mark = c.gamma_multiply(if s.beacon_tune.subcarrier_hz.is_some() {
+                        1.0
+                    } else {
+                        0.7
+                    });
+                    let sides: &[f64] = if fsc > 0.0 { &[-1.0, 1.0] } else { &[0.0] };
+                    for &side in sides {
+                        let f = fc + side * fsc;
+                        if let Some(w) = width {
+                            let band = Rect::from_min_max(
+                                pos2(x_of(f - w).max(rect.left()), rect.top()),
+                                pos2(x_of(f + w).min(rect.right()), rect.bottom()),
+                            );
+                            painter.rect_filled(
+                                band,
+                                CornerRadius::ZERO,
+                                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 22),
+                            );
+                        }
+                        if side != 0.0 {
+                            let x = x_of(f);
+                            painter.extend(egui::Shape::dashed_line(
+                                &[pos2(x, rect.top() + 40.0), pos2(x, rect.bottom())],
+                                Stroke::new(1.5, mark),
+                                6.0,
+                                4.0,
+                            ));
+                            painter.text(
+                                pos2(x + 3.0, rect.top() + 42.0),
+                                Align2::LEFT_TOP,
+                                "TLM",
+                                FontId::proportional(10.0),
+                                mark,
+                            );
+                            sub_marks.push((v.id, fc, x));
+                        }
+                    }
+                }
+            }
 
             // Label pill at the top of the spectrum.
             let label = format!(
@@ -1266,28 +1334,42 @@ impl BandView {
 
         let find = |id: VfoId| inp.vfos.iter().find(|v| v.id == id);
 
+        // A beacon's subcarrier mark under a point.
+        let hit_mark = |p: Pos2| {
+            sub_marks
+                .iter()
+                .find(|(_, _, x)| (p.x - x).abs() <= edge_px)
+                .map(|&(id, fc, _)| (id, fc))
+        };
+
         if resp.drag_started_by(PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
                 .unwrap_or(rect.center());
-            self.drag = match hit_vfo(origin) {
-                Some((id, true)) => {
+            self.drag = match (hit_mark(origin), hit_vfo(origin)) {
+                (Some((id, carrier_hz)), _) => {
                     actions.push(Action::Select(Some(id)));
-                    Drag::Resize { id }
+                    Drag::Subcarrier { id, carrier_hz }
                 }
-                Some((id, false)) => {
-                    actions.push(Action::Select(Some(id)));
-                    let off = find(id).map_or(0.0, |v| v.settings.offset_hz);
-                    Drag::Move {
-                        id,
-                        grab_hz: hz_of(origin.x) - off,
+                (None, hit) => match hit {
+                    Some((id, true)) => {
+                        actions.push(Action::Select(Some(id)));
+                        Drag::Resize { id }
                     }
-                }
-                None => {
-                    let h = hz_of(origin.x);
-                    self.create_to = h;
-                    Drag::Create { start_hz: h }
-                }
+                    Some((id, false)) => {
+                        actions.push(Action::Select(Some(id)));
+                        let off = find(id).map_or(0.0, |v| v.settings.offset_hz);
+                        Drag::Move {
+                            id,
+                            grab_hz: hz_of(origin.x) - off,
+                        }
+                    }
+                    None => {
+                        let h = hz_of(origin.x);
+                        self.create_to = h;
+                        Drag::Create { start_hz: h }
+                    }
+                },
             };
         }
 
@@ -1313,6 +1395,27 @@ impl BandView {
                     ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
                 }
                 Drag::Create { .. } => self.create_to = h,
+                Drag::Subcarrier { id, carrier_hz } => {
+                    if let Some(v) = find(id) {
+                        let mut s = v.settings.clone();
+                        let fsc = (h - carrier_hz).abs().min(s.bandwidth_hz / 2.0);
+                        s.beacon_tune.subcarrier_hz = Some(fsc);
+                        // The data's reach: as found, else a guess to start
+                        // from (the side panel sets it exactly).
+                        if s.beacon_tune.half_width_hz.is_none() {
+                            let found = inp
+                                .statuses
+                                .get(&id)
+                                .and_then(|st| st.beacon.as_ref())
+                                .and_then(|b| b.telemetry.as_ref())
+                                .map(|t| t.half_width_hz);
+                            s.beacon_tune.half_width_hz =
+                                Some(found.unwrap_or(fsc / 4.0).max(100.0));
+                        }
+                        actions.push(Action::Update(id, s));
+                    }
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                }
                 _ => {}
             }
         }
@@ -1350,6 +1453,8 @@ impl BandView {
                 || plan_boxes.iter().any(|(_, r)| r.contains(p))
             {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            } else if hit_mark(p).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             } else {
                 match hit_vfo(p) {
                     Some((_, true)) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),

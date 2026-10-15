@@ -446,6 +446,10 @@ pub struct VfoSettings {
     /// The beacon decoder: sound a tone whose pitch follows the carrier's
     /// C/N0 (the GUI plays it; the engine ignores it).
     pub pointing_tone: bool,
+    /// The beacon decoder: where to look for the telemetry (subcarrier
+    /// offset from the carrier, its data's reach, the bit rate), each
+    /// found blind when `None`.
+    pub beacon_tune: crate::beacon::Tune,
     /// Where the IQ recorder and the symbol writer write.
     pub record_dir: PathBuf,
     /// DVB-S2: append every good BBFRAME to this file, for working out
@@ -498,6 +502,7 @@ impl VfoSettings {
             programme_record: false,
             voice_auto: true,
             pointing_tone: false,
+            beacon_tune: crate::beacon::Tune::default(),
             record_dir: std::env::temp_dir(),
             bbframes: None,
         }
@@ -1182,10 +1187,14 @@ impl Worker {
                 file: Is19File::default(),
             },
             DecoderKind::Beacon => Decoder::Beacon {
-                rx: Box::new(crate::beacon::BeaconRx::new(
-                    ddc.out_rate(),
-                    s.bandwidth_hz.min(ddc.out_rate()),
-                )),
+                rx: {
+                    let mut rx = Box::new(crate::beacon::BeaconRx::new(
+                        ddc.out_rate(),
+                        s.bandwidth_hz.min(ddc.out_rate()),
+                    ));
+                    rx.set_tune(s.beacon_tune);
+                    rx
+                },
                 files: crate::beacon::BeaconFiles::default(),
             },
             DecoderKind::Tdma => Decoder::Tdma(Box::new(crate::tdma::TdmaAnalyser::new(
@@ -1259,6 +1268,11 @@ impl Worker {
         // carrier kept its gathered signal and analysed a mixture of the two.
         let signal_changed = rebuild_ddc || retuned || new_decoder;
         self.settings = new;
+        // Where a beacon's telemetry is looked for: its receiver starts its
+        // search again, the carrier loop running on.
+        if let Decoder::Beacon { rx, .. } = &mut self.decoder {
+            rx.set_tune(self.settings.beacon_tune);
+        }
         // Record / GSE variant changes reach a running FEC thread directly.
         if let Decoder::Dvbs2 { fec: Some(w), .. }
         | Decoder::Modem { fec: Some(w), .. }

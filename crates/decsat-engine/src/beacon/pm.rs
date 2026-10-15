@@ -194,6 +194,86 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
     best.map(|(_, s)| s)
 }
 
+/// A subcarrier placed by hand at about `near_hz`: snapped to the squared
+/// phase's line within 3 % (or 500 Hz) of twice it, when one stands 7 dB
+/// clear (else left where it was put), and its data's reach either side
+/// measured there (95 % of the excess power; `width_hz` when given).
+pub fn subcarrier_at(
+    phi: &[f32],
+    rate: f64,
+    near_hz: f64,
+    width_hz: Option<f64>,
+) -> Option<Subcarrier> {
+    let n = fft_size(phi.len(), rate, rate / 8192.0);
+    if phi.len() < 4 * n || near_hz <= 0.0 || near_hz >= rate / 2.0 {
+        return None;
+    }
+    let (p, _) = psd_real(phi, n, 256);
+    let sq: Vec<f32> = phi.iter().map(|v| v * v).collect();
+    let (q, _) = psd_real(&sq, n, 256);
+    let bin = rate / n as f64;
+    let half_bins = n / 2;
+    let span = (0.03 * 2.0 * near_hz).max(500.0);
+    let lo = (((2.0 * near_hz - span) / bin) as usize).max(2);
+    let hi = (((2.0 * near_hz + span) / bin) as usize + 1).min(half_bins);
+    let fsc = lines(&q, lo, hi, 5.0)
+        .first()
+        .map_or(near_hz, |&(_, kf, _)| kf * bin / 2.0);
+    let ksc = (fsc / bin).round() as usize;
+    if ksc < 2 || ksc + 2 >= half_bins {
+        return None;
+    }
+    let mut all = p[1..].to_vec();
+    let floor = median(&mut all).max(1e-30);
+    let reach = ksc.min(half_bins - ksc);
+    // The data's spread: a median over 9 bins first (narrow lines — a tone,
+    // another subcarrier's line — drop out), then only what both sides
+    // share, as data on a subcarrier are mirrored about it.
+    let smooth: Vec<f64> = (0..p.len())
+        .map(|k| {
+            let mut w: Vec<f64> = p[k.saturating_sub(4)..(k + 5).min(p.len())].to_vec();
+            median(&mut w)
+        })
+        .collect();
+    let excess = |k: usize| (smooth[k] - floor).max(0.0);
+    let mut sum = 0.0;
+    let mut cum = Vec::with_capacity(reach);
+    for d in 1..reach {
+        sum += 2.0 * excess(ksc - d).min(excess(ksc + d));
+        cum.push(sum);
+    }
+    let width_bins = cum
+        .iter()
+        .position(|&c| c >= 0.95 * sum)
+        .unwrap_or(cum.len())
+        + 1;
+    let measured = (width_bins as f64 * bin).max(4.0 * bin);
+    Some(Subcarrier {
+        freq_hz: fsc,
+        half_width_hz: width_hz.unwrap_or(measured).min(fsc).max(bin),
+        snr: sum / (floor * 2.0 * width_bins as f64),
+    })
+}
+
+/// The code and chip rate of data known to run at `bit_rate`: bi-phase if
+/// chips at twice it pair up opposite nine times in ten, else NRZ.
+pub fn coding_at(s: &[f32], rate: f64, bit_rate: f64) -> Option<(Coding, f64, f64)> {
+    if rate / (2.0 * bit_rate) >= 2.5 {
+        let (chips, phase) = chips_at(s, rate, 2.0 * bit_rate);
+        if chips.len() >= 400 {
+            let opp = pair_opposite(&chips);
+            if opp[0].max(opp[1]) >= 0.9 {
+                return Some((Coding::Biphase, 2.0 * bit_rate, phase));
+            }
+        }
+    }
+    if rate / bit_rate < 2.0 {
+        return None;
+    }
+    let (chips, phase) = chips_at(s, rate, bit_rate);
+    (chips.len() >= 400).then_some((Coding::Nrz, bit_rate, phase))
+}
+
 /// How far the data on the carrier's own phase reach (PCM/PM, no
 /// subcarrier): 95 % of the phase's power above the noise, from `lo_hz`
 /// (below which the carrier loop tracks it out). `None` if there is next

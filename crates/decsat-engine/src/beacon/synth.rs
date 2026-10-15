@@ -47,6 +47,8 @@ pub struct Spec {
     pub framing: Framing,
     /// The spacecraft's clock against ours, ppm (bit rate and subcarrier).
     pub clock_ppm: f64,
+    /// An unmodulated tone also on the phase: (Hz, peak radians).
+    pub tone: Option<(f64, f64)>,
 }
 
 /// The channel bits for `n` bits' worth of `framing`, sent at
@@ -192,7 +194,10 @@ pub fn generate(s: &Spec) -> Vec<Iq> {
                 } else {
                     0.0
                 };
-                let ph = theta + m;
+                let tone = s
+                    .tone
+                    .map_or(0.0, |(f, a)| a * (std::f64::consts::TAU * f * t).sin());
+                let ph = theta + m + tone;
                 (amp * ph.cos(), amp * ph.sin())
             };
             let (nr, ni) = noise.complex(noise_var);
