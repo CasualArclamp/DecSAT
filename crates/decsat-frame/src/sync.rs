@@ -30,6 +30,8 @@
 
 use decsat_core::Iq;
 
+use decsat_dsp::dot::fir_cr;
+
 use crate::defs::{PLSC_LEN, PLSC_SCRAMBLER, SOF_BIG_ENDIAN, SOF_LEN};
 use crate::pi2bpsk::map_bpsk;
 
@@ -64,25 +66,35 @@ pub fn sof_differential(sof: &[Iq]) -> Iq {
 
 /// Differential correlator over the PLHEADER.
 ///
-/// Feed symbols one at a time with [`Self::push`]. The returned metric is
-/// normalised so that a noiseless, unit-power PLHEADER gives 1.0, and it peaks
-/// on the push of the PLHEADER's **last** symbol — so the next symbol pushed is
-/// the first payload symbol.
+/// Feed symbols with [`Self::process`] (a block) or [`Self::push`] (one at a
+/// time). The metric is normalised so that a noiseless, unit-power PLHEADER
+/// gives 1.0, and it peaks on the PLHEADER's **last** symbol — so the next
+/// symbol is the first payload symbol.
+///
+/// Every expected differential is ±j (consecutive pi/2-BPSK symbols are a
+/// quarter turn apart), so each correlator is j times a sum of differentials
+/// signed ±1, and j drops out of the metric's magnitude: both are real-tap
+/// filters over the differential stream, run with `decsat_dsp`'s block FIR.
+/// (The first version wrapped a ring index on each of its 57 complex taps per
+/// symbol: 55 % of a core for a 6.75 MBd carrier, more than any other stage.)
 pub struct PlHeaderCorrelator {
-    /// Conjugated expected SOF differentials.
-    sof_taps: [Iq; SOF_CORR_LEN],
-    /// Conjugated expected PLSC pairwise differentials.
-    plsc_taps: [Iq; PLSC_CORR_LEN],
-    /// Ring of the last `WINDOW` differentials, oldest first via [`Self::diff`].
-    diffs: [Iq; WINDOW],
-    /// Next write slot in `diffs`.
-    pos: usize,
-    /// How many differentials have been seen (so we know when the ring is full).
+    /// Signs of the expected SOF differentials (`Im` of their conjugates).
+    sof_sign: [f32; SOF_CORR_LEN],
+    /// Signs of the expected PLSC pairwise differentials, at window offsets
+    /// `SOF_LEN + 2i`, zero at the odd offsets between them.
+    plsc_sign: [f32; WINDOW - SOF_LEN],
+    /// Differentials: the last `WINDOW - 1` from before, then the new ones.
+    diffs: Vec<Iq>,
+    /// How many differentials have been seen (so we know when a window fills).
     seen: usize,
     /// Previous symbol, for forming the next differential.
     prev: Iq,
     /// Whether `prev` holds a real symbol yet.
     primed: bool,
+    // Scratch: the two correlators' outputs, and one metric for `push`.
+    sof: Vec<Iq>,
+    plsc: Vec<Iq>,
+    one: Vec<f32>,
 }
 
 impl Default for PlHeaderCorrelator {
@@ -93,89 +105,105 @@ impl Default for PlHeaderCorrelator {
 
 impl PlHeaderCorrelator {
     pub fn new() -> Self {
-        // Expected SOF symbols, and their differentials.
+        // Expected SOF symbols; each differential `sof[n]·conj(sof[n+1])` is
+        // ±j, and correlating with its conjugate means multiplying by ∓j:
+        // the sign kept is that of the conjugate's imaginary part.
         let mut sof = [Iq::new(0.0, 0.0); SOF_LEN];
         map_bpsk(SOF_BIG_ENDIAN, &mut sof, SOF_LEN);
-        let mut sof_taps = [Iq::new(0.0, 0.0); SOF_CORR_LEN];
-        for n in 0..SOF_CORR_LEN {
-            // Conjugated up front so correlating is a plain multiply-accumulate.
-            sof_taps[n] = (sof[n] * sof[n + 1].conj()).conj();
+        let mut sof_sign = [0f32; SOF_CORR_LEN];
+        for (n, s) in sof_sign.iter_mut().enumerate() {
+            let tap = (sof[n] * sof[n + 1].conj()).conj();
+            debug_assert!(tap.re.abs() < 1e-6 && (tap.im.abs() - 1.0).abs() < 1e-5);
+            *s = tap.im.signum();
         }
 
         // PLSC taps from the scrambler. Under pi/2-BPSK the differential of a
         // (even, odd) symbol pair is -j when the two transmitted bits are equal
-        // and +j when they differ; see the module comment.
-        let mut plsc_taps = [Iq::new(0.0, 0.0); PLSC_CORR_LEN];
-        for (i, tap) in plsc_taps.iter_mut().enumerate() {
+        // and +j when they differ; see the module comment. Conjugated, that is
+        // +j and -j.
+        let mut plsc_sign = [0f32; WINDOW - SOF_LEN];
+        for i in 0..PLSC_CORR_LEN {
             let a = (PLSC_SCRAMBLER >> (63 - 2 * i)) & 1;
             let b = (PLSC_SCRAMBLER >> (63 - (2 * i + 1))) & 1;
-            let d = if a == b {
-                Iq::new(0.0, -1.0)
-            } else {
-                Iq::new(0.0, 1.0)
-            };
-            *tap = d.conj();
+            plsc_sign[2 * i] = if a == b { 1.0 } else { -1.0 };
         }
 
         PlHeaderCorrelator {
-            sof_taps,
-            plsc_taps,
-            diffs: [Iq::new(0.0, 0.0); WINDOW],
-            pos: 0,
+            sof_sign,
+            plsc_sign,
+            diffs: Vec::new(),
             seen: 0,
             prev: Iq::new(0.0, 0.0),
             primed: false,
+            sof: Vec::new(),
+            plsc: Vec::new(),
+            one: Vec::with_capacity(1),
         }
     }
 
-    /// Read the differential `i` places from the oldest in the window.
-    ///
-    /// Rust note: `pos` is where the *next* write goes, so the oldest entry is
-    /// at `pos` too once the ring has filled.
-    #[inline]
-    fn diff(&self, i: usize) -> Iq {
-        self.diffs[(self.pos + i) % WINDOW]
+    /// Push a block of symbols: one metric each is appended to `out`, 0.0
+    /// where [`Self::push`] would say `None` (too little history yet).
+    pub fn process(&mut self, symbols: &[Iq], out: &mut Vec<f32>) {
+        let mut rest = symbols;
+        if !self.primed {
+            let Some((&x, tail)) = rest.split_first() else {
+                return;
+            };
+            self.prev = x;
+            self.primed = true;
+            out.push(0.0);
+            rest = tail;
+        }
+        for &x in rest {
+            self.diffs.push(self.prev * x.conj());
+            self.prev = x;
+        }
+        self.seen += rest.len();
+
+        // Windows that fit end on the newest differentials; the new ones
+        // before them have no metric yet.
+        let full = self.diffs.len().saturating_sub(WINDOW - 1);
+        out.extend(std::iter::repeat_n(0.0, rest.len() - full));
+        if full > 0 {
+            self.sof.clear();
+            self.plsc.clear();
+            // Window start `w`: SOF over differentials w..w+25, PLSC over
+            // w+26..w+89 (every other one counted).
+            let n = self.diffs.len();
+            fir_cr(
+                &self.diffs[..n - (WINDOW - SOF_CORR_LEN)],
+                &self.sof_sign,
+                &mut self.sof,
+            );
+            fir_cr(&self.diffs[SOF_LEN..], &self.plsc_sign, &mut self.plsc);
+            // Sum peaks when the PLS code's 7th bit is 0, difference when it
+            // is 1.
+            out.extend(
+                self.sof
+                    .iter()
+                    .zip(&self.plsc)
+                    .map(|(&s, &p)| (s + p).norm().max((s - p).norm()) / TAPS as f32),
+            );
+        }
+        // Keep only the history the next window needs.
+        let drop = self.diffs.len().saturating_sub(WINDOW - 1);
+        self.diffs.drain(..drop);
     }
 
     /// Push one symbol and get the timing metric, or `None` until enough
     /// history has accumulated to fill the window.
     pub fn push(&mut self, x: Iq) -> Option<f32> {
-        if !self.primed {
-            self.prev = x;
-            self.primed = true;
-            return None;
-        }
-
-        self.diffs[self.pos] = self.prev * x.conj();
-        self.pos = (self.pos + 1) % WINDOW;
-        self.prev = x;
-        self.seen += 1;
-
-        if self.seen < WINDOW {
-            return None;
-        }
-
-        // SOF: differentials 0..25 of the window.
-        let mut sof = Iq::new(0.0, 0.0);
-        for n in 0..SOF_CORR_LEN {
-            sof += self.diff(n) * self.sof_taps[n];
-        }
-
-        // PLSC: pairwise, so every other differential starting at SOF_LEN.
-        let mut plsc = Iq::new(0.0, 0.0);
-        for i in 0..PLSC_CORR_LEN {
-            plsc += self.diff(SOF_LEN + 2 * i) * self.plsc_taps[i];
-        }
-
-        // Sum peaks when the PLS code's 7th bit is 0, difference when it is 1.
-        let metric = (sof + plsc).norm().max((sof - plsc).norm()) / TAPS as f32;
-        Some(metric)
+        let mut one = std::mem::take(&mut self.one);
+        one.clear();
+        self.process(&[x], &mut one);
+        let m = one[0];
+        self.one = one;
+        (self.seen >= WINDOW).then_some(m)
     }
 
     /// Forget all history, e.g. after a retune.
     pub fn reset(&mut self) {
-        self.diffs = [Iq::new(0.0, 0.0); WINDOW];
-        self.pos = 0;
+        self.diffs.clear();
         self.seen = 0;
         self.primed = false;
     }

@@ -22,7 +22,7 @@
 
 use decsat_core::Iq;
 
-use crate::dot::dot_cr;
+use crate::dot::{dot_cr, fir_cr};
 
 /// Output rate as a multiple of the VFO bandwidth (before rounding the
 /// decimation factor down, which only raises it).
@@ -103,6 +103,12 @@ impl Stage {
         let l = self.taps_rev.len();
         self.buf.extend_from_slice(input);
         out.reserve(self.buf.len().saturating_sub(self.next_out) / self.decim + 1);
+        if self.decim == 1 && self.next_out < self.buf.len() {
+            // A VFO too wide to decimate (over 40 % of the span) filters
+            // every sample: the block kernel, several outputs at a time.
+            fir_cr(&self.buf[self.next_out + 1 - l..], &self.taps_rev, out);
+            self.next_out = self.buf.len();
+        }
         while self.next_out < self.buf.len() {
             let window = &self.buf[self.next_out + 1 - l..=self.next_out];
             out.push(dot_cr(window, &self.taps_rev));

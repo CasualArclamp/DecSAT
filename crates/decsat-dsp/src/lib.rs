@@ -17,7 +17,7 @@ pub mod rrc;
 pub mod timing;
 
 pub use agc::Agc;
-pub use carrier::{CarrierPll, LOCK_COHERENCE, lock_coherence, mer_db, quality};
+pub use carrier::{CarrierPll, LOCK_COHERENCE, cis, lock_coherence, mer_db, quality};
 pub use dc::DcBlocker;
 pub use ddc::{Ddc, lowpass};
 pub use fir::Fir;

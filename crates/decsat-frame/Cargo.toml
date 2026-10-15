@@ -9,5 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }
+decsat-dsp = { path = "../decsat-dsp" }
 num-complex.workspace = true
 thiserror.workspace = true

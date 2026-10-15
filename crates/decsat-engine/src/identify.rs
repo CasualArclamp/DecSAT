@@ -898,15 +898,13 @@ fn weak_s4_offset(sym: &[Iq], rs: f64) -> Option<f64> {
 /// Search recovered symbols for DVB-S2 PLHEADERs and confirm them on the frame
 /// grid their own PLS codes predict.
 pub fn detect_dvbs2(sym: &[Iq]) -> Dvbs2Info {
-    let mut corr = PlHeaderCorrelator::new();
-    let mut cands: Vec<(usize, f32)> = Vec::new();
-    for (i, &s) in sym.iter().enumerate() {
-        if let Some(m) = corr.push(s)
-            && m > PLHEADER_THRESHOLD
-        {
-            cands.push((i, m));
-        }
-    }
+    let mut metric = Vec::with_capacity(sym.len());
+    PlHeaderCorrelator::new().process(sym, &mut metric);
+    let cands: Vec<(usize, f32)> = metric
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, m)| m > PLHEADER_THRESHOLD)
+        .collect();
     // Keep only local maxima: a header is one peak, its neighbours are lower.
     let peaks: Vec<usize> = cands
         .iter()

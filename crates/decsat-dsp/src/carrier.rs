@@ -25,19 +25,79 @@ fn loop_gains(bn_t: f64) -> (f64, f64) {
     (4.0 * zeta * theta / d, 4.0 * theta * theta / d)
 }
 
+/// `e^{jθ}`, to f32 precision, without a call into the C maths library.
+///
+/// The loops turn a phase into a rotation for every symbol, and on a plain
+/// x86-64 build (no SSE4.1/FMA) `f64::sin_cos` is two calls into the C
+/// library — millions a second on a fast carrier. Here θ is reduced to
+/// the nearest quarter turn, `θ = q·π/2 + r` with |r| ≤ π/4, where the
+/// Taylor series to r⁹ (sine) and r¹⁰ (cosine) are within 2·10⁻⁹ — far
+/// below f32's resolution — and the quarter turns are swaps and signs.
+#[inline]
+pub fn cis(theta: f64) -> Iq {
+    use std::f64::consts::{FRAC_2_PI, FRAC_PI_2};
+    // Rust note: a float-to-int `as` truncates toward zero, one instruction
+    // (`floor`/`round` would be library calls here); adding ±0.5 first makes
+    // it round to the nearest quarter turn.
+    let qf = theta * FRAC_2_PI;
+    let q = (qf + 0.5f64.copysign(qf)) as i64;
+    let r = theta - q as f64 * FRAC_PI_2;
+    let r2 = r * r;
+    let s =
+        r * (1.0 + r2 * (-1.0 / 6.0 + r2 * (1.0 / 120.0 + r2 * (-1.0 / 5040.0 + r2 / 362_880.0))));
+    let c = 1.0
+        + r2 * (-0.5
+            + r2 * (1.0 / 24.0 + r2 * (-1.0 / 720.0 + r2 * (1.0 / 40_320.0 - r2 / 3_628_800.0))));
+    let (s, c) = (s as f32, c as f32);
+    // An odd quarter turn swaps cos and sin (with a sign); the half turn in
+    // `q & 2` negates both. (`q & 3` is right for negative q too: two's
+    // complement.)
+    let (re, im) = if q & 1 == 0 { (c, s) } else { (-s, c) };
+    let sign = if q & 2 == 0 { 1.0 } else { -1.0 };
+    Iq::new(sign * re, sign * im)
+}
+
 /// Index of the constellation point nearest `y`.
 #[inline]
-fn nearest(y: Iq, points: &[Iq]) -> Iq {
-    let mut best = points[0];
+fn nearest_index(y: Iq, points: &[Iq]) -> usize {
+    let mut best = 0;
     let mut best_d = f32::INFINITY;
-    for &p in points {
+    for (i, &p) in points.iter().enumerate() {
         let d = (y - p).norm_sqr();
         if d < best_d {
             best_d = d;
-            best = p;
+            best = i;
         }
     }
     best
+}
+
+/// The constellation point nearest `y`.
+#[inline]
+fn nearest(y: Iq, points: &[Iq]) -> Iq {
+    points[nearest_index(y, points)]
+}
+
+/// `e^{j·order·arg(u)}`: a phase error folded by a ring's rotational
+/// symmetry, by repeated squaring of the unit phasor instead of `atan2`,
+/// `cos` and `sin` (three library calls a symbol). Zero for `u = 0`.
+#[inline]
+fn fold(u: Iq, order: u32) -> Iq {
+    let m = u.norm();
+    if m == 0.0 {
+        return Iq::new(0.0, 0.0);
+    }
+    let mut base = u / m;
+    let mut acc = Iq::new(1.0, 0.0);
+    let mut n = order;
+    while n > 0 {
+        if n & 1 == 1 {
+            acc *= base;
+        }
+        base *= base;
+        n >>= 1;
+    }
+    acc
 }
 
 /// Second-order carrier PLL.
@@ -92,8 +152,7 @@ impl CarrierPll {
     pub fn anchor(&mut self, block: &[Iq], sent: impl Fn(usize) -> Iq) -> f64 {
         let mut acc = Iq::new(0.0, 0.0);
         for (n, &y) in block.iter().enumerate() {
-            let ph = -(self.phase + self.freq * n as f64);
-            acc += y * Iq::new(ph.cos() as f32, ph.sin() as f32) * sent(n).conj();
+            acc += y * cis(-(self.phase + self.freq * n as f64)) * sent(n).conj();
         }
         if acc.norm() == 0.0 {
             return 0.0;
@@ -119,8 +178,7 @@ impl CarrierPll {
 
     #[inline]
     fn rotate(&self, x: Iq) -> Iq {
-        let (s, c) = (-self.phase).sin_cos();
-        x * Iq::new(c as f32, s as f32)
+        x * cis(-self.phase)
     }
 
     #[inline]
@@ -187,12 +245,12 @@ pub fn mer_db(sym: &[Iq], points: &[Iq]) -> f32 {
 /// The largest number of points on any one ring: the finest rotational
 /// step a decision-directed loop can slip by is 2π over it.
 pub fn densest_ring(points: &[Iq]) -> usize {
-    ring_orders(points).into_iter().fold(1.0f32, f32::max) as usize
+    ring_orders(points).into_iter().max().unwrap_or(1).max(1) as usize
 }
 
 /// How many points share each point's ring: the rotational symmetry the
 /// phase error has to be folded by for that point.
-fn ring_orders(points: &[Iq]) -> Vec<f32> {
+fn ring_orders(points: &[Iq]) -> Vec<u32> {
     points
         .iter()
         .map(|p| {
@@ -200,7 +258,7 @@ fn ring_orders(points: &[Iq]) -> Vec<f32> {
             points
                 .iter()
                 .filter(|q| (q.norm() - r).abs() < 1e-3 * r.max(1e-6))
-                .count() as f32
+                .count() as u32
         })
         .collect()
 }
@@ -220,14 +278,8 @@ pub fn lock_coherence(sym: &[Iq], points: &[Iq]) -> f32 {
     let orders = ring_orders(points);
     let mut acc = Iq::new(0.0, 0.0);
     for &s in sym {
-        let (i, _) = points
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (i, (s - p).norm_sqr()))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
-        let err = (s * points[i].conj()).arg() * orders[i];
-        acc += Iq::new(err.cos(), err.sin());
+        let i = nearest_index(s, points);
+        acc += fold(s * points[i].conj(), orders[i]);
     }
     acc.norm() / sym.len() as f32
 }
@@ -241,18 +293,19 @@ pub fn quality<'a>(sym: &[Iq], points_for: impl Fn(usize) -> &'a [Iq]) -> (f32, 
     }
     let (mut sig, mut err) = (0.0f64, 0.0f64);
     let mut acc = Iq::new(0.0, 0.0);
+    // The constellation's ring orders, worked out again only when it
+    // changes (an ACM frame boundary), not for every symbol.
+    let mut orders: (*const Iq, usize, Vec<u32>) = (std::ptr::null(), 0, Vec::new());
     for (i, &s) in sym.iter().enumerate() {
         let pts = points_for(i);
-        let d = nearest(s, pts);
+        if (pts.as_ptr(), pts.len()) != (orders.0, orders.1) {
+            orders = (pts.as_ptr(), pts.len(), ring_orders(pts));
+        }
+        let k = nearest_index(s, pts);
+        let d = pts[k];
         sig += d.norm_sqr() as f64;
         err += (s - d).norm_sqr() as f64;
-        let r = d.norm();
-        let order = pts
-            .iter()
-            .filter(|q| (q.norm() - r).abs() < 1e-3 * r.max(1e-6))
-            .count() as f32;
-        let e = (s * d.conj()).arg() * order;
-        acc += Iq::new(e.cos(), e.sin());
+        acc += fold(s * d.conj(), orders.2[k]);
     }
     (
         (10.0 * (sig / err.max(1e-30)).log10()) as f32,
@@ -366,6 +419,37 @@ mod tests {
             .collect();
         assert!(lock_coherence(&rotating, &pts) < 0.1);
         assert!(lock_coherence(&pts.repeat(100), &pts) > 0.99);
+    }
+
+    #[test]
+    fn cis_matches_sin_cos() {
+        let mut worst = 0f64;
+        for k in -200_000i64..=200_000 {
+            let th = k as f64 * 1.37e-4 * if k % 7 == 0 { 300.0 } else { 1.0 };
+            let z = cis(th);
+            let (s, c) = th.sin_cos();
+            worst = worst
+                .max((z.re as f64 - c).abs())
+                .max((z.im as f64 - s).abs());
+        }
+        assert!(worst < 2e-7, "worst error {worst:e}");
+    }
+
+    #[test]
+    fn fold_matches_the_angle_times_the_order() {
+        for k in 0..1000 {
+            let th = -3.1 + k as f32 * 0.0062;
+            let u = Iq::new(th.cos(), th.sin()) * (0.3 + k as f32 * 0.001);
+            for order in [1u32, 4, 8, 12, 16] {
+                let e = th * order as f32;
+                let want = Iq::new(e.cos(), e.sin());
+                assert!(
+                    (fold(u, order) - want).norm() < 2e-5,
+                    "θ {th} order {order}"
+                );
+            }
+        }
+        assert_eq!(fold(Iq::new(0.0, 0.0), 4), Iq::new(0.0, 0.0));
     }
 
     #[test]

@@ -169,13 +169,30 @@ impl ReedMuller {
         let mut best: Option<(u8, f32)> = None;
         for &i in self.enabled.iter().filter(|&&i| keep(i)) {
             let image = &self.images[i as usize * 64..i as usize * 64 + 64];
-            let score: f32 = soft[..64].iter().zip(image).map(|(r, s)| r * s).sum();
+            let score = dot64(soft[..64].try_into().unwrap(), image.try_into().unwrap());
             if best.is_none_or(|b| score > b.1) {
                 best = Some((i, score));
             }
         }
         best
     }
+}
+
+/// `Σ a[k]·b[k]` over 64 terms, in eight running sums: one float sum is a
+/// serial chain the compiler may not reorder, eight vectorise. The soft
+/// decoder scores up to 256 codewords per header, and the demodulator reads
+/// five candidate headers a frame.
+#[inline]
+fn dot64(a: &[f32; 64], b: &[f32; 64]) -> f32 {
+    let mut acc = [0f32; 8];
+    // Rust note: `as_chunks::<8>()` yields `&[f32; 8]` arrays (none left
+    // over: 64 is a multiple of 8), a constant-length inner loop.
+    for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        for k in 0..8 {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    acc.iter().sum()
 }
 
 #[cfg(test)]

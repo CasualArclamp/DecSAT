@@ -4604,3 +4604,43 @@ tick. Thresholds: `decsat_core::qef_es_n0_db` (EN 302 307-1 Table 13;
 columns are offset) and `decsat_modem::dvbs::qef_es_n0_db` (EN 300 421
 Eb/N0, 0.8 dB margin included, to Es/N0). `last_modcod` now skips dummy
 frames so the header holds still between data.
+
+## A live 6.75 MBd VFO kept half its frames: the VFO thread ran at 2× real time (2026-10-15)
+
+Eutelsat 172B 12705.156 MHz (ACM GSE, short frames, pilots; BBC News
+multicast 238.1.1.10:1234 inside): the live GUI's PCAP held 53 % of the
+multicast's datagrams, the lossless `decode --fast` of the same carrier's
+recording 96.5 %. Cause: at 20 MS/s the 8.06 MHz VFO cannot decimate
+(decimation 1), so the DDC, matched filter and Gardner loop all run at
+20 MS/s, and the VFO's worker thread needed ~215 % of one core (release,
+9800X3D): DDC 27, matched filter 45, Gardner 20, PLHEADER correlator 55,
+frame logic and carrier loop ~67 %. A bounded queue (8 blocks) then dropped
+about half the blocks; each drop lost lock (the GUI's 367 lock losses). FEC
+was never the problem (~20 % on its own thread).
+
+Fixes, all exact up to float rounding (same 5027 frames, 4 lock losses, 101
+slip repairs on the recording): a register-blocked FIR (`dot::fir_cr`,
+16 outputs at a time, 3.4× a dot product per output) for `Fir` and the
+DDC's undecimated stage; the correlator as two real-tap filters (its taps
+are all ±j) over a contiguous differential buffer, run a block at a time
+(55 → 7 %); `carrier::cis` (quarter-turn reduction + short polynomials)
+instead of `f64::sin_cos` in the carrier loop; `quality`'s fold of the
+phase error by repeated squaring instead of `atan2`/`cos`/`sin`, with ring
+orders worked out once per constellation instead of per symbol; truncating
+casts for `floor` in the Gardner interpolator; an 8-lane dot for the PLS
+soft decoder. Worker thread now ~75 % of a core (DDC 12, demod 62).
+Live-equivalent run (`decode` without `--fast`, which paces the file and
+drops as the GUI does): 483 of 519 datagrams (93.1 %) against 305 (58.8 %)
+before and 501 lossless; the difference is one 16-datagram gap while the
+VFO identifies the carrier at start-up. CPU 74 % against 163 %.
+
+16APSK 8/9 (1 % of the frames, 5–20 of 69 decode): no margin, not a
+fault. It needs 12.89 dB (Table 13, normal frames; short a little more),
+and the frames' pilots read 13.3 dB (MER 13.5; the outer ring's phase
+spread is the noise's; no slips; ring ratio ~2.51 against 2.60 with the
+noise bias removed). On synthetic AWGN through the same demod and FEC
+short 16APSK 8/9 decodes 0/52 at 12.5 dB, 13/52 at 12.7, 41/52 at 12.9,
+52/52 at 13.3 — the receiver is at the theoretical threshold. The real
+carrier costs ~0.5 dB more than AWGN at the same reading (the ring
+compression, transponder/HackRF distortion), which puts it just under the
+cliff. A bigger dish would decode it; the receiver can't.

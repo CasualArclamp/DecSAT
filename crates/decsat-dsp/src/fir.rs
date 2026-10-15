@@ -2,14 +2,14 @@
 
 use decsat_core::Iq;
 
-use crate::dot::dot_cr;
+use crate::dot::fir_cr;
 
 /// A complex-in/complex-out FIR with real taps, holding state across calls so
 /// it can be fed block by block without edge artefacts.
 ///
 /// The history is a plain `Vec` holding the last `taps − 1` inputs followed by
-/// the new block, so every output is one contiguous dot product (see
-/// [`dot_cr`]); a ring buffer would save the copy but wrap its index on every
+/// the new block, so the outputs are contiguous dot products (see
+/// [`fir_cr`]); a ring buffer would save the copy but wrap its index on every
 /// tap, which stops the inner loop vectorising.
 pub struct Fir {
     /// Taps reversed, so the dot product runs over the history forwards.
@@ -53,10 +53,7 @@ impl Fir {
     pub fn process(&mut self, input: &[Iq], out: &mut Vec<Iq>) {
         let l = self.taps_rev.len();
         self.buf.extend_from_slice(input);
-        out.reserve(input.len());
-        for end in l - 1..self.buf.len() {
-            out.push(dot_cr(&self.buf[end + 1 - l..=end], &self.taps_rev));
-        }
+        fir_cr(&self.buf, &self.taps_rev, out);
         let drop = self.buf.len() - (l - 1);
         self.buf.drain(..drop);
     }

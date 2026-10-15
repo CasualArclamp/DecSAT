@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::f64::consts::{PI, TAU};
 
 use decsat_core::{Iq, Modulation};
-use decsat_dsp::{Agc, CarrierPll, Fir, LOCK_COHERENCE, SymbolSync, rrc_taps};
+use decsat_dsp::{Agc, CarrierPll, Fir, LOCK_COHERENCE, SymbolSync, cis, rrc_taps};
 use decsat_fec::Constellation;
 use decsat_frame::pi2bpsk::map_bpsk;
 use decsat_frame::vlsnr::{self, Slot, VLSNR_HEADER_LEN};
@@ -388,10 +388,8 @@ impl Demod {
             self.new_sym.clear();
             self.sync.process(&self.filtered, &mut self.new_sym);
 
-            for &s in &self.new_sym {
-                self.sym.push(s);
-                self.metric.push(self.corr.push(s).unwrap_or(0.0));
-            }
+            self.sym.extend_from_slice(&self.new_sym);
+            self.corr.process(&self.new_sym, &mut self.metric);
             self.advance(out);
             self.trim();
         }
@@ -532,10 +530,7 @@ impl Demod {
     /// from coherent soft decisions, then measure how well the whole header
     /// matches what that code sends.
     fn read_header(&mut self, h0: usize, phase: f64, w: f64) -> (PlsInfo, f32) {
-        let derotate = |n: usize, y: Iq| {
-            let ph = -(phase + w * n as f64);
-            y * Iq::new(ph.cos() as f32, ph.sin() as f32)
-        };
+        let derotate = |n: usize, y: Iq| y * cis(-(phase + w * n as f64));
         // The decoder takes the last SOF symbol and the 64 PLS symbols.
         let mut buf = [Iq::new(0.0, 0.0); PLHEADER_LEN - SOF_LEN + 1];
         for (k, b) in buf.iter_mut().enumerate() {
@@ -733,8 +728,7 @@ impl Demod {
                     let ph1 = want + (d + PI).rem_euclid(TAU) - PI;
                     for (t, (y, &x)) in payload[i0..i].iter_mut().zip(&self.raw[i0..i]).enumerate()
                     {
-                        let ph = -(ph0 + (ph1 - ph0) * t as f64 / span);
-                        *y = x * Iq::new(ph.cos() as f32, ph.sin() as f32);
+                        *y = x * cis(-(ph0 + (ph1 - ph0) * t as f64 / span));
                     }
                     // A slip also kicked the loop's frequency: take the one
                     // the two blocks measure instead — on constellations
@@ -793,16 +787,11 @@ impl Demod {
             self.coherence += 0.3 * (coh - self.coherence);
         }
         self.modulation = Some(c.modulation);
-        for &y in self
-            .data
-            .iter()
-            .skip(self.data.len().saturating_sub(RECENT))
-        {
-            if self.recent.len() == RECENT {
-                self.recent.pop_front();
-            }
-            self.recent.push_back(y);
-        }
+        // The newest RECENT data symbols, older ones let go in one step.
+        let take = self.data.len().min(RECENT);
+        let excess = (self.recent.len() + take).saturating_sub(RECENT);
+        self.recent.drain(..excess);
+        self.recent.extend(&self.data[self.data.len() - take..]);
         level
     }
 

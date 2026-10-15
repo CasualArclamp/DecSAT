@@ -665,6 +665,7 @@ name = "decsat-frame"
 version = "0.10.12"
 dependencies = [
  "decsat-core",
+ "decsat-dsp",
  "num-complex",
  "thiserror 2.0.21",
 ]

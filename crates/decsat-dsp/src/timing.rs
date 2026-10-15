@@ -125,7 +125,9 @@ impl SymbolSync {
             self.sps,
             self.buf.len()
         );
-        let i = t.floor() as usize;
+        // Rust note: `as usize` truncates, which is the floor for t ≥ 1 and
+        // one instruction; `t.floor()` is a library call on plain x86-64.
+        let i = t as usize;
         let mu = (t - i as f64) as f32;
         cubic(
             self.buf[i - 1],
@@ -177,8 +179,9 @@ impl SymbolSync {
         // The last step can leave `t_next` up to about sps/2 past the end of
         // the buffer, so clamp: at high samples-per-symbol the unclamped figure
         // ran past the end (found at sps = 84, not caught by tests at ≤ 4).
+        // (Truncating a non-negative value is its floor.)
         let keep_from =
-            ((self.t_next - self.sps / 2.0 - 2.0).floor().max(0.0) as usize).min(self.buf.len());
+            ((self.t_next - self.sps / 2.0 - 2.0).max(0.0) as usize).min(self.buf.len());
         if keep_from > 0 {
             self.buf.drain(..keep_from);
             self.t_next -= keep_from as f64;
