@@ -635,6 +635,19 @@ pub fn ffmpeg_path() -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
+/// The in-app player window's own volume, 0..=1 (1 when never set).
+pub fn tv_volume() -> f32 {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "tv_volume")
+        .and_then(|(_, v)| v.parse::<f32>().ok())
+        .map_or(1.0, |v| v.clamp(0.0, 1.0))
+}
+
+pub fn set_tv_volume(v: f32) {
+    let _ = write_key("tv_volume", &format!("{:.3}", v.clamp(0.0, 1.0)));
+}
+
 pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
     write_key(
         "ffmpeg",

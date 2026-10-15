@@ -4780,3 +4780,13 @@ thread 27 % with the key against 20–23 % without. Then: the PID flags and
 the services' lock showed *scrambled* as well as *descrambled* (the count
 kept the packets from before the key was typed): `PidStats::scrambled_now`
 / `descrambled_now` now give the state as it is, the counts the history.
+
+## The player window's own volume (2026-10-15)
+
+Rory: a volume slider in the internal player. The window has one beside
+its Play button: `AudioHandle::set_volume` (decsat-audio) is a per-player
+slider position applied as its cube, multiplied with the app's volume and
+mute in the output callback; `VideoPlayer::set_volume` keeps it in the
+player's shared state and hands it to each audio player it makes, so an
+ffmpeg restart keeps it; the window remembers it as `tv_volume` in the
+prefs (1.0 when never set) and sets it on each player it starts.

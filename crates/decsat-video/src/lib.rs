@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -106,6 +106,9 @@ struct Shared {
     /// Bumped at each ffmpeg start: its timestamps start over.
     generation: AtomicU64,
     audio: Mutex<Option<AudioClock>>,
+    /// The player's own volume (f32 bits, 0..=1), given to each audio
+    /// player made (ffmpeg restarts make a new one).
+    volume: AtomicU32,
     status: Mutex<Status>,
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
@@ -145,6 +148,7 @@ impl VideoPlayer {
             frames: Mutex::new(VecDeque::new()),
             generation: AtomicU64::new(0),
             audio: Mutex::new(None),
+            volume: AtomicU32::new(1.0f32.to_bits()),
             status: Mutex::new(Status::default()),
             stdin: Mutex::new(None),
             child: Mutex::new(None),
@@ -185,6 +189,16 @@ impl VideoPlayer {
             .as_ref()
             .map(|a| a.handle.status());
         s
+    }
+
+    /// This player's own volume, 0..=1, on top of the app's volume and
+    /// mute; kept across ffmpeg restarts.
+    pub fn set_volume(&self, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        self.sh.volume.store(v.to_bits(), Ordering::Relaxed);
+        if let Some(a) = self.sh.audio.lock().unwrap().as_ref() {
+            a.handle.set_volume(v);
+        }
     }
 
     /// Peak sound levels (left, right), 0..1, when there is sound.
@@ -406,6 +420,8 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                 if audio.is_some() {
                     match AudioPlayer::start_pcm("decoded by ffmpeg", output) {
                         Ok(p) => {
+                            p.handle()
+                                .set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
                             *sh.audio.lock().unwrap() = Some(AudioClock {
                                 handle: p.handle(),
                                 end_ms: None,

@@ -1,6 +1,7 @@
 //! The in-app player window: one service of a VFO's transport stream,
 //! decoded by ffmpeg (`decsat_video`), its sound through the app's audio
-//! output (volume, mute and device as set in the toolbar).
+//! output (volume, mute and device as set in the toolbar) with a volume
+//! slider of its own, remembered between runs.
 //!
 //! The VFO hands its (descrambled) packets to the player through a tap in
 //! its settings; the app makes the tap and starts the player
@@ -29,7 +30,6 @@ pub enum TvRequest {
     Key(String),
 }
 
-#[derive(Default)]
 pub struct TvWindow {
     /// The VFO playing (none: closed).
     pub vfo: Option<VfoId>,
@@ -41,6 +41,23 @@ pub struct TvWindow {
     error: Option<String>,
     /// The ffmpeg path being typed.
     ffmpeg_edit: String,
+    /// The window's own volume, 0..=1, on top of the toolbar's.
+    volume: f32,
+}
+
+impl Default for TvWindow {
+    fn default() -> Self {
+        TvWindow {
+            vfo: None,
+            programme: None,
+            audio: None,
+            player: None,
+            texture: None,
+            error: None,
+            ffmpeg_edit: String::new(),
+            volume: prefs::tv_volume(),
+        }
+    }
 }
 
 /// The PIDs a service needs (PAT, its PMT and PCR, its streams), its video,
@@ -82,7 +99,10 @@ impl TvWindow {
             return;
         };
         match VideoPlayer::start(&exe, rx, sel, decsat_audio::OutputKind::Device) {
-            Ok(p) => self.player = Some(p),
+            Ok(p) => {
+                p.set_volume(self.volume);
+                self.player = Some(p);
+            }
             Err(e) => self.error = Some(e),
         }
     }
@@ -220,6 +240,31 @@ impl TvWindow {
                 } else {
                     *req = Some(TvRequest::Play(self.programme, self.audio));
                 }
+            }
+            // The window's own volume, on top of the toolbar's.
+            ui.label("\u{1F50A}");
+            let slider = ui
+                .add(
+                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                )
+                .on_hover_text(
+                    "This window's volume, on top of the toolbar's volume and mute; \
+                     remembered",
+                );
+            ui.label(
+                RichText::new(format!("{:.0} %", self.volume * 100.0))
+                    .small()
+                    .weak(),
+            );
+            if slider.changed()
+                && let Some(p) = &self.player
+            {
+                p.set_volume(self.volume);
+            }
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                prefs::set_tv_volume(self.volume);
             }
             if let Some(p) = &self.player {
                 let st = p.status();

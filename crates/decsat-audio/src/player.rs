@@ -175,6 +175,9 @@ struct Shared {
     played: AtomicU64,
     /// Buffer level beyond which audio is cut back to `START_MS`.
     max_ms: u32,
+    /// This player's own volume, 0..=1 as a slider position (f32 bits),
+    /// on top of the app's: the in-app TV player's slider.
+    volume: AtomicU32,
 }
 
 /// A handle on a running player: its status, level and pause control.
@@ -223,6 +226,18 @@ impl AudioHandle {
     /// Stereo frames sent to the output so far.
     pub fn played_frames(&self) -> u64 {
         self.0.played.load(Ordering::Relaxed)
+    }
+
+    /// This player's own volume, 0..=1 (a slider position, applied as its
+    /// cube like the app's), multiplied with the app's volume and mute.
+    pub fn set_volume(&self, v: f32) {
+        self.0
+            .volume
+            .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.0.volume.load(Ordering::Relaxed))
     }
 }
 
@@ -281,6 +296,7 @@ impl AudioPlayer {
             level: [AtomicU32::new(0), AtomicU32::new(0)],
             played: AtomicU64::new(0),
             max_ms,
+            volume: AtomicU32::new(1.0f32.to_bits()),
         });
         let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE);
         let sh = shared.clone();
@@ -414,7 +430,7 @@ where
 {
     let start = (rate as usize * START_MS as usize / 1000) * 2;
     move |data: &mut [T], _| {
-        let g = gain();
+        let g = gain() * f32::from_bits(sh.volume.load(Ordering::Relaxed)).powi(3);
         let paused = sh.paused.load(Ordering::Relaxed);
         let mut ring = sh.ring.lock().unwrap();
         if !ring.primed && ring.buf.len() >= start && !paused {

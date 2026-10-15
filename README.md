@@ -217,7 +217,8 @@ descrambles a recording (`--scramble` makes a scrambled test stream).
 service in the analyser's Services tab) plays a service in a window:
 pictures deinterlaced and fitted 16:9 (anamorphic SD shown right), its
 sound through the app's audio (the volume, mute and output device in the
-toolbar), the pictures timed by the sound. The window picks the service
+toolbar) with a volume slider of its own, the pictures timed by the sound.
+The window picks the service
 and the sound track (language), and lists what ffmpeg says the streams are.
 It needs [ffmpeg](https://ffmpeg.org) (`winget install Gyan.FFmpeg`):
 found on the PATH, beside DecSAT, or where you point it; it runs as a
