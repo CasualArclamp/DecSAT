@@ -443,6 +443,9 @@ pub struct VfoSettings {
     /// The CDM-600 voice preset: play the G.728 voice as soon as it is
     /// found, without ▶ (so several carriers can be heard at once).
     pub voice_auto: bool,
+    /// The beacon decoder: sound a tone whose pitch follows the carrier's
+    /// C/N0 (the GUI plays it; the engine ignores it).
+    pub pointing_tone: bool,
     /// Where the IQ recorder and the symbol writer write.
     pub record_dir: PathBuf,
     /// DVB-S2: append every good BBFRAME to this file, for working out
@@ -494,6 +497,7 @@ impl VfoSettings {
             programme_play: false,
             programme_record: false,
             voice_auto: true,
+            pointing_tone: false,
             record_dir: std::env::temp_dir(),
             bbframes: None,
         }

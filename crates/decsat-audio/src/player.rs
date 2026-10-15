@@ -65,6 +65,12 @@ fn gain() -> f32 {
     if muted() { 0.0 } else { volume().powi(3) }
 }
 
+/// The gain the app's volume and mute give now (for other sound makers:
+/// the pointing tone).
+pub(crate) fn gain_now() -> f32 {
+    gain()
+}
+
 /// The sound output chosen by name (`None`: the system's default), and a
 /// count of changes, which running players watch to move to it.
 static OUTPUT_DEVICE: Mutex<Option<String>> = Mutex::new(None);
@@ -78,6 +84,12 @@ pub fn set_output_device(name: Option<String>) {
         *d = name;
         OUTPUT_CHANGES.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// How many times the output device has been changed (a sound maker
+/// opened at an older count should reopen).
+pub fn output_changes() -> u64 {
+    OUTPUT_CHANGES.load(Ordering::Relaxed)
 }
 
 pub fn output_device() -> Option<String> {

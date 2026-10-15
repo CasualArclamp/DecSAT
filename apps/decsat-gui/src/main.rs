@@ -8,6 +8,7 @@ mod adsb_names;
 mod auto_pick;
 mod automation;
 mod band_view;
+mod beacon_card;
 mod carrier_caps;
 mod filename;
 mod format;
@@ -55,7 +56,7 @@ fn main() -> eframe::Result {
             eprintln!("decsat-gui: {e}");
             eprintln!(
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
-                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|psk|tdma|rec|spec[,…]] \
+                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|rec|spec[,…]] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--wireshark]"
             );
@@ -156,6 +157,8 @@ struct App {
     survey: survey::Survey,
     /// Carriers claimed from their brackets: Identify, then their decoder.
     auto_pick: auto_pick::AutoPick,
+    /// The beacon decoder's pointing tone.
+    tone: beacon_card::ToneDriver,
     selected: Option<VfoId>,
     new_decoder: DecoderKind,
     names: u32,
@@ -230,6 +233,7 @@ impl Default for App {
             satellite_edit: String::new(),
             survey: Default::default(),
             auto_pick: Default::default(),
+            tone: Default::default(),
             selected: None,
             new_decoder: DecoderKind::Identify,
             names: 1,
@@ -1490,6 +1494,7 @@ impl eframe::App for App {
             if let Some(n) = note {
                 self.note = n;
             }
+            self.tone.tick(&self.vfos, &self.statuses);
             // What each VFO's carrier carries, learnt by its RF — only from
             // a status of the carrier it is on: one from before the VFO
             // moved (until its worker takes the move) is the last

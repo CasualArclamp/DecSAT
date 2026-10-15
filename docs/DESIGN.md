@@ -93,6 +93,7 @@ IqSource (HackRF 20 MS/s, or a wideband file)
 | **Generic PSK → symbols** | Any linearly modulated carrier: blind rate, carrier lock, hard decisions to a `.bin`, one byte per symbol | done |
 | **TDMA bursts** | One carrier or an MF-TDMA group: bursts found and demodulated one by one, their layout (preamble, pilots, fixed fields, idle fill) read blind, slot grid, frame and terminals; data symbols to a `.bursts` file. See §3c. | T1–T2 done |
 | **IS-19 DAMA outbound** | The 102.4 kBd outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown, everything measured): frame sync, pilots, descrambling, the packet stream, the call signalling (request acks, channel assignments) named; packets to a `.csv` on Record. See `decsat-modem::is19` and STATUS 2026-10-15. | done |
+| **Satellite beacon** | The carrier tracked and measured (frequency, drift, C/N0) and any telemetry decoded blind: PCM/PSK/PM subcarrier, PCM/PM or suppressed-carrier BPSK/QPSK; NRZ/bi-phase; IRIG-style minor frames (known or blind sync word, counter, major-frame map, word plots) or CCSDS (RS dual basis, randomiser, K = 7, TM/AOS frames); pointing tone. See §3d. | done |
 | **IQ recorder** | That VFO's narrowband IQ to a file | M1 |
 | **Spectrum only** | Zoomed spectrum, level, occupied bandwidth; no decode | done |
 
@@ -189,6 +190,61 @@ the network's outbound to name the vendor, comes first. Weak carriers
 (≤ 7 dB) still fragment; detecting bursts on their preamble once the layout
 is known is the fix.
 
+## 3d. Satellite beacons
+
+Asked for 2026-10-15 with a recording of the Intelsat 19 beacon at
+12 253.468 MHz (PCM/PSK/PM: 4800 bit/s bi-phase on a 48 kHz sine
+subcarrier, index ≈ 1.2 rad, 2048-bit frames on IRIG's FAF320, a 0–31
+counter). Rory's answers: **any phase-modulated telemetry beacon and CCSDS
+spacecraft**; the card shows **telemetry frames, level and frequency
+charts, a word plotted on click, and a pointing tone**; Record writes
+**frames (.bin + .csv) and a level log**.
+
+`decsat-engine::beacon` (carrier, pm, bits, synth) and `decsat-modem::pcm`,
+`decsat-modem::ccsds`:
+
+1. **Carrier**: strongest narrow line in a 0.8 s first look (the VFO's
+   centre preferred), ≥ 20 dB over the floor in ~4 Hz bins and ≥ 5 % of the
+   power; a 2nd-order PLL (50 Hz pulling in, then sized to a 20 dB loop SNR
+   and to 1/60 of the subcarrier); C/N0 from the loop's coherent mean
+   against the spectrum's floor (10th percentile, stopband bins under the
+   upper quartile − 20 dB left out); index from J₀(m)² (or cos² m).
+   No line: Identify's look and the generic PSK demod (BPSK/QPSK).
+2. **Modulation** on the loop's phase φ: the subcarrier is the strongest
+   line of φ²'s spectrum whose half has φ's excess power spread
+   symmetrically about it (a DDC + Costas loop then takes it to baseband);
+   else bi-phase data straight on φ. Bit rate: the lowest of the strong
+   line family in the squared derivative's spectrum; bi-phase when, at
+   twice that or at it, integrated chips pair up opposite nine times in
+   ten. DTTL bit sync (integrate-and-dump), the bi-phase pairing followed.
+3. **Frames** (`pcm::Framer`): known words (CCSDS ASM, IRIG 32/24/16-bit)
+   by grid of hits, in the direct and the differential reading, either
+   polarity (per frame: alternating sync is fine); failing those a blind
+   word from the autocorrelation's period and the longest run of fixed
+   bits; slips of ≤ 2 bits, a 4-frame flywheel. Counter: a byte (or its
+   low bits) stepping by one, nine steps in ten.
+4. **CCSDS** (`ccsds`): the codeblock after the marker — RS E = 16/8,
+   I = 1…8, virtual fill, dual basis or not, randomised or not — chosen by
+   which makes every codeword of a few blocks decode (else an uncoded frame
+   whose CRC checks); TM/AOS primary headers, VC counts, the FECF. The
+   K = 7 code: when 20 000 bits frame on nothing, eight Viterbi readings
+   (CCSDS inverted G2 or plain, either output first, either pair phase)
+   run until one frames on the marker. (A blind code search was fooled by
+   randomised fill — the input itself obeys a short recurrence — so the
+   book's code is tried instead.)
+5. **Log** shared with the GUI behind a mutex: 4 h of half-second points,
+   8192 frames, the major-frame map and per-cell change counts.
+
+Identify runs `beacon::look` first: a line with a subcarrier (or ≥ 20 % of
+the power and bi-phase on the phase) is named "Satellite beacon …"
+(`names_beacon`), a plain line stays *narrow carrier* with its C/N0.
+BPSK whose symbols pair up opposite is called bi-phase (likely one sideband
+of a beacon's subcarrier), not a K = 2 code. A bracket claimed on a narrow
+carrier goes to the beacon decoder in a 200 kHz VFO.
+
+Not done: FM/FM (IRIG analogue subcarriers), turbo/LDPC-coded CCSDS,
+space packets inside transfer frames, word lengths other than 8/16 bits.
+
 ## 4. Workspace layout
 
 Cargo workspace `decsat`, modelled on DecDRM.
@@ -219,7 +275,10 @@ crates/
                   built with CMake; FFI bindings (from DecDRM)
   decsat-xaac-sys libxaac's AAC decoder (Apache-2.0), the third_party/libxaac
                   submodule (v0.1.13), built with cc; FFI bindings
-  decsat-modem    other satellite modem formats: DVB-S (Viterbi K = 7 with
+  decsat-modem    PCM telemetry frames (IRIG-style, sync words known or
+                  blind, the minor-frame counter) and CCSDS TM coding
+                  (marker, randomiser, RS dual basis, transfer frames);
+                  other satellite modem formats: DVB-S (Viterbi K = 7 with
                   puncturing, RS(204,188), Forney interleaving, energy dispersal),
                   generic RS over GF(256); turbo product codes, IESS-315
                   tpc_2964 (structure found blind) and Comtech TPC 7/8

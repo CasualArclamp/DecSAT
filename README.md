@@ -68,6 +68,7 @@ real carriers stay put.
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers; on BPSK and QPSK it looks for a convolutional code meanwhile (as the Viterbi decoder does, given up after a while) and decodes what it finds through the payload search — or says there is none (*a block code or uncoded*) | ✅ |
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
+| **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on a live Intelsat 19 beacon: 4800 bit/s bi-phase on a 48 kHz subcarrier, every frame; CCSDS on synthetic signals |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -570,6 +571,65 @@ is in `docs/STATUS.md` (2026-10-15).
 decsat decode capture_4Msps.cs8 --decoder is19 --offset -803.8e3 --bandwidth 125e3 --out dir
 ```
 
+### Satellite beacons
+
+A satellite's beacon is the carrier ground stations point at and measure
+the path by, and often carries the spacecraft's telemetry. Drop a VFO on
+one wide enough for its sidebands (claim the narrow line from its bracket
+and the VFO is widened to 200 kHz by itself) and choose **Satellite
+beacon**:
+
+- **the carrier**: found as the strongest narrow line (the one at the VFO's
+  centre first), tracked by a phase-locked loop sized to its C/N0; the card
+  gives its frequency as received (tuning + LNB + VFO + loop), its drift
+  over the last minute, C/N0 and level, with charts of both against time —
+  for pointing, rain fade and LNB drift. A beacon with nothing on it reads
+  *unmodulated (CW)* after five looks;
+- **the telemetry**, all blind: a **data subcarrier** BPSK-modulated and
+  phase-modulating the carrier (PCM/PSK/PM) is found from the line the
+  squared phase shows at twice its frequency, and taken to baseband by a
+  Costas loop; **data straight on the phase** (PCM/PM, bi-phase) from the
+  phase's own spectrum; a carrier with **no residual line** is demodulated
+  as BPSK or QPSK. The bit rate comes from the data's transitions,
+  **bi-phase** (Manchester) is told from NRZ by its chips, and the
+  modulation index from the share of power the carrier keeps;
+- **the frames**: on IRIG 106's sync words (FAF320, FE6B2840, EB90),
+  CCSDS's marker (1ACFFC1D) or, failing those, a word found blind from the
+  frame period, in any polarity and as sent or differentially coded
+  (NRZ-M/S, bi-phase-M/S); bit slips and missed words ridden out. The
+  **minor-frame counter** is found and the **major frame** drawn as a map —
+  a row a minor frame, a column a byte, grey where a word never changes and
+  coloured by value where it does; **click a cell** to plot that word (or a
+  16-bit word) against time. The latest frame is shown in hex, the sync
+  word and counter picked out;
+- **CCSDS**: when the frames start with the marker, the codeblock's layout
+  is worked out — Reed–Solomon (255,223) or (255,239) in the dual basis,
+  interleave 1–8, virtual fill, the randomiser — and the TM or AOS
+  transfer frames read: spacecraft, virtual channels, counts, the frame
+  CRC. Bits that frame on nothing are tried through CCSDS's K = 7 code
+  (inverted or not, either output first, either pair phase);
+- **♪ Pointing tone**: a tone whose pitch follows the C/N0 a tenth of a
+  second at a time — two semitones a dB up from 600 Hz at the level when it
+  was switched on (**re-centre** to start again) — so the dish can be
+  peaked by ear.
+
+**● Record** writes the frames raw to `decsat-<VFO>-<RF>MHz-beacon-<time>.bin`
+(one after another), a line each (time, counter, hex) to the `.csv` beside
+it, and the carrier's log (offset, C/N0, level every half second) to a
+`.level.csv`. On the Intelsat 19 beacon at 12 253.47 MHz: C/N0 58 dB-Hz,
+index 1.2 rad, 4800 bit/s bi-phase on a 48 kHz subcarrier, 2048-bit frames
+on FAF320 with a counter 0–31 in byte 4 (a 13.65 s major frame). What the
+words mean is the spacecraft maker's; nothing here guesses.
+
+Identify names a beacon (*Satellite beacon — residual carrier, PCM/PSK/PM —
+subcarrier 48.000 kHz, 4800 bit/s bi-phase*) and the survey and the scan
+hand it to this decoder. A VFO over one sideband of a subcarrier alone sees
+BPSK bi-phase chips, and Identify says so rather than calling them a code.
+
+```bash
+decsat decode beacon_533333Sps.cf32 --decoder beacon   # carrier, telemetry, frames, the last few in hex
+```
+
 ### Generic PSK → symbols
 
 For carriers that are not DVB-S2 — SCPC data, telemetry, DVB-S — a VFO locks
@@ -792,6 +852,7 @@ decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf  
 decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
 decsat decode capture_20Msps.cs8 --decoder tdma --offset -4.27e6 --bandwidth 5.3e6 --out dir   # a TDMA group: layout, slots, frame, terminals; bursts to a file
 decsat decode capture_4Msps.cs8 --decoder is19 --offset -803.8e3 --bandwidth 125e3 --out dir   # an Intelsat 19 DAMA outbound: packets, call signalling; packets to a .csv
+decsat decode capture_4Msps.cs8 --decoder beacon --offset 1.2e3 --bandwidth 250e3 --out dir   # a satellite beacon: carrier, telemetry frames (Record: .bin, .csv, .level.csv)
 decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
 decsat decode --hackrf 1748 --rate 4000000 --decoder tpc --offset -915e3 --bandwidth 640e3 --wireshark   # a modem's IP live in Wireshark
 decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back

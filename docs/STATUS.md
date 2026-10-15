@@ -4484,3 +4484,79 @@ FFh, AAh × 10; TS16 FFh), no IBS synchronous scrambler: an idle link.
 
 A label kept in the prefs for that carrier changes back as soon as a CDM
 VFO decodes it again (the newer model wins), or with Reset labels.
+
+## Satellite beacons: carrier, PM telemetry, IRIG frames, CCSDS (2026-10-15)
+
+Rory: "can we add a decoder for satellite beacons", with a recording of
+the Intelsat 19 beacon (VFO 10, 12 253.4678 MHz, 533 333 S/s cf32, 25.7 s)
+and a screenshot in which Identify, on a 12.8 kHz VFO over the beacon's
+upper sideband, had called its chips "BPSK, convolutional code K = 2".
+Answers: any PM telemetry beacon and CCSDS; frames, charts, word plot,
+pointing tone; Record = frames .bin + .csv and a level log (DESIGN §3d).
+
+**The beacon, measured** (scratch Python first): residual carrier
++1171.9 Hz from the file's centre, 50 dB over the floor in 8 Hz bins;
+the loop's phase has a double hump about 48 kHz with a null at its centre
+and lines at 48 ± 4.8·odd kHz, the IQ spectrum lines at ±96 kHz (J₂: the
+data squared out) — a sine subcarrier, BPSK, bi-phase data. Subcarrier
+48.000 kHz, bit rate 4800.07 Hz by the 4.8 kHz line (HackRF ≈ +15 ppm),
+chips pair opposite 99.9 %. Bits autocorrelate at 2048; FAF320 (IRIG
+24-bit) every 2048 bits, byte 3 10h, byte 4 a counter 0–31 (major frame
+32 × 0.4267 s = 13.65 s), bytes 5–9 00 01 9E A3 2B fixed; long runs of
+ones elsewhere (the discrete lines). The subcarrier's polarity flipped
+once in my crude Python (phase from a moving average of z²); the decoder's
+Costas loop holds it.
+
+**Built** (a6f33fc, then this commit):
+- `decsat-modem::pcm`: `Framer` (known words by hit grid, direct and
+  differential readings, either polarity per frame, blind word from the
+  autocorrelation and the longest fixed run, ±2-bit slips, 4-frame
+  flywheel; the direct reading wins ties — a differential reading of a
+  fixed pattern is fixed too), `find_counter`, `pack`.
+- `decsat-modem::ccsds`: randomiser (FF 48 0E C0 9A …), RS over 0x187 with
+  roots α^(11j), j = 128 − E … 127 + E, dual basis (Taltab 00 7B AF D4 …,
+  Tal1tab 00 CC AC 60 …), shortened; `find_format` (E, I, fill, basis,
+  randomiser), uncoded-by-CRC; TM/AOS headers; `TmRx`; `CONV_CODE`.
+- `decsat-engine::beacon`: `find_line`, `CarrierLoop`, noise floor,
+  `find_subcarrier` (φ² line + symmetric hump), `direct_width`,
+  `find_clock`, `choose_coding`, `SubDemod` (DDC on φ + Costas), `BitSync`
+  (DTTL), `Biphase`, `SnrMeter`, `BeaconRx`, `BeaconFiles`, `look`
+  (Identify's), `synth` (test signals: IRIG or CCSDS frames, subcarrier or
+  direct or suppressed, drift, clock ppm, noise at a C/N0).
+- VFO decoder `DecoderKind::Beacon` (key `beacon`, short BCN, CLI
+  `--decoder beacon|tlm|telemetry`), status `VfoStatus::beacon`, carrier
+  followed when 2 % of the VFO off centre, retunes carried into the log.
+- Identify: `beacon::look` before the tone test; "Satellite beacon — …"
+  hint (`names_beacon`) → survey/auto-pick/scan pick the beacon decoder
+  (the scan's VFO 2.3 × the telemetry's reach); `biphase` BPSK (pairs
+  opposite ≥ 0.9) instead of a K = 2 code, and no decoder for it (a
+  sideband). A claimed narrow carrier → beacon decoder in 200 kHz.
+- GUI: `beacon_card.rs` (carrier rows, C/N0 and frequency charts, CCSDS
+  rows, the major-frame map as a texture rebuilt on the log's revision,
+  click → word plot with a 16-bit option, latest frame in hex), Record and
+  ♪ Pointing tone rows, `ToneDriver` + `decsat-audio::tone` (cpal sine,
+  30 ms glide, app volume/mute/device), waterfall label "BCN 58 dB-Hz ·
+  TLM 4.8 kbit/s", carrier label BEACON.
+
+**On the recording** (`decsat decode … --decoder beacon --fast`): carrier
+locked, C/N0 58.4 dB-Hz (the first try read 144: the recording's own DDC
+stopband sat inside the decode VFO and the 10th percentile found it —
+bins 20 dB under the upper quartile are now left out), index 1.21 rad,
+subcarrier 48.001 kHz, 4800.03 bit/s bi-phase, Eb/N0 ≈ 16 dB from the
+soft bits, 59 frames on FAF320, 0 sync errors, 0 slips, counter byte 4
+mod 32. Identify on the whole VFO: "Satellite beacon — residual carrier,
+PCM/PSK/PM — subcarrier 48.000 kHz, 4800 bit/s bi-phase (Manchester)
+(C/N0 58 dB-Hz)"; on an 8 kHz VFO round the line: narrow carrier, C/N0
+54 dB-Hz, "or its telemetry is outside this VFO". GUI checked unattended
+(`--vfo-at 0:420000 --decoder beacon`): card, charts and map render.
+
+**Synthetic tests**: IS-19-like (index, bit rate with +15 ppm, counter),
+CW with −2 Hz/s drift (−120 Hz/min), CCSDS RS(255,223) I = 1 randomised +
+K = 7 on PCM/PM bi-phase at 4 kbit/s, the first look naming a 32 kHz NRZ
+subcarrier; framer, counter, slips, blind word, RS/dual basis/layout,
+randomiser, CRC (29B1h), DTTL off-nominal, bi-phase vs NRZ.
+
+Open: the word meanings (the maker's); no CCSDS capture yet (checked
+against the book's constants and self-consistency only); FM/FM, turbo and
+LDPC CCSDS, space packets; the pointing tone not heard here (no way to
+listen unattended) — Rory to try.

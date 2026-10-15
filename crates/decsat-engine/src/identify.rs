@@ -215,6 +215,12 @@ pub fn names_is19_call(hint: &str) -> bool {
     hint.contains("DAMA call channel") || hint.contains("DAMA wide call channel")
 }
 
+/// A [`Verdict::NotDvbS2`] hint names a satellite beacon with telemetry
+/// (the beacon decoder reads it).
+pub fn names_beacon(hint: &str) -> bool {
+    hint.starts_with("Satellite beacon")
+}
+
 /// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
 /// or Comtech TPC 7/8's (the TPC decoder reads either).
 pub fn names_tpc(hint: &str) -> bool {
@@ -257,6 +263,12 @@ pub struct Identification {
     /// A rate-½ convolutional code its symbols carry, found from their
     /// parity checks ([`decsat_modem::convblind`]).
     pub conv_code: Option<decsat_modem::convblind::Code>,
+    /// BPSK whose symbols pair up opposite: bi-phase (Manchester) chips at
+    /// the symbol rate — data at half of it.
+    pub biphase: bool,
+    /// A residual carrier looked at as a beacon: its C/N0 and any telemetry
+    /// on its phase ([`crate::beacon::look`]).
+    pub beacon: Option<crate::beacon::Look>,
 }
 
 /// A carrier keyed on and off, as TDMA terminals share one (the STDMA
@@ -354,6 +366,8 @@ impl Identification {
             roll_off_2pct: false,
             bursts: None,
             conv_code: None,
+            biphase: false,
+            beacon: None,
         }
     }
 
@@ -381,10 +395,17 @@ impl Identification {
         };
         match &self.verdict {
             Verdict::NoSignal => "no signal".into(),
-            Verdict::Carrier => format!(
-                "narrow carrier at {:+.0} Hz (unmodulated, or far narrower than this VFO)",
-                self.center_offset_hz
-            ),
+            Verdict::Carrier => match &self.beacon {
+                Some(b) => format!(
+                    "narrow carrier at {:+.0} Hz, C/N0 {:.0} dB-Hz (unmodulated: a CW beacon, \
+                     a spur — or its telemetry is outside this VFO)",
+                    self.center_offset_hz, b.cn0_dbhz
+                ),
+                None => format!(
+                    "narrow carrier at {:+.0} Hz (unmodulated, or far narrower than this VFO)",
+                    self.center_offset_hz
+                ),
+            },
             Verdict::DvbS2(d) => {
                 let mods: Vec<String> = d
                     .modcods_sent()
@@ -411,6 +432,8 @@ impl Identification {
                     if d.with_pilots > 0 { ", pilots" } else { "" }
                 )
             }
+            // A beacon's hint says it all (no symbol rate of its own).
+            Verdict::NotDvbS2 { hint } if self.beacon.is_some() => hint.clone(),
             Verdict::NotDvbS2 { hint } => match &self.frame_structure {
                 Some(p) => format!("{hint}, {rs} {ro}; frames: {}", p.describe()),
                 None => format!("{hint}, {rs} {ro}"),
@@ -1025,6 +1048,27 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     if band.snr_db < MIN_SNR_DB || band.bandwidth_hz <= 0.0 {
         return Identification::bare(Verdict::NoSignal, 0.0, band.snr_db, 0.0);
     }
+    // A satellite beacon: a residual carrier with telemetry phase-modulated
+    // on it (a subcarrier's sidebands either side, or bi-phase data).
+    let beacon = crate::beacon::look(x, rate, bandwidth.unwrap_or(rate));
+    if let Some(b) = beacon.filter(|b| b.telemetry.is_some()) {
+        let mut id = Identification::bare(
+            Verdict::NotDvbS2 {
+                hint: format!(
+                    "Satellite beacon — residual carrier, {} (C/N0 {:.0} dB-Hz) — the beacon \
+                     decoder reads its telemetry",
+                    b.describe(),
+                    b.cn0_dbhz
+                ),
+            },
+            b.offset_hz,
+            band.snr_db,
+            band.bandwidth_hz,
+        );
+        id.carrier_locked = true;
+        id.beacon = Some(b);
+        return id;
+    }
     // A Hann-windowed tone that falls between bins spreads over ~5 bins, so
     // "narrow" has to allow for that. Anything this narrow is either an
     // unmodulated carrier or a carrier far too narrow for this VFO.
@@ -1037,7 +1081,9 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         // that is mostly noise.
         let k0 = peak_bin(&db);
         let center = (k0 as f64 - (db.len() / 2) as f64) * bin_hz;
-        return Identification::bare(Verdict::Carrier, center, band.snr_db, band.bandwidth_hz);
+        let mut id = Identification::bare(Verdict::Carrier, center, band.snr_db, band.bandwidth_hz);
+        id.beacon = beacon;
+        return id;
     }
 
     let mut id = Identification::bare(
@@ -1229,10 +1275,23 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         }
     }
     let is19_call = is19_call || is19_wide;
+    // Bi-phase: BPSK whose symbols pair up opposite (one of a bit's two
+    // chips the other's negative) — Manchester data at half the rate. Its
+    // pairs also satisfy a trivial "code" (K = 2), which is not one.
+    id.biphase = !is_s2
+        && id.carrier_locked
+        && cst == ConstellationGuess::Bpsk
+        && lock.symbols.len() >= 1000
+        && {
+            let re: Vec<f32> = lock.symbols.iter().map(|s| s.re).collect();
+            let opp = crate::beacon::pm::pair_opposite(&re);
+            opp[0].max(opp[1]) >= 0.9
+        };
     // A convolutional code on BPSK or QPSK: its parity checks show in the
     // hard decisions (quick: small GF(2) matrices), the K = 7 code of DVB-S
     // and IESS-308/309 or any other rate-½ one.
     id.conv_code = (!is_s2
+        && !id.biphase
         && !tpc
         && !fastlink
         && !is19
@@ -1312,6 +1371,13 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                     cst.label()
                 ),
                 _ if id.bursts.is_some() => burst_text.clone(),
+                _ if id.biphase => format!(
+                    "BPSK, bi-phase (Manchester) chips — {:.0} bit/s data; beside a narrow \
+                     carrier this is likely one sideband of a beacon's telemetry subcarrier \
+                     (a VFO over the carrier and both sidebands, with the beacon decoder, reads \
+                     it)",
+                    rs / 2.0
+                ),
                 // ("DVB-S (" kept in the K = 7 one: the CLI's scan tries the
                 // DVB-S decoder on that.)
                 _ if id.conv_code.is_some_and(|c| c.is_k7_standard()) => format!(

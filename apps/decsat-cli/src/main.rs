@@ -535,6 +535,11 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
         } else {
             c.vfo_bandwidth_among(&carriers)
         };
+        // A beacon: wide enough for its telemetry's sidebands.
+        let bw = match ident.beacon.filter(|b| b.telemetry.is_some()) {
+            Some(b) => bw.max(2.3 * b.reach_hz),
+            None => bw,
+        };
         for kind in decoders_for(ident) {
             // Centred on the carrier as Identify measured it.
             let mut s = VfoSettings::new(
@@ -619,8 +624,14 @@ fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::Dec
             vec![DecoderKind::Is19Outbound]
         }
         Verdict::NotDvbS2 { hint } if decsat_engine::names_is19_call(hint) => Vec::new(),
+        // A satellite beacon with telemetry: the beacon decoder.
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_beacon(hint) => {
+            vec![DecoderKind::Beacon]
+        }
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => vec![DecoderKind::Tdma],
+        // Bi-phase chips on their own: a beacon's subcarrier sideband.
+        _ if ident.biphase => Vec::new(),
         Verdict::NotDvbS2 { hint } => {
             // Rust note: the hint is a sentence for people; these are the
             // names Identify puts in it when a decoder can read the carrier.

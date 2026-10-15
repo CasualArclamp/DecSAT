@@ -44,8 +44,8 @@ pub use fec::{
 };
 pub use frontend::{Engine, EngineOptions, FrontStatus, STRONG_INPUT_DBFS, SourceState};
 pub use identify::{
-    ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in, names_is19,
-    names_is19_call, names_tpc,
+    ConstellationGuess, Identification, RateSource, Verdict, identify, identify_in, names_beacon,
+    names_is19, names_is19_call, names_tpc,
 };
 pub use programme::ProgrammeView;
 pub use psk::PskDemod;

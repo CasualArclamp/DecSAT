@@ -8,6 +8,7 @@
 //! - [`resample`]: to the sound card's rate, drift-trimmed.
 //! - [`player`]: the thread and sound output, with volume and pause.
 //! - [`record`]: the stream to a file as broadcast.
+//! - [`tone`]: a tone of live pitch (the beacon decoder's pointing aid).
 //!
 //! - [`xaac`]: AAC, LC and HE-AAC v1/v2 with SBR and PS, through libxaac.
 //!
@@ -21,10 +22,11 @@ pub mod es;
 pub mod player;
 pub mod record;
 pub mod resample;
+pub mod tone;
 pub mod xaac;
 
 pub use player::{
-    AudioHandle, AudioPlayer, OutputKind, PlayState, Status, muted, output_device, output_devices,
-    set_muted, set_output_device, set_volume, volume,
+    AudioHandle, AudioPlayer, OutputKind, PlayState, Status, muted, output_changes, output_device,
+    output_devices, set_muted, set_output_device, set_volume, volume,
 };
 pub use record::AudioRecorder;

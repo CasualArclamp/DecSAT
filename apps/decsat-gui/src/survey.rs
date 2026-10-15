@@ -180,8 +180,14 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
         Verdict::NotDvbS2 { hint } if decsat_engine::names_is19_call(hint) => {
             Err(Outcome::NoDecoder)
         }
+        // A satellite beacon with telemetry on it.
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_beacon(hint) => Ok(DecoderKind::Beacon),
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => Ok(DecoderKind::Tdma),
+        // Bi-phase chips on their own: most likely one sideband of a
+        // beacon's telemetry subcarrier (the beacon decoder over the
+        // carrier reads it), no modem's.
+        _ if ident.biphase => Err(Outcome::NoDecoder),
         Verdict::NotDvbS2 { hint }
             if decsat_engine::names_tpc(hint)
                 || hint.contains("FastLink")

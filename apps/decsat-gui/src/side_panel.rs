@@ -499,6 +499,59 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
+            if s.decoder == DecoderKind::Beacon {
+                ui.label("Frames");
+                ui.horizontal(|ui| {
+                    let (label, tip) = if s.record {
+                        ("⏹ Stop", "Close the files")
+                    } else {
+                        (
+                            "● Record",
+                            "Write the telemetry frames as they come (raw, one after another, \
+                             to a .bin; a line each with time, counter and hex to a .csv) and \
+                             the carrier's log (offset, C/N0, level every half second) to a \
+                             .level.csv",
+                        )
+                    };
+                    let b = egui::Button::new(label).selected(s.record);
+                    if ui.add(b).on_hover_text(tip).clicked() {
+                        s.record = !s.record;
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Pointing tone");
+                ui.horizontal(|ui| {
+                    let b = egui::Button::new(if s.pointing_tone {
+                        "♪ on"
+                    } else {
+                        "♪ off"
+                    })
+                    .selected(s.pointing_tone);
+                    if ui
+                        .add(b)
+                        .on_hover_text(
+                            "Sound a tone whose pitch follows the beacon's C/N0 (a tenth of a \
+                             second at a time): up two semitones a dB from 600 Hz at the level \
+                             when it was switched on — peak the dish by ear. Silent while the \
+                             carrier is not locked. At the app's volume.",
+                        )
+                        .clicked()
+                    {
+                        s.pointing_tone = !s.pointing_tone;
+                    }
+                    if s.pointing_tone
+                        && ui
+                            .small_button("re-centre")
+                            .on_hover_text("Take the level now as the 600 Hz point")
+                            .clicked()
+                    {
+                        crate::beacon_card::recentre_tone(v.id);
+                    }
+                });
+                ui.end_row();
+            }
+
             if s.decoder == DecoderKind::FastLink {
                 ui.label("Auto-record");
                 ui.checkbox(&mut s.record_on_activity, "when a TDM channel goes active")
@@ -542,7 +595,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
-            if s.decoder.demodulates() {
+            // (A beacon's bit rate is found from its telemetry.)
+            if s.decoder.demodulates() && s.decoder != DecoderKind::Beacon {
                 ui.label("Symbol rate");
                 ui.horizontal(|ui| {
                     let mut auto = s.symbol_rate.is_none();
@@ -912,6 +966,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         && let Some(c) = &st.cid
     {
         cid_card(ui, c);
+    }
+
+    if v.settings.decoder == DecoderKind::Beacon
+        && let Some(b) = &st.beacon
+    {
+        crate::beacon_card::show(ui, b, inp.rf_center, v.id);
     }
 
     if v.settings.decoder == DecoderKind::Is19Outbound

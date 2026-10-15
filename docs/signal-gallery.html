@@ -232,16 +232,16 @@ const SIGNALS = [
   decsat: ['Identify: "8PSK, TPC 2964 unique word …"; the TPC decoder on 8PSK (Gray-labelled as the manual\'s figure) then EDMAC, bridged Ethernet and the IP: ED-137 RTP with PTT and squelch, SIP, the radio\'s voice played while PTT or squelch is on.']
 },
 {
-  id: 'beacon', name: 'Beacon and CW tones', tag: 'line · no decoder',
-  where: 'The satellite\'s Ku beacons (on Intelsat 19 at 12253.5 and 12256.5 MHz) with telemetry sidebands; test tones; the HackRF\'s own DC spike at the centre.',
-  span: 60e3,
-  carriers: [{ f: 0, rs: 0, alpha: 0, lvl: 40, mod: 'cw', kind: 'cw' }, { f: -8.2e3, rs: 1.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }, { f: 8.2e3, rs: 1.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }],
+  id: 'beacon', name: 'Beacons and CW tones', tag: 'line · beacon decoder',
+  where: 'The satellite\'s Ku beacons (on Intelsat 19 at 12253.5 and 12256.5 MHz), telemetry phase-modulated on them; test tones; the HackRF\'s own DC spike at the centre.',
+  span: 140e3,
+  carriers: [{ f: 0, rs: 0, alpha: 0, lvl: 40, mod: 'cw', kind: 'cw' }, { f: -48e3, rs: 9.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }, { f: 48e3, rs: 9.6e3, alpha: 0.5, lvl: 14, mod: 'cw', kind: 'side' }],
   env: { type: 'beacon' }, cons: { mods: ['cw'] },
   tell: ['A single line: all the power in one or two bins at any FFT size, with the window\'s own leakage skirt and nothing flat on top.',
-         'A beacon carries telemetry as low-rate sidebands a few kHz either side, each far below the line, their level wandering as the telemetry goes.',
+         'A telemetry beacon has sidebands either side, mirror images of each other: on Intelsat 19 a 48 kHz subcarrier, 4800 bit/s bi-phase — two humps with a notch at ±48 kHz, lines in them, and lines at ±96 kHz (the subcarrier\'s second harmonic, which the phase modulation makes).',
          'The constellation is one spot; the power against time is flat.'],
-  decsat: ['The carrier finder marks it a narrow line (a tick, not a bracket) and Identify says "narrow carrier at +12 Hz (unmodulated, or far narrower than this VFO)".',
-           'A slow modulated carrier that looked like this at 20 MS/s is told apart by a finer look (a flat top at least six fine bins wide).']
+  decsat: ['Identify, on a VFO over the line and its sidebands: "Satellite beacon — residual carrier, PCM/PSK/PM — subcarrier 48.000 kHz, 4800 bit/s bi-phase". On a VFO over the line alone: "narrow carrier … C/N0 … dB-Hz"; claimed from its tick, it goes to the beacon decoder in a 200 kHz VFO.',
+           'The Satellite beacon decoder: frequency, drift and C/N0 charted, the telemetry\'s frames (FAF320, 2048 bits, a 0–31 counter), the major frame as a map, any word plotted, a pointing tone; CCSDS frames too. Over one sideband alone Identify sees BPSK bi-phase chips and says so.']
 },
 {
   id: 'hackrf', name: 'HackRF artefacts (not signals)', tag: 'receiver · beware',

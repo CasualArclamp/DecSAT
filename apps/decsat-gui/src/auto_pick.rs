@@ -21,6 +21,20 @@ const IDENTIFY_SECS: f64 = 30.0;
 /// A DVB-S2 carrier's frames are watched this long for TS against GS
 /// mode, s.
 const MODE_SECS: f64 = 60.0;
+/// A narrow carrier goes to the beacon decoder with a VFO this wide, Hz:
+/// room for a telemetry subcarrier's sidebands either side (the IS-19
+/// beacon's reach ±60 kHz).
+const BEACON_LOOK_HZ: f64 = 200e3;
+
+/// The VFO a beacon's telemetry needs: wide enough for its sidebands (a
+/// seventh more for the filter's skirts), never narrower than it was.
+fn beacon_width(id: &decsat_engine::Identification, now: f64) -> f64 {
+    let want = id
+        .beacon
+        .filter(|b| b.telemetry.is_some())
+        .map_or(BEACON_LOOK_HZ, |b| 2.3 * b.reach_hz);
+    now.max(want)
+}
 
 enum Stage {
     Identify,
@@ -94,7 +108,17 @@ impl AutoPick {
                         }
                         return true;
                     };
-                    match survey::pick(id) {
+                    // A narrow carrier: the beacon decoder measures it, and
+                    // looks for telemetry in a wider VFO round it.
+                    let pick = match survey::pick(id) {
+                        Err(Outcome::NoDecoder)
+                            if id.verdict == decsat_engine::Verdict::Carrier =>
+                        {
+                            Ok(DecoderKind::Beacon)
+                        }
+                        p => p,
+                    };
+                    match pick {
                         Ok(kind) => {
                             let mut s = v.settings.clone();
                             s.decoder = kind;
@@ -103,6 +127,10 @@ impl AutoPick {
                             // (The burst analyser finds its carriers' rates
                             // itself.)
                             s.symbol_rate = id.symbol_rate.filter(|_| kind != DecoderKind::Tdma);
+                            if kind == DecoderKind::Beacon {
+                                s.bandwidth_hz = beacon_width(id, s.bandwidth_hz);
+                                s.symbol_rate = None;
+                            }
                             updates.push((w.id, s));
                             note = Some(format!("{name}: {} → {}", id.summary(), kind.label()));
                             if kind == DecoderKind::Dvbs2Ip {

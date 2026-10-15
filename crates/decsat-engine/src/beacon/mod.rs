@@ -92,6 +92,93 @@ impl Riding {
     }
 }
 
+/// What a first look makes of a carrier as a beacon (Identify's).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Look {
+    /// The carrier's offset from the centre of the look, Hz.
+    pub offset_hz: f64,
+    pub cn0_dbhz: f64,
+    /// The carrier's share of the signal's power.
+    pub share: f64,
+    /// Telemetry found on it, and how it is sent.
+    pub telemetry: Option<(Riding, f64, Coding)>,
+    /// How far the telemetry reaches either side of the carrier, Hz (to
+    /// size a VFO that holds it).
+    pub reach_hz: f64,
+}
+
+impl Look {
+    /// "PCM/PSK/PM — subcarrier 48.000 kHz, 4800 bit/s bi-phase (Manchester)".
+    pub fn describe(&self) -> String {
+        match self.telemetry {
+            Some((r, rb, c)) => format!("{}, {:.0} bit/s {}", r.describe(), rb, c.name()),
+            None => "no telemetry seen".into(),
+        }
+    }
+}
+
+/// Look at `x` (baseband at `rate`, a VFO `band` wide) for a beacon: a
+/// residual carrier, tracked through the look, and telemetry on its phase —
+/// a data subcarrier, or bi-phase data on the phase itself when the
+/// carrier keeps a fifth of the power (an unbalanced PSK carrier's line
+/// keeps less, and its phase is no bi-phase). `None`: no carrier line.
+pub fn look(x: &[Iq], rate: f64, band: f64) -> Option<Look> {
+    let line = carrier::find_line(x, rate, band)?;
+    let mut l = Look {
+        offset_hz: line.offset_hz,
+        cn0_dbhz: line.cn0_dbhz(rate),
+        share: line.share,
+        telemetry: None,
+        reach_hz: 0.0,
+    };
+    let mut cl = CarrierLoop::new(rate, line.offset_hz, BN_START, line.power.sqrt());
+    let mut phi = Vec::with_capacity(x.len());
+    cl.process(x, &mut phi);
+    let skip = ((0.15 * rate) as usize).min(phi.len());
+    let phi = &phi[skip..];
+    if (phi.len() as f64) < 0.3 * rate {
+        return Some(l);
+    }
+    let found = match pm::find_subcarrier(phi, rate) {
+        Some(sc) => {
+            let d = SubDemod::new(rate, sc.freq_hz, sc.half_width_hz);
+            let r = Riding::Subcarrier {
+                freq_hz: sc.freq_hz,
+            };
+            look_bits(phi, d, 1.6 * sc.half_width_hz)
+                .map(|(rb, c)| (r, rb, c, sc.freq_hz + 1.5 * sc.half_width_hz))
+        }
+        None if line.share >= 0.2 => pm::direct_width(phi, rate, 4.0 * BN_START)
+            .filter(|&w| w > 8.0 * BN_START)
+            .and_then(|w| {
+                let d = SubDemod::new(rate, 0.0, w);
+                look_bits(phi, d, 1.2 * w)
+                    .filter(|(_, c)| *c == Coding::Biphase)
+                    .map(|(rb, c)| (Riding::Direct, rb, c, 1.5 * w))
+            }),
+        None => None,
+    };
+    if let Some((r, rb, c, reach)) = found {
+        l.telemetry = Some((r, rb, c));
+        l.reach_hz = reach;
+    }
+    Some(l)
+}
+
+/// The bit rate and code of what `demod` makes of `phi`, if a clock shows.
+fn look_bits(phi: &[f32], mut demod: SubDemod, hi: f64) -> Option<(f64, Coding)> {
+    let mut s = Vec::new();
+    demod.process(phi, &mut s);
+    let settle = demod.settle().min(s.len());
+    let rate = demod.out_rate();
+    let (line, _) = pm::find_clock(&s[settle..], rate, 20.0, hi.min(rate / 2.2))?;
+    let (coding, rc, _) = pm::choose_coding(&s[settle..], rate, line)?;
+    Some(match coding {
+        Coding::Biphase => (rc / 2.0, coding),
+        Coding::Nrz => (rc, coding),
+    })
+}
+
 /// The carrier as measured.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CarrierView {
@@ -102,8 +189,10 @@ pub struct CarrierView {
     /// Offset from the receiver's centre, Hz (the VFO's tuning plus the
     /// loop's).
     pub band_offset_hz: f64,
-    /// C/N0, dB-Hz, and the carrier's power, dB (the baseband's scale).
+    /// C/N0, dB-Hz (over the last half second, and the last tenth: the
+    /// pointing tone's), and the carrier's power, dB (the baseband's scale).
     pub cn0_dbhz: f32,
+    pub cn0_fast_dbhz: f32,
     pub level_db: f32,
     /// Hz a minute over the last minute.
     pub drift_hz_min: Option<f64>,
@@ -336,6 +425,7 @@ pub struct BeaconRx {
     windows: Vec<carrier::Window>,
     last_offset: f64,
     last_cn0: f32,
+    last_cn0_fast: f32,
     last_level: f32,
     last_lock: bool,
     last_index: Option<f32>,
@@ -389,6 +479,7 @@ impl BeaconRx {
             windows: Vec::new(),
             last_offset: 0.0,
             last_cn0: 0.0,
+            last_cn0_fast: 0.0,
             last_level: -200.0,
             last_lock: false,
             last_index: None,
@@ -550,6 +641,9 @@ impl BeaconRx {
     /// Fold the loop's windows into the carrier's measurements; a log point
     /// every [`POINT_EVERY_S`].
     fn measure(&mut self, band_offset: f64) {
+        if let (Some(w), Some(noise)) = (self.windows.last(), self.noise) {
+            self.last_cn0_fast = (10.0 * (w.carrier * self.rate / noise).max(1e-6).log10()) as f32;
+        }
         let per = ((POINT_EVERY_S / 0.1).round() as usize).max(1);
         while self.windows.len() >= per {
             let w: Vec<carrier::Window> = self.windows.drain(..per).collect();
@@ -815,6 +909,7 @@ impl BeaconRx {
         let rs = d.symbol_rate();
         self.last_lock = d.locked();
         self.last_cn0 = d.mer_db() + (10.0 * rs.log10()) as f32;
+        self.last_cn0_fast = self.last_cn0;
         self.last_offset =
             ddc_offset_hz - step * self.rate / std::f64::consts::TAU + d.carrier_offset_hz();
         let step_s = (POINT_EVERY_S * self.rate) as u64;
@@ -1018,6 +1113,7 @@ impl BeaconRx {
                 locked: self.last_lock,
                 band_offset_hz: self.last_offset,
                 cn0_dbhz: self.last_cn0,
+                cn0_fast_dbhz: self.last_cn0_fast,
                 level_db: self.last_level,
                 drift_hz_min: self.drift_hz_min(),
                 excursion_hz: self.span.map_or(0.0, |(lo, hi)| hi - lo),
@@ -1299,6 +1395,39 @@ mod tests {
         let log = v.log.lock().unwrap();
         assert!(log.frames.iter().filter(|f| f.good).count() >= 12);
         assert!(log.points.len() >= 10);
+    }
+
+    #[test]
+    fn a_first_look_names_the_telemetry() {
+        let spec = Spec {
+            rate: 266_667.0,
+            seconds: 1.5,
+            carrier_hz: -900.0,
+            drift_hz_s: 0.0,
+            cn0_dbhz: 60.0,
+            index_rad: 1.2,
+            subcarrier_hz: Some(32_000.0),
+            bit_rate: 2000.0,
+            biphase: false,
+            suppressed: false,
+            framing: Framing::Irig {
+                frame_bytes: 128,
+                counter_mod: 16,
+            },
+            clock_ppm: 0.0,
+        };
+        let x = synth::generate(&spec);
+        let l = look(&x, spec.rate, 250_000.0).expect("carrier");
+        assert!((l.offset_hz + 900.0).abs() < 5.0);
+        let (r, rb, c) = l.telemetry.expect("telemetry");
+        assert!(matches!(r, Riding::Subcarrier { freq_hz } if (freq_hz - 32_000.0).abs() < 50.0));
+        assert!((rb - 2000.0).abs() < 2.0, "{rb}");
+        assert_eq!(c, Coding::Nrz);
+        assert!(
+            l.reach_hz > 32_000.0 && l.reach_hz < 45_000.0,
+            "{}",
+            l.reach_hz
+        );
     }
 
     #[test]

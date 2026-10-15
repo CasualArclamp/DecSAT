@@ -117,16 +117,25 @@ pub fn find_line(x: &[Iq], rate: f64, band: f64) -> Option<Line> {
     let (p, _) = psd_complex(x, n, 64);
     let bin = rate / n as f64;
     let inside = |k: usize| ((k as f64 - (n / 2) as f64) * bin).abs() <= half;
-    let k0 = (0..n)
+    let strongest = (0..n)
         .filter(|&k| inside(k))
         .max_by(|&a, &b| p[a].total_cmp(&p[b]))?;
+    // A line at the VFO's centre (where a claimed carrier puts it) is taken
+    // over a stronger neighbour further out.
+    let near = (2000.0f64).max(0.05 * band) / bin;
+    let central = (0..n)
+        .filter(|&k| (k as f64 - (n / 2) as f64).abs() <= near && inside(k))
+        .max_by(|&a, &b| p[a].total_cmp(&p[b]))
+        .filter(|&k| p[k] >= 100.0 * noise);
+    let k0 = central.unwrap_or(strongest);
     if p[k0] < 100.0 * noise {
         return None;
     }
     // Power: a bin sum over n (Parseval, with bins normalised to σ²) — the
     // bins round the peak above the floor (a Hann window spreads a tone
     // over three; phase noise a few more).
-    let reach = 6usize;
+    // ±30 Hz at least: an LNB's phase noise spreads its carrier that far.
+    let reach = ((30.0 / bin).ceil() as usize).max(6);
     let lo = k0.saturating_sub(reach);
     let hi = (k0 + reach).min(n - 1);
     let power: f64 = (lo..=hi).map(|k| (p[k] - noise).max(0.0)).sum::<f64>() / n as f64;
