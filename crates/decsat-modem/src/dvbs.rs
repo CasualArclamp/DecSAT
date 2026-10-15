@@ -209,6 +209,23 @@ impl Hypothesis {
     }
 }
 
+/// The Es/N0, dB, a code rate needs for quasi error free reception (BER
+/// 2·10⁻⁴ after the Viterbi, ~10⁻¹¹ after RS): EN 300 421's IF-loop
+/// performance table. The standard gives Eb/N0 per useful bit (188-byte
+/// packets, before RS) with 0.8 dB of modem implementation margin in it;
+/// Es/N0 = Eb/N0 + 10·log10(2 bits · rate · 188/204).
+pub fn qef_es_n0_db(rate: Rate) -> f32 {
+    let eb_n0 = match rate {
+        Rate::R1_2 => 4.5,
+        Rate::R2_3 => 5.0,
+        Rate::R3_4 => 5.5,
+        Rate::R5_6 => 6.0,
+        Rate::R7_8 => 6.4,
+    };
+    let bits = 2.0 * rate.value() * TS_LEN as f64 / RS_LEN as f64;
+    (eb_n0 + 10.0 * bits.log10()) as f32
+}
+
 /// What the receiver has done, for display.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DvbsStats {
@@ -717,6 +734,15 @@ impl ViterbiRx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qef_thresholds_rise_with_rate() {
+        // 3/4: 5.5 dB Eb/N0 + 10·log10(1.5 · 188/204) = 6.91 dB Es/N0.
+        assert!((qef_es_n0_db(Rate::R3_4) - 6.91).abs() < 0.01);
+        for w in Rate::ALL.windows(2) {
+            assert!(qef_es_n0_db(w[0]) < qef_es_n0_db(w[1]));
+        }
+    }
 
     fn ts_packets(n: usize) -> Vec<[u8; TS_LEN]> {
         (0..n)

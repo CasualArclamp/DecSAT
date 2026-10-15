@@ -547,6 +547,8 @@ pub struct VfoStatus {
     pub lock_losses: u64,
     /// MODCOD index → frames, DVB-S2 decoders.
     pub modcods: BTreeMap<u8, u64>,
+    /// The latest data frame's MODCOD (dummy frames, which an ACM carrier
+    /// sends between data, left out so the reading holds still).
     pub last_modcod: Option<u8>,
     pub symbol_rate: Option<f64>,
     pub message: String,
@@ -1578,7 +1580,9 @@ impl Worker {
                     d.process(&self.bb, &mut self.frames);
                     for f in &self.frames {
                         *self.modcods.entry(f.pls.modcod).or_default() += 1;
-                        self.last_modcod = Some(f.pls.modcod);
+                        if f.pls.modcod != 0 {
+                            self.last_modcod = Some(f.pls.modcod);
+                        }
                     }
                     if let Some(w) = fec {
                         for f in self.frames.drain(..) {

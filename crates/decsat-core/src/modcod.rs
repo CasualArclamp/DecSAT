@@ -332,6 +332,116 @@ pub fn modcod_name(index: u8) -> String {
     }
 }
 
+/// The ideal Es/N0, dB, at which a MODCOD is quasi error free over AWGN:
+/// the floor a receiver's link margin is measured from. `None` for a dummy
+/// frame, a VL-SNR set (its MODCOD is in its own header) or a reserved code.
+///
+/// S2: EN 302 307-1 Table 13 (normal FECFRAMEs, PER 10⁻⁷, 50 iterations);
+/// a short-frame carrier needs a little more, so its margin reads slightly
+/// high. S2X: EN 302 307-2 Table 20a (normal, FER 10⁻⁵) and Table 20c
+/// (short) — the S2X MODCOD fixes its own frame length.
+pub fn qef_es_n0_db(index: u8) -> Option<f32> {
+    // Rust note: a `match` on integer literals compiles to a jump table, so
+    // this is as cheap as indexing an array, and it reads like the tables.
+    let db = match index {
+        // QPSK 1/4 … 9/10
+        1 => -2.35,
+        2 => -1.24,
+        3 => -0.30,
+        4 => 1.00,
+        5 => 2.23,
+        6 => 3.10,
+        7 => 4.03,
+        8 => 4.68,
+        9 => 5.18,
+        10 => 6.20,
+        11 => 6.42,
+        // 8PSK 3/5 … 9/10
+        12 => 5.50,
+        13 => 6.62,
+        14 => 7.91,
+        15 => 9.35,
+        16 => 10.69,
+        17 => 10.98,
+        // 16APSK 2/3 … 9/10
+        18 => 8.97,
+        19 => 10.21,
+        20 => 11.03,
+        21 => 11.61,
+        22 => 12.89,
+        23 => 13.13,
+        // 32APSK 3/4 … 9/10
+        24 => 12.73,
+        25 => 13.64,
+        26 => 14.28,
+        27 => 15.69,
+        28 => 16.05,
+        _ if index < 132 => return None,
+        // S2X by PLS code, the pilot bit ignored.
+        _ => match index & 0xFE {
+            // Table 20a, normal FECFRAMEs.
+            132 => -2.03, // QPSK 13/45
+            134 => 0.22,  // QPSK 9/20
+            136 => 1.45,  // QPSK 11/20
+            138 => 4.73,  // 8APSK 5/9-L
+            140 => 5.13,  // 8APSK 26/45-L
+            142 => 6.12,  // 8PSK 23/36
+            144 => 7.02,  // 8PSK 25/36
+            146 => 7.49,  // 8PSK 13/18
+            148 => 5.97,  // 16APSK 1/2-L
+            150 => 6.55,  // 16APSK 8/15-L
+            152 => 6.84,  // 16APSK 5/9-L
+            154 => 7.51,  // 16APSK 26/45
+            156 => 7.80,  // 16APSK 3/5
+            158 => 7.41,  // 16APSK 3/5-L
+            160 => 8.10,  // 16APSK 28/45
+            162 => 8.38,  // 16APSK 23/36
+            164 => 8.43,  // 16APSK 2/3-L
+            166 => 9.27,  // 16APSK 25/36
+            168 => 9.71,  // 16APSK 13/18
+            170 => 10.65, // 16APSK 7/9
+            172 => 11.99, // 16APSK 77/90
+            174 => 11.10, // 32APSK 2/3-L
+            178 => 11.75, // 32APSK 32/45
+            180 => 12.17, // 32APSK 11/15
+            182 => 13.05, // 32APSK 7/9
+            184 => 13.98, // 64APSK 32/45-L
+            186 => 14.81, // 64APSK 11/15
+            190 => 15.47, // 64APSK 7/9
+            194 => 15.87, // 64APSK 4/5
+            198 => 16.55, // 64APSK 5/6
+            200 => 17.73, // 128APSK 3/4
+            202 => 18.53, // 128APSK 7/9
+            204 => 16.98, // 256APSK 29/45-L
+            206 => 17.24, // 256APSK 2/3-L
+            208 => 18.10, // 256APSK 31/45-L
+            210 => 18.59, // 256APSK 32/45
+            212 => 18.84, // 256APSK 11/15-L
+            214 => 19.57, // 256APSK 3/4
+            // Table 20c, short FECFRAMEs.
+            216 => -2.50, // QPSK 11/45
+            218 => -2.24, // QPSK 4/15
+            220 => -1.46, // QPSK 14/45
+            222 => 0.60,  // QPSK 7/15
+            224 => 1.45,  // QPSK 8/15
+            226 => 3.66,  // QPSK 32/45
+            228 => 3.83,  // 8PSK 7/15
+            230 => 4.71,  // 8PSK 8/15
+            232 => 5.52,  // 8PSK 26/45
+            234 => 7.54,  // 8PSK 32/45
+            236 => 5.99,  // 16APSK 7/15
+            238 => 6.93,  // 16APSK 8/15
+            240 => 7.66,  // 16APSK 26/45
+            242 => 8.10,  // 16APSK 3/5
+            244 => 9.81,  // 16APSK 32/45
+            246 => 11.41, // 32APSK 2/3
+            248 => 12.18, // 32APSK 32/45
+            _ => return None,
+        },
+    };
+    Some(db)
+}
+
 /// The standard DVB-S2 MODCOD table (see [`S2_MODCODS`]).
 pub fn s2_modcod_table() -> &'static [Modcod] {
     &S2_MODCODS
@@ -390,6 +500,29 @@ mod tests {
         );
         assert!(modcod(129, FecFrame::Normal).is_none()); // VL-SNR
         assert_eq!(modcod(4, FecFrame::Short).unwrap().frame, FecFrame::Short);
+    }
+
+    #[test]
+    fn every_modcod_has_a_qef_threshold() {
+        for m in s2_modcod_table().iter().chain(s2x_modcod_table()) {
+            assert!(qef_es_n0_db(m.index).is_some(), "{m}");
+            // The pilots-on PLS code is the same MODCOD.
+            if m.is_s2x() {
+                assert_eq!(qef_es_n0_db(m.index | 1), qef_es_n0_db(m.index));
+            }
+        }
+        for none in [0, 29, 31, 128, 129, 130, 131, 176, 188, 250, 255] {
+            assert_eq!(qef_es_n0_db(none), None, "{none}");
+        }
+        // Within one constellation of Table 12 a higher rate needs more.
+        let t = s2_modcod_table();
+        for w in t.windows(2) {
+            if w[0].modulation == w[1].modulation {
+                assert!(qef_es_n0_db(w[0].index) < qef_es_n0_db(w[1].index));
+            }
+        }
+        assert_eq!(qef_es_n0_db(13), Some(6.62)); // 8PSK 2/3
+        assert_eq!(qef_es_n0_db(143), Some(6.12)); // 8PSK 23/36, pilots
     }
 
     #[test]

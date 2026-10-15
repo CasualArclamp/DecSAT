@@ -4589,3 +4589,18 @@ decoded here). Many satellites publish no Ku beacon (APSTAR 6C/6D/6E/9,
 ChinaSat 6D/6E/10R/19, Superbird-B3, Koreasat 6's 160E figure). Tune makes
 the VFO against the current tuning and then retunes (the carry places it).
 `--beacons` opens the window unattended.
+
+## MODCOD header with link margin (2026-10-15)
+
+Rory picked it from five mockups: the selected DVB-S/S2/S2X VFO now opens
+with its MODCOD (DVB-S: the code rate found) in big monospace, coloured by
+the carrier's standard once locked — S2X blue (any S2X MODCOD carried), S2
+green, DVB-S yellow — dimmed while confirming, grey while searching. The
+modulation is right-aligned in a column as wide as the carrier's widest, so
+an ACM carrier's rate stays put. Beside it the margin (measured Es/N0 less
+the ideal QEF Es/N0; settled locks only), under it an Es/N0 bar with a QEF
+tick. Thresholds: `decsat_core::qef_es_n0_db` (EN 302 307-1 Table 13;
+-2 Tables 20a/20c, read from the reference PDF by row count — its text
+columns are offset) and `decsat_modem::dvbs::qef_es_n0_db` (EN 300 421
+Eb/N0, 0.8 dB margin included, to Es/N0). `last_modcod` now skips dummy
+frames so the header holds still between data.

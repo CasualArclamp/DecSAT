@@ -217,6 +217,13 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     };
     let st = inp.statuses.get(&v.id).cloned().unwrap_or_default();
     ui.separator();
+    if matches!(
+        v.settings.decoder,
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
+    ) {
+        modcod_header(ui, v.settings.decoder, &st);
+        ui.add_space(6.0);
+    }
 
     let mut s = v.settings.clone();
     egui::Grid::new("vfo_settings")
@@ -4616,6 +4623,228 @@ fn identification_card(
             let counts: BTreeMap<u8, u64> =
                 d.modcods.iter().map(|(&k, &v)| (k, v as u64)).collect();
             modcod_table(ui, &counts);
+        }
+    });
+}
+
+/// The MODCOD being received (for DVB-S, its code rate), big, at the top of
+/// a DVB-S/S2/S2X VFO, in the standard's colour once locked — DVB-S2X blue,
+/// DVB-S2 green, DVB-S yellow — dimmed while the lock is being confirmed,
+/// grey while searching. Beside it the link margin, and under it a bar of
+/// the measured Es/N0 with a tick at the ideal QEF Es/N0 of that MODCOD, so
+/// how close the carrier is to falling over reads at a glance.
+fn modcod_header(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) {
+    const GOOD: Color32 = Color32::from_rgb(110, 220, 110);
+    const WAIT: Color32 = Color32::from_rgb(240, 200, 80);
+    const BAD: Color32 = Color32::from_rgb(230, 110, 110);
+    const S2X: Color32 = Color32::from_rgb(100, 170, 255);
+    const S2: Color32 = GOOD;
+    const S1: Color32 = Color32::from_rgb(240, 230, 90);
+    // Clear of the panel's scroll bar, which egui floats over the content.
+    const RIGHT_PAD: f32 = 6.0;
+    let grey = ui.visuals().weak_text_color();
+    // A lock being confirmed: the standard's colour, half lit.
+    let dim = |c: Color32| c.gamma_multiply(0.55);
+
+    // The data MODCODs this carrier has sent more than now and then (a
+    // misread header names a stray one once in a while).
+    let data_frames: u64 = st.modcods.iter().filter(|e| *e.0 != 0).map(|e| e.1).sum();
+    let carried: Vec<decsat_core::Modcod> = st
+        .modcods
+        .iter()
+        .filter(|&(&m, &n)| m != 0 && n >= 3 && n * 1000 >= data_frames)
+        .filter_map(|(&m, _)| decsat_core::modcod(m, decsat_core::FecFrame::Normal))
+        .collect();
+    // The modulation column's width: the widest this carrier uses, so the
+    // rate starts in the same place whatever an ACM carrier sends next.
+    let width = carried
+        .iter()
+        .map(|m| m.modulation.name().len())
+        .max()
+        .unwrap_or(4);
+
+    // The demodulator's Es/N0 (pilots and headers on S2, the MER on
+    // DVB-S); the FEC's latest-frame figure if the carrier loop is not up.
+    let es_n0 = st
+        .carrier
+        .map(|c| c.esn0_db())
+        .or(st.fec.as_ref().and_then(|f| f.es_n0_db));
+
+    // What is shown: the name (None while there is none), its colour, what
+    // it is in words, its QEF Es/N0, and whether the lock is settled.
+    let (name, colour, about, qef, locked) = if decoder == DecoderKind::DvbsTs {
+        let rate = st
+            .fec
+            .as_ref()
+            .and_then(|f| f.dvbs.as_ref())
+            .and_then(|d| d.rate);
+        let carrier = st.carrier.is_some_and(|c| c.locked);
+        match rate {
+            Some(r) => (
+                Some(format!("QPSK {}", r.name())),
+                if carrier { S1 } else { dim(S1) },
+                format!(
+                    "DVB-S, code rate {} found. QEF: EN 300 421's figure, which \
+                     has 0.8 dB of modem implementation margin in it.",
+                    r.name()
+                ),
+                Some(decsat_engine::dvbs_qef_es_n0_db(r)),
+                carrier,
+            ),
+            None if carrier => (
+                None,
+                dim(S1),
+                "DVB-S: finding the code rate".into(),
+                None,
+                false,
+            ),
+            None => (None, grey, "DVB-S: searching".into(), None, false),
+        }
+    } else {
+        // ACM (or VCM) once more than one data MODCOD has been seen.
+        let mode = if carried.len() > 1 { "ACM" } else { "CCM" };
+        // The carrier's standard, not the frame's: an S2X carrier may send
+        // S2 MODCODs too, and its colour should not flicker as it does.
+        let s2x = carried.iter().any(|m| m.is_s2x()) || st.last_modcod.is_some_and(|m| m >= 128);
+        let standard = if s2x { S2X } else { S2 };
+        let colour = match st.lock {
+            Some(LockState::Locked) => standard,
+            Some(LockState::Found) => dim(standard),
+            _ => grey,
+        };
+        let locked = st.lock == Some(LockState::Locked);
+        match st.last_modcod {
+            Some(m) if st.lock.is_some_and(|l| l != LockState::Searching) => {
+                let kind = if m >= 128 { "DVB-S2X" } else { "DVB-S2" };
+                // "  QPSK 1/2" under "16APSK 26/45": the modulation right-
+                // aligned in its column. Rust note: `{:>width$}` pads to a
+                // width taken from the variable `width`.
+                let text = match decsat_core::modcod(m, decsat_core::FecFrame::Normal) {
+                    Some(mc) => {
+                        let rate = mc.label.map_or_else(|| mc.rate.to_string(), str::to_string);
+                        format!("{:>width$} {rate}", mc.modulation.name())
+                    }
+                    None => decsat_core::modcod_name(m),
+                };
+                (
+                    Some(text),
+                    colour,
+                    format!(
+                        "{kind} MODCOD {m}, {mode}. QEF: the ideal figure of EN 302 307 \
+                         ({}); this receiver needs about 1 dB more.",
+                        if m >= 128 {
+                            "-2 Tables 20a/20c"
+                        } else {
+                            "-1 Table 13, normal frames"
+                        }
+                    ),
+                    decsat_core::qef_es_n0_db(m),
+                    locked,
+                )
+            }
+            _ if locked => (
+                Some("dummy".into()),
+                colour,
+                "DVB-S2: only dummy frames so far".into(),
+                None,
+                true,
+            ),
+            _ => (None, colour, "DVB-S2: searching".into(), None, false),
+        }
+    };
+    // A settled lock's only: while confirming, the MODCOD and Es/N0 come
+    // from a header or two and may be misreads. Rust note: `zip` pairs two
+    // Options (Some only if both are); `filter` and `and` keep that only
+    // while there is a locked name to show it beside.
+    let margin = name
+        .as_ref()
+        .filter(|_| locked)
+        .and(es_n0.zip(qef))
+        .map(|(e, q)| e - q);
+    let margin_colour = match margin {
+        Some(m) if m < 0.0 => BAD,
+        Some(m) if m < 1.0 => WAIT,
+        _ => GOOD,
+    };
+
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(
+                RichText::new(name.as_deref().unwrap_or("–"))
+                    .monospace()
+                    .size(26.0)
+                    .color(if name.is_some() { colour } else { grey }),
+            );
+            if let Some(m) = margin {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(RIGHT_PAD);
+                    ui.label(
+                        RichText::new(format!("{m:+5.1} dB"))
+                            .monospace()
+                            .size(18.0)
+                            .color(margin_colour),
+                    );
+                });
+            }
+        })
+        .response;
+    resp.on_hover_text(format!(
+        "{about}\n\nMargin: the measured Es/N0 less the Es/N0 this MODCOD needs \
+         to be quasi error free over AWGN. Below 0 dB the FEC fails; within \
+         1 dB a fade drops frames."
+    ));
+
+    // The Es/N0 bar: a fixed scale (so it does not jump as the reading
+    // moves), from below zero for the S2X codes that work there, wider for
+    // the 64–256APSKs.
+    let lo = if qef.is_some_and(|q| q < 0.0) {
+        -4.0
+    } else {
+        0.0
+    };
+    let hi = if qef.is_some_and(|q| q > 15.0) {
+        24.0
+    } else {
+        20.0
+    };
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, 10.0), Sense::hover());
+    let x_of = |db: f32| rect.left() + rect.width() * ((db - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    if let (Some(e), true) = (es_n0, locked && name.is_some()) {
+        let fill = egui::Rect::from_min_max(rect.min, pos2(x_of(e), rect.max.y));
+        p.rect_filled(fill, CornerRadius::same(2), margin_colour);
+    }
+    if let Some(q) = qef {
+        let x = x_of(q);
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                pos2(x - 1.0, rect.top() - 3.0),
+                pos2(x + 1.0, rect.bottom() + 3.0),
+            ),
+            CornerRadius::ZERO,
+            ui.visuals().strong_text_color(),
+        );
+    }
+    ui.horizontal(|ui| {
+        let dvbs = decoder == DecoderKind::DvbsTs;
+        let left = match (es_n0, &name) {
+            (Some(e), Some(_)) => format!("Es/N0 {e:.1} dB"),
+            (None, Some(_)) => "Es/N0 not measured yet".into(),
+            _ if dvbs && st.carrier.is_some_and(|c| c.locked) => "finding the code rate…".into(),
+            _ if !dvbs && st.lock.is_none() => {
+                format!("acquiring {:.0} %", st.progress * 100.0)
+            }
+            _ if st.lock == Some(LockState::Found) => "confirming…".into(),
+            _ => "searching…".into(),
+        };
+        ui.label(RichText::new(left).size(12.0).weak());
+        if let Some(q) = qef {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(format!("QEF {q:.1} dB")).size(12.0).weak());
+            });
         }
     });
 }
