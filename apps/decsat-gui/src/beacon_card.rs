@@ -23,6 +23,10 @@ struct Pick {
     row: usize,
     byte: usize,
     wide: bool,
+    /// Every minor frame's sample of this byte, a line each.
+    all: bool,
+    /// Read as two's complement (a word that crosses zero stays one line).
+    signed: bool,
 }
 
 /// The frame map's texture, kept between frames until the log changes.
@@ -523,6 +527,8 @@ fn frame_map(ui: &mut Ui, b: &BeaconView, id: VfoId) {
                 row: r,
                 byte: c,
                 wide: pick.is_some_and(|p| p.wide),
+                all: pick.is_some_and(|p| p.all),
+                signed: pick.is_some_and(|p| p.signed),
             });
             ui.data_mut(|d| d.insert_temp(pick_key, pick));
         }
@@ -545,84 +551,253 @@ fn frame_map(ui: &mut Ui, b: &BeaconView, id: VfoId) {
     if let Some(p) = picked {
         word_plot(ui, b, p, rows, id);
     }
+    pinned_plots(ui, b, rows, id);
 }
 
-/// The picked word against time.
+impl Pick {
+    /// "Byte 200–201 (16 bits), every minor frame".
+    fn title(&self) -> String {
+        let bytes = if self.wide {
+            format!("Byte {}–{} (16 bits)", self.byte, self.byte + 1)
+        } else {
+            format!("Byte {}", self.byte)
+        };
+        let signed = if self.signed { ", signed" } else { "" };
+        if self.all {
+            format!("{bytes}{signed}, every minor frame")
+        } else {
+            format!("{bytes}{signed}, minor frame {}", self.row)
+        }
+    }
+
+    /// As kept in the prefs: "200,1,*,1" (byte, 16 bits, every minor
+    /// frame, signed) or "43,0,7,0" (minor frame 7).
+    fn key(&self) -> String {
+        format!(
+            "{},{},{},{}",
+            self.byte,
+            u8::from(self.wide),
+            if self.all {
+                "*".to_string()
+            } else {
+                self.row.to_string()
+            },
+            u8::from(self.signed)
+        )
+    }
+
+    fn parse(s: &str) -> Option<Pick> {
+        let mut it = s.split(',');
+        let byte = it.next()?.trim().parse().ok()?;
+        let wide = it.next()?.trim() == "1";
+        let row = it.next()?.trim();
+        Some(Pick {
+            byte,
+            wide,
+            all: row == "*",
+            row: row.parse().unwrap_or(0),
+            signed: it.next().is_some_and(|x| x.trim() == "1"),
+        })
+    }
+
+    /// The word in a frame's bytes.
+    fn value(&self, bytes: &[u8]) -> Option<f64> {
+        let hi = *bytes.get(self.byte)?;
+        Some(match (self.wide, self.signed) {
+            (true, s) => {
+                let w = u16::from(hi) << 8 | u16::from(*bytes.get(self.byte + 1)?);
+                if s { f64::from(w as i16) } else { f64::from(w) }
+            }
+            (false, true) => f64::from(hi as i8),
+            (false, false) => f64::from(hi),
+        })
+    }
+}
+
+/// Pinned plots: kept in the prefs, read once.
+static PINS: std::sync::Mutex<Option<Vec<Pick>>> = std::sync::Mutex::new(None);
+
+fn pins() -> Vec<Pick> {
+    let mut p = PINS.lock().unwrap_or_else(|e| e.into_inner());
+    p.get_or_insert_with(|| {
+        crate::prefs::beacon_pins()
+            .split(';')
+            .filter_map(Pick::parse)
+            .collect()
+    })
+    .clone()
+}
+
+fn set_pins(list: Vec<Pick>) {
+    let text: Vec<String> = list.iter().map(Pick::key).collect();
+    crate::prefs::set_beacon_pins(&text.join(";"));
+    *PINS.lock().unwrap_or_else(|e| e.into_inner()) = Some(list);
+}
+
+/// A word's samples against time (minutes): one series for a minor frame,
+/// one a minor frame (by its counter) for every minor frame.
+fn series(b: &BeaconView, p: Pick, rows: usize) -> Vec<(usize, Vec<[f64; 2]>)> {
+    let log: std::sync::MutexGuard<'_, BeaconLog> = b.log.lock().unwrap_or_else(|e| e.into_inner());
+    let lines = if p.all || rows == 1 { rows.max(1) } else { 1 };
+    let mut out: Vec<(usize, Vec<[f64; 2]>)> = (0..lines)
+        .map(|r| (if lines == 1 { p.row } else { r }, Vec::new()))
+        .collect();
+    for f in log.frames.iter().filter(|f| f.good) {
+        let Some(v) = p.value(&f.bytes) else {
+            continue;
+        };
+        // Numbered by the counter as it stands now (frames logged before
+        // its wrap was seen may carry an older reading).
+        let index = b
+            .counter
+            .map_or(f.index, |c| c.index(&f.bytes))
+            .map(|i| i as usize);
+        let slot = if rows == 1 {
+            Some(0)
+        } else if p.all {
+            index.filter(|&i| i < lines)
+        } else {
+            (index == Some(p.row)).then_some(0)
+        };
+        if let Some(s) = slot {
+            out[s].1.push([f.t_s / 60.0, v]);
+        }
+    }
+    out.retain(|(_, pts)| !pts.is_empty());
+    out
+}
+
+/// A line's colour: one hue a minor frame, round the wheel.
+fn row_colour(row: usize, rows: usize) -> Color32 {
+    let h = row as f32 / rows.max(1) as f32;
+    egui::ecolor::Hsva::new(h, 0.65, 0.95, 1.0).into()
+}
+
+/// Draw a word's series.
+fn draw(ui: &mut Ui, lines: Vec<(usize, Vec<[f64; 2]>)>, rows: usize, plot_id: egui::Id) {
+    if lines.iter().map(|(_, p)| p.len()).sum::<usize>() < 2 {
+        ui.label(RichText::new("waiting for more frames…").weak());
+        return;
+    }
+    let single = lines.len() == 1;
+    Plot::new(plot_id)
+        .height(if single { 110.0 } else { 160.0 })
+        .x_axis_label("minutes")
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .show(ui, |pl| {
+            for (r, pts) in lines {
+                let colour = if single {
+                    Color32::from_rgb(240, 200, 80)
+                } else {
+                    row_colour(r, rows)
+                };
+                pl.line(Line::new(format!("minor frame {r}"), PlotPoints::from(pts)).color(colour));
+            }
+        });
+}
+
+/// The word picked in the map: its plot, with switches for 16 bits and
+/// every minor frame, and a pin to keep it.
 fn word_plot(ui: &mut Ui, b: &BeaconView, mut p: Pick, rows: usize, id: VfoId) {
     let pick_key = egui::Id::new(("beacon_pick", id));
-    let pts: Vec<[f64; 2]> = {
-        let log: std::sync::MutexGuard<'_, BeaconLog> =
-            b.log.lock().unwrap_or_else(|e| e.into_inner());
-        log.frames
-            .iter()
-            .filter(|f| f.good && (rows == 1 || f.index == Some(p.row as u32)))
-            .filter_map(|f| {
-                let hi = *f.bytes.get(p.byte)?;
-                let v = if p.wide {
-                    u16::from(hi) << 8 | u16::from(*f.bytes.get(p.byte + 1)?)
-                } else {
-                    u16::from(hi)
-                };
-                Some([f.t_s / 60.0, f64::from(v)])
-            })
-            .collect()
-    };
+    let lines = series(b, p, rows);
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!(
-                "Minor frame {}, byte {}{}",
-                p.row,
-                p.byte,
-                if p.wide {
-                    format!("–{} (16 bits)", p.byte + 1)
-                } else {
-                    String::new()
-                }
-            ))
-            .strong(),
-        );
-        if ui
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(p.title()).strong());
+        let mut changed = ui
             .checkbox(&mut p.wide, "16 bits")
             .on_hover_text("Read the byte and the next as one 16-bit word, most significant first")
-            .changed()
-        {
+            .changed();
+        if rows > 1 {
+            changed |= ui
+                .checkbox(&mut p.all, "every minor frame")
+                .on_hover_text(
+                    "Plot this byte in every minor frame, a line each (coloured by the \
+                     counter): a byte that carries a different word in each minor frame \
+                     shows all of them",
+                )
+                .changed();
+        }
+        changed |= ui
+            .checkbox(&mut p.signed, "signed")
+            .on_hover_text(
+                "Read as two's complement: a word that crosses zero (FFh → 00h) stays one \
+                 line instead of jumping across the plot",
+            )
+            .changed();
+        if changed {
             ui.data_mut(|d| d.insert_temp(pick_key, Some(p)));
         }
-        if let Some(last) = pts.last() {
-            let v = last[1] as u32;
+        if !p.all
+            && let Some(last) = lines.first().and_then(|(_, pts)| pts.last())
+        {
+            let v = last[1] as i64;
+            let raw = if p.wide { v & 0xFFFF } else { v & 0xFF };
             ui.label(
                 RichText::new(if p.wide {
-                    format!("{v:04X}h = {v}")
+                    format!("{raw:04X}h = {v}")
                 } else {
-                    format!("{v:02X}h = {v} = {v:08b}b")
+                    format!("{raw:02X}h = {v} = {raw:08b}b")
                 })
                 .monospace(),
             );
         }
+        let mut list = pins();
+        if !list.contains(&p)
+            && ui
+                .small_button("Pin")
+                .on_hover_text("Keep this plot under the map (remembered for next time)")
+                .clicked()
+        {
+            list.push(p);
+            set_pins(list);
+        }
         if ui
-            .small_button("✕")
+            .small_button("Close")
             .on_hover_text("Close the plot")
             .clicked()
         {
             ui.data_mut(|d| d.insert_temp::<Option<Pick>>(pick_key, None));
         }
     });
-    if pts.len() < 2 {
-        ui.label(RichText::new("waiting for more frames…").weak());
+    draw(ui, lines, rows, egui::Id::new(("beacon_word", id)));
+}
+
+/// The pinned plots, each with its Unpin.
+fn pinned_plots(ui: &mut Ui, b: &BeaconView, rows: usize, id: VfoId) {
+    let list = pins();
+    if list.is_empty() {
         return;
     }
-    Plot::new(("beacon_word", id))
-        .height(110.0)
-        .x_axis_label("minutes")
-        .allow_drag(false)
-        .allow_zoom(false)
-        .allow_scroll(false)
-        .show(ui, |pl| {
-            pl.line(
-                Line::new("value", PlotPoints::from(pts)).color(Color32::from_rgb(240, 200, 80)),
-            );
+    ui.add_space(6.0);
+    ui.label(RichText::new("Pinned").strong())
+        .on_hover_text("Plots kept from the map (Pin on a picked word); remembered between runs");
+    let mut unpin = None;
+    for (k, p) in list.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(p.title());
+            if ui
+                .small_button("Unpin")
+                .on_hover_text("Remove this plot")
+                .clicked()
+            {
+                unpin = Some(k);
+            }
         });
+        draw(
+            ui,
+            series(b, *p, rows),
+            rows,
+            egui::Id::new(("beacon_pin", id, k)),
+        );
+    }
+    if let Some(k) = unpin {
+        let mut list = list;
+        list.remove(k);
+        set_pins(list);
+    }
 }
 
 /// The latest good frame, 16 bytes a row: the sync word and the counter

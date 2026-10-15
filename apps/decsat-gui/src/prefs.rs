@@ -274,6 +274,20 @@ pub fn set_radar_internet(on: bool) {
     let _ = write_key("radar_internet", if on { "1" } else { "0" });
 }
 
+/// The beacon card's pinned word plots, as the card writes them
+/// ("200,1,*;43,0,7": byte, 16 bits or not, minor frame or every one).
+pub fn beacon_pins() -> String {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "beacon_pins")
+        .map(|(_, v)| v)
+        .unwrap_or_default()
+}
+
+pub fn set_beacon_pins(pins: &str) {
+    let _ = write_key("beacon_pins", pins);
+}
+
 pub fn set_radar_airports(on: bool) {
     let _ = write_key("radar_airports", if on { "1" } else { "0" });
 }

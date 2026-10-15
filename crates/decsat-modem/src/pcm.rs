@@ -569,7 +569,14 @@ impl Counter {
     /// Where frame `bytes` sits in its major frame (0 = the first).
     pub fn index(&self, bytes: &[u8]) -> Option<u32> {
         let v = bytes.get(self.byte)? & self.mask;
-        let i = u32::from(v.wrapping_sub(self.first) & self.mask);
+        // Until a wrap shows where the count starts, the lowest value seen
+        // may not be it: the value as it is (counters mostly start at 0).
+        let first = if self.modulus.is_some() {
+            self.first
+        } else {
+            0
+        };
+        let i = u32::from(v.wrapping_sub(first) & self.mask);
         let i = if self.down {
             self.modulus.map_or(i, |m| (m - 1).saturating_sub(i))
         } else {

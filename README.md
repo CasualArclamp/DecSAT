@@ -600,7 +600,11 @@ beacon**:
   **minor-frame counter** is found and the **major frame** drawn as a map —
   a row a minor frame, a column a byte, grey where a word never changes and
   coloured by value where it does; **click a cell** to plot that word (or a
-  16-bit word) against time. The latest frame is shown in hex, the sync
+  16-bit word, signed or not) against time — or that byte in **every minor
+  frame**, a line each — and **Pin** the plot to keep it on the card (pins
+  are remembered between runs). A check byte at the frame's end and a
+  spacecraft clock are found by themselves; frames failing the check are
+  kept out of the map and plots. The latest frame is shown in hex, the sync
   word and counter picked out;
 - **CCSDS**: when the frames start with the marker, the codeblock's layout
   is worked out — Reed–Solomon (255,223) or (255,239) in the dual basis,
