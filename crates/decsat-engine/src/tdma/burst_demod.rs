@@ -1024,8 +1024,10 @@ mod tests {
             .map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
         let mut f = std::fs::File::open(cap).unwrap();
         let mut dm = BurstDemod::new(8e6);
-        // terminal -> (bursts, ok, MERs, offsets, fits); code -> MERs
-        let mut per: BTreeMap<u16, (u32, u32, Vec<f32>, Vec<f64>, Vec<f32>)> = BTreeMap::new();
+        /// A terminal's bursts, those taken, and their MERs, offsets, fits.
+        #[derive(Default)]
+        struct Tally(u32, u32, Vec<f32>, Vec<f64>, Vec<f32>);
+        let mut per: BTreeMap<u16, Tally> = BTreeMap::new();
         let mut codes: BTreeMap<u16, Vec<f32>> = BTreeMap::new();
         let mut headers: BTreeMap<u16, BTreeMap<Vec<u8>, u32>> = BTreeMap::new();
         let mut buf = Vec::new();
@@ -1106,7 +1108,7 @@ mod tests {
             v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
         };
         eprintln!("{done} bursts in {:.1} s", t0.elapsed().as_secs_f64());
-        for (t, (n, ok, mer, off, fit)) in &mut per {
+        for (t, Tally(n, ok, mer, off, fit)) in &mut per {
             let mut offs: Vec<f32> = off.iter().map(|&x| x as f32).collect();
             eprintln!(
                 "terminal {t:3}: {ok:4}/{n:4} ok, MER {:5.1} dB, offset {:+8.0} Hz, fit {:.2}",
