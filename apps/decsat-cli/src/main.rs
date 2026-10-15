@@ -613,6 +613,12 @@ fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::Dec
     use decsat_engine::{DecoderKind, Verdict};
     match &ident.verdict {
         Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => vec![DecoderKind::Dvbs2Ip],
+        // An Intelsat 19 DAMA outbound: its own decoder; a call channel of
+        // that network: none (its voice is encrypted).
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_is19(hint) => {
+            vec![DecoderKind::Is19Outbound]
+        }
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_is19_call(hint) => Vec::new(),
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => vec![DecoderKind::Tdma],
         Verdict::NotDvbS2 { hint } => {

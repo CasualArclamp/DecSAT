@@ -171,6 +171,15 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
     match &ident.verdict {
         Verdict::NoSignal => Err(Outcome::NoSignal),
         Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => Ok(DecoderKind::Dvbs2Ip),
+        // An Intelsat 19 DAMA outbound (its sync word found): its own
+        // decoder. Its call channels: nothing to decode (the voice is
+        // encrypted; the outbounds name the calls).
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_is19(hint) => {
+            Ok(DecoderKind::Is19Outbound)
+        }
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_is19_call(hint) => {
+            Err(Outcome::NoDecoder)
+        }
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => Ok(DecoderKind::Tdma),
         Verdict::NotDvbS2 { hint }

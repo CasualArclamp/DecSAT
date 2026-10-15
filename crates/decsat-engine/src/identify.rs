@@ -203,6 +203,18 @@ pub enum Verdict {
     NotDvbS2 { hint: String },
 }
 
+/// A [`Verdict::NotDvbS2`] hint names an Intelsat 19 DAMA outbound (its
+/// sync word found: the IS-19 outbound decoder reads it).
+pub fn names_is19(hint: &str) -> bool {
+    hint.contains("DAMA outbound")
+}
+
+/// Identify's hint names an Intelsat 19 DAMA call channel (no decoder: its
+/// voice is encrypted).
+pub fn names_is19_call(hint: &str) -> bool {
+    hint.contains("DAMA call channel")
+}
+
 /// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
 /// or Comtech TPC 7/8's (the TPC decoder reads either).
 pub fn names_tpc(hint: &str) -> bool {
@@ -343,6 +355,17 @@ impl Identification {
             bursts: None,
             conv_code: None,
         }
+    }
+
+    /// Take a carrier lock's result: offset, the symbols shown, MER,
+    /// coherence and whether it locked.
+    fn set_lock(&mut self, lock: &CarrierLock, rs: f64) {
+        self.carrier_offset_hz = Some(lock.freq_cycles * rs);
+        let tail = lock.symbols.len().saturating_sub(DISPLAY_SYMBOLS);
+        self.symbols = lock.symbols[tail..].to_vec();
+        self.mer_db = Some(lock.mer_db);
+        self.coherence = Some(lock.coherence);
+        self.carrier_locked = lock.coherence > decsat_dsp::LOCK_COHERENCE;
     }
 
     /// One-line human summary for the CLI and the VFO panel.
@@ -1116,12 +1139,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         }
         lock = best;
     }
-    id.carrier_offset_hz = Some(lock.freq_cycles * rs);
-    let tail = lock.symbols.len().saturating_sub(DISPLAY_SYMBOLS);
-    id.symbols = lock.symbols[tail..].to_vec();
-    id.mer_db = Some(lock.mer_db);
-    id.coherence = Some(lock.coherence);
-    id.carrier_locked = lock.coherence > decsat_dsp::LOCK_COHERENCE;
+    id.set_lock(&lock, rs);
 
     // 8. Not DVB-S2: the unique word of an Intelsat TPC 2964 carrier, every
     //    2964 bits, or a Comtech TPC 7/8 one, every 16 320, is quick to look
@@ -1139,12 +1157,54 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         && !tpc
         && cst == ConstellationGuess::Qpsk
         && decsat_modem::fastlink::detect(&lock.symbols);
+    // An Intelsat 19 DAMA outbound: its sync word every 40 112 symbols,
+    // looked for differentially (no lock needed — its pilots' squared lines
+    // make it read BPSK, and the lock goes with that). Found, it is QPSK:
+    // the lock is done again so.
+    let is19 = !is_s2
+        && !tpc
+        && !fastlink
+        && (rs / decsat_modem::is19::SYMBOL_RATE - 1.0).abs() < 0.02
+        && decsat_modem::is19::detect(&sym);
+    if is19 && cst != ConstellationGuess::Qpsk {
+        cst = ConstellationGuess::Qpsk;
+        id.constellation = Some(cst);
+        let seed = weak_s4_offset(&sym, rs).map(|hz| hz / rs);
+        lock = lock_carrier(&sym, cst, seed, None);
+        id.set_lock(&lock, rs);
+    }
+    // One of its call channels: QPSK at 5133⅓ Bd, a pilot every 16 symbols
+    // in 154-symbol frames. Identify's rate for so narrow a carrier can be
+    // well off: near it, the symbols are timed again at the call rate.
+    let mut is19_call = !is_s2
+        && !tpc
+        && !fastlink
+        && !is19
+        && cst == ConstellationGuess::Qpsk
+        && decsat_modem::is19::detect_call_channel(&lock.symbols);
+    let call_rs = decsat_modem::is19::CALL_SYMBOL_RATE;
+    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && (0.8..1.3).contains(&(rs / call_rs)) {
+        let s = symbols_at(&bb, rate, call_rs, 0.2);
+        let seed = weak_s4_offset(&s, call_rs).map(|hz| hz / call_rs);
+        let l = lock_carrier(&s, ConstellationGuess::Qpsk, seed, None);
+        if decsat_modem::is19::detect_call_channel(&l.symbols) {
+            is19_call = true;
+            rs = call_rs;
+            id.symbol_rate = Some(rs);
+            cst = ConstellationGuess::Qpsk;
+            id.constellation = Some(cst);
+            id.set_lock(&l, rs);
+            lock = l;
+        }
+    }
     // A convolutional code on BPSK or QPSK: its parity checks show in the
     // hard decisions (quick: small GF(2) matrices), the K = 7 code of DVB-S
     // and IESS-308/309 or any other rate-½ one.
     id.conv_code = (!is_s2
         && !tpc
         && !fastlink
+        && !is19
+        && !is19_call
         && id.carrier_locked
         && matches!(cst, ConstellationGuess::Bpsk | ConstellationGuess::Qpsk))
     .then(|| decsat_modem::convblind::detect(&lock.symbols, cst == ConstellationGuess::Bpsk))
@@ -1152,7 +1212,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // 9. Not DVB-S2 nor a TPC: does anything repeat frame by frame? A
     //    header or pilots every frame fingerprint a framing — proprietary
     //    ones included — even with no decoder for it.
-    if !is_s2 && !tpc && !fastlink && id.carrier_locked {
+    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && id.carrier_locked {
         id.frame_structure = crate::period::find_period(&lock.symbols, 16, 200_000);
     }
     let burst_text = id.bursts.map_or_else(String::new, |b| {
@@ -1186,6 +1246,18 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                      (NovelSat NS4 offers 2 %)",
                     cst.label()
                 ),
+                _ if is19 => {
+                    "QPSK, Intelsat 19 DAMA outbound (sync word every 40 112 symbols, a pilot \
+                     every 16; 52 × 960 information bits a frame) — the IS-19 DAMA outbound \
+                     decoder reads its packets and call signalling"
+                        .into()
+                }
+                _ if is19_call => {
+                    "QPSK, Intelsat 19 DAMA call channel (30 ms frames of 154 symbols, a pilot \
+                     every 16) — its voice is encrypted; the outbounds' channel assignments \
+                     name its calls"
+                        .into()
+                }
                 _ if fastlink => {
                     "QPSK, Paradise Q-Flex FastLink framing (sync word every 11 538 symbols: \
                      rate 0.710, eight 2880-bit LDPC codewords a frame) — the Q-Flex FastLink \
@@ -1229,6 +1301,29 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
 
 /// Locked symbols kept for the constellation display.
 const DISPLAY_SYMBOLS: usize = 3000;
+
+/// `bb` (a carrier at DC, `rate` samples a second) matched-filtered and
+/// timed at `rs`, levelled, the pull-in dropped — as Identify's main look
+/// does, at a rate given.
+fn symbols_at(bb: &[Iq], rate: f64, rs: f64, alpha: f64) -> Vec<Iq> {
+    let sps = rate / rs;
+    if sps < 2.0 {
+        return Vec::new();
+    }
+    let mut mf = Fir::new(rrc_taps(sps, alpha, 12));
+    let mut filtered = Vec::with_capacity(bb.len());
+    mf.process(bb, &mut filtered);
+    let mut agc = Agc::new(1.0, 1.0);
+    agc.process(&mut filtered);
+    let mut ss = SymbolSync::new(sps, 0.01, 0.03);
+    let mut sym = Vec::with_capacity((bb.len() as f64 / sps) as usize + 16);
+    ss.process(&filtered, &mut sym);
+    let settle = (sym.len() / 5).min(4000);
+    let mut sym = sym[settle..].to_vec();
+    let mut agc = Agc::new(1.0, 1.0);
+    agc.process(&mut sym);
+    sym
+}
 
 /// What carrier recovery produced.
 pub struct CarrierLock {
@@ -1844,6 +1939,57 @@ mod tests {
         }
         assert_eq!(id.constellation, Some(ConstellationGuess::Qpsk));
         assert_eq!(id.bursts, None);
+    }
+
+    /// The Intelsat 19 DAMA network: an outbound named by its sync word
+    /// (and called QPSK, though its pilots' squared lines look BPSK), a
+    /// call channel by its pilots — each through the shaping filter, with a
+    /// carrier offset and noise, at their own rates.
+    #[test]
+    fn names_an_is19_outbound_and_a_call_channel() {
+        use decsat_modem::is19;
+        let mut nz = Noise(5);
+        let mut x = 0x1234_5678_9abc_def1u64;
+        let mut bit = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 40) as u8 & 1
+        };
+        let offset = |v: Vec<Iq>, rate: f64, hz: f64, nz: &mut Noise| -> Vec<Iq> {
+            let w = std::f64::consts::TAU * hz / rate;
+            v.iter()
+                .enumerate()
+                .map(|(n, &s)| s * Iq::from_polar(1.0, (w * n as f64) as f32) + nz.gauss() * 0.1)
+                .collect()
+        };
+
+        let pilots: Vec<bool> = (0..2496).map(|_| bit() == 1).collect();
+        let mut syms = Vec::new();
+        for f in 0..3 {
+            syms.extend(is19::build_frame(&[], &mut bit, &pilots, f % 2 == 1));
+        }
+        let mut sh = Shaper::new(4, is19::ROLL_OFF, 16);
+        let mut v = Vec::new();
+        sh.process(&syms[20_000..], &mut v);
+        let rate = 4.0 * is19::SYMBOL_RATE;
+        let id = identify(&offset(v, rate, 600.0, &mut nz), rate);
+        match &id.verdict {
+            Verdict::NotDvbS2 { hint } => assert!(names_is19(hint), "{hint}"),
+            v => panic!("expected not-DVB-S2, got {v:?}"),
+        }
+        assert_eq!(id.constellation, Some(ConstellationGuess::Qpsk));
+
+        let call = is19::call_channel_symbols(150, &mut bit);
+        let mut sh = Shaper::new(8, 0.2, 16);
+        let mut v = Vec::new();
+        sh.process(&call, &mut v);
+        let rate = 8.0 * is19::CALL_SYMBOL_RATE;
+        let id = identify(&offset(v, rate, 40.0, &mut nz), rate);
+        match &id.verdict {
+            Verdict::NotDvbS2 { hint } => assert!(names_is19_call(hint), "{hint}"),
+            v => panic!("expected not-DVB-S2, got {v:?}"),
+        }
     }
 
     #[test]

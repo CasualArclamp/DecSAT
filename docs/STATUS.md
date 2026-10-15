@@ -4376,3 +4376,43 @@ summaries per reference (`OutboundView::calls`), acks marked with the call
 their terminal is in; CLI prints the events and a calls table; the CSV gains
 terminal, flags, end, call, tx and rx channel; GUI card: a **Calls** table.
 Checked on both outbounds: every call's ends and channels as above.
+
+## Identify names the Intelsat 19 DAMA network (2026-10-15)
+
+Rory: "did you add this to the auto signal ID" — it had not: Identify read
+an outbound as BPSK or QPSK 102.4 kS/s, "possibly DVB-S (not verified)",
+and claiming it sent it to the Comtech CDM decoder.
+
+- `decsat-modem::is19::detect`: the sync word looked for in differential
+  products (`x[k]·x̄[k−1]` against the word's own, ±1), so neither a carrier
+  lock nor the right constellation guess is needed; hits ≥ 0.5 (the best in
+  64 symbols: the word's repeats leave sidelobes 16 and 32 off), two of them
+  a whole number of frames apart within 1 %, or one ≥ 0.85 where the look
+  holds no second. `detect_call_channel`: carrier-locked symbols folded 10
+  frames at a time at 154; the consistency of each position's diagonal
+  (sign of I·Q), the ten-pilot comb (0, 16 … 128, 144) scored at every
+  offset — pilots ≥ 0.7, the rest ≤ 0.45 (random data ~0.25) — in a third
+  of the folds or more (folds while the carrier is off, or across a slip,
+  find nothing). `call_channel_symbols` for tests.
+- `identify_in`: after FastLink, an outbound when the rate is within 2 % of
+  102.4 k and `detect` finds it — then QPSK, the lock done again so (MER and
+  constellation right); else a call channel on the QPSK-locked symbols, or,
+  the rate within 0.8–1.3 × 5133⅓ (Identify read 6.2–6.3 k on some), the
+  symbols timed again at exactly 5133⅓ Bd (`symbols_at`) and locked as QPSK.
+  Both skip the convolutional-code and frame-structure searches. Hints:
+  "QPSK, Intelsat 19 DAMA outbound (…) — the IS-19 DAMA outbound decoder
+  reads its packets and call signalling", "QPSK, Intelsat 19 DAMA call
+  channel (…) — its voice is encrypted; the outbounds' channel assignments
+  name its calls". `names_is19` / `names_is19_call`.
+- Routing: `survey::pick` (the survey, and a carrier claimed from its
+  bracket) → `Is19Outbound` for an outbound, no decoder for a call channel,
+  both ahead of the bursts → TDMA and QPSK → Comtech rules; the CLI's
+  `decoders_for` the same (`scan --decode`).
+- Checked on the recording: `scan` names both outbounds and nothing else;
+  single-channel VFOs (6.5 kHz) on L0, L1, L3 and a steady L2 are named
+  call channels (L2 while it pulses at set-up reads "in bursts"); the call
+  band itself is one 24 kHz carrier to the detector (channels 6.16 kHz
+  apart). GUI `--claim-auto`: the claimed outbound runs the IS-19 decoder
+  by itself. Tests: `fingerprints_find_an_outbound_and_a_call_channel`
+  (unlocked carrier turning 1 % a symbol; a 90° slip; plain QPSK neither),
+  `names_an_is19_outbound_and_a_call_channel` (through the shaping filter).

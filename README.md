@@ -619,7 +619,15 @@ Anything else gets measurements (symbol rate, roll-off, an estimated
 constellation) and a labelled guess: plain QPSK reads *"possibly DVB-S (not
 verified)"* (the DVB-S decoder confirms it), and a BPSK, QPSK or 8PSK carrier
 with the TPC 2964 unique word every 2964 bits, or Comtech TPC 7/8's every
-16 320, is named as such. For the rest it
+16 320, is named as such. So is the **Intelsat 19 DAMA network**: an
+outbound by its 176-symbol sync word every 40 112 symbols (looked for
+differentially, so it is found even when its pilots make the carrier read
+BPSK — it is then called QPSK, and claiming it or the survey runs the IS-19
+outbound decoder), a call channel by its pilots, one every 16 symbols in
+154-symbol frames (*"Intelsat 19 DAMA call channel … its voice is
+encrypted"*: nothing to decode, the outbounds name its calls). Call channels
+sit 6.16 kHz apart, so carrier detection takes the band as one; put a VFO
+on one channel (about 6.5 kHz wide) to have it named. For the rest it
 looks for fingerprints of proprietary waveforms:
 
 - **DVB-S2-style headers off their own grid**: SOF and PLS headers that recur

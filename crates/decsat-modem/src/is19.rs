@@ -1278,6 +1278,141 @@ fn fill_bits(info: &[u8], bad: &[bool; SUBFRAMES]) -> u64 {
 }
 
 // ---------------------------------------------------------------------
+// Fingerprints, for Identify: an outbound by its sync word, a call channel
+// by its pilots.
+
+/// A sync-word score in this many (or more) marks a hit when looking blind.
+const DETECT_SCORE: f32 = 0.5;
+/// A lone hit this good is enough when the look is too short for two.
+const DETECT_ALONE: f32 = 0.85;
+
+/// Differential products `x[k]·x̄[k−1]`: the carrier's phase gone, and a
+/// frequency offset of a few percent of the symbol rate only turns them a
+/// little — so a blind look needs no carrier lock.
+fn diff(x: &[Iq]) -> Vec<Iq> {
+    x.windows(2).map(|w| w[1] * w[0].conj()).collect()
+}
+
+/// The sync word's differential products (±1: BPSK on one diagonal).
+fn uw_diff() -> &'static [f32] {
+    static D: OnceLock<Vec<f32>> = OnceLock::new();
+    D.get_or_init(|| diff(uw_symbols()).iter().map(|d| d.re.signum()).collect())
+}
+
+/// An outbound in timing-recovered symbols (carrier-locked or not, at about
+/// 102.4 kBd): its sync word twice, a whole number of frames apart (within
+/// 1 %, for a symbol clock read a little off) — or once, unmistakably, when
+/// the look holds no second one.
+pub fn detect(sym: &[Iq]) -> bool {
+    let d = diff(sym);
+    let u = uw_diff();
+    if d.len() < u.len() {
+        return false;
+    }
+    // Hits, each the best of its neighbourhood (the word's repeats leave
+    // sidelobes 16 and 32 symbols off).
+    let mut hits: Vec<(usize, f32)> = Vec::new();
+    for k in 0..=d.len() - u.len() {
+        let w = &d[k..k + u.len()];
+        let acc: Iq = w.iter().zip(u).map(|(x, &s)| x * s).sum();
+        let p: f32 = w.iter().map(|x| x.norm()).sum();
+        let score = acc.norm() / p.max(1e-12);
+        if score < DETECT_SCORE {
+            continue;
+        }
+        match hits.last_mut() {
+            Some(h) if k - h.0 < 64 => {
+                if score > h.1 {
+                    *h = (k, score);
+                }
+            }
+            _ => hits.push((k, score)),
+        }
+    }
+    let frame = FRAME_SYMBOLS as f64;
+    let paired = hits.iter().enumerate().any(|(i, a)| {
+        hits[i + 1..].iter().any(|b| {
+            let frames = (b.0 - a.0) as f64 / frame;
+            frames.round() >= 1.0 && (frames - frames.round()).abs() * frame <= 0.01 * frame
+        })
+    });
+    let alone = hits
+        .iter()
+        .any(|h| h.1 >= DETECT_ALONE && (h.0 + FRAME_SYMBOLS >= d.len() || h.0 < FRAME_SYMBOLS));
+    paired || alone
+}
+
+/// A call channel's symbol rate (154 symbols every 30 ms) and frame.
+pub const CALL_SYMBOL_RATE: f64 = 154.0 / 0.030;
+pub const CALL_FRAME_SYMBOLS: usize = 154;
+/// Frames folded together when looking for a call channel's pilots; how
+/// consistently the pilots must hold their diagonal over them, and how
+/// little the other positions may (random data: about a quarter).
+const CALL_FOLD_FRAMES: usize = 10;
+const CALL_PILOT_SHARE: f32 = 0.7;
+const CALL_DATA_SHARE: f32 = 0.45;
+/// Where the ten pilots sit in a call channel's frame.
+const CALL_PILOTS: [usize; 10] = [0, 16, 32, 48, 64, 80, 96, 112, 128, 144];
+
+/// A call channel in carrier-locked symbols: a BPSK pilot every 16
+/// symbols, on one diagonal, ten to a 154-symbol frame — nine blocks of 16
+/// and one of 10. Folded 10 frames at a time, the pilots' comb is scored at
+/// every offset (a carrier slip between folds does no harm, and a fold of
+/// noise — the carrier off, a slip inside it — finds nothing); found in a
+/// third of the folds or more.
+pub fn detect_call_channel(sym: &[Iq]) -> bool {
+    let chunk = CALL_FOLD_FRAMES * CALL_FRAME_SYMBOLS;
+    let mut folds = 0;
+    let mut found = 0;
+    for c in sym.chunks_exact(chunk) {
+        folds += 1;
+        // How consistently each position's symbols sit on one diagonal.
+        let mut m = [0f32; CALL_FRAME_SYMBOLS];
+        for (k, s) in c.iter().enumerate() {
+            m[k % CALL_FRAME_SYMBOLS] += (s.re * s.im).signum();
+        }
+        let a = m.map(|v| v.abs() / CALL_FOLD_FRAMES as f32);
+        let total: f32 = a.iter().sum();
+        let comb = (0..CALL_FRAME_SYMBOLS)
+            .map(|o| {
+                CALL_PILOTS
+                    .iter()
+                    .map(|&p| a[(o + p) % CALL_FRAME_SYMBOLS])
+                    .sum::<f32>()
+            })
+            .fold(0.0f32, f32::max);
+        let pilots = comb / CALL_PILOTS.len() as f32;
+        let others = (total - comb) / (CALL_FRAME_SYMBOLS - CALL_PILOTS.len()) as f32;
+        if pilots >= CALL_PILOT_SHARE && others <= CALL_DATA_SHARE {
+            found += 1;
+        }
+    }
+    found >= 1 && found * 3 >= folds
+}
+
+/// A call channel's symbols, for tests: `frames` frames of random QPSK
+/// data with their pilots (random signs on the −45°/135° diagonal).
+pub fn call_channel_symbols(frames: usize, bit: &mut impl FnMut() -> u8) -> Vec<Iq> {
+    let h = std::f32::consts::FRAC_1_SQRT_2;
+    let mut out = Vec::with_capacity(frames * CALL_FRAME_SYMBOLS);
+    for _ in 0..frames {
+        for k in 0..CALL_FRAME_SYMBOLS {
+            // Pilots open each block of 16, the last block short.
+            let pilot = k % 16 == 0 && k < 144 || k == 144;
+            out.push(if pilot {
+                Iq::new(h, -h) * (1.0 - 2.0 * f32::from(bit()))
+            } else {
+                Iq::new(
+                    h * (1.0 - 2.0 * f32::from(bit())),
+                    h * (1.0 - 2.0 * f32::from(bit())),
+                )
+            });
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
 // Building frames: for tests, and to check the receiver on a signal made
 // to the layout above.
 
@@ -1598,6 +1733,56 @@ mod tests {
         assert!(st.framer.bad_subframes <= 1, "{:?}", st.framer);
         let traffic = got.iter().filter(|p| p.kind == PacketKind::Traffic).count();
         assert!(traffic + 1 >= pk.len(), "{traffic} of {}", pk.len());
+    }
+
+    /// Identify's fingerprints: an outbound by its sync word with the
+    /// carrier unlocked (turning 1 % of a cycle a symbol), a call channel by
+    /// its pilots across a 90° slip — and neither in plain QPSK.
+    #[test]
+    fn fingerprints_find_an_outbound_and_a_call_channel() {
+        let mut r = rng(31);
+        let mut gauss = {
+            let mut n = rng(33);
+            move || (0..12).map(|_| n() as f32).sum::<f32>() - 6.0
+        };
+        let pilots: Vec<bool> = (0..2496).map(|_| r() == 1).collect();
+        let mut ob = Vec::new();
+        for f in 0..3 {
+            ob.extend(build_frame(&[], &mut r, &pilots, f % 2 == 1));
+        }
+        // Joined part-way into the first frame.
+        let mut ob = ob[25_000..].to_vec();
+        for (k, s) in ob.iter_mut().enumerate() {
+            let turn = Iq::from_polar(1.0, std::f32::consts::TAU * 0.01 * k as f32);
+            *s = *s * turn + Iq::new(gauss(), gauss()) * 0.15;
+        }
+        assert!(detect(&ob));
+
+        let mut call = call_channel_symbols(70, &mut r);
+        let half = call.len() / 2;
+        for (k, s) in call.iter_mut().enumerate() {
+            let slip = if k >= half {
+                Iq::new(0.0, 1.0)
+            } else {
+                Iq::new(1.0, 0.0)
+            };
+            *s = *s * slip + Iq::new(gauss(), gauss()) * 0.2;
+        }
+        assert!(detect_call_channel(&call));
+        assert!(!detect(&call));
+        assert!(!detect_call_channel(&ob));
+
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let qpsk: Vec<Iq> = (0..90_000)
+            .map(|_| {
+                Iq::new(
+                    h * (1.0 - 2.0 * f32::from(r())),
+                    h * (1.0 - 2.0 * f32::from(r())),
+                )
+            })
+            .collect();
+        assert!(!detect(&qpsk));
+        assert!(!detect_call_channel(&qpsk));
     }
 
     #[test]
