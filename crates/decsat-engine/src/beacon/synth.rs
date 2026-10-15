@@ -21,6 +21,11 @@ pub enum Framing {
         conv: bool,
         scid: u16,
     },
+    /// CCSDS as Eutelsat 172B's beacon sends it: TM transfer frames of
+    /// `frame_bytes` with their error control field, no Reed–Solomon, no
+    /// randomiser, the marker, the K = 7 code on top; the frames mostly
+    /// zeros, so the coded stream is mostly 0101… fill.
+    CcsdsPlain { frame_bytes: usize, scid: u16 },
 }
 
 /// A beacon to make.
@@ -129,6 +134,22 @@ pub fn bits(framing: Framing, n: usize, bit_rate: f64) -> Vec<u8> {
             } else {
                 out = plain;
             }
+        }
+        Framing::CcsdsPlain { frame_bytes, scid } => {
+            let mut plain = Vec::new();
+            let mut i = 0u32;
+            while plain.len() < n / 2 + 64 {
+                // A few changing bytes up front, zeros after.
+                let mut data = vec![0u8; frame_bytes - 8];
+                for (k, b) in data.iter_mut().take(24).enumerate() {
+                    *b = (k as u32 * 37 + i) as u8;
+                }
+                let frame = ccsds::tm_frame(frame_bytes, scid, 0, i as u8, i as u8, &data);
+                push_bytes(&mut plain, &ccsds::ASM.to_be_bytes());
+                push_bytes(&mut plain, &frame);
+                i += 1;
+            }
+            out = ccsds::CONV_CODE.encode(&plain);
         }
     }
     out.truncate(n.max(1));

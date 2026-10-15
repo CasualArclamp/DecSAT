@@ -449,15 +449,34 @@ impl Format {
 }
 
 /// Work out how codeblocks of `blocks` (each the bytes after a marker, all
-/// the same length) are coded: every Reed–Solomon layout their length
-/// allows (E = 16 then 8, interleave 1–8, virtual fill), randomised or not,
-/// dual basis or not, until one decodes every codeword of every block;
-/// failing that, an uncoded block whose frame error control field checks
-/// (randomised or not). `None`: nothing fits.
+/// the same length) are coded: an uncoded block whose frame error control
+/// field checks (randomised or not) first — a check passes by chance once
+/// in 65 536, where frames that are mostly zeros "decode" under a wrong
+/// Reed–Solomon layout as near enough the all-zero codeword (Eutelsat
+/// 172B's beacon) — then every Reed–Solomon layout their length allows
+/// (E = 16 then 8, interleave 1–8, virtual fill), randomised or not, dual
+/// basis or not, until one decodes every codeword of every block. `None`:
+/// nothing fits.
 pub fn find_format(blocks: &[&[u8]]) -> Option<Format> {
     let len = blocks.first()?.len();
     if len < 8 || blocks.iter().any(|b| b.len() < len) {
         return None;
+    }
+    for randomised in [true, false] {
+        let f = Format {
+            block_bytes: len,
+            rs: None,
+            randomised,
+        };
+        let crc_ok = blocks.iter().all(|b| {
+            let (fr, _) = f.decode(b).unwrap_or_default();
+            fr.len() > 8
+                && crc16(&fr[..fr.len() - 2])
+                    == u16::from_be_bytes([fr[fr.len() - 2], fr[fr.len() - 1]])
+        });
+        if crc_ok {
+            return Some(f);
+        }
     }
     for e in [16usize, 8] {
         for interleave in 1..=8usize {
@@ -485,22 +504,6 @@ pub fn find_format(blocks: &[&[u8]]) -> Option<Format> {
                     }
                 }
             }
-        }
-    }
-    for randomised in [true, false] {
-        let f = Format {
-            block_bytes: len,
-            rs: None,
-            randomised,
-        };
-        let crc_ok = blocks.iter().all(|b| {
-            let (fr, _) = f.decode(b).unwrap_or_default();
-            fr.len() > 8
-                && crc16(&fr[..fr.len() - 2])
-                    == u16::from_be_bytes([fr[fr.len() - 2], fr[fr.len() - 1]])
-        });
-        if crc_ok {
-            return Some(f);
         }
     }
     None

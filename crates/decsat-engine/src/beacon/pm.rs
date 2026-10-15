@@ -67,6 +67,18 @@ fn median(v: &mut [f64]) -> f64 {
     *v.select_nth_unstable_by(mid, f64::total_cmp).1
 }
 
+/// `p` through a median over 9 bins: narrow lines (a tone, another
+/// subcarrier's line, intermodulation between a subcarrier's sidebands)
+/// drop out, a data spectrum's spread stays.
+fn median_smoothed(p: &[f64]) -> Vec<f64> {
+    (0..p.len())
+        .map(|k| {
+            let mut w: Vec<f64> = p[k.saturating_sub(4)..(k + 5).min(p.len())].to_vec();
+            median(&mut w)
+        })
+        .collect()
+}
+
 /// A parabola's vertex through bins k−1, k, k+1 (dB), as a fraction of a
 /// bin from k.
 fn vertex(p: &[f64], k: usize) -> f64 {
@@ -142,6 +154,7 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
     let half_bins = n / 2;
     let mut all = p[1..].to_vec();
     let floor = median(&mut all).max(1e-30);
+    let smooth = median_smoothed(&p);
     let mut best: Option<(f64, Subcarrier)> = None;
     // Subcarriers from ~500 Hz up.
     let lo = ((1000.0 / bin) as usize).max(4);
@@ -154,7 +167,7 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
                 continue;
             }
             let reach = ksc.min(half_bins - ksc).min((0.9 * fsc / bin) as usize);
-            let excess = |k: usize| (p[k] - floor).max(0.0);
+            let excess = |k: usize| (smooth[k] - floor).max(0.0);
             let mut sum = 0.0;
             let mut sym = (0.0, 0.0);
             let mut cum = Vec::with_capacity(reach);
@@ -226,15 +239,9 @@ pub fn subcarrier_at(
     let mut all = p[1..].to_vec();
     let floor = median(&mut all).max(1e-30);
     let reach = ksc.min(half_bins - ksc);
-    // The data's spread: a median over 9 bins first (narrow lines — a tone,
-    // another subcarrier's line — drop out), then only what both sides
-    // share, as data on a subcarrier are mirrored about it.
-    let smooth: Vec<f64> = (0..p.len())
-        .map(|k| {
-            let mut w: Vec<f64> = p[k.saturating_sub(4)..(k + 5).min(p.len())].to_vec();
-            median(&mut w)
-        })
-        .collect();
+    // The data's spread: narrow lines dropped first, then only what both
+    // sides share, as data on a subcarrier are mirrored about it.
+    let smooth = median_smoothed(&p);
     let excess = |k: usize| (smooth[k] - floor).max(0.0);
     let mut sum = 0.0;
     let mut cum = Vec::with_capacity(reach);
@@ -306,12 +313,19 @@ pub fn direct_width(phi: &[f32], rate: f64, lo_hz: f64) -> Option<f64> {
     Some((k0 + k95) as f64 * bin)
 }
 
+/// Harmonics of the transition rate looked through for its fundamental.
+const MAX_HARMONIC: usize = 16;
+
 /// The data's transition rate in `s` (a data waveform at `rate`): from
 /// the lines of its squared derivative between `lo` and `hi` Hz — the
-/// strongest, or the lowest of its family (the strongest over 2, 3 or 4)
-/// that stands nearly as tall, since sharp transitions put the rate's
-/// harmonics up with it — and how far it stands over the bins round it.
-/// `None` below 9 dB.
+/// strongest, or the lowest of its family that stands nearly as tall, the
+/// strongest being its 2nd…16th harmonic with most of the harmonics
+/// between standing too. Sharp transitions put the rate's harmonics up
+/// with it, and fill that alternates (1010…, or a convolutional code's
+/// output for a run of zeros: Eutelsat 172B's 9600 symbol/s beacon) sets
+/// the whole comb level, the 7th harmonic as likely to top it as the
+/// first. With how far the line stands over the bins round it. `None`
+/// below 9 dB.
 pub fn find_clock(s: &[f32], rate: f64, lo: f64, hi: f64) -> Option<(f64, f64)> {
     if s.len() < 4096 {
         return None;
@@ -327,17 +341,33 @@ pub fn find_clock(s: &[f32], rate: f64, lo: f64, hi: f64) -> Option<(f64, f64)> 
     let lo_k = ((lo / bin) as usize).max(3);
     let hi_k = ((hi / bin) as usize).min(n / 2 - 2);
     let found = lines(&p, lo_k, hi_k, 8.0);
+    let (kf, rr) = fundamental(&found)?;
+    Some((kf * bin, rr))
+}
+
+/// Of `found` (lines as [`lines`] gives them, strongest first: bin,
+/// interpolated bin, ratio), the fundamental of the strongest's family:
+/// the lowest line (the 16th subharmonic first) standing at least 0.3 of
+/// the strongest, with at least half the harmonics between it and the
+/// strongest there too — a lone line that happens to divide the top is
+/// not the clock. Its interpolated bin and ratio.
+fn fundamental(found: &[(usize, f64, f64)]) -> Option<(f64, f64)> {
     let &(_, top, r) = found.first()?;
-    // The lowest of the family (k = 4 first) that stands.
-    let sub = (2..=4).rev().find_map(|k| {
-        let want = top / k as f64;
+    // A line within a bin and a half (or 0.1 %) of `want`, standing `min`.
+    let line_at = |want: f64, min: f64| {
         found
             .iter()
-            .find(|&&(_, kf, rr)| (kf - want).abs() <= 1.5 + 1e-3 * want && rr >= 0.3 * r)
+            .find(|&&(_, kf, rr)| (kf - want).abs() <= 1.5 + 1e-3 * want && rr >= min)
             .copied()
+    };
+    let sub = (2..=MAX_HARMONIC).rev().find_map(|m| {
+        let f0 = top / m as f64;
+        let base = line_at(f0, 0.3 * r)?;
+        let between = (2..m).filter(|&j| line_at(f0 * j as f64, 8.0).is_some());
+        (2 * between.count() >= m - 2).then_some(base)
     });
     let (_, kf, rr) = sub.unwrap_or((0, top, r));
-    Some((kf * bin, rr))
+    Some((kf, rr))
 }
 
 /// How a bit is sent.
@@ -410,22 +440,43 @@ pub(crate) fn chips_at(s: &[f32], rate: f64, chip_rate: f64) -> (Vec<f32>, f64) 
 }
 
 /// For each way of pairing chips (from chip 0 or chip 1), the share of
-/// pairs whose two chips differ in sign.
+/// pairs whose two chips differ in sign — counted where the chips round a
+/// pair are not periodic fill. Chips repeating every 2 or 4 (bi-phase of a
+/// run of one bit or of 0101…; NRZ fill — a convolutional code's output
+/// for a run of zeros is 0101… — read at its rate or twice it) pair up
+/// opposite one way or both, so an NRZ stream mostly fill passed for
+/// bi-phase; where the chips do more, only bi-phase's own pairing is
+/// always opposite. Every pair counts when too few are left.
 pub(crate) fn pair_opposite(chips: &[f32]) -> [f64; 2] {
+    let sign: Vec<bool> = chips.iter().map(|&c| c > 0.0).collect();
     let mut out = [0.0; 2];
     for (a, o) in out.iter_mut().enumerate() {
-        let pairs: Vec<(f32, f32)> = chips[a.min(chips.len())..]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| (c[0], c[1]))
-            .collect();
-        if !pairs.is_empty() {
-            *o = pairs.iter().filter(|(x, y)| x * y < 0.0).count() as f64 / pairs.len() as f64;
+        let (mut busy, mut busy_opp, mut all, mut all_opp) = (0usize, 0usize, 0usize, 0usize);
+        for i in (a..chips.len().saturating_sub(1)).step_by(2) {
+            let opp = sign[i] != sign[i + 1];
+            all += 1;
+            all_opp += usize::from(opp);
+            // Ten chips round the pair, the same four after four?
+            let still =
+                i >= 4 && i + 5 < chips.len() && (i - 4..=i + 1).all(|j| sign[j] == sign[j + 4]);
+            if !still {
+                busy += 1;
+                busy_opp += usize::from(opp);
+            }
         }
+        *o = if busy >= MIN_BUSY_PAIRS.max(all / 20) {
+            busy_opp as f64 / busy as f64
+        } else if all > 0 {
+            all_opp as f64 / all as f64
+        } else {
+            0.0
+        };
     }
     out
 }
+
+/// Pairs the bi-phase test needs where the chips are not fill.
+const MIN_BUSY_PAIRS: usize = 64;
 
 /// The code and chip rate behind a transition line at `line_hz` in `s`:
 /// bi-phase if, at twice the line or at the line, the chips pair up
@@ -533,5 +584,31 @@ mod tests {
             .map(|&b| if b == 1 { 0.3 } else { -0.3 })
             .collect();
         assert!(find_subcarrier(&phi, 400_000.0).is_none());
+    }
+
+    #[test]
+    fn the_clock_is_the_fundamental_under_a_level_comb() {
+        // Eutelsat 172B's beacon: 9600 symbol/s, mostly 0101… fill — its
+        // transition line's harmonics level with it, the 7th on top.
+        let line = |h: usize, db: f64| {
+            let k = 6144.0 * h as f64;
+            (k as usize, k + 0.2, 10f64.powf(db / 10.0))
+        };
+        let found = vec![
+            line(7, 33.0),
+            line(6, 33.0),
+            line(5, 32.0),
+            line(8, 31.0),
+            line(4, 31.0),
+            line(2, 30.0),
+            line(1, 30.0),
+            line(3, 30.0),
+        ];
+        let (kf, _) = fundamental(&found).expect("line");
+        assert!((kf - 6144.2).abs() < 1.0, "{kf}");
+        // A lone line dividing the top, no comb between: not the clock.
+        let found = vec![line(7, 33.0), line(1, 31.0)];
+        let (kf, _) = fundamental(&found).expect("line");
+        assert!((kf - 7.0 * 6144.0).abs() < 1.0, "{kf}");
     }
 }

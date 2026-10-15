@@ -64,8 +64,19 @@ const MAX_POINTS: usize = 28_800;
 const MAX_FRAMES: usize = 8192;
 /// Drift: the slope over this many seconds.
 const DRIFT_S: f64 = 60.0;
-/// Bits without a frame lock before the convolutional code is looked for.
+/// Bits without a frame lock before every reading of the convolutional
+/// code is decoded at once (when its parity checks have not named one).
 const CONV_AFTER_BITS: u64 = 20_000;
+/// A TM or AOS transfer frame's primary header, bytes (CCSDS 132.0-B
+/// §4.1.2; 732.0-B §4.1.2, without its optional insert zone).
+const CCSDS_HEADER_BYTES: usize = 6;
+/// The parity-check probe for the convolutional code: bits a look, the
+/// busy windows it needs, and the share of checks the reading may fail
+/// (½ on anything else; a coded channel bit error rate of 5 % fails about
+/// a third).
+const CONV_PROBE_BITS: usize = 2048;
+const CONV_PROBE_MIN_CHECKS: usize = 300;
+const CONV_PROBE_MAX_FAILS: f64 = 0.35;
 
 /// How the telemetry rides on the carrier.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -456,19 +467,55 @@ struct Coded {
 }
 
 impl Coded {
-    fn new(since: u64) -> Self {
+    /// The eight readings: the code, and whether its pairs start on an
+    /// odd bit.
+    fn readings() -> Vec<(convblind::Code, bool)> {
         let book = ccsds::CONV_CODE;
-        let mut tries = Vec::new();
+        let mut out = Vec::new();
         for inv in [book.inv, [false, false]] {
             for g in [book.g, [book.g[1], book.g[0]]] {
                 let inv = if g == book.g { inv } else { [inv[1], inv[0]] };
                 let code = convblind::Code { k: book.k, g, inv };
                 for odd in [false, true] {
-                    tries.push(ViterbiTry::new(code, odd));
+                    out.push((code, odd));
                 }
             }
         }
+        out
+    }
+
+    /// Every reading tried at once, the one that frames kept.
+    fn new(since: u64) -> Self {
+        let tries = Self::readings()
+            .into_iter()
+            .map(|(code, odd)| ViterbiTry::new(code, odd))
+            .collect();
         Coded { tries, since }
+    }
+
+    /// The one reading the parity checks named.
+    fn reading(code: convblind::Code, odd: bool, since: u64) -> Self {
+        Coded {
+            tries: vec![ViterbiTry::new(code, odd)],
+            since,
+        }
+    }
+
+    /// The reading whose parity checks the bits (soft: positive a one)
+    /// pass, if one stands clear: a coded stream passes nearly all of one
+    /// reading's checks and about half of every other's, uncoded bits half
+    /// of all. `None` too when too few windows were busy enough to judge
+    /// (fill alone).
+    fn probe(soft: &[f32]) -> Option<(convblind::Code, bool)> {
+        let hard: Vec<u8> = soft.iter().map(|&b| u8::from(b > 0.0)).collect();
+        let (fails, reading) = Self::readings()
+            .into_iter()
+            .filter_map(|(code, odd)| {
+                let (f, judged) = convblind::check_fails(&code, &hard, odd);
+                (judged >= CONV_PROBE_MIN_CHECKS).then_some((f, (code, odd)))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))?;
+        (fails < CONV_PROBE_MAX_FAILS).then_some(reading)
     }
 
     fn locked(&self) -> Option<&ViterbiTry> {
@@ -520,6 +567,11 @@ pub struct BeaconRx {
     framer: pcm::Framer,
     coded: Option<Coded>,
     conv_tried: bool,
+    /// Soft bits gathered for the convolutional code's parity checks, and
+    /// whether they named it (the bits as they come are then code
+    /// symbols, not framed).
+    conv_probe: Vec<f32>,
+    conv_found: bool,
     tm: Option<ccsds::TmRx>,
     recent: VecDeque<Vec<u8>>,
     counter: Option<pcm::Counter>,
@@ -579,6 +631,8 @@ impl BeaconRx {
             framer: pcm::Framer::new(),
             coded: None,
             conv_tried: false,
+            conv_probe: Vec::new(),
+            conv_found: false,
             tm: None,
             recent: VecDeque::new(),
             counter: None,
@@ -898,6 +952,8 @@ impl BeaconRx {
         self.framer = pcm::Framer::new();
         self.coded = None;
         self.conv_tried = false;
+        self.conv_probe.clear();
+        self.conv_found = false;
         self.tm = None;
         self.recent.clear();
         self.counter = None;
@@ -1091,14 +1147,36 @@ impl BeaconRx {
         }
         self.snr.push(soft);
         self.bits += soft.len() as u64;
-        let hard: Vec<u8> = soft.iter().map(|&b| u8::from(b > 0.0)).collect();
-        let mut frames = Vec::new();
-        self.framer.push(&hard, &mut frames);
-        if self.framer.lock().is_some() {
-            self.bits_at_lock = self.bits;
+        // The convolutional code, looked for by its parity checks in each
+        // block of bits until a search starts: named, its one reading is
+        // decoded from the block's start on.
+        let mut coded_in = soft;
+        let replay;
+        if !self.conv_tried {
+            self.conv_probe.extend_from_slice(soft);
+            if self.conv_probe.len() >= CONV_PROBE_BITS {
+                let probe = std::mem::take(&mut self.conv_probe);
+                if let Some((code, odd)) = Coded::probe(&probe) {
+                    self.conv_tried = true;
+                    self.conv_found = true;
+                    self.coded = Some(Coded::reading(code, odd, self.bits));
+                    // A lock the framer took on code symbols is a false one.
+                    self.framer = pcm::Framer::new();
+                    replay = probe;
+                    coded_in = &replay;
+                }
+            }
         }
-        for f in frames {
-            self.frame(f, false);
+        if !self.conv_found {
+            let hard: Vec<u8> = soft.iter().map(|&b| u8::from(b > 0.0)).collect();
+            let mut frames = Vec::new();
+            self.framer.push(&hard, &mut frames);
+            if self.framer.lock().is_some() {
+                self.bits_at_lock = self.bits;
+            }
+            for f in frames {
+                self.frame(f, false);
+            }
         }
         // No frames on the bits as they are: a convolutional code?
         if self.framer.lock().is_none()
@@ -1112,7 +1190,7 @@ impl BeaconRx {
             let mut out = Vec::new();
             for (i, t) in c.tries.iter_mut().enumerate() {
                 let mut frames = Vec::new();
-                t.push(soft, &mut frames);
+                t.push(coded_in, &mut frames);
                 out.extend(frames.into_iter().map(|f| (i, f)));
             }
             // The first reading to frame is kept, the rest dropped.
@@ -1291,9 +1369,16 @@ impl BeaconRx {
                     .filter(|x| x.good)
                     .map(|x| (x.t_s, x.bytes.as_slice()))
                     .collect();
-                let skip = self
-                    .active_lock()
-                    .map_or(0, |(l, _, _)| usize::from(l.word.len) / 8);
+                // Past the sync word; a CCSDS transfer frame (logged
+                // without its marker) past its primary header, whose
+                // frame counts and first-header pointer with a packet's
+                // sequence count read as a clock.
+                let skip = if self.tm.is_some() {
+                    CCSDS_HEADER_BYTES
+                } else {
+                    self.active_lock()
+                        .map_or(0, |(l, _, _)| usize::from(l.word.len) / 8)
+                };
                 self.clock = pcm::find_clock(&recent, skip);
             }
             if let (Some(c), true) = (self.clock.as_mut(), f.good)
@@ -1361,7 +1446,10 @@ impl BeaconRx {
             }
         });
         let framing = self.active_lock().map(|(l, st, coded)| {
-            let bit_rate = telemetry.as_ref().map_or(0.0, |t| t.bit_rate);
+            // After the Viterbi decoder, half the bits (every code tried
+            // is rate ½).
+            let bit_rate =
+                telemetry.as_ref().map_or(0.0, |t| t.bit_rate) / if coded { 2.0 } else { 1.0 };
             FramingView {
                 word_hex: l.word.hex(),
                 word_name: l.word.name.clone(),
@@ -1764,5 +1852,51 @@ mod tests {
         );
         assert!(c.stats.decoded >= 2, "{:?}", c.stats);
         assert!(c.stats.channels.keys().all(|(s, _)| *s == 0x1A5));
+    }
+
+    #[test]
+    fn reads_a_eutelsat_172b_like_coded_ccsds_beacon() {
+        // 9600 symbol/s NRZ on a 76.8 kHz subcarrier, index 1.2: the K = 7
+        // code over 596-byte TM frames, one a second, mostly zeros — the
+        // coded stream mostly 0101… fill, its transition line's harmonics
+        // as tall as the line itself.
+        let spec = Spec {
+            rate: 400_000.0,
+            seconds: 8.0,
+            carrier_hz: 34.0,
+            drift_hz_s: 1.0,
+            cn0_dbhz: 60.0,
+            index_rad: 1.22,
+            subcarrier_hz: Some(76_800.0),
+            bit_rate: 9600.0,
+            biphase: false,
+            suppressed: false,
+            framing: Framing::CcsdsPlain {
+                frame_bytes: 596,
+                scid: 0x2DF,
+            },
+            clock_ppm: 0.0,
+            tone: None,
+        };
+        let x = synth::generate(&spec);
+        let rx = run(&x, spec.rate, 300_000.0);
+        let v = rx.view();
+        let t = v.telemetry.expect("telemetry");
+        assert_eq!(t.coding, Coding::Nrz);
+        assert!((t.bit_rate - 9600.0).abs() < 2.0, "{}", t.bit_rate);
+        match t.riding {
+            Riding::Subcarrier { freq_hz } => assert!((freq_hz - 76_800.0).abs() < 10.0),
+            r => panic!("{r:?}"),
+        }
+        let f = v.framing.expect("frames");
+        assert!(f.coded);
+        assert_eq!((f.word_hex.as_str(), f.frame_bits), ("1ACFFC1D", 4800));
+        assert!((f.frame_seconds - 1.0).abs() < 0.01, "{}", f.frame_seconds);
+        // The parity checks name the code at once: frames from the third
+        // second on, every one good.
+        let c = v.ccsds.expect("ccsds");
+        assert_eq!(c.format.as_deref(), Some("no Reed–Solomon"));
+        assert!(c.stats.crc_ok >= 4 && c.stats.crc_bad == 0, "{:?}", c.stats);
+        assert!(c.stats.channels.keys().all(|(s, v)| (*s, *v) == (0x2DF, 0)));
     }
 }

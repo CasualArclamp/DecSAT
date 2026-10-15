@@ -68,7 +68,7 @@ real carriers stay put.
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers; on BPSK and QPSK it looks for a convolutional code meanwhile (as the Viterbi decoder does, given up after a while) and decodes what it finds through the payload search — or says there is none (*a block code or uncoded*) | ✅ |
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
-| **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on a live Intelsat 19 beacon: 4800 bit/s bi-phase on a 48 kHz subcarrier, every frame; CCSDS on synthetic signals |
+| **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on live beacons — Intelsat 19's: 4800 bit/s bi-phase on a 48 kHz subcarrier, IRIG frames; Eutelsat 172B's: 9600 symbol/s NRZ on a 76.8 kHz subcarrier, K = 7 coded CCSDS TM frames — every frame |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -610,8 +610,10 @@ beacon**:
   is worked out — Reed–Solomon (255,223) or (255,239) in the dual basis,
   interleave 1–8, virtual fill, the randomiser — and the TM or AOS
   transfer frames read: spacecraft, virtual channels, counts, the frame
-  CRC. Bits that frame on nothing are tried through CCSDS's K = 7 code
-  (inverted or not, either output first, either pair phase);
+  CRC. CCSDS's K = 7 code is recognised by its parity checks in the first
+  fifth of a second of bits (inverted or not, either output first, either
+  pair phase) and decoded from there; bits that frame on nothing are
+  tried through every reading of it as well;
 - **♪ Pointing tone**: a tone whose pitch follows the C/N0 a tenth of a
   second at a time — two semitones a dB up from 600 Hz at the level when it
   was switched on (**re-centre** to start again) — so the dish can be
@@ -638,8 +640,12 @@ it; the toolbar's satellite's beacons (by name, or by a position such as
 it, and the carrier's log (offset, C/N0, level every half second) to a
 `.level.csv`. On the Intelsat 19 beacon at 12 253.47 MHz: C/N0 58 dB-Hz,
 index 1.2 rad, 4800 bit/s bi-phase on a 48 kHz subcarrier, 2048-bit frames
-on FAF320 with a counter 0–31 in byte 4 (a 13.65 s major frame). What the
-words mean is the spacecraft maker's; nothing here guesses.
+on FAF320 with a counter 0–31 in byte 4 (a 13.65 s major frame). On
+Eutelsat 172B's at 12 250.10 MHz: C/N0 58 dB-Hz, index 1.2 rad, 9600
+symbol/s NRZ on a 76.8 kHz subcarrier under CCSDS's K = 7 code, one
+596-byte TM frame a second on the marker (no Reed–Solomon or randomiser,
+frame CRC), spacecraft 2DFh. What the words mean is the spacecraft maker's;
+nothing here guesses.
 
 Identify names a beacon (*Satellite beacon — residual carrier, PCM/PSK/PM —
 subcarrier 48.000 kHz, 4800 bit/s bi-phase*) and the survey and the scan
@@ -926,9 +932,12 @@ the HackRF already uses on Windows (Zadig, or the official tools). DecSAT only
 ever **receives**, and keeps the antenna-port power **off** — feed an LNB from
 an external inserter.
 
-**DC removal** (toolbar, on by default) subtracts the IQ mean before the
-waterfall and the VFOs, which removes the spike the HackRF leaves at the
-centre frequency. Its notch is a few hertz wide.
+**DC removal** (toolbar, on by default) subtracts the IQ mean, tracked
+sample by sample with a 0.2 s time constant, before the waterfall and the
+VFOs, which removes the spike the HackRF leaves at the centre frequency.
+Its notch is under a hertz wide, so a carrier a few tens of hertz off the
+centre (a VFO recording replayed is centred on its carrier) keeps its
+phase.
 
 ## Scope
 

@@ -345,7 +345,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     // The last few takes, together: a slow TDMA carrier stays shown.
     let mut takes: VecDeque<Vec<crate::bursty::BurstBand>> = VecDeque::new();
     let mut dc_removal = opts.dc_removal;
-    let mut dc = decsat_dsp::DcBlocker::new();
+    let mut dc = decsat_dsp::DcBlocker::new(rate);
 
     let set_state = |s: SourceState| shared.front.lock().unwrap().state = s;
 

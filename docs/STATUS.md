@@ -4659,3 +4659,66 @@ Baseband (format, streams, packets, roll-off, payload). DVB-S has Viterbi
 and Reed–Solomon in place of the S2 stages. The old Physical layer, FEC and
 DVB-S grids and the MODCOD table under the plots are gone (`fec_card`
 removed; `modcod_table` stays for Identify).
+
+## Eutelsat 172B's beacon: 9600 symbol/s, K = 7 coded CCSDS (2026-10-15)
+
+Rory: "add support for this beacon also prune the recording", with VFO 4
+over Eutelsat 172B's beacon (12 250.0986 MHz, 1 230 769 S/s cf32, 26.9 s)
+and a screenshot of the decoder at "19199.5 bit/s NRZ · looking for a sync
+word" (the CLI said 67 200 bit/s).
+
+**The beacon, measured** (scratch Python): residual carrier, C/N0 58 dB-Hz,
+index 1.22 rad; PCM/PSK/PM on a 76.800 kHz sine subcarrier; 9600 symbol/s
+NRZ-L, eye 19 dB. The symbols satisfy every parity check of CCSDS's K = 7
+code (171, 133, G2 inverted; 131.0-B §3): long 0101… runs are its output
+for zeros. Decoded, 4800 bit/s with the marker 1ACFFC1D (inverted, the
+carrier's 180° reading) every 4800 bits: one 596-byte TM transfer frame a
+second — spacecraft 735 (2DFh), VC 0, OCF, frame CRC (all check), no
+Reed–Solomon, no randomiser; frames mostly zeros.
+
+**What stopped it, and the fixes:**
+- `pm::find_clock`: fill sets the whole comb of the transition line level
+  (9600 … 67 200 Hz within 3 dB), the 7th on top, and only ÷2–4 was tried.
+  Now the lowest of the family up to the 16th subharmonic, with at least
+  half the harmonics between standing (`fundamental`, tested on a level
+  comb).
+- The raw framer locked falsely on FAF320 in the code symbols (13 725-bit
+  "frames" for 7 s), holding off the convolutional search. Now
+  `convblind::check_fails` tests the eight CCSDS readings on each 2048-bit
+  block (windows where both outputs hold still left out: fill passes any
+  check); a reading failing < 35 % (½ otherwise) is decoded at once from
+  the block's start and the raw bits are no longer framed. Frames from 2.4 s.
+- `pm::pair_opposite`: 0101 fill read at the bit rate or twice it pairs up
+  opposite like bi-phase; a mostly-fill synthetic stream went bi-phase at
+  half its rate. Now pairs whose 10 chips repeat every 4 are left out.
+- `ccsds::find_format`: near-zero frames "decoded" as RS(149,117) I = 4
+  (corrected to the zero codeword); an uncoded block whose CRC checks is
+  now tried first.
+- The spacecraft-clock search skipped 4 bytes (the marker) of transfer
+  frames logged without it, and took the first-header pointer + a packet
+  sequence count for a clock; now past the 6-byte primary header.
+- Frame period shown for coded frames: the decoded rate (1.000 s, not 0.5).
+- `decsat_dsp::DcBlocker` (front end, on by default): a block mean taken
+  off whole held a slice of the carrier 34 Hz off the file's centre and
+  stepped its phase at every block edge — 4–6 frames in the first 14 s
+  failed their CRC in the engine (not in a direct run). Now a per-sample
+  one-pole tracker, τ = 0.2 s (notch < 1 Hz); `DcBlocker::new(rate)`.
+- `pm::find_subcarrier` at 410 kS/s rejected the subcarrier (symmetry 0.46
+  < 0.5: intermodulation lines at 4.8 kHz spacing on its lower side only);
+  the spread is now judged on a 9-bin median like `subcarrier_at`
+  (`median_smoothed`): 0.81.
+
+**Result** (`decsat decode … --decoder beacon --fast`): 26 frames, 0 slips,
+26 transfer frames, CRC 26/0, none missing; clock bytes 12–15 at 1 count a
+second; Identify: "Satellite beacon — residual carrier, PCM/PSK/PM —
+subcarrier 76.800 kHz, 9600 bit/s NRZ". IS-19's recording decodes as
+before. Test `reads_a_eutelsat_172b_like_coded_ccsds_beacon` (synth
+`Framing::CcsdsPlain`). The Beacons list's 172B 12250.1 H entry notes the
+format.
+
+**Recording pruned**: decimated ×3 (`resample_poly`) to
+`decsat-VFO_4-12250.0986MHz-410256Sps-1792054464.cf32` (84 MB; ±170 kHz
+holds the subcarrier's sidebands and its 2nd-harmonic line at 153.6 kHz,
+which keeps the phase exact); decodes the same 26/26 frames, C/N0 57.7
+dB-Hz (the full-rate file read 61.7: its outer band was already filtered,
+lowering the floor). The 252 MB original went to the Recycle Bin.

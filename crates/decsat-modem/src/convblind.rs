@@ -795,6 +795,46 @@ pub fn check_of(code: &Code, k: usize) -> u32 {
     })
 }
 
+/// How well hard `bits` (a coded stream as sent: c₁ c₂ c₁ c₂ …, its
+/// pairs from bit 1 when `odd`) carry `code`: of its parity checks
+/// g₂·c₁ + g₁·c₂ = 0 (each output sent inverted adds the other
+/// generator's weight), the share that fail — near 0 when they do, ½ when
+/// not — and how many were judged. Windows where both outputs hold still
+/// are left out: fill (1010…, or a code's output for a run of zeros)
+/// would pass any check of the right weight.
+pub fn check_fails(code: &Code, bits: &[u8], odd: bool) -> (f64, usize) {
+    let k = code.k;
+    let pairs: Vec<(u8, u8)> = bits[usize::from(odd).min(bits.len())..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0] & 1, p[1] & 1))
+        .collect();
+    let mask = (1u32 << k) - 1;
+    let want =
+        (u8::from(code.inv[0]) & parity(code.g[1])) ^ (u8::from(code.inv[1]) & parity(code.g[0]));
+    // Each output's last k bits, newest in bit 0 (bit j: j steps ago, as
+    // the generators are written).
+    let (mut r1, mut r2) = (0u32, 0u32);
+    let (mut judged, mut failed) = (0usize, 0usize);
+    for (n, &(c1, c2)) in pairs.iter().enumerate() {
+        r1 = ((r1 << 1) | u32::from(c1)) & mask;
+        r2 = ((r2 << 1) | u32::from(c2)) & mask;
+        if n + 1 < k {
+            continue;
+        }
+        let still = |r: u32| r == 0 || r == mask;
+        if still(r1) && still(r2) {
+            continue;
+        }
+        judged += 1;
+        if parity(r1 & code.g[1]) ^ parity(r2 & code.g[0]) != want {
+            failed += 1;
+        }
+    }
+    (failed as f64 / judged.max(1) as f64, judged)
+}
+
 /// Identify's look: whether locked symbols carry a rate-½ convolutional
 /// code (as they come: any orientation shows it). Cheap enough for a first
 /// look — hard bits and small GF(2) matrices only.
@@ -1095,5 +1135,45 @@ mod tests {
         assert!(rx.stats.gave_up && rx.stats.code.is_none());
         assert_eq!(rx.stats.searches, MAX_SEARCHES);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_parity_check_names_the_coded_reading() {
+        // CCSDS's code (second output inverted) over data with runs of
+        // zeros, as a beacon's frames have: the fill is 0101…, which
+        // passes any check and is left out.
+        let ccsds = Code {
+            k: 7,
+            g: [reverse(0o171, 7), reverse(0o133, 7)],
+            inv: [false, true],
+        };
+        let mut u = bits(3000, 77);
+        u[500..1500].fill(0);
+        let mut c = vec![1u8];
+        c.extend(ccsds.encode(&u));
+        let (f, n) = check_fails(&ccsds, &c, true);
+        assert!(f < 0.01 && n > 1500, "{f} over {n}");
+        // The pairs from the wrong bit, the outputs swapped or the
+        // inversion missed: about half fail.
+        let swapped = Code {
+            g: [ccsds.g[1], ccsds.g[0]],
+            inv: [true, false],
+            ..ccsds
+        };
+        let plain = Code {
+            inv: [false, false],
+            ..ccsds
+        };
+        for (code, odd) in [(ccsds, false), (swapped, true), (plain, true)] {
+            let (f, _) = check_fails(&code, &c, odd);
+            if code == plain {
+                assert!(f > 0.99, "{f}");
+            } else {
+                assert!((f - 0.5).abs() < 0.1, "{code:?} {odd}: {f}");
+            }
+        }
+        // Uncoded bits pass no reading.
+        let (f, _) = check_fails(&ccsds, &bits(4000, 5), false);
+        assert!((f - 0.5).abs() < 0.1, "{f}");
     }
 }
