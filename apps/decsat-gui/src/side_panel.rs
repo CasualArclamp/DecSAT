@@ -1765,7 +1765,9 @@ fn byte_text_card(ui: &mut Ui, t: &decsat_engine::ByteTextView, title: &str, sal
                     .show(ui, |ui| {
                         for (s, n) in &t.repeated {
                             ui.label(RichText::new(format!("×{n}")).small().weak());
-                            ui.label(RichText::new(s).monospace());
+                            // Cut to the panel: a long string in a grid
+                            // cell widened the side panel over the waterfall.
+                            ui.add(egui::Label::new(RichText::new(s).monospace()).truncate());
                             ui.end_row();
                         }
                     });
@@ -3990,6 +3992,227 @@ fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView) {
                 }
             });
     });
+    if let Some(p) = &r.plan {
+        plan_section(ui, p);
+    }
+}
+
+const PLAN_TIP: &str = "A Newtec hub's own burst plan (private table D1h, read from a \
+     capture of Eutelsat 172B — no public spec): one section per 40.2 ms return frame, each \
+     burst a terminal may send in it — the slot it starts in, its length (1, 2, 4 or 8 slots, \
+     from its code's range), and its frequency in 50 Hz steps from the plan's own zero. Each \
+     code's bandwidth (and, for a few, a centre 25 kHz off the frequency) is learned from \
+     how the hub packs bursts edge to edge. The map: the latest frames, a row a slot, time \
+     down; a box a burst in its terminal's colour.";
+
+/// A Newtec burst plan (D1h) under the RCS card.
+fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("Burst plan (D1h, Newtec)").strong())
+        .on_hover_text(PLAN_TIP);
+    let mut line = format!("{} frames", p.frames);
+    if let Some(s) = p.period_s {
+        line.push_str(&format!(
+            " of {:.3} ms · {} slots of {:.3} ms",
+            s * 1e3,
+            p.slots,
+            s * 1e3 / f64::from(p.slots.max(1))
+        ));
+    }
+    line.push_str(&format!(
+        " · {:.1} bursts a frame · {} terminals",
+        p.bursts_per_frame,
+        p.terminals.len()
+    ));
+    ui.label(line);
+    if let Some((lo, hi)) = p.span {
+        ui.label(
+            RichText::new(format!(
+                "bursts over {:.0} kHz of the plan ({:.0}–{:.0} kHz from its zero), {:.0} % of it \
+                 handed out",
+                (hi - lo) / 1e3,
+                lo / 1e3,
+                hi / 1e3,
+                p.load * 100.0
+            ))
+            .small(),
+        );
+        plan_strip(ui, p, 2, lo, hi, 0.0, 128.0);
+    }
+    egui::CollapsingHeader::new(
+        RichText::new(format!("Terminals in the plan ({})", p.terminals.len()))
+            .small()
+            .strong(),
+    )
+    .id_salt("plan_terminals")
+    .show(ui, |ui| {
+        egui::Grid::new("plan_terminal_rows")
+            .num_columns(5)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["terminal", "bursts/s", "share", "mostly", "value"] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for t in &p.terminals {
+                    ui.label(
+                        RichText::new(t.id.to_string())
+                            .small()
+                            .color(terminal_color(t.id)),
+                    );
+                    ui.label(RichText::new(format!("{:.1}", t.per_s)).small());
+                    ui.label(RichText::new(format!("{:.1} %", t.share * 100.0)).small());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} × {}",
+                            t.slots,
+                            t.width_hz
+                                .map_or("?".into(), |w| format!("{:.0} kHz", w / 1e3))
+                        ))
+                        .small(),
+                    )
+                    .on_hover_text(format!(
+                        "Code {:04X}h, its commonest; bursts centred {:.0}–{:.0} kHz from the \
+                         plan's zero, the latest {:.0} kHz",
+                        t.code,
+                        t.lo_hz / 1e3,
+                        t.hi_hz / 1e3,
+                        t.last_hz / 1e3
+                    ));
+                    ui.label(RichText::new(t.extra.map_or("–".into(), |x| x.to_string())).small())
+                        .on_hover_text(
+                            "The 11-bit value some of its bursts carry: steady per terminal, \
+                         drifting a little — a power or correction setting, unread",
+                        );
+                    ui.end_row();
+                }
+            });
+    });
+    egui::CollapsingHeader::new(
+        RichText::new(format!("Codes learned ({})", p.widths.len()))
+            .small()
+            .strong(),
+    )
+    .id_salt("plan_codes")
+    .show(ui, |ui| {
+        egui::Grid::new("plan_code_rows")
+            .num_columns(4)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["code", "burst", "bursts", "from"] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for w in &p.widths {
+                    ui.label(RichText::new(format!("{:04X}h", w.code)).small());
+                    let mut b = format!("{} × {:.2} kHz", w.slots, w.width_hz / 1e3);
+                    if w.centre_hz.abs() >= 5e3 {
+                        b.push_str(&format!(", {:+.0} kHz off", w.centre_hz / 1e3));
+                    }
+                    ui.label(RichText::new(b).small());
+                    ui.label(RichText::new(w.bursts.to_string()).small());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} pairs{}",
+                            w.pairs,
+                            if w.direct { "" } else { " (others)" }
+                        ))
+                        .small(),
+                    );
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+/// A terminal's colour in the plan maps: hues a golden angle apart.
+fn terminal_color(id: u16) -> Color32 {
+    let h = (f32::from(id) * 0.618_034).fract();
+    egui::ecolor::Hsva::new(h, 0.55, 0.95, 1.0).into()
+}
+
+/// The latest `frames` of a burst plan, a row a slot (time down, the
+/// newest frame at the bottom), across `lo_hz..hi_hz` of display frequency
+/// — a burst's plan frequency plus `offset_hz` — each burst a box in its
+/// terminal's colour, its terminal written in it where there is room.
+fn plan_strip(
+    ui: &mut Ui,
+    p: &decsat_ts::newtec::PlanView,
+    frames: usize,
+    lo_hz: f64,
+    hi_hz: f64,
+    offset_hz: f64,
+    height: f32,
+) {
+    let slots = usize::from(p.slots.max(1));
+    let shown: Vec<&decsat_ts::newtec::PlanFrame> =
+        p.recent.iter().rev().take(frames).rev().collect();
+    if shown.is_empty() || hi_hz <= lo_hz {
+        return;
+    }
+    let rows = shown.len() * slots;
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2(ui.available_width() - RIGHT_PAD, height),
+        Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    let row_h = rect.height() / rows as f32;
+    let x_of = |hz: f64| rect.left() + rect.width() * (((hz - lo_hz) / (hi_hz - lo_hz)) as f32);
+    let pointer = resp.hover_pos();
+    let mut hover = None;
+    for (fi, f) in shown.iter().enumerate() {
+        let top = rect.top() + (fi * slots) as f32 * row_h;
+        if fi > 0 {
+            painter.hline(rect.x_range(), top, (1.0, Color32::from_gray(90)));
+        }
+        for b in &f.bursts {
+            let Some((a, c)) = p.edges(b) else { continue };
+            let r = egui::Rect::from_min_max(
+                pos2(x_of(a + offset_hz), top + f32::from(b.slot) * row_h),
+                pos2(
+                    x_of(c + offset_hz),
+                    top + f32::from(b.slot + b.slots()).min(slots as f32) * row_h,
+                ),
+            )
+            .shrink(0.5);
+            let col = terminal_color(b.terminal);
+            painter.rect_filled(r, CornerRadius::ZERO, col.gamma_multiply(0.55));
+            if r.width() > 18.0 && r.height() > 8.0 {
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    b.terminal.to_string(),
+                    egui::FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+            }
+            if pointer.is_some_and(|q| r.contains(q)) {
+                hover = Some(format!(
+                    "terminal {} · frame {} · slot {}{} · {:.1} kHz wide at {:.1} kHz (code {:04X}h)",
+                    b.terminal,
+                    f.counter,
+                    b.slot,
+                    if b.slots() > 1 {
+                        format!("–{}", b.slot + b.slots() - 1)
+                    } else {
+                        String::new()
+                    },
+                    (c - a) / 1e3,
+                    (b.freq_hz() + offset_hz) / 1e3,
+                    b.code
+                ));
+            }
+        }
+    }
+    resp.on_hover_text(hover.unwrap_or_else(|| {
+        format!(
+            "The plan's latest {} frames, a row a slot, newest at the bottom; across, \
+             {:.0} kHz",
+            shown.len(),
+            (hi_hz - lo_hz) / 1e3
+        )
+    }));
 }
 
 /// The decoder menu: every kind, the Comtech CDM presets folded into one
@@ -5890,6 +6113,50 @@ fn pool_section(
                     ),
                 );
             }
+        }
+    }
+    // An outbound's burst plan, lined up with the pool's mean spectrum (a
+    // second's worth of new plan or signal between tries).
+    for (name, rcs) in outbounds {
+        let Some(plan) = &rcs.plan else { continue };
+        let id = egui::Id::new(("plan_match", name, rf_center.to_bits()));
+        let stamp = (plan.frames / 25, p.seconds as u64);
+        let cached: Option<((u64, u64), Option<decsat_engine::tdma::pool::PlanMatch>)> =
+            ui.data(|d| d.get_temp(id));
+        let m = match cached {
+            Some((s, m)) if s == stamp => m,
+            _ => {
+                let m = decsat_engine::tdma::pool::match_plan(p, plan);
+                ui.data_mut(|d| d.insert_temp(id, (stamp, m)));
+                m
+            }
+        };
+        match m {
+            Some(m) if m.corr >= 0.5 => {
+                ui.colored_label(
+                    Color32::from_rgb(110, 220, 110),
+                    format!(
+                        "{name}'s burst plan lines up here (fit {:.2}): its zero at {}",
+                        m.corr,
+                        freq(m.offset_hz)
+                    ),
+                )
+                .on_hover_text(
+                    "The plan's occupancy (how often each of its frequencies is in a burst)                      slid across this pool's mean spectrum: the offset where they match best.                      Below, the plan's latest frame on this VFO's band, a row a slot — sent                      eight frames (a third of a second) ahead of the bursts it schedules",
+                );
+                let half = p.half_band_hz.max(1.0);
+                plan_strip(ui, plan, 1, -half, half, m.offset_hz, 72.0);
+            }
+            Some(m) if p.seconds > 10.0 => {
+                ui.label(
+                    RichText::new(format!(
+                        "{name}'s burst plan does not line up with this pool (best fit {:.2})",
+                        m.corr
+                    ))
+                    .weak(),
+                );
+            }
+            _ => {}
         }
     }
     pool_map(ui, p);

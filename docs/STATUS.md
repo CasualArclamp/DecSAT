@@ -4894,3 +4894,58 @@ Built (3963603, 18a75b6, ef6cfbd, 6196242):
 Seen meanwhile: the UI-redesign session reported Identify's live view "not
 locked" on the scene's S2X ACM VFO; 0.10.14 shows the same in the GUI and
 both lock in the paced CLI — not from these changes.
+
+## The Newtec hub's burst plan: table D1h (2026-10-16)
+
+Asked whether the outbound helps with the return. It does: D1h (PID 833h,
+every 40.2 ms) is the burst plan. How it was found, on the 60 s capture of
+outbound and pool together (scratch Python, not kept):
+
+- **Structure**: after the long header, a 4-byte counter (+1 a frame), an
+  8-byte time (+69 465 600 a frame = 40.2 ms × 27 MHz × 64; a fixed offset
+  from the NCR, ±25 ms arrival jitter), a count, and 8-byte records
+  [flags][terminal 16][code 16][frequency 24] + 2 bytes when flag bit 5 —
+  1490 of 1491 sections parse exactly. Flags bits 0–2 run 0–7.
+- **It schedules the pool**: records per (frame, flags & 7) against the
+  pool's occupancy per 5.025 ms slot, over frame lags and phases:
+  correlation 0.394 at a lag of 8 frames (the null: median 0.015, 99th
+  percentile 0.144). So flags & 7 is the slot.
+- **Frequency**: each burst's slot spectrum averaged in bins of the 24-bit
+  field shows a diagonal; aligning the spectra on it, the sharpest profile
+  is at exactly 50 Hz a unit. A spectrogram with the plan's boxes drawn on
+  put every box on a burst.
+- **Length**: codes below 2000h light only their own slot; 2xxxh start only
+  on even slots, 4xxxh–5xxxh on 0 and 4, 7xxxh–8xxxh on 0 — and a code's
+  energy lasts 1/2/4/8 slots. 8-slot bursts overlap nothing (0.0–0.8 %).
+- **Bandwidth**: within a family the code fixes it exactly — two of the
+  same code side by side are always the same distance apart (0104h:
+  130.60 kHz, 545 of 787 pairs). Codes with no same-code pairs come from
+  mixed pairs: first a weighted mode (00C4h came out 218 kHz against
+  ~168 in the spectrum), then a median; the remaining error was the
+  model: for 00CCh every neighbour above implied a 53 kHz upper half and
+  every one below a 104 kHz lower half — that code's burst sits 25 kHz
+  below its frequency (so do 00C4h, 00D4h, 02A8h, 04C8h–04D8h; the
+  spectral edges had said the same). Now each code has its own extent
+  below and above, solved by CGLS on all pair modes (above(X) + below(Y)
+  = spacing), weakly pulled symmetric, the free shift taken out per
+  connected set of codes. The 00C4h–0114h family then narrows smoothly
+  167 → 123 kHz, matching the spectrum within 2 kHz.
+- **Not solved**: what the code means (not symbol rate × anything found;
+  widths fall as the code rises within a family, while each family's
+  range scales with the length), and the 11-bit extra value (steady per
+  terminal, ±10, drifting — a power or correction setting?). D0h is static
+  (version never changed in 60 s; 86 sections of 22-byte records in groups
+  [EDh][len][04h][count][16h]; section 0 lists 32-bit IDs by index) —
+  configuration, unread.
+- **The plan's zero**: not in any table. The GUI slides the plan's
+  occupancy over the pool's 30 s mean spectrum (correlation 0.97, zero at
+  capture −17 kHz); offline, the learned edges fit the bursts' own best
+  at −18 to −22 kHz. ≈ 12530.01 MHz downlink with the LNB corrected by
+  the RMT's forward frequency.
+
+Code: `decsat-ts::newtec` (parser, `PlanRx` learning, `PlanView`), the RCS
+view's `plan`; `tdma::pool` keeps a mean spectrum and `match_plan`; CLI
+prints the plan under the RCS lines; GUI: *Burst plan* section in the RCS
+card (map of two frames, terminals, codes) and the plan lined up on the
+Return pool card. Also: the TS text card's recurring strings truncate (a
+long one widened the side panel to 1200 px).

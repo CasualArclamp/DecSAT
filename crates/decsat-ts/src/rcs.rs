@@ -24,7 +24,9 @@
 //! Seen live (2026-10-15): a Newtec hub's S2X outbound declares SCT, FCT,
 //! TCT and TBTP but sends none of them; the RMT, TIM, NCR and two private
 //! tables (D0h every 116 ms, D1h every 40.2 ms) are what goes out — the
-//! return carriers' 40.2 ms frame grid matches the D1h rate.
+//! return carriers' 40.2 ms frame grid matches the D1h rate, and D1h is
+//! the burst plan ([`crate::newtec`]). D0h is static (86 sections of 22-byte
+//! records, ~10 s a cycle): configuration, unread.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -332,6 +334,8 @@ pub struct RcsView {
     /// TIMs to single terminals, and how many MACs.
     pub tim_unicast: u64,
     pub tim_macs: usize,
+    /// A Newtec hub's private burst plan (D1h), when one parses.
+    pub plan: Option<crate::newtec::PlanView>,
 }
 
 impl RcsView {
@@ -373,6 +377,7 @@ pub struct RcsRx {
     tbtp_logons: BTreeSet<u16>,
     cmt_logons: BTreeSet<u16>,
     tim_macs: BTreeSet<[u8; 6]>,
+    plan: Option<crate::newtec::PlanRx>,
     view: RcsView,
 }
 
@@ -549,6 +554,7 @@ impl RcsRx {
         v.tbtp_logons = self.tbtp_logons.len();
         v.cmt_logons = self.cmt_logons.len();
         v.tim_macs = self.tim_macs.len();
+        v.plan = self.plan.as_ref().map(|p| p.view());
         v
     }
 
@@ -646,6 +652,13 @@ impl RcsRx {
             0xA4 => self.cmt(&body[5..]),
             0xA5 => self.tbtp(&body[5..]),
             0xB0 => self.tim(s),
+            crate::newtec::PLAN_TABLE => {
+                if let Some(f) = crate::newtec::parse_plan(s) {
+                    self.plan
+                        .get_or_insert_with(crate::newtec::PlanRx::new)
+                        .push(f, self.clock);
+                }
+            }
             _ => {}
         }
     }

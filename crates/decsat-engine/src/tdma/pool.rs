@@ -64,6 +64,9 @@ const GRID_MIN_S: f64 = 0.002;
 const GRID_MAX_S: f64 = 0.25;
 /// A repeat must stand this high in the normalised autocorrelation.
 const GRID_FITS: f64 = 0.15;
+/// The mean spectrum's time constant, s: the pool's long-term shape, to
+/// line up with an outbound's burst plan.
+const MEAN_S: f64 = 30.0;
 
 /// A carrier in the pool now, for display: its edges, Hz from the VFO's
 /// centre.
@@ -107,6 +110,12 @@ pub struct PoolView {
     pub grid_strength: f64,
     /// Signal looked at, s.
     pub seconds: f64,
+    /// The passband's mean spectrum over the last half minute or so, dB
+    /// over the noise floor, a bin each `spectrum_bin_hz` from
+    /// `spectrum_start_hz` (Hz from the VFO's centre).
+    pub spectrum: Vec<f32>,
+    pub spectrum_start_hz: f64,
+    pub spectrum_bin_hz: f64,
 }
 
 /// Follows a return pool's carriers and finds its frame grid.
@@ -126,6 +135,9 @@ pub struct PoolTracker {
     column: Vec<f32>,
     in_column: usize,
     per_column: usize,
+    /// The columns' running mean, and how many columns have gone in.
+    mean: Vec<f32>,
+    columns: u32,
     /// The pool's power envelope, one value every `ENVELOPE_STEP_S`, and
     /// the block being summed into the next.
     envelope: std::collections::VecDeque<f32>,
@@ -166,6 +178,8 @@ impl PoolTracker {
             column: vec![0.0; n],
             in_column: 0,
             per_column: ((COLUMN_S / fft_s).round() as usize).max(1),
+            mean: vec![0.0; n],
+            columns: 0,
             envelope: Default::default(),
             env_block: ((ENVELOPE_STEP_S * rate).round() as usize).max(1),
             env_sum: 0.0,
@@ -262,6 +276,18 @@ impl PoolTracker {
         let mut sorted = self.minimum[self.pass.clone()].to_vec();
         sorted.sort_by(f32::total_cmp);
         let floor = sorted[sorted.len() / 10].max(1e-30);
+        // The mean: a plain average at first, then exponential.
+        self.columns += 1;
+        let a = (1.0 / self.columns as f32).max((COLUMN_S / MEAN_S) as f32);
+        for (m, &c) in self.mean.iter_mut().zip(&col) {
+            *m += a * (c - *m);
+        }
+        self.view.spectrum = self.mean[self.pass.clone()]
+            .iter()
+            .map(|&m| 10.0 * (m / floor).max(1e-3).log10())
+            .collect();
+        self.view.spectrum_start_hz = self.bin_hz(self.pass.start);
+        self.view.spectrum_bin_hz = self.rate / self.n as f64;
         // Only the passband: past it are the down-converter's skirts.
         for (k, c) in col.iter_mut().enumerate() {
             if !self.pass.contains(&k) {
@@ -571,10 +597,130 @@ fn split(col: &[f32], a: usize, b: usize, out: &mut Vec<(usize, usize)>) {
     }
 }
 
+/// Where an outbound's burst plan sits in a pool VFO's band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlanMatch {
+    /// Add to a plan frequency for Hz from the VFO's centre.
+    pub offset_hz: f64,
+    /// How well the plan's occupancy follows the pool's mean spectrum
+    /// there (correlation, -1..1).
+    pub corr: f64,
+}
+
+/// Line a burst plan up with the pool: the plan's occupancy (how often
+/// each frequency is in a burst) slid across the pool's mean spectrum (dB
+/// over the floor), the offset where they correlate best — in 2 kHz steps,
+/// then 250 Hz. The plan must lie mostly (70 %) inside the VFO's band.
+/// Nothing in a Newtec hub's tables gives the plan's zero; this does, to a
+/// few kHz.
+pub fn match_plan(pool: &PoolView, plan: &decsat_ts::newtec::PlanView) -> Option<PlanMatch> {
+    let (s, o) = (&pool.spectrum, &plan.occupancy);
+    if s.len() < 8 || o.len() < 8 || pool.spectrum_bin_hz <= 0.0 {
+        return None;
+    }
+    let bin = plan.occupancy_bin_hz;
+    let g0 = plan.occupancy_start_hz + bin / 2.0;
+    let level = |hz: f64| {
+        let x = (hz - pool.spectrum_start_hz) / pool.spectrum_bin_hz;
+        if x < 0.0 || x > (s.len() - 1) as f64 {
+            return None;
+        }
+        let i = x as usize;
+        let f = (x - i as f64) as f32;
+        let v = s[i] * (1.0 - f) + s[(i + 1).min(s.len() - 1)] * f;
+        Some(v.clamp(0.0, 30.0) as f64)
+    };
+    let score = |off: f64| {
+        let (mut n, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        for (j, &occ) in o.iter().enumerate() {
+            if let Some(y) = level(g0 + j as f64 * bin + off) {
+                let x = occ as f64;
+                n += 1.0;
+                sx += x;
+                sy += y;
+                sxx += x * x;
+                syy += y * y;
+                sxy += x * y;
+            }
+        }
+        if n < 0.7 * o.len() as f64 {
+            return None;
+        }
+        let cov = sxy - sx * sy / n;
+        let var = (sxx - sx * sx / n) * (syy - sy * sy / n);
+        (var > 0.0).then(|| cov / var.sqrt())
+    };
+    let lo = pool.spectrum_start_hz - g0 - o.len() as f64 * bin;
+    let hi = pool.spectrum_start_hz + s.len() as f64 * pool.spectrum_bin_hz - g0;
+    let mut best: Option<(f64, f64)> = None;
+    let mut off = lo;
+    while off <= hi {
+        if let Some(c) = score(off)
+            && best.is_none_or(|b| c > b.1)
+        {
+            best = Some((off, c));
+        }
+        off += 2_000.0;
+    }
+    let (coarse, _) = best?;
+    for k in -8..=8 {
+        let off = coarse + k as f64 * 250.0;
+        if let Some(c) = score(off)
+            && best.is_none_or(|b| c > b.1)
+        {
+            best = Some((off, c));
+        }
+    }
+    best.map(|(offset_hz, corr)| PlanMatch { offset_hz, corr })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use decsat_mod::Shaper;
+
+    #[test]
+    fn a_plan_lines_up_with_its_pool() {
+        // A plan whose bursts fill 200–900 kHz of its own frequencies, the
+        // bottom 200 kHz always, the rest less often with a step; the pool
+        // VFO sees the same shape 330 kHz lower, in dB, with noise.
+        let mut plan = decsat_ts::newtec::PlanView {
+            occupancy_start_hz: 200e3,
+            occupancy_bin_hz: 2e3,
+            ..Default::default()
+        };
+        plan.occupancy = (0..350)
+            .map(|j| match j {
+                0..100 => 1.0,
+                100..220 => 0.6,
+                _ => 0.25 + 0.1 * ((j as f32) * 0.3).sin(),
+            })
+            .collect();
+        let mut pool = PoolView {
+            spectrum_start_hz: -500e3,
+            spectrum_bin_hz: 1953.125,
+            ..Default::default()
+        };
+        let mut seed = 3u32;
+        pool.spectrum = (0..512)
+            .map(|k| {
+                let hz = pool.spectrum_start_hz + k as f64 * pool.spectrum_bin_hz;
+                let g = hz + 330e3; // the plan frequency here
+                let j = ((g - 200e3) / 2e3).floor();
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+                let occ = if (0.0..350.0).contains(&j) {
+                    plan.occupancy[j as usize]
+                } else {
+                    0.0
+                };
+                12.0 * occ + noise
+            })
+            .collect();
+        let m = match_plan(&pool, &plan).expect("a match");
+        assert!((m.offset_hz + 330e3).abs() < 1.5e3, "{m:?}");
+        assert!(m.corr > 0.9, "{m:?}");
+    }
 
     /// Random QPSK, shaped at `sps` with roll-off 0.05, mixed to `offset`
     /// (cycles a sample), `n` samples.

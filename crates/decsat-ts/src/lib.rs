@@ -7,11 +7,13 @@
 //! - [`sink`]: a `.ts` file, UDP, or a TCP/HTTP server for VLC and PotPlayer.
 //! - [`csa`] and [`biss`]: DVB-CSA descrambling with a BISS key.
 //! - [`rcs`]: a VSAT hub's DVB-RCS signalling — the return link it runs.
+//! - [`newtec`]: a Newtec hub's private burst plan (table D1h).
 
 pub mod biss;
 pub mod csa;
 pub mod deframe;
 pub mod mpe;
+pub mod newtec;
 pub mod psi;
 pub mod rcs;
 pub mod section;

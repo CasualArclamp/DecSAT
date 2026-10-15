@@ -84,6 +84,7 @@ real carriers stay put.
 | **ACM terminal table**: each GSE label (a terminal's MAC) — its bytes, its IP addresses and the MODCODs the hub sends it in, which is the terminal's link as the hub sees it | ✅ live: 25 terminals of a hub, QPSK 5/6 to 16APSK 5/6 |
 | **DVB-RCS signalling** in a hub's outbound (EN 301 790 / 545-2): the forward and return links of the RCS map, the network clock (NCR), the terminal information, superframe/frame/timeslot plans, burst time plan and corrections when sent — and every signalling table's rate, the vendor's own included | ✅ live (RCS2 over GSE: its PDU types named only) |
 | **Return pools** (TDMA mode's *Return pool* decoder): the pool's layout over time — a hub resizing and moving its terminals' carriers — and the slot and frame grid of its bursts, tied to an outbound VFO whose signalling keeps the same time | ✅ live: 5.025 ms slots in a 40.200 ms frame, matching the outbound's 40.2 ms table |
+| **A Newtec hub's burst plan** (its private table D1h, worked out from a capture — no public spec): every burst each terminal may send, frame by frame — slot, length, frequency, bandwidth (learned from how the hub packs them) — the terminals' shares, and the plan lined up on a Return pool VFO's band | ✅ live: 24 terminals, 16.7 bursts a 40.2 ms frame; fits the pool's spectrum at 0.97 |
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
@@ -213,8 +214,9 @@ with tables of its own still shows its timing in their rates.
 
 The **Return pool** decoder (TDMA mode, beside the burst analyser) over
 the return shows the carriers now (a 200 ms average split at the guards
-between them), how often the layout changes, a map of the layouts over two minutes (a hub
-resizing and moving its terminals' carriers, Mx-DMA style), and the grid —
+between them), how often the layout changes, a map of the layouts over
+two minutes (a hub resizing and moving its terminals' carriers, Mx-DMA
+style), and the grid —
 the slot, from the repeat of the bursts' guard times, and the frame, the
 multiple of it the envelope repeats over. When another VFO is decoding an
 outbound whose NCR or a signalling table keeps the same period, the card
@@ -226,6 +228,27 @@ and two private tables, one every 40.2 ms — and IP to its terminals on
 ISI 1; the 770 kHz pool beside it holds a ~190 kHz continuous carrier
 whose width the hub changes every few seconds and a block of bursts in
 5.025 ms slots of a 40.200 ms frame: the private table's period.
+
+That table, D1h, is the hub's **burst plan** — no public spec, so worked
+out from a minute of outbound and return received together (the plan's
+burst counts per slot follow the return's bursts eight frames later). Each
+section is one return frame: a counter, the frame's start on the NCR's
+clock, and a record per burst — the slot it starts in, the terminal, a
+code, and its frequency in 50 Hz steps from the plan's own zero. The
+code's range gives the length (one, two, four or eight slots of the
+frame); its bandwidth is learned from the plan itself — the hub packs
+bursts edge to edge, so the spacing between neighbours in a slot gives
+each code's extent below and above its frequency (130.6 kHz for 0104h,
+213.1 kHz for 02E8h, 157.1 kHz for the two-slot 2278h). The RCS card
+then shows a **Burst plan** section: the frame and slots, bursts a frame,
+a map of the latest frames (a row a slot, a box a burst in its terminal's
+colour), the terminals with their shares of the plan, and the codes
+learned. On the **Return pool** card the plan is slid across the pool's
+mean spectrum: where it fits (0.97 on 172B) the card gives the plan's zero
+as a frequency and draws the latest frame on the pool's band — which
+terminal is where. On 172B: 24 terminals, one (413) holding a whole-frame
+block at the bottom of the pool (a third of it), the rest one- and
+two-slot bursts of 123–400 kHz.
 
 ```bash
 decsat decode outbound_8Msps.cs8 --decoder ip --offset -881700 --bandwidth 1300000

@@ -894,6 +894,70 @@ fn print_rcs(r: &decsat_ts::rcs::RcsView) {
             t.last_len
         );
     }
+    if let Some(p) = &r.plan {
+        print_plan(p);
+    }
+}
+
+/// A Newtec hub's burst plan (D1h).
+fn print_plan(p: &decsat_ts::newtec::PlanView) {
+    println!(
+        "  burst plan (D1h): {} frames{}, {} slots{}, {:.1} bursts a frame, {} terminals{}{}",
+        p.frames,
+        p.period_s
+            .map_or(String::new(), |s| format!(" of {:.3} ms", s * 1e3)),
+        p.slots,
+        p.period_s.map_or(String::new(), |s| format!(
+            " of {:.3} ms",
+            s * 1e3 / f64::from(p.slots.max(1))
+        )),
+        p.bursts_per_frame,
+        p.terminals.len(),
+        p.span.map_or(String::new(), |(a, b)| format!(
+            ", bursts in {:.1}–{:.1} kHz of the plan ({:.0} % handed out)",
+            a / 1e3,
+            b / 1e3,
+            p.load * 100.0
+        )),
+        if p.missed > 0 {
+            format!(", {} frames missed", p.missed)
+        } else {
+            String::new()
+        }
+    );
+    for w in p.widths.iter().filter(|w| w.bursts >= 20) {
+        println!(
+            "    code {:04X}h: {} slot{} × {:.2} kHz{} ({} bursts, {} pairs{})",
+            w.code,
+            w.slots,
+            if w.slots == 1 { "" } else { "s" },
+            w.width_hz / 1e3,
+            if w.centre_hz.abs() >= 5e3 {
+                format!(", centred {:+.1} kHz off its frequency", w.centre_hz / 1e3)
+            } else {
+                String::new()
+            },
+            w.bursts,
+            w.pairs,
+            if w.direct { "" } else { ", via a neighbour" }
+        );
+    }
+    for t in &p.terminals {
+        println!(
+            "    terminal {:3}: {:5.1} bursts/s, {:4.1} % of the plan, at {:.1}–{:.1} kHz, mostly {:04X}h ({} slot{}{}){}",
+            t.id,
+            t.per_s,
+            t.share * 100.0,
+            t.lo_hz / 1e3,
+            t.hi_hz / 1e3,
+            t.code,
+            t.slots,
+            if t.slots == 1 { "" } else { "s" },
+            t.width_hz
+                .map_or(String::new(), |w| format!(" × {:.1} kHz", w / 1e3)),
+            t.extra.map_or(String::new(), |x| format!(", value {x}"))
+        );
+    }
 }
 
 /// One input stream of a DVB-S2/S2X carrier.
