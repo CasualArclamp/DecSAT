@@ -79,7 +79,11 @@ real carriers stay put.
 | **S2X**: 8-bit PLS code, all 55 normal/short MODCODs — 2+4+2 8APSK to 256APSK, the new interleavers | ✅ |
 | **S2X VL-SNR**: the VL-SNR header, pi/2-BPSK (and spread), medium FECFRAMEs, all 9 MODCODs — down to about 0 dB Es/N0 so far | ✅ |
 | PL scrambling: the preferred sequences of S2X Table 19e found from the pilots | ✅ |
-| S2X superframing (Annex E) | to do |
+| **S2X baseband**: the low roll-offs (0.15/0.10/0.05, signalled by RO alternating with `11`), GSE-HEM (GSE sliced across BBFRAMEs), GSE-Lite; **multistream** carriers read stream by stream — each ISI to its own stage: GSE, GSE-HEM, a transport stream, or transport packets in a generic stream (a VSAT hub's signalling) | ✅ live on a Newtec hub's S2X ACM outbound (0.05 roll-off, signalling on ISI 0, IP on ISI 1); GSE-HEM on test signals |
+| **S2X superframing** (Annex E): super-frames found by their start sequence, their format read, and formats 0 (S2X) and 1 (S2 legacy) decoded with the super-frame pilots on or off; the other formats named | ✅ on test signals (none seen live yet) |
+| **ACM terminal table**: each GSE label (a terminal's MAC) — its bytes, its IP addresses and the MODCODs the hub sends it in, which is the terminal's link as the hub sees it | ✅ live: 25 terminals of a hub, QPSK 5/6 to 16APSK 5/6 |
+| **DVB-RCS signalling** in a hub's outbound (EN 301 790 / 545-2): the forward and return links of the RCS map, the network clock (NCR), the terminal information, superframe/frame/timeslot plans, burst time plan and corrections when sent — and every signalling table's rate, the vendor's own included | ✅ live (RCS2 over GSE: its PDU types named only) |
+| **Return pools** (TDMA VFOs): the pool's layout over time — a hub resizing and moving its terminals' carriers — and the slot and frame grid of its bursts, tied to an outbound VFO whose signalling keeps the same time | ✅ live: 5.025 ms slots in a 40.200 ms frame, matching the outbound's 40.2 ms table |
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
@@ -138,7 +142,10 @@ its title bar; the MODCOD being received, large, with its margin over the
 quasi-error-free Es/N0 of EN 302 307's tables and an Es/N0 bar; then the
 receive chain stage by stage with health dots — demodulator, PL frames,
 LDPC and BCH (an ACM carrier's MODCODs with their share, frames good and
-margin), the FEC thread's load, the baseband. The
+margin), the FEC thread's load, the super-frames when the carrier has
+them, the baseband — a multistream carrier's input streams under it, each
+with what it carries, its MODCOD and rate (click one with transport
+packets to show its TS in the card below). The
 status bar counts the carriers and narrow lines and shows the front end's
 load; the input level is beside the play button — orange when the HackRF's
 gain is too high (see *HackRF One* below).
@@ -174,6 +181,56 @@ data field four ways at once — GSE_LENGTH counting the 2-byte header or not,
 the fragment id as 8 bits or as 6 bits plus a 2-bit counter — and keeps
 whichever yields valid IP (checksums, lengths). The *GSE* setting can force
 one. If none yields IP, a blind IPv4 search over the data fields takes over.
+
+A multistream carrier's streams are read apart, each its own GSE (or TS)
+state, and S2X's GSE-HEM — GSE packets sliced across BBFRAMEs like TS
+packets, SYNCD pointing at the first that starts — is put back together.
+The roll-off is read as S2X signals it: codes 00/01/10 sent alternately
+with 11 mean 0.15/0.10/0.05 (a 0.05 carrier is not shown as 0.20).
+
+**Terminals.** On a VSAT hub's outbound every GSE packet carries its
+terminal's MAC as a 6-byte label, and on an ACM outbound the hub sends each
+terminal's data in the MODCOD its reported reception allows. The IP card's
+*Terminals* table lists the labels by bytes, with the MODCODs each was sent
+in, the Es/N0 the main one needs and (hover) its IP addresses — a map of
+the network's terminals and their links as the hub sees them.
+
+### Interactive networks (DVB-RCS) and return pools
+
+A hub's outbound tells its terminals how to transmit. With DVB-RCS
+(EN 301 790; EN 301 545-2 for RCS2) that is a programme of signalling
+tables in the transport stream — on a multistream outbound often its own
+input stream, transport packets in a generic stream. The TS card then gets
+an **Interactive network** card: the network's name, the forward and return
+links of its RCS map (satellite, beam, frequency, symbol rate, standard),
+the network clock reference (the 27 MHz count every terminal times its
+bursts by) and how often it comes, the terminal information's status
+flags, the superframe, frame and timeslot plans, the burst time plan and
+corrections when they are sent — and under *Signalling tables* every table
+id with its PID, count, period and size, a vendor's own included. Tables a
+PMT declares but never sends are listed too: a hub that runs its return
+with tables of its own still shows its timing in their rates.
+
+A **TDMA** VFO over the return shows the **Return pool** above its bursts:
+the carriers now (a 200 ms average split at the guards between them), how
+often the layout changes, a map of the layouts over two minutes (a hub
+resizing and moving its terminals' carriers, Mx-DMA style), and the grid —
+the slot, from the repeat of the bursts' guard times, and the frame, the
+multiple of it the envelope repeats over. When another VFO is decoding an
+outbound whose NCR or a signalling table keeps the same period, the card
+says so: the pool runs on that outbound's clock.
+
+On Eutelsat 172B a Newtec hub's 1.048 MS/s S2X ACM outbound (roll-off
+0.05) carries its signalling on ISI 0 at QPSK 1/3 — an RCS map, the NCR,
+and two private tables, one every 40.2 ms — and IP to its terminals on
+ISI 1; the 770 kHz pool beside it holds a ~190 kHz continuous carrier
+whose width the hub changes every few seconds and a block of bursts in
+5.025 ms slots of a 40.200 ms frame: the private table's period.
+
+```bash
+decsat decode outbound_8Msps.cs8 --decoder ip --offset -881700 --bandwidth 1300000
+decsat decode outbound_8Msps.cs8 --decoder tdma --offset 580000 --bandwidth 900000
+```
 
 ### DVB-S2 → MPEG-TS → VLC / PotPlayer
 

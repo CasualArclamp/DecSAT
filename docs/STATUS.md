@@ -4820,3 +4820,77 @@ on it. He picked layout D of five menu-bar mockups. New module
 Checked with the release build on the synthetic scene and live on the
 HackRF (1929.125 MHz + LO 10.6 GHz, 16 MS/s, receive only): the three
 states (HackRF stopped, running, a file) look as mocked up.
+
+## S2X stuff and a hub's return link (2026-10-15)
+
+Rory, with a screenshot of the Eutelsat 172B carrier at 12529.15 MHz:
+"add more DVB-S2X stuff… this carrier seems to be the forward link, can you
+see if the thing on the right is the return link". A 60 s HackRF capture
+(1930.05 MHz, 8 MS/s) settled it: the right-hand group is the return.
+
+- **The forward link** is a Newtec hub's S2X ACM outbound (GSE labels in
+  Newtec's OUI 00:06:39). ISI 1 is IP; ISI 0, always QPSK 1/3, is an MPEG
+  transport stream of DVB-RCS signalling, sent as 188-byte packets in a
+  stream flagged generic continuous (UPL 1504, SYNC BBh, the CRC-8 chain
+  holding on all 7564 packets): an RCS map service (SDT type 0Eh), the RMT
+  (its forward-link descriptor describes this carrier), the NCR as the PCR
+  of PID 1600h, a broadcast TIM, an MPE multicast listing ~100 terminals,
+  and two private tables, D0h every 116 ms and D1h every 40.2 ms. The PMT
+  declares SCT, FCT, TCT and TBTP; none is sent.
+- **The return** is a ~770 kHz pool beside it: continuous carriers of
+  roll-off 0.05 whose widths the hub changes every few seconds (Mx-DMA
+  style) and a block of bursts. The bursts' guard times repeat every
+  5.025 ms in a 40.200 ms frame — the D1h table's period (its own timestamps
+  step by 1 085 400 counts of 27 MHz: 40.200 ms). Proof of the link.
+
+Rory then chose: streams per ISI, a DVB-RCS signalling card, an ACM
+terminal table, superframes + GSE-HEM, and a pool tracker; spec download
+OK'd (EN 301 790 V1.5.1, EN 301 545-2 V1.3.1 into `reference/etsi-rcs/`,
+with `curl -A` a browser user agent — ETSI answers 403 otherwise).
+
+Built (3963603, 18a75b6, ef6cfbd, 6196242):
+
+- **S2X baseband** (`decsat-frame::bbframe`): `RollOffReader` (S2X low range
+  on the first `11`; the outbound read 0.20 before), `StreamFormat::GseHem`,
+  `gse_lite()`, RO kept raw; the modulator's sources alternate RO for the
+  low roll-offs (they sent `11` always).
+- **Streams per ISI** (`decsat-engine::streams`, `fec.rs`): a TS stage per
+  stream with transport packets (the shown one picked by `ts_isi`; an IP
+  VFO writes them to `.ts` while recording its PCAP), GSE per stream,
+  `HemDeframer` for GSE-HEM, `FecStats.streams`/`roll_off`/`ts_isi`. GUI:
+  the stream rows under *Baseband*; CLI: a line per stream.
+- **Terminals** (`GseIp::labels`, `GseView.terminals`): per GSE label PDUs,
+  bytes, MODCODs (of the frame each PDU completed in) and IP addresses.
+  Live: 25 terminals, one mostly at QPSK 5/6, most at 16APSK 3/5–5/6.
+- **Super-frames** (Annex E): the degree-20 Gold scrambler, SOSF, SFFI
+  simplex code, type-A pilots (`decsat-frame::superframe`); TX
+  `Superframer` + `PlFramer::superframed`; RX `SfStripper` between timing
+  and PL framing (FFT differential SOSF search for 3 super-frames' worth,
+  offset/phase from the SOSF by multi-lag tone estimate — lag 1 alone was
+  too coarse to read the SFFI — SF-pilots on/off from the first pilot
+  fields, then each super-frame's own symbols dropped and every SOSF
+  checked where due). Threshold 0.35: 0.25 gave a false start every
+  super-frame at 6 dB. `PlsInfo::without_pilot_blocks` once locked.
+- **DVB-RCS** (`decsat-ts::rcs`): PMT A7h descriptors → table PIDs and the
+  NCR PID; RMT (linkage 81h populations, A8h/A9h links — RCS2's S2X branch
+  read only for a defined S2X mode: the live hub sends mode 4 and roll-off
+  code 0, reserved/wrong for a 0.05 carrier), SCT/FCT/TCT, TBTP/CMT counts,
+  TIM, NCR interval and rate against the symbol clock (0.0 ppm live: one
+  reference), every table's rate. GUI card under the TS card (wrapping
+  rows: a grid of long values widened the side panel over the waterfall,
+  and the band view's label clamp then panicked — fixed too).
+- **Return pool** (`tdma::pool`): 200 ms columns, passband only, floor from
+  each bin's slowly rising minimum, guards of 3 dB or more (1.5 dB caught
+  1 dB dips in the bursting block that flickered, and no layout held); the
+  layout taken after two columns, kept two minutes for the GUI's map; no
+  carrier identities (a tracker split one live carrier into several). The
+  grid from the 50 µs envelope's short dips (an FFT's 0.5 ms hid the guard
+  times: only the frame showed), frame chosen by bias-corrected explained
+  variance as the shortest multiple within 10 % of the best (contrast
+  favoured short folds; the best alone gave 120.6 ms = 3 frames). GUI: map,
+  grid, and "40.200 ms = VFO 1's table D1h every 40.19 ms: this pool runs
+  on that outbound's clock".
+
+Seen meanwhile: the UI-redesign session reported Identify's live view "not
+locked" on the scene's S2X ACM VFO; 0.10.14 shows the same in the GUI and
+both lock in the paced CLI — not from these changes.
