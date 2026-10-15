@@ -66,6 +66,17 @@ pub fn table_name(id: u8) -> &'static str {
     }
 }
 
+/// A table id as a short label for a PID list: "RMT", "TIM", "MPE",
+/// "user D0h".
+pub fn table_label(id: u8) -> String {
+    match table_name(id) {
+        "user defined" => format!("user {id:02X}h"),
+        "reserved" => format!("{id:02X}h"),
+        // "TIM (terminal information)" → "TIM": the part before " (".
+        n => n.split(" (").next().unwrap_or(n).to_string(),
+    }
+}
+
 /// The DVB-RCS descriptor names (EN 301 790 Table 50).
 pub fn descriptor_name(tag: u8) -> &'static str {
     match tag {
@@ -1113,5 +1124,34 @@ mod tests {
         assert!((f.orbital_deg - 19.2).abs() < 1e-9);
         assert!((f.symbol_rate - 2.0e6).abs() < 1.0);
         assert_eq!((f.isi, f.s2x_mode, f.roll_off), (Some(0), Some(4), None));
+    }
+
+    #[test]
+    fn the_ts_analyser_names_rcs_pids_from_the_pmt() {
+        // The PID list shows what the RCS content descriptors put on each
+        // PID, and the RCS programme's PCR PID as the NCR, where the stream
+        // type alone would say "private sections" and "PCR".
+        let mut a = crate::psi::TsAnalyser::new();
+        for p in stream() {
+            a.packet(&p);
+        }
+        a.packet(&ncr_packet(1_000_000));
+        let r = a.report();
+        let kind = |pid: u16| {
+            r.pids
+                .iter()
+                .find(|row| row.pid == pid)
+                .unwrap()
+                .kind
+                .clone()
+        };
+        assert_eq!(kind(0x26), "RCS RMT");
+        assert_eq!(kind(0x27), "RCS SCT, FCT, TCT");
+        assert_eq!(kind(0x934), "RCS TIM");
+        assert_eq!(kind(0x1600), "NCR (RCS network clock)");
+        // A vendor's own and an unassigned id keep their number.
+        assert_eq!(table_label(0xD1), "user D1h");
+        assert_eq!(table_label(0xA8), "A8h");
+        assert_eq!(table_label(0x3E), "MPE");
     }
 }

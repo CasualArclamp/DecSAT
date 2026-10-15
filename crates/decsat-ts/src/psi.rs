@@ -90,6 +90,11 @@ pub struct EsInfo {
     /// What a descriptor says the stream is, where the stream type does not
     /// (private PES carrying AC-3, subtitles, teletext…).
     pub kind: Option<&'static str>,
+    /// The table ids an RCS content descriptor (A7h, EN 301 790
+    /// §8.5.5.10.10 Table 60) puts on this PID: a VSAT hub's signalling
+    /// (RMT, TIM, a vendor's own tables…), which the stream type alone
+    /// calls just "private sections".
+    pub rcs_tables: Vec<u8>,
 }
 
 impl EsInfo {
@@ -114,8 +119,18 @@ impl EsInfo {
         self.base().ends_with("audio")
     }
 
-    /// "H.264 video", "AC-3 audio (eng)", "subtitles (fra)"…
+    /// "H.264 video", "AC-3 audio (eng)", "subtitles (fra)", "RCS TIM"…
     pub fn describe(&self) -> String {
+        if !self.rcs_tables.is_empty() {
+            // `map` turns each id into a String; `collect` gathers them
+            // into a Vec so `join` can put commas between.
+            let t: Vec<String> = self
+                .rcs_tables
+                .iter()
+                .map(|&id| crate::rcs::table_label(id))
+                .collect();
+            return format!("RCS {}", t.join(", "));
+        }
         let base = self.base();
         match &self.language {
             Some(l) => format!("{base} ({l})"),
@@ -450,6 +465,13 @@ impl TsAnalyser {
                     0x6A => es.kind = Some("AC-3 audio"),
                     0x7A => es.kind = Some("E-AC-3 audio"),
                     0x7C => es.kind = Some("AAC audio"),
+                    0xA7 => {
+                        for &t in d {
+                            if !es.rcs_tables.contains(&t) {
+                                es.rcs_tables.push(t);
+                            }
+                        }
+                    }
                     0x09 if d.len() >= 4 => {
                         let sys = u16::from_be_bytes([d[0], d[1]]);
                         cas.push(sys);
@@ -618,7 +640,16 @@ impl TsAnalyser {
         }
         for p in self.programmes.values() {
             if p.pcr_pid == Some(pid) {
-                return ("PCR".into(), named(p.number));
+                // The PCR PID of a programme carrying RCS tables is the
+                // Network Clock Reference (EN 301 790 §8.5.5.6): the 27 MHz
+                // count the terminals time their return bursts by.
+                let rcs = p.streams.iter().any(|e| !e.rcs_tables.is_empty());
+                let kind = if rcs {
+                    "NCR (RCS network clock)"
+                } else {
+                    "PCR"
+                };
+                return (kind.into(), named(p.number));
             }
         }
         let kind = match st.pes_stream_id {
