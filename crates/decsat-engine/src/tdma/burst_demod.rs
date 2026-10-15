@@ -116,7 +116,9 @@ pub struct BurstResult {
     pub code: u16,
     pub waveform: Waveform,
     /// The data symbols, equalised and on the constellation's scale (the
-    /// header and known symbols left out).
+    /// header and known symbols left out; the pilot pairs after the
+    /// second known block are still among them — their positions vary by
+    /// code and are not yet tabled).
     pub symbols: Vec<Iq>,
     /// Their soft bits, max-log, positive for a 0 as [`decsat_fec`]'s
     /// (the labels assumed: see the module notes); `bits_per_symbol` a

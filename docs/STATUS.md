@@ -5084,4 +5084,75 @@ width rule, a learned code carrying its rate.
 
 Not done: the pool tracker and its plan boxes still use 40.2/8 ms slots;
 `PlanRx` learns offsets per code where they belong to terminals; no burst
-demodulator (Rory had not asked to demodulate the return).
+demodulator yet (Rory then asked for one: next section).
+
+## A return burst demodulator, and the FEC not yet (2026-10-16)
+
+Rory asked for the return bursts demodulated live. `tdma::burst_demod`
+(d40e7b5, d9207a9, f8bb607) takes a burst the plan has scheduled — its
+terminal, code, slots, centre, symbol rate (exact from
+`newtec::code_rate`, or an estimate it searches ±1.5 % on the code's
+grid), waveform and planned start in a slice of IQ — and gives back the
+data symbols, max-log LLRs, the 8+8 header's phases, MER, carrier and
+timing offsets, the preamble's fit and a pass flag. The plan-timing
+session wires it to the live pool; this is the core.
+
+- **Receiver.** One FFT of the slice; the burst's band taken out of it at
+  an integer decimation leaving 4–8 samples a symbol — first wide (±40 kHz,
+  or ±6 kHz round the terminal's last offset), the preamble found there by
+  differential correlation, then again on the RRC matched filter's output
+  (roll-off 0.05) at that offset, which neighbours in the wide band no
+  longer bias (they had pushed ~20 % of bursts past the fine search);
+  fractional timing from the coherent preamble fit; frequency (a search
+  over ±1.2 % of Rs), phase and gain from every known symbol; a 9-tap T/2
+  LS equaliser trained on them; second-order decision-directed tracking;
+  LLRs with the noise from the known symbols' residual.
+- **Known sequences**, read from the capture (bursts of 22 terminals and
+  11 codes aligned, each symbol where they agree, quantised): the 8+8
+  preamble — an **11-symbol header** whose phases differ by code (its ring
+  pattern fixed: outer, outer, inner, outer, five inner, outer, outer)
+  then 65 fixed symbols — and the 66-symbol block 203 symbols in; the sync
+  burst's 514 symbols from 16 in; the 8PSK burst's 70 from 17 in. Ring
+  ratio of the averaged known symbols: **2.19**, S2X's to two decimals.
+  0528h, 50F8h and 52E0h are none of these (`Waveform::Unknown`, not
+  demodulated: a ~100-symbol known block, another ~230 on, single known
+  symbols every ~20; their coherent average did not converge).
+- **On the 172B capture** (all 24 024 planned bursts, 44 s in release):
+  97–99 % taken for every terminal (431: 94 %), MER 11.2–12.3 dB (431
+  10.0) — the pool's C/N; offsets 431 −25 468 Hz, 409 −7 136 Hz, 413
+  −4 727 Hz, the rest within ±31 Hz. By hand: `DECSAT_172B=<cs8>
+  DECSAT_172B_BURSTS=<csv> cargo test -p decsat-engine --release
+  burst_demod_on_a_capture -- --ignored --nocapture` (the CSV of planned
+  bursts came from the scratch alignment; the live path will not need it).
+- **The header groups the codes**: 00FCh, 0104h, 010Ch and 0114h share
+  one; 02E8h and 02F0h; 0508h and 0510h; 02C8h with 4EF0h; 02E0h with
+  7E94h and 7E9Ch; 00F4h, 2278h each their own. Likely the MODCOD, the
+  codes of a group differing in payload (0114h 550 periods, 010Ch 559,
+  0104h 584, 00FCh 595 — steps of size, one MODCOD).
+- **Pilots** after the 66-symbol block: pairs (4-symbol blocks on the
+  codes 431 uses) from ~5–20 symbols after it, their spacing growing with
+  distance from it to a cap — 7E8Ch 11, 11, 12, 13, 13, 14 … 20; 2278h
+  12, 13, … 21; 00CCh 24, 26, 30, 33, 38, 41. Not yet tabled: they are
+  left among the data symbols (decisions track through them).
+
+**FEC, what the soft bits say so far** (scratch analysis of the dump):
+
+- A single burst's hard decisions are **~15 % wrong** at 12.3 dB MER
+  (against the idle bursts' averages): the code must be strong, rate ½
+  or so — S2X's 8+8 rates are 90/180–100/180 and 18/30–20/30.
+- **Idle bursts are identical across terminals** for a code (33 idle
+  clusters of 0104h from 22 terminals, all the same symbols): no terminal
+  id in them. The idle words of different codes — 00F4h, 00FCh, 0104h,
+  010Ch, 397–421 data symbols — agree only by chance (~1/16) beyond their
+  first 2–6 symbols: the encoding depends on the length.
+- **No short LFSR**: every bit plane of every idle word (the ring bit,
+  the phase bits under all 16 rotations/reflections of S2X's 8+8 labels,
+  the phase differences) has linear complexity n/2, as random data. So it
+  is not a scrambled all-zero word behind a block interleaver; a code with
+  a pseudo-random interleaver (turbo, LDPC) fits.
+- Ruled out: the S2/S2X LDPC frames (16 200 bits = 4 050 8+8 symbols, ten
+  times a 1-slot burst's 1 500–1 700 bits); DVB-RCS2's reference bursts
+  (QPSK/8PSK/16QAM only, 536/1 616 symbols, roll-off 0.2).
+- Next, if wanted: table the pilots per code (exact data bit counts per
+  code), then test candidate codes against the idle words with their
+  labels and interleaver as unknowns — a bigger job.
