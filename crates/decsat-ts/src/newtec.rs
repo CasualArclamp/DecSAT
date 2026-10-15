@@ -63,8 +63,10 @@
 //!   8+8 rings (EN 302 307-2 Table 11c: both rings at π/8 + kπ/4, ratio
 //!   ≈ 2.2 measured, 2.19 in Table 11d) — opening with a 76-symbol
 //!   preamble, then 127 data symbols, a 66-symbol known block, and data
-//!   with a pair of known outer-ring symbols every 14–21. Some codes are
-//!   8PSK with a preamble of their own; and every terminal sends, about
+//!   with a pair of known outer-ring symbols every 14–21; its first 11
+//!   symbols are a header whose phases differ by code (the MODCOD, it
+//!   seems). Some codes are 8PSK with a preamble of their own, three more
+//!   a waveform not yet read; and every terminal sends, about
 //!   every 32 frames, a 16APSK burst opening with 530 known symbols (a
 //!   sync burst, for the hub's timing, frequency and level).
 //! - **Level**: each terminal's received power follows the 11-bit value at
@@ -169,6 +171,10 @@ pub enum Waveform {
     /// 16APSK 8+8 opening with 530 known symbols: each terminal's sync
     /// burst, about every 32 frames.
     Sync,
+    /// A preamble of its own not yet read (0528h, 50F8h, 52E0h on 172B:
+    /// a ~100-symbol known block, another ~230 symbols on, single known
+    /// symbols every ~20).
+    Unknown,
 }
 
 impl Waveform {
@@ -177,6 +183,7 @@ impl Waveform {
             Waveform::Apsk8p8 => "16APSK 8+8",
             Waveform::Psk8 => "8PSK",
             Waveform::Sync => "16APSK 8+8 sync",
+            Waveform::Unknown => "waveform unread",
         }
     }
 }
@@ -198,7 +205,7 @@ pub struct CodeRate {
 /// and constellations.
 #[rustfmt::skip]
 const CODE_TABLE: &[(u16, u32, Waveform)] = {
-    use Waveform::{Apsk8p8, Psk8, Sync};
+    use Waveform::{Apsk8p8, Psk8, Sync, Unknown};
     &[
         (0x00C4, 754, Apsk8p8), (0x00CC, 709, Apsk8p8), (0x00D0, 1092, Sync), (0x00D4, 686, Apsk8p8),
         (0x00D8, 1080, Sync), (0x00DC, 670, Apsk8p8), (0x00E0, 1070, Sync), (0x00E4, 656, Apsk8p8),
@@ -212,14 +219,14 @@ const CODE_TABLE: &[(u16, u32, Waveform)] = {
         (0x02F8, 933, Apsk8p8), (0x0490, 1850, Psk8), (0x04C8, 1752, Apsk8p8),
         (0x04D0, 1688, Apsk8p8), (0x04D8, 1635, Apsk8p8), (0x0500, 1370, Apsk8p8),
         (0x0508, 1335, Apsk8p8), (0x0510, 1311, Apsk8p8), (0x0518, 1257, Apsk8p8),
-        (0x0528, 1281, Psk8), (0x20AC, 1425, Sync), (0x2240, 1865, Apsk8p8), (0x2264, 2006, Sync),
+        (0x0528, 1281, Unknown), (0x20AC, 1425, Sync), (0x2240, 1865, Apsk8p8), (0x2264, 2006, Sync),
         (0x2278, 1415, Apsk8p8), (0x227C, 1753, Sync), (0x2284, 1724, Sync), (0x2460, 3172, Apsk8p8),
         (0x2468, 3067, Apsk8p8), (0x2470, 2975, Apsk8p8), (0x2478, 2892, Apsk8p8),
         (0x2490, 2550, Apsk8p8), (0x2498, 2494, Apsk8p8), (0x24A0, 2441, Apsk8p8),
         (0x2698, 3653, Apsk8p8), (0x4CE0, 3916, Apsk8p8), (0x4CF0, 3621, Apsk8p8),
         (0x4EE0, 4923, Apsk8p8), (0x4EE8, 4797, Apsk8p8), (0x4EF0, 4720, Apsk8p8),
-        (0x50D8, 5862, Apsk8p8), (0x50E0, 5739, Apsk8p8), (0x50F8, 5606, Psk8),
-        (0x52C8, 6758, Apsk8p8), (0x52E0, 6580, Psk8), (0x7AC0, 6312, Apsk8p8),
+        (0x50D8, 5862, Apsk8p8), (0x50E0, 5739, Apsk8p8), (0x50F8, 5606, Unknown),
+        (0x52C8, 6758, Apsk8p8), (0x52E0, 6580, Unknown), (0x7AC0, 6312, Apsk8p8),
         (0x7AC8, 6178, Apsk8p8), (0x7CB0, 7253, Apsk8p8), (0x7CB8, 7090, Apsk8p8),
         (0x7E8C, 8586, Apsk8p8), (0x7E94, 8145, Apsk8p8), (0x7E9C, 7985, Apsk8p8),
         (0x806C, 9450, Apsk8p8), (0x8074, 8987, Apsk8p8), (0x8230, 11028, Apsk8p8),
