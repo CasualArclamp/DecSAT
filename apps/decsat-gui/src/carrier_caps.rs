@@ -38,6 +38,7 @@ pub fn model_tag(k: DecoderKind) -> Option<&'static str> {
         DecoderKind::Dvbs2Ip => "DVB-S2 IP",
         DecoderKind::Dvbs2Ts => "DVB-S2 TS",
         DecoderKind::DvbsTs => "DVB-S",
+        DecoderKind::Is19Outbound => "IS-19 outbound",
         _ => return None,
     })
 }
@@ -121,6 +122,14 @@ impl Caps {
 /// DVB-S2 carrier once frames decode, a DVB-S one once its code rate is
 /// found.
 fn modem(s: &VfoSettings, st: &VfoStatus) -> Option<DecoderKind> {
+    // The Intelsat 19 outbound, once its frames are found.
+    if s.decoder == DecoderKind::Is19Outbound {
+        return st
+            .is19
+            .as_ref()
+            .is_some_and(|v| v.stats.framer.frames > 0)
+            .then_some(DecoderKind::Is19Outbound);
+    }
     let f = st.fec.as_ref()?;
     match s.decoder {
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => return (f.ok > 0).then_some(s.decoder),

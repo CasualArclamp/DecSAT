@@ -71,8 +71,9 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "cid" | "carrier-id" => DecoderKind::CarrierId,
         "psk" => DecoderKind::PskSymbols,
         "tdma" => DecoderKind::Tdma,
+        "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19)"
         ),
     })
 }
@@ -358,6 +359,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(t) = &st.tdma {
         print_tdma(t);
+    }
+    if let Some(v) = &st.is19 {
+        print_is19(v);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text};
@@ -1035,6 +1039,42 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
 }
 
 /// A TDMA VFO's carriers: their bursts, layout, slot grid and terminals.
+/// The Intelsat 19 outbound: its frames, what its packets were, and the
+/// call signalling in time order.
+pub(crate) fn print_is19(v: &decsat_modem::is19::OutboundView) {
+    use decsat_modem::is19::PacketKind;
+    let s = &v.stats;
+    let f = &s.framer;
+    println!(
+        "is19 outbound: {} frames ({:.1} s), {} sync words missed, {} acquisitions, {} sub-frames read across carrier slips, {} dropped, load {:.0} %",
+        f.frames,
+        s.seconds,
+        f.uw_misses,
+        f.acquisitions,
+        f.slips_repaired,
+        f.bad_subframes,
+        100.0 * s.load()
+    );
+    let kinds: Vec<String> = PacketKind::ALL
+        .iter()
+        .filter(|&&k| s.count(k) > 0)
+        .map(|&k| format!("{} {}", k.name(), s.count(k)))
+        .collect();
+    println!("  packets: {}", kinds.join(" · "));
+    if s.seconds > 0.0 {
+        println!(
+            "  traffic {:.1} kbit/s",
+            s.traffic_bits as f64 / s.seconds / 1e3
+        );
+    }
+    if !v.events.is_empty() {
+        println!("  call signalling (time from the start, s):");
+        for e in &v.events {
+            println!("    {:8.3}  {}", e.t_s, e.describe());
+        }
+    }
+}
+
 pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
     for (i, c) in v.channels.iter().enumerate() {
         println!(

@@ -20,6 +20,8 @@
 //!   they carry on PH-ML.
 //! - [`asterix`]: the other radar feeds' ASTERIX; [`mode_s`]: the Mode S
 //!   registers (selected altitude, air data) their reports carry.
+//! - [`is19`]: the 102.4 kBd outbounds of a DAMA telephony network on
+//!   Intelsat 19 — frames, descrambling, packets, call signalling.
 
 pub mod aptx;
 pub mod asterix;
@@ -37,6 +39,7 @@ pub mod g728;
 pub mod ibs;
 pub mod ibssync;
 pub mod interleave;
+pub mod is19;
 pub mod mode_s;
 pub mod mpa;
 pub mod paradise;

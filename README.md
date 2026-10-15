@@ -67,6 +67,7 @@ real carriers stay put.
 | **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
 | **Generic PSK/APSK/QAM → symbols** (`.bin`, one byte per symbol), BPSK…32APSK and 8/16/64QAM, for non-DVB carriers; on BPSK and QPSK it looks for a convolutional code meanwhile (as the Viterbi decoder does, given up after a while) and decodes what it finds through the payload search — or says there is none (*a block code or uncoded*) | ✅ |
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
+| **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -520,6 +521,41 @@ symbols every 30, slots of 0.6089–0.8102 ms, 125 ms frames each closed by a
 decsat decode capture_20Msps.cs8 --decoder tdma --offset -4.27e6 --bandwidth 5.3e6 --out dir
 ```
 
+### Intelsat 19 DAMA outbound
+
+Around 12 335 MHz on Intelsat 19 sits a DAMA telephony network: two
+outbounds of 102.4 kBd, the slow 16-carrier TDMA return beside them, and,
+above, the calls — pairs of 5.1 kBd channels that come up for a call and
+go again. Drop a VFO on an outbound (about 125 kHz wide) and choose
+**IS-19 DAMA outbound**:
+
+- the carrier is centred and locked as QPSK at 102.4 kBd (a blind look
+  reads it BPSK: its pilots, one every 16 symbols, put lines in its squared
+  spectrum);
+- **frames** (40 112 symbols, 0.39 s) are found by their 176-symbol sync
+  word and read the right way up; once a clean frame has taught the
+  pilots' signs, a 90° carrier slip part-way through a frame is put right;
+- each frame's 52 × 960 information bits are **descrambled**
+  (1 + x² + x⁸ + x¹³ + x¹⁶, restarted every frame) into one packet stream,
+  idle fill between packets; the card shows the load (about three
+  quarters), the 275-byte traffic packets and the rest by type;
+- **call signalling**: a *request ack* ~0.37 s after a terminal's request
+  burst on the call channels (with a field that names the terminal), a
+  *channel assignment* ~0.42 s before a call's carriers key up — one on each
+  outbound, so a VFO on each sees both ends. Newest first, the packet's hex
+  on hover; times are seconds since the decoder started.
+
+**● Record** writes every packet, one a line (time, kind, type, length,
+terminal field, hex), to `decsat-<VFO>-<RF>MHz-is19-<time>.csv`. What the
+packets say inside is not decoded (their fields are coded further), nor is
+the rate-⅔ code (the information bits are clean enough as sent), nor the
+calls' voice, which is encrypted. The decoder was worked out from one
+recording; how it was found is in `docs/STATUS.md` (2026-10-15).
+
+```bash
+decsat decode capture_4Msps.cs8 --decoder is19 --offset -803.8e3 --bandwidth 125e3 --out dir
+```
+
 ### Generic PSK → symbols
 
 For carriers that are not DVB-S2 — SCPC data, telemetry, DVB-S — a VFO locks
@@ -731,6 +767,7 @@ decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   #
 decsat decode capture_8Msps.cs8 --decoder ip --offset -1.2e6 --bbframes s2.bbf   # a DVB-S2 carrier, its good BBFRAMEs kept
 decsat decode capture_8Msps.cs8 --decoder auto --offset 3.3e6 --bandwidth 60e3   # a Comtech CDM carrier: the type found, the model from its data
 decsat decode capture_20Msps.cs8 --decoder tdma --offset -4.27e6 --bandwidth 5.3e6 --out dir   # a TDMA group: layout, slots, frame, terminals; bursts to a file
+decsat decode capture_4Msps.cs8 --decoder is19 --offset -803.8e3 --bandwidth 125e3 --out dir   # an Intelsat 19 DAMA outbound: packets, call signalling; packets to a .csv
 decsat payload trunk.bin --frame-bits 2223 --bit-rate 1024000 --voice-out voice.wav --radar-out tracks.csv --hdlc-out frames.txt
 decsat decode --hackrf 1748 --rate 4000000 --decoder tpc --offset -915e3 --bandwidth 640e3 --wireshark   # a modem's IP live in Wireshark
 decsat pcap recording.pcap --csv points.csv   # a recorded PCAP read back

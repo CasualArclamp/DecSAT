@@ -914,6 +914,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         cid_card(ui, c);
     }
 
+    if v.settings.decoder == DecoderKind::Is19Outbound
+        && let Some(o) = &st.is19
+    {
+        is19_card(ui, o, v.id);
+    }
+
     if v.settings.decoder == DecoderKind::Tdma
         && let Some(t) = &st.tdma
     {
@@ -1912,6 +1918,133 @@ fn payload_rows(ui: &mut Ui, f: Option<&FecStats>) {
 }
 
 /// A DVB-CID VFO: the despreader, and what the identifier says.
+/// The Intelsat 19 outbound: its frames and load, what its packets are,
+/// and the call signalling as it comes (newest first).
+fn is19_card(ui: &mut Ui, o: &decsat_engine::is19::OutboundView, id: VfoId) {
+    use decsat_engine::is19::{self, PacketKind};
+    let good = Color32::from_rgb(110, 220, 110);
+    let wait = Color32::from_rgb(240, 200, 80);
+    let s = &o.stats;
+    let f = &s.framer;
+    ui.add_space(6.0);
+    ui.label(RichText::new("Intelsat 19 DAMA outbound (102.4 kBd QPSK)").strong())
+        .on_hover_text(
+            "Measured on a recording, vendor unknown: 40 112-symbol frames (0.392 s) opening \
+             with a 176-symbol sync word, a pilot every 16 symbols, 52 sub-frames of 960 \
+             information bits (a rate-⅔ code, not decoded), scrambled with \
+             1 + x² + x⁸ + x¹³ + x¹⁶; packets between runs of fill. What the packets mean \
+             comes from their timing against the calls' carriers.",
+        );
+    egui::Grid::new(("is19", id)).num_columns(2).show(ui, |ui| {
+        ui.label("Frames");
+        if f.frames == 0 {
+            ui.colored_label(wait, "looking for the sync word…");
+        } else {
+            ui.colored_label(
+                if f.locked { good } else { wait },
+                format!(
+                    "{} · {} sync words missed · {} sub-frames read across slips · {} dropped",
+                    f.frames, f.uw_misses, f.slips_repaired, f.bad_subframes
+                ),
+            )
+            .on_hover_text(
+                "The pilots' signs are the same every frame: learnt once, they give each \
+                 sub-frame its orientation, so a 90° carrier slip part-way through a frame \
+                 is put right. A sub-frame whose pilots fit no orientation (interference, \
+                 or the slip itself) is dropped.",
+            );
+        }
+        ui.end_row();
+        if f.frames > 0 {
+            ui.label("Load");
+            let capacity = is19::FRAME_INFO_BITS as f64 / is19::FRAME_SECONDS;
+            ui.label(format!(
+                "{:.0} % of {} (the rest idle fill)",
+                100.0 * s.load(),
+                format::bitrate(capacity)
+            ));
+            ui.end_row();
+            ui.label("Traffic");
+            ui.label(format!(
+                "{} packets of 275 bytes · {}",
+                s.count(PacketKind::Traffic),
+                format::bitrate(s.traffic_bits as f64 / s.seconds.max(1e-9))
+            ));
+            ui.end_row();
+            ui.label("Other packets");
+            let others: Vec<String> = PacketKind::ALL
+                .iter()
+                .filter(|&&k| k != PacketKind::Traffic && s.count(k) > 0)
+                .map(|&k| format!("{} {}", k.name(), s.count(k)))
+                .collect();
+            ui.label(if others.is_empty() {
+                "none yet".to_string()
+            } else {
+                others.join(" · ")
+            });
+            ui.end_row();
+        }
+    });
+    if f.frames == 0 {
+        return;
+    }
+    ui.add_space(4.0);
+    ui.label(RichText::new("Call signalling").strong())
+        .on_hover_text(
+            "A request ack goes out ~0.37 s after a terminal's request burst on the call \
+         channels; an assignment ~0.42 s before a call's two carriers key up (one on \
+         each outbound). Times: seconds since the decoder started.",
+        );
+    if o.events.is_empty() {
+        ui.label(RichText::new("none yet").weak());
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt(("is19_events", id))
+            .max_height(220.0)
+            .show(ui, |ui| {
+                egui::Grid::new(("is19_events_grid", id))
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for e in o.events.iter().rev() {
+                            ui.label(RichText::new(format!("{:.2} s", e.t_s)).monospace());
+                            let colour = if e.kind == PacketKind::Assignment {
+                                good
+                            } else {
+                                wait
+                            };
+                            ui.colored_label(colour, e.describe())
+                                .on_hover_text(RichText::new(&e.hex).monospace());
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+    egui::CollapsingHeader::new("Recent control packets")
+        .id_salt(("is19_recent", id))
+        .show(ui, |ui| {
+            egui::Grid::new(("is19_recent_grid", id))
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for p in o.recent.iter().rev() {
+                        ui.label(RichText::new(format!("{:.2} s", p.t_s)).monospace());
+                        ui.label(p.kind.name());
+                        ui.label(format!(
+                            "{} · {} B",
+                            p.type_code.map_or("?".into(), |t| format!("{t:02X}h")),
+                            p.bytes()
+                        ));
+                        let hex = p.hex();
+                        let short: String = hex.chars().take(48).collect();
+                        ui.label(RichText::new(short).monospace().small())
+                            .on_hover_text(RichText::new(hex).monospace());
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn cid_card(ui: &mut Ui, c: &decsat_engine::CidView) {
     use decsat_engine::cid;
     let good = Color32::from_rgb(110, 220, 110);

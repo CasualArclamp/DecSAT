@@ -397,6 +397,20 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             },
             None => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "I19 3 calls · 74 %": assignments seen, and the load.
+        DecoderKind::Is19Outbound => match (&st.is19, &st.carrier) {
+            (Some(v), _) if v.stats.framer.frames > 0 => {
+                use decsat_engine::is19::PacketKind;
+                format!(
+                    "I19 {} calls · {:.0} %{}",
+                    v.stats.count(PacketKind::Assignment),
+                    100.0 * v.stats.load(),
+                    if st.recording_active { " ● REC" } else { "" }
+                )
+            }
+            (_, Some(c)) => format!("I19 {} · sync?", if c.locked { "LOCK" } else { "no lock" }),
+            _ => format!("acq {:.0} %", st.progress * 100.0),
+        },
         DecoderKind::PskSymbols => match &st.carrier {
             Some(c) => {
                 let lock = if c.locked { "LOCK" } else { "no lock" };

@@ -75,6 +75,11 @@ pub enum DecoderKind {
     /// host carrier — the uplink modulator's unique ID, position, telephone
     /// and text.
     CarrierId,
+    /// An outbound of the DAMA telephony network on Intelsat 19 (102.4 kBd
+    /// QPSK, measured — [`decsat_modem::is19`]): frames, descrambling and
+    /// the packet stream, with the call signalling (request acks, channel
+    /// assignments) picked out.
+    Is19Outbound,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -92,7 +97,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 16] = [
+    pub const ALL: [DecoderKind; 17] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -105,6 +110,7 @@ impl DecoderKind {
         DecoderKind::FastLink,
         DecoderKind::Viterbi,
         DecoderKind::CarrierId,
+        DecoderKind::Is19Outbound,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::IqRecord,
@@ -125,6 +131,9 @@ impl DecoderKind {
             DecoderKind::FastLink => "Q-Flex FastLink (QPSK 0.710) → data",
             DecoderKind::Viterbi => "Viterbi (K=7 any rate, or a code found blind) → data",
             DecoderKind::CarrierId => "Carrier ID (DVB-CID)",
+            DecoderKind::Is19Outbound => {
+                "IS-19 DAMA outbound (102.4 kBd) → packets, call signalling"
+            }
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::IqRecord => "IQ recorder",
@@ -148,6 +157,7 @@ impl DecoderKind {
             DecoderKind::FastLink => "fastlink",
             DecoderKind::Viterbi => "viterbi",
             DecoderKind::CarrierId => "carrier-id",
+            DecoderKind::Is19Outbound => "is19-outbound",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::IqRecord => "iq-record",
@@ -252,6 +262,7 @@ impl DecoderKind {
                 | DecoderKind::FastLink
                 | DecoderKind::Viterbi
                 | DecoderKind::PskSymbols
+                | DecoderKind::Is19Outbound
         )
     }
 
@@ -269,6 +280,7 @@ impl DecoderKind {
             DecoderKind::FastLink => "FL",
             DecoderKind::Viterbi => "VIT",
             DecoderKind::CarrierId => "CID",
+            DecoderKind::Is19Outbound => "I19",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::IqRecord => "REC",
@@ -535,6 +547,8 @@ pub struct VfoStatus {
     pub cid: Option<crate::cid::CidView>,
     /// TDMA: the carriers, their bursts, layouts, slots and terminals.
     pub tdma: Option<crate::tdma::TdmaView>,
+    /// The Intelsat 19 DAMA outbound: frames, packets, call signalling.
+    pub is19: Option<decsat_modem::is19::OutboundView>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -833,6 +847,14 @@ enum Decoder {
     },
     /// TDMA: the analyser runs on the VFO's baseband from the start.
     Tdma(Box<crate::tdma::TdmaAnalyser>),
+    /// The Intelsat 19 DAMA outbound: Identify's first look centres the
+    /// carrier, then QPSK at the measured rate into the framer.
+    Is19 {
+        buf: Vec<Iq>,
+        demod: Option<Box<PskDemod>>,
+        rx: Option<Box<decsat_modem::is19::OutboundRx>>,
+        file: Is19File,
+    },
     Psk {
         buf: Vec<Iq>,
         demod: Option<Box<PskDemod>>,
@@ -987,6 +1009,8 @@ struct Worker {
     bb: Vec<Iq>,
     frames: Vec<crate::demod::PlFrame>,
     syms: Vec<(u8, Iq)>,
+    /// The soft symbols alone, for decoders that take no labels.
+    soft: Vec<Iq>,
     sym_bytes: Vec<u8>,
     modcods: BTreeMap<u8, u64>,
     last_modcod: Option<u8>,
@@ -1059,6 +1083,7 @@ impl Worker {
             bb: Vec::new(),
             frames: Vec::new(),
             syms: Vec::new(),
+            soft: Vec::new(),
             sym_bytes: Vec::new(),
             modcods: BTreeMap::new(),
             last_modcod: None,
@@ -1122,6 +1147,12 @@ impl Worker {
             DecoderKind::CarrierId => Decoder::Cid {
                 buf: Vec::new(),
                 worker: None,
+            },
+            DecoderKind::Is19Outbound => Decoder::Is19 {
+                buf: Vec::new(),
+                demod: None,
+                rx: None,
+                file: Is19File::default(),
             },
             DecoderKind::Tdma => Decoder::Tdma(Box::new(crate::tdma::TdmaAnalyser::new(
                 ddc.out_rate(),
@@ -1229,7 +1260,9 @@ impl Worker {
             Decoder::Dvbs2 { demod: Some(d), .. } if d.carrier_locked() => {
                 (d.carrier_offset_hz(), d.symbol_rate())
             }
-            Decoder::Modem { demod: Some(d), .. } | Decoder::Psk { demod: Some(d), .. }
+            Decoder::Modem { demod: Some(d), .. }
+            | Decoder::Psk { demod: Some(d), .. }
+            | Decoder::Is19 { demod: Some(d), .. }
                 if d.locked() =>
             {
                 (d.carrier_offset_hz(), d.symbol_rate())
@@ -1247,9 +1280,9 @@ impl Worker {
         self.ddc.set_offset(to);
         match &mut self.decoder {
             Decoder::Dvbs2 { demod: Some(d), .. } => d.retune_hz(f),
-            Decoder::Modem { demod: Some(d), .. } | Decoder::Psk { demod: Some(d), .. } => {
-                d.retune_hz(f)
-            }
+            Decoder::Modem { demod: Some(d), .. }
+            | Decoder::Psk { demod: Some(d), .. }
+            | Decoder::Is19 { demod: Some(d), .. } => d.retune_hz(f),
             _ => {}
         }
         self.followed += f;
@@ -1354,6 +1387,16 @@ impl Worker {
             }
             // Closes (and flushes) the burst files.
             Decoder::Tdma(mut a) => a.set_recording(false, &self.settings.record_dir, ""),
+            Decoder::Is19 {
+                file:
+                    Is19File {
+                        writer: Some(mut w),
+                        ..
+                    },
+                ..
+            } => {
+                let _ = w.flush();
+            }
             _ => {}
         }
     }
@@ -1687,6 +1730,64 @@ impl Worker {
                     }
                 }
             },
+            Decoder::Is19 {
+                buf,
+                demod,
+                rx,
+                file,
+            } => {
+                let mut packets = Vec::new();
+                match (demod.as_mut(), rx.as_mut()) {
+                    (Some(d), Some(r)) => {
+                        self.syms.clear();
+                        d.process(&self.bb, &mut self.syms);
+                        self.soft.clear();
+                        self.soft.extend(self.syms.iter().map(|&(_, s)| s));
+                        r.push(&self.soft, &mut packets);
+                    }
+                    _ => {
+                        buf.extend_from_slice(&self.bb);
+                        if buf.len() >= first_look(out_rate) {
+                            let id = identify_in(buf, out_rate, Some(self.settings.bandwidth_hz));
+                            let rs = self
+                                .settings
+                                .symbol_rate
+                                .unwrap_or(decsat_modem::is19::SYMBOL_RATE);
+                            if !matches!(id.verdict, Verdict::NoSignal) && out_rate / rs >= 2.0 {
+                                let mut shifted = std::mem::take(buf);
+                                shift(&mut shifted, out_rate, id.center_offset_hz);
+                                self.ddc
+                                    .set_offset(self.settings.offset_hz + id.center_offset_hz);
+                                // The carrier's residual offset from the
+                                // fourth-power line: Identify, seeing the
+                                // pilots' squared lines, can take it for BPSK
+                                // and measure it wrong.
+                                let seed = qpsk_offset_hz(&shifted, out_rate, rs) / rs;
+                                let mut d = Box::new(PskDemod::new(
+                                    out_rate,
+                                    rs,
+                                    decsat_modem::is19::ROLL_OFF,
+                                    decsat_core::Modulation::Qpsk,
+                                    seed,
+                                ));
+                                let mut r = Box::new(decsat_modem::is19::OutboundRx::new(0.0, rs));
+                                self.syms.clear();
+                                d.process(&shifted, &mut self.syms);
+                                self.soft.clear();
+                                self.soft.extend(self.syms.iter().map(|&(_, s)| s));
+                                r.push(&self.soft, &mut packets);
+                                *demod = Some(d);
+                                *rx = Some(r);
+                            } else {
+                                buf.clear();
+                            }
+                            self.identification = Some(id);
+                        }
+                    }
+                }
+                file.follow(&self.settings, self.ddc.offset_hz());
+                file.write(&packets);
+            }
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
                 let tag = format!(
@@ -1851,6 +1952,7 @@ impl Worker {
         st.carrier = None;
         st.fec = None;
         st.tdma = None;
+        st.is19 = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2099,6 +2201,54 @@ impl Worker {
                 st.symbol_rate = v.channels.first().map(|c| c.symbol_rate);
                 st.tdma = Some(v);
             }
+            Decoder::Is19 {
+                buf,
+                demod,
+                rx,
+                file,
+            } => match (demod, rx) {
+                (Some(d), Some(r)) => {
+                    st.symbol_rate = Some(d.symbol_rate());
+                    st.scatter = d.recent();
+                    let carrier = CarrierState {
+                        locked: d.locked(),
+                        mer_db: d.mer_db(),
+                        offset_hz: d.carrier_offset_hz(),
+                        modulation: d.modulation(),
+                        // 52 × 960 information bits a frame of 40 112
+                        // symbols (the code, sync word and pilots on top).
+                        info_bits: Some(
+                            decsat_modem::is19::FRAME_INFO_BITS as f32
+                                / decsat_modem::is19::FRAME_SYMBOLS as f32,
+                        ),
+                        bursts: d.blanked().0,
+                    };
+                    st.carrier = Some(carrier);
+                    let v = r.view();
+                    st.frames = v.stats.framer.frames;
+                    st.lock_losses = v.stats.framer.acquisitions.saturating_sub(1);
+                    if let Some(p) = &file.path {
+                        st.recording = Some((p.clone(), file.written));
+                    }
+                    st.recording_active = file.writer.is_some();
+                    let lock = format!(
+                        "QPSK {}, {}",
+                        if d.locked() { "locked" } else { "not locked" },
+                        carrier.snr_text()
+                    );
+                    st.message = is19_message(&lock, &v, file);
+                    st.is19 = Some(v);
+                }
+                _ => {
+                    st.progress = buf.len() as f32 / first_look(out_rate) as f32;
+                    st.message = match &self.identification {
+                        Some(id) if matches!(id.verdict, Verdict::NoSignal) => {
+                            "no signal in this VFO".into()
+                        }
+                        _ => "acquiring: centring the carrier…".into(),
+                    };
+                }
+            },
             Decoder::Psk {
                 buf,
                 demod,
@@ -2282,6 +2432,112 @@ fn fastlink_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         t.codewords,
         t.failed,
         t.channel_ber()
+    )
+}
+
+/// The Intelsat 19 outbound's packet file, written while Record is on: one
+/// line a packet (time, kind, type, length, terminal field, hex).
+#[derive(Default)]
+struct Is19File {
+    writer: Option<BufWriter<File>>,
+    path: Option<PathBuf>,
+    /// Packets written.
+    written: u64,
+    open_failed: bool,
+}
+
+impl Is19File {
+    /// Open or close the file as the Record switch says.
+    fn follow(&mut self, settings: &VfoSettings, carrier_hz: f64) {
+        match (settings.record, self.writer.is_some()) {
+            (true, false) if !self.open_failed => {
+                let p = settings.record_dir.join(format!(
+                    "decsat-{}-{}-is19-{}.csv",
+                    settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(carrier_hz),
+                    unix_stamp()
+                ));
+                match File::create(&p) {
+                    Ok(f) => {
+                        let mut w = BufWriter::new(f);
+                        let _ = writeln!(w, "t_s,kind,type,bytes,tag,hex");
+                        self.writer = Some(w);
+                        self.written = 0;
+                    }
+                    Err(_) => self.open_failed = true,
+                }
+                self.path = Some(p);
+            }
+            (false, true) => {
+                if let Some(mut w) = self.writer.take() {
+                    let _ = w.flush();
+                }
+            }
+            (false, false) => self.open_failed = false,
+            _ => {}
+        }
+    }
+
+    fn write(&mut self, packets: &[decsat_modem::is19::Packet]) {
+        let Some(w) = self.writer.as_mut() else {
+            return;
+        };
+        for p in packets {
+            let ok = writeln!(
+                w,
+                "{:.4},{},{},{},{},{}",
+                p.t_s,
+                p.kind.name(),
+                p.type_code.map_or(String::new(), |t| format!("{t:02x}")),
+                p.bytes(),
+                p.tag.map_or(String::new(), |t| format!("{t:08x}")),
+                p.hex()
+            );
+            if ok.is_err() {
+                self.writer = None;
+                self.open_failed = true;
+                return;
+            }
+            self.written += 1;
+        }
+    }
+}
+
+/// A QPSK carrier's offset from DC, Hz, from the line its fourth power puts
+/// at four times it (searched over a tenth of the symbol rate either side).
+fn qpsk_offset_hz(x: &[Iq], rate: f64, rs: f64) -> f64 {
+    let p4: Vec<Iq> = x
+        .iter()
+        .map(|s| {
+            let s2 = s * s;
+            s2 * s2
+        })
+        .collect();
+    let span = 4.0 * 0.1 * rs;
+    crate::identify::strongest_line(&p4, rate, -span, span).map_or(0.0, |(f, _)| f / 4.0)
+}
+
+/// An Intelsat 19 outbound VFO's status line.
+fn is19_message(lock: &str, v: &decsat_modem::is19::OutboundView, file: &Is19File) -> String {
+    use decsat_modem::is19::PacketKind;
+    let s = &v.stats;
+    if s.framer.frames == 0 {
+        return format!("{lock} · looking for the frame sync word");
+    }
+    let calls = s.count(PacketKind::Assignment);
+    let rec = match (&file.path, file.writer.is_some(), file.open_failed) {
+        (Some(p), _, true) => format!(" — cannot write {}", p.display()),
+        (_, true, _) => format!(" — recording, {} packets", file.written),
+        _ => String::new(),
+    };
+    format!(
+        "{lock} · {} frames · load {:.0} % · {} traffic packets · {} request acks · {} assignments{}{rec}",
+        s.framer.frames,
+        100.0 * s.load(),
+        s.count(PacketKind::Traffic),
+        s.count(PacketKind::RequestAck),
+        calls,
+        if s.framer.locked { "" } else { " · sync lost" },
     )
 }
 
@@ -3600,6 +3856,97 @@ mod tests {
                 .iter()
                 .any(|a| a.group == "239.1.2.4".parse::<std::net::IpAddr>().unwrap())
         );
+    }
+
+    /// An Intelsat 19 outbound, 102.4 kBd at 30 kHz in a 409.6 kS/s band,
+    /// tuned in mid-frame: traffic, then a request ack and the channel
+    /// assignment after it (packets as received on the air) — the VFO
+    /// frames it and names the call signalling.
+    #[test]
+    fn reads_an_is19_outbound_and_its_call_signalling() {
+        use decsat_mod::Shaper;
+        use decsat_modem::is19::{self, PacketKind};
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut bit = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 40) as u8 & 1
+        };
+        let traffic = |bit: &mut dyn FnMut() -> u8| {
+            let mut b = is19::hex_bits("aaa3d15555555555");
+            while b.len() < 275 * 8 {
+                b.push(bit());
+            }
+            b
+        };
+        let mut pk = Vec::new();
+        for i in 0..30 {
+            pk.push((200 + 31 * i, 3, traffic(&mut bit)));
+            if i == 20 {
+                pk.push((300, 5, is19::hex_bits("aa9955495406b4a3d551c5faaa")));
+                pk.push((
+                    40,
+                    2,
+                    is19::hex_bits(
+                        "5550baa92a82d697c9fc5b81e0cc5ac6f51f568ca842ab8982aaa8eaaaaaaaaaaaa9ab1aaba9576755",
+                    ),
+                ));
+            }
+        }
+        let frames = 5;
+        let stream = is19::stream_with(&pk, frames * is19::FRAME_INFO_BITS);
+        let pilots: Vec<bool> = (0..2496).map(|_| bit() == 1).collect();
+        let mut syms = Vec::new();
+        for f in 0..frames {
+            let info = &stream[f * is19::FRAME_INFO_BITS..(f + 1) * is19::FRAME_INFO_BITS];
+            syms.extend(is19::build_frame(info, &mut bit, &pilots, f % 2 == 1));
+        }
+        let mut sh = Shaper::new(4, is19::ROLL_OFF, 16);
+        let mut sig = Vec::new();
+        sh.process(&syms[7_000..], &mut sig);
+        let w = std::f64::consts::TAU * 30_000.0 / 409_600.0;
+        let mut u = 0x9E37_79B9_7F4A_7C15u64;
+        let mut uniform = move || {
+            u ^= u << 13;
+            u ^= u >> 7;
+            u ^= u << 17;
+            (u >> 11) as f32 / (1u64 << 53) as f32 - 0.5
+        };
+        for (n, v) in sig.iter_mut().enumerate() {
+            let ph = w * n as f64 + 1.1;
+            *v = *v * Iq::new(ph.cos() as f32, ph.sin() as f32)
+                + Iq::new(uniform(), uniform()) * 0.06;
+        }
+        let settings = VfoSettings::new("O", 30_000.0, 125_000.0, DecoderKind::Is19Outbound);
+        let status = Arc::new(Mutex::new(VfoStatus::default()));
+        let mut wk = Worker::new(
+            409_600.0,
+            settings,
+            status.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        feed(&mut wk, &sig, 32_768);
+        let st = status.lock().unwrap();
+        let v = st
+            .is19
+            .clone()
+            .unwrap_or_else(|| panic!("no outbound view: {}", st.message));
+        let f = &v.stats.framer;
+        // Joined mid-frame: the frames after the first sync word found.
+        assert!(f.frames >= 3, "{f:?} / {}", st.message);
+        assert_eq!(f.uw_misses, 0, "{f:?}");
+        assert!(v.stats.count(PacketKind::Traffic) >= 8, "{:?}", v.stats);
+        let kinds: Vec<PacketKind> = v.events.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [PacketKind::RequestAck, PacketKind::Assignment],
+            "{}",
+            st.message
+        );
+        assert_eq!(v.events[0].tag, Some(0x4954_06b4));
+        assert_eq!(v.events[0].assigned, Some(true));
+        assert!(st.carrier.is_some_and(|c| c.locked && c.mer_db > 12.0));
     }
 
     /// A TPC 2964 QPSK carrier, 125 kBd at 40 kHz in a 500 kS/s band,

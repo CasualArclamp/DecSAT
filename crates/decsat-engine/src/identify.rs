@@ -429,7 +429,7 @@ fn pow2_floor(n: usize, cap: usize) -> usize {
 /// Find the strongest spectral line of `seq` (already a real-or-complex
 /// sequence) within `[lo_hz, hi_hz]`, by FFT. Returns (frequency, peak-to-median
 /// power ratio in dB). Frequencies may be negative; the FFT is complex.
-fn strongest_line(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64) -> Option<(f64, f32)> {
+pub(crate) fn strongest_line(seq: &[Iq], rate: f64, lo_hz: f64, hi_hz: f64) -> Option<(f64, f32)> {
     line_in(seq, rate, lo_hz, hi_hz, false)
 }
 

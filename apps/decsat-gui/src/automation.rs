@@ -131,7 +131,7 @@ impl Options {
                     for name in v.split(',') {
                         o.decoders.push(decoder_by_name(name.trim()).ok_or(
                             "--decoder takes id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, \
-                             viterbi, cid, psk, tdma, rec or spec (or a comma-separated list of them, \
+                             viterbi, cid, psk, tdma, is19, rec or spec (or a comma-separated list of them, \
                              one a claimed carrier)",
                         )?);
                     }
@@ -189,6 +189,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "cid" | "carrier-id" => CarrierId,
         "psk" => PskSymbols,
         "tdma" => Tdma,
+        "is19" | "is19-outbound" | "i19" => Is19Outbound,
         "rec" | "iq" => IqRecord,
         "spec" | "spectrum" => Spectrum,
         _ => return None,

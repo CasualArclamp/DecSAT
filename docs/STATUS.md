@@ -4239,3 +4239,95 @@ frames in 4.4 s, none missing. Decoded: a programme feed (speech/music to
 - The programme stage takes the frames as they are: the player decodes
   them (Symphonia), the recorder keeps them (`.mp2`); same *Programme audio*
   card, ▶ ●; CLI `--programme-record` writes the `.mp2`.
+
+## Intelsat 19: a DAMA telephony network, its outbounds decoded to the call signalling (2026-10-15)
+
+Rory, watching the 12 335 MHz neighbourhood on Intelsat 19 with activity on
+it: "can you see what is on these tiny carriers", "maybe the ones on the left
+are outbound", then "crack the call carriers", "decode the 102.4k outbounds'
+framing", "build the IS-19 outbound decoder into DecSAT". Recorded 180 s at
+HackRF 1735.9 MHz, 4 MS/s, LNA 32 (scratchpad, not kept).
+
+What the band holds (GUI RF, LNB 10 599.955 MHz effective):
+
+- **Two outbounds**, ~12 335.05 and ~12 335.17 GHz: QPSK 102.4 kBd with a
+  BPSK pilot every 16 symbols (its squared-spectrum lines 6400 Hz apart made
+  Identify call it BPSK, and a demodulator told so would not lock).
+- **The slow TDMA group** (16 × 6.4 kBd, see above): frame 2.0005 s, not
+  locked to the outbounds' 0.391 72 s frame; channels 0–5 every frame,
+  8–17 about 60 %, 6–7 unused. Not tied to the calls.
+- **DAMA call channels** above it ("the lump"): 5133.33 Bd QPSK (154
+  symbols per 30 ms), 6.16 kHz apart; two always on; each call an adjacent
+  pair. A ~70 ms request burst on a grid channel just below, the pair keys
+  up 0.82 s later — the caller three pulses then steady, the far end a pulse
+  every 1.125 s (ringing) until it answers — hang-up pulses and a release
+  burst at the end. Seven calls in 3 min (one rang 45 s unanswered).
+- **Call carriers' framing**: 30 ms frames = 9 × [pilot + 15 QPSK] + [pilot
+  + 9]: 288 bits = 9.6 kbit/s; pilot signs random; no sync word in voice
+  frames. Signalling blocks (setup/ringing/teardown only) in pairs 332
+  symbols apart every ~1.125 s: a 64-symbol BPSK header
+  `1100001000110000100011111011010110000010101100011001101000000111`, a
+  4-bit field, then the 32-symbol sequence the TDMA and outbound preambles
+  use, repeated. **Voice not decodable**: no convolutional code, no LFSR,
+  and on long calls every bit position unbiased over 2000+ frames — real
+  codec bits never are; encrypted or keystream-scrambled. (The ringing
+  side's payload repeats exactly every 150 frames.)
+
+The outbounds (`decsat-modem::is19`, all measured):
+
+- **Frame** 40 112 symbols = 2507 blocks of 16: a 176-symbol BPSK sync word
+  (`2c7ad385` ×4½ then `8fb59a07`, polarity alternating frame to frame — the
+  same 32-symbol sequence as the TDMA bursts' 176-symbol preamble: one
+  vendor), then 2496 × [pilot + 15 data]. The pilots' signs are the same
+  every frame.
+- **52 sub-frames of 1440 bits**, each a codeword of a linear code: rank of
+  the XOR of same-slot sub-frames saturating near 1037 with bit errors, 403
+  checks found and all holding on held-out blocks — 960 information bits +
+  480 parity (rate ⅔; not sparse, not decoded — the information bits are
+  read hard at 11–14 dB).
+- **Scrambler**: additive m-sequence 1 + x² + x⁸ + x¹³ + x¹⁶ over the frame's
+  52 × 960 information bits, restarted each frame (first bits
+  `1100111111011111`). Found from idle sub-frames repeating per slot: LC 31
+  each, 16 once two are added; each slot's sequence 960 bits on from the
+  last; both outbounds the same.
+- **Stream**: one packet stream, idle fill D554h (AAA6h as the packets
+  frame it); packets open with alternating bits then a 6-bit type. Mostly
+  type 1Eh, 275 bytes, ~35/s (traffic — the *same* traffic packets on both
+  outbounds at the same moments); 32h 12–13 B **request acks** ~0.37 s after
+  each request burst (bits 15–46 after the type differ by terminal: nine
+  seen); 0Bh ~41 B and 31h ~60 B **channel assignments** — 0.40–0.46 s
+  before every one of the seven calls' pairs keyed up, one of each on the two
+  outbounds (and at 84.1 s for the unanswered set-up); 3Fh every 2.004 s
+  (the TDMA bursts come 0.30/0.40 s after it), 28h ~1 s status, 26h every
+  1.06 s.
+
+Built:
+
+- `decsat-modem::is19`: `Framer` (sync-word search with sidelobe-proof
+  peak pick, tracking ±6 symbols, 3 misses to lose lock; per-frame
+  orientation from the fill until a clean frame teaches the pilots' signs,
+  then **each sub-frame's quarter turn from its pilots**, so a 90° carrier
+  slip mid-frame is put right rather than dropped), descrambler,
+  `PacketParser` (fill windows, any phase, ≤ 1 bit off; runs across
+  sub-frames and frames; a break drops the open packet), `PacketKind`,
+  call events (an assignment within 0.3 s of an ack marks it assigned),
+  `build_frame`/`stream_with` to make test signals. 7 tests, real packets as
+  vectors.
+- `DecoderKind::Is19Outbound` ("IS-19 DAMA outbound (102.4 kBd) → packets,
+  call signalling", key `is19-outbound`, CLI `--decoder is19`): first look
+  centres the carrier, the offset seed from the **fourth-power line** (not
+  Identify's, which can read it BPSK), `PskDemod` QPSK 102.4 kBd α 0.2,
+  follows the carrier. Status line, `VfoStatus::is19`; **● Record** writes
+  `decsat-<VFO>-<RF>-is19-<time>.csv` (time, kind, type, bytes, terminal
+  field, hex) of every packet. GUI card (frames, load, traffic, packet kinds,
+  call signalling newest first with hex on hover, recent control packets),
+  VFO label `I19 n calls · 74 %`, waterfall tag *IS-19 outbound* (a VFO
+  made on that carrier then picks the decoder). Engine test
+  `reads_an_is19_outbound_and_its_call_signalling`.
+- Checked on the recording: both outbounds 459 frames / 180 s, no sync word
+  missed, load 74 %, ~7400 traffic packets, every call event above at its
+  time (to the millisecond of the analysis); OB2 (11.5 dB) 51 sub-frames
+  read across slips, 1 dropped. GUI unattended run: card and tag as above.
+- Open: what the packets say (fields still 55h/AAh-heavy: another layer),
+  the rate-⅔ code (soft decoding would help OB2), times are seconds since
+  the decoder started (no wall clock), the call channels' voice (encrypted).
