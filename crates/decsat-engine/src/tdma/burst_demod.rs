@@ -41,6 +41,7 @@
 //!    symbols, then decision-directed phase tracking through the data;
 //! 5. max-log LLRs, the noise from the known symbols' residual.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use decsat_core::{CodeRate, FecFrame, Iq, Modulation};
@@ -51,8 +52,10 @@ use rustfft::{Fft, FftPlanner};
 /// The roll-off the bursts' spectra show.
 const ROLL_OFF: f64 = 0.05;
 
-/// How far round the plan's centre the first pass looks, Hz.
+/// How far round the plan's centre the first pass looks, Hz; and round a
+/// terminal's known offset.
 const WIDE_HZ: f64 = 40e3;
+const NARROW_HZ: f64 = 6e3;
 
 /// The preamble search, s round the nominal start: before it, and after.
 const SEARCH_BEFORE_S: f64 = 0.6e-3;
@@ -265,11 +268,14 @@ fn apsk_grid(cst: &Constellation) -> Vec<Iq> {
 /// An FFT size's forward and inverse plans.
 type Plans = (usize, Arc<dyn Fft<f32>>, Arc<dyn Fft<f32>>);
 
-/// Demodulates scheduled bursts; keeps its FFT plans between them.
+/// Demodulates scheduled bursts; keeps its FFT plans between them, and
+/// each terminal's carrier offset (so its next burst is looked for in a
+/// narrow band round it).
 pub struct BurstDemod {
     fs: f64,
     planner: FftPlanner<f32>,
     plans: Vec<Plans>,
+    offsets: HashMap<u16, f64>,
 }
 
 impl BurstDemod {
@@ -279,6 +285,7 @@ impl BurstDemod {
             fs: sample_rate,
             planner: FftPlanner::new(),
             plans: Vec::new(),
+            offsets: HashMap::new(),
         }
     }
 
@@ -319,9 +326,37 @@ impl BurstDemod {
             spectrum.resize(n_fft, Iq::new(0.0, 0.0));
             fwd.process(&mut spectrum);
         }
+        // Round the terminal's last offset first, if it has one; the wide
+        // look when that finds nothing good.
+        let known = self.offsets.get(&b.terminal).copied();
+        let mut res = self.attempt(&spectrum, n_fft, b, layout, &rates, known);
+        if known.is_some() && !res.as_ref().is_some_and(|r| r.ok) {
+            let wide = self.attempt(&spectrum, n_fft, b, layout, &rates, None);
+            let fit = |r: &Option<BurstResult>| r.as_ref().map_or(-1.0, |r| r.preamble_fit);
+            if fit(&wide) > fit(&res) {
+                res = wide;
+            }
+        }
+        if let Some(r) = res.as_ref().filter(|r| r.ok) {
+            self.offsets.insert(b.terminal, r.freq_offset_hz);
+        }
+        res
+    }
+
+    /// One try: the preamble at each rate (round `prior` when given), the
+    /// best few finished.
+    fn attempt(
+        &mut self,
+        spectrum: &[Iq],
+        n_fft: usize,
+        b: &ScheduledBurst,
+        layout: &Layout,
+        rates: &[f64],
+        prior: Option<f64>,
+    ) -> Option<BurstResult> {
         let mut found: Vec<(f64, Coarse)> = rates
             .iter()
-            .filter_map(|&rs| Some((rs, self.coarse(&spectrum, n_fft, b, rs, layout)?)))
+            .filter_map(|&rs| Some((rs, self.coarse(spectrum, n_fft, b, rs, layout, prior)?)))
             .collect();
         // The preamble alone barely tells neighbouring rates apart; the
         // fit over every known symbol (a few hundred symbols) does: the
@@ -330,7 +365,7 @@ impl BurstDemod {
         found.truncate(5);
         found
             .into_iter()
-            .filter_map(|(rs, c)| self.fine(&spectrum, n_fft, b, rs, layout, c))
+            .filter_map(|(rs, c)| self.fine(spectrum, n_fft, b, rs, layout, c))
             .max_by(|a, b| a.preamble_fit.total_cmp(&b.preamble_fit))
     }
 
@@ -376,8 +411,11 @@ impl BurstDemod {
         y
     }
 
-    /// First pass: a wide band, the preamble by differential correlation
-    /// (sample resolution) and the carrier offset from its phase.
+    /// First pass: a wide band (or a narrow one round `prior`, the
+    /// terminal's known offset), the preamble by differential correlation
+    /// and the carrier offset from its phase; then the same on the matched
+    /// filter's output there, which neighbours in the wide band no longer
+    /// bias.
     fn coarse(
         &mut self,
         spectrum: &[Iq],
@@ -385,55 +423,37 @@ impl BurstDemod {
         b: &ScheduledBurst,
         rs: f64,
         layout: &Layout,
+        prior: Option<f64>,
     ) -> Option<Coarse> {
         let d = ((self.fs / (4.0 * rs)).floor() as usize).max(1);
         let fs2 = self.fs / d as f64;
         let sps = fs2 / rs;
-        let half = rs * (1.0 + ROLL_OFF) / 2.0 + WIDE_HZ;
-        let y = self.band(spectrum, n_fft, d, b.centre_hz, |f| {
+        let centre = b.centre_hz + prior.unwrap_or(0.0);
+        let margin = if prior.is_some() { NARROW_HZ } else { WIDE_HZ };
+        let half = rs * (1.0 + ROLL_OFF) / 2.0 + margin;
+        let y = self.band(spectrum, n_fft, d, centre, |f| {
             if f.abs() <= half { 1.0 } else { 0.0 }
         });
         // Search where the detection run can start: round the planned
         // start, plus the run's offset in the burst.
         let start2 = b.start as f64 / d as f64;
-        let lo = (start2 - SEARCH_BEFORE_S * fs2).max(0.0) as usize;
         let det_off = layout.detect_at as f64 * sps;
-        let hi = ((start2 + SEARCH_AFTER_S * fs2 + det_off) as usize).min(
-            y.len()
-                .saturating_sub((layout.detect.len() as f64 * sps) as usize + 2),
-        );
-        let p = &layout.detect;
-        let dp: Vec<Iq> = p.windows(2).map(|w| w[1] * w[0].conj()).collect();
-        let ep: f32 = dp.iter().map(|v| v.norm_sqr()).sum();
-        let mut best = (0f32, 0usize, Iq::new(0.0, 0.0));
-        let mut fits = Vec::with_capacity(hi.saturating_sub(lo) + 1);
-        for n in lo.max((det_off + 1.0) as usize)..hi {
-            let at = |k: usize| y[n + (k as f64 * sps).round() as usize];
-            let (mut c, mut e) = (Iq::new(0.0, 0.0), 0f32);
-            let mut prev = at(0);
-            for (k, q) in dp.iter().enumerate() {
-                let cur = at(k + 1);
-                let x = cur * prev.conj();
-                c += x * q.conj();
-                e += x.norm_sqr();
-                prev = cur;
-            }
-            let v = c.norm() / (e * ep).sqrt().max(1e-20);
-            fits.push((n, v));
-            if v > best.0 {
-                best = (v, n, c);
-            }
-        }
-        if best.0 < 0.25 {
+        let lo = ((start2 - SEARCH_BEFORE_S * fs2).max(0.0) as usize).max((det_off + 1.0) as usize);
+        let hi = (start2 + SEARCH_AFTER_S * fs2 + det_off) as usize;
+        let (fit1, n1, c1) = detect(&y, sps, &layout.detect, lo, hi)?;
+        if fit1 < 0.25 {
             return None;
         }
         // Carrier: the differential product's phase over one symbol.
-        let f = f64::from(best.2.arg()) / (2.0 * std::f64::consts::PI) * rs;
+        let f1 = f64::from(c1.arg()) / (2.0 * std::f64::consts::PI) * rs;
+        let y = self.band(spectrum, n_fft, d, centre + f1, |f| rrc_gain(f, rs));
+        let (fit2, n2, c2) = detect(&y, sps, &layout.detect, n1.saturating_sub(4), n1 + 5)?;
+        let f2 = f64::from(c2.arg()) / (2.0 * std::f64::consts::PI) * rs;
         Some(Coarse {
-            fit: best.0,
-            n: best.1,
+            fit: fit2,
+            n: n2,
             d,
-            freq: f,
+            freq: centre - b.centre_hz + f1 + f2,
         })
     }
 
@@ -451,19 +471,8 @@ impl BurstDemod {
         let d = c.d;
         let fs2 = self.fs / d as f64;
         let sps = fs2 / rs;
-        let lo_edge = rs * (1.0 - ROLL_OFF) / 2.0;
-        let hi_edge = rs * (1.0 + ROLL_OFF) / 2.0;
         let y = self.band(spectrum, n_fft, d, b.centre_hz + c.freq, |f| {
-            let a = f.abs();
-            if a <= lo_edge {
-                1.0
-            } else if a >= hi_edge {
-                0.0
-            } else {
-                // Root-raised-cosine roll-off (EN 302 307-1 §5.5).
-                let x = std::f64::consts::PI / (2.0 * ROLL_OFF * rs) * (a - lo_edge);
-                x.cos() as f32
-            }
+            rrc_gain(f, rs)
         });
         // Fine timing: the coherent fit of the detection run at fractional
         // offsets round the coarse peak (its phase taken out each time).
@@ -649,6 +658,50 @@ impl BurstDemod {
             ok: fit >= MIN_FIT && mer_db >= MIN_MER_DB,
         })
     }
+}
+
+/// The root-raised-cosine matched filter's gain at `f` Hz from the
+/// carrier (EN 302 307-1 §5.5: flat to (1 − α) Rs/2, a quarter-cosine to
+/// (1 + α) Rs/2).
+fn rrc_gain(f: f64, rs: f64) -> f32 {
+    let (lo, hi) = (rs * (1.0 - ROLL_OFF) / 2.0, rs * (1.0 + ROLL_OFF) / 2.0);
+    let a = f.abs();
+    if a <= lo {
+        1.0
+    } else if a >= hi {
+        0.0
+    } else {
+        (std::f64::consts::PI / (2.0 * ROLL_OFF * rs) * (a - lo)).cos() as f32
+    }
+}
+
+/// Where in `y` (`sps` samples a symbol) the run `p` starts, searched over
+/// samples `lo..hi`: differential correlation (blind to a carrier offset
+/// under half the symbol rate), normalised 0..1, with its complex sum
+/// (whose phase is the carrier's turn a symbol).
+fn detect(y: &[Iq], sps: f64, p: &[Iq], lo: usize, hi: usize) -> Option<(f32, usize, Iq)> {
+    let dp: Vec<Iq> = p.windows(2).map(|w| w[1] * w[0].conj()).collect();
+    let ep: f32 = dp.iter().map(|v| v.norm_sqr()).sum();
+    let span = (p.len() as f64 * sps) as usize + 2;
+    let hi = hi.min(y.len().saturating_sub(span));
+    let mut best: Option<(f32, usize, Iq)> = None;
+    for n in lo..hi {
+        let at = |k: usize| y[n + (k as f64 * sps).round() as usize];
+        let (mut c, mut e) = (Iq::new(0.0, 0.0), 0f32);
+        let mut prev = at(0);
+        for (k, q) in dp.iter().enumerate() {
+            let cur = at(k + 1);
+            let x = cur * prev.conj();
+            c += x * q.conj();
+            e += x.norm_sqr();
+            prev = cur;
+        }
+        let v = c.norm() / (e * ep).sqrt().max(1e-20);
+        if best.is_none_or(|b| v > b.0) {
+            best = Some((v, n, c));
+        }
+    }
+    best
 }
 
 /// What the first pass found.
