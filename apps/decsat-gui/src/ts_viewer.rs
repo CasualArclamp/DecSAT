@@ -306,10 +306,12 @@ impl TsViewer {
                             });
                             ui.label(s.errors.to_string());
                             let mut flags = Vec::new();
-                            if s.scrambled > 0 {
+                            // As it is now: a PID descrambled since its key
+                            // was typed is no longer "scrambled".
+                            if s.scrambled_now {
                                 flags.push("scrambled");
                             }
-                            if s.descrambled > 0 {
+                            if s.descrambled_now {
                                 flags.push("descrambled");
                             }
                             if s.pcr > 0 {
@@ -354,11 +356,11 @@ fn services(ui: &mut Ui, r: &TsReport) -> Option<u16> {
             .find(|p| p.pid == pid)
             .map_or(0.0, |p| p.stats.rate_bps)
     };
-    let scrambled = |pid: u16| r.pids.iter().any(|p| p.pid == pid && p.stats.scrambled > 0);
+    let scrambled = |pid: u16| r.pids.iter().any(|p| p.pid == pid && p.stats.scrambled_now);
     let descrambled = |pid: u16| {
         r.pids
             .iter()
-            .any(|p| p.pid == pid && p.stats.descrambled > 0)
+            .any(|p| p.pid == pid && p.stats.descrambled_now)
     };
     egui::ScrollArea::vertical()
         .auto_shrink(false)

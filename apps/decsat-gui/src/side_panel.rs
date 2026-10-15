@@ -3635,21 +3635,25 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
         }
     });
     let r = &t.report;
-    let scrambled = |pid: u16| r.pids.iter().any(|p| p.pid == pid && p.stats.scrambled > 0);
+    let scrambled = |pid: u16| r.pids.iter().any(|p| p.pid == pid && p.stats.scrambled_now);
+    let descrambled = |pid: u16| {
+        r.pids
+            .iter()
+            .any(|p| p.pid == pid && p.stats.descrambled_now)
+    };
     if !r.programmes.is_empty() {
         ui.add_space(4.0);
         ui.label(RichText::new("Services").small().strong());
         for p in &r.programmes {
             let name = p.name.as_deref().unwrap_or("(no name)");
-            let encrypted = p.streams.iter().any(|e| scrambled(e.pid));
-            ui.label(
-                RichText::new(format!(
-                    "{} {name}{}",
-                    p.number,
-                    if encrypted { "  🔒" } else { "" }
-                ))
-                .strong(),
-            );
+            let lock = if p.streams.iter().any(|e| scrambled(e.pid)) {
+                "  🔒"
+            } else if p.streams.iter().any(|e| descrambled(e.pid)) {
+                "  🔓"
+            } else {
+                ""
+            };
+            ui.label(RichText::new(format!("{} {name}{lock}", p.number)).strong());
             if let Some(e) = &p.now {
                 ui.label(RichText::new(format!("    now: {}", e.name)).small());
             }

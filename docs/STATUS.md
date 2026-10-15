@@ -4768,5 +4768,15 @@ Asked for from a live BISS-scrambled contribution feed (Ericsson encoder,
 without the key the analyser and panel say *scrambled: the service's BISS
 key is needed*; with it *the key fits · 2 PIDs descrambled*, 0 CC errors,
 and the player shows the picture at 16:9, *timed by the sound*, ~590 ms
-sound buffer, 4 pictures dropped at start. Not yet seen on the live
-Sydney feed (needs its key).
+sound buffer, 4 pictures dropped at start.
+
+**Confirmed live** the same evening on the Sydney_1 feed (11611.7 MHz,
+8PSK 3/4, 3.58 MS/s, 7.98 Mbit/s; the key kept in Rory's settings only):
+*the key fits · 4 PIDs descrambled* (H.264 0x21, MP2 0x22–0x24); the
+player showed the 1920×1080i25 H.264 Main test card with its sound, timed
+by the sound, ~505 ms buffered, 21 pictures dropped at start, the start-up
+complaints only (missing reference pictures before the first IDR). FEC
+thread 27 % with the key against 20–23 % without. Then: the PID flags and
+the services' lock showed *scrambled* as well as *descrambled* (the count
+kept the packets from before the key was typed): `PidStats::scrambled_now`
+/ `descrambled_now` now give the state as it is, the counts the history.

@@ -188,6 +188,11 @@ pub struct PidStats {
     /// Packets that came scrambled and were descrambled (a BISS key)
     /// before the analyser saw them.
     pub descrambled: u64,
+    /// The latest packet came scrambled (left so: no key), or came
+    /// scrambled and was descrambled. The counts above keep the history (a
+    /// PID scrambled until its key was typed); these say what it is now.
+    pub scrambled_now: bool,
+    pub descrambled_now: bool,
     /// Packets carrying a PCR.
     pub pcr: u64,
     /// The stream id of the PES it carries, if it carries PES.
@@ -274,6 +279,8 @@ impl TsAnalyser {
         if scrambling != 0 {
             st.scrambled += 1;
         }
+        st.scrambled_now = scrambling != 0;
+        st.descrambled_now = false; // `note_descrambled` follows if it was
         let has_af = afc & 2 != 0;
         let af_len = if has_af { p[4] as usize } else { 0 };
         if has_af && af_len > 0 && p[5] & 0x10 != 0 {
@@ -317,6 +324,7 @@ impl TsAnalyser {
     pub fn note_descrambled(&mut self, pid: u16) {
         if let Some(st) = self.pids.get_mut(&pid) {
             st.descrambled += 1;
+            st.descrambled_now = true;
         }
     }
 

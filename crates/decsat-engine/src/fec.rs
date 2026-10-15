@@ -2900,6 +2900,16 @@ mod tests {
         }
         let (tap, rx) = TsTap::new(4);
         let mut stage = TsStage::new();
+        // Before the key is typed: scrambled, and said to be.
+        stage.follow(&FecOutput {
+            ts: true,
+            ..FecOutput::default()
+        });
+        stage.packets_in(&scrambled[..10]);
+        let row = &stage.analyser.pids[&0x100];
+        assert!(row.scrambled_now && !row.descrambled_now);
+        assert_eq!(stage.view().biss.verdict, decsat_ts::Verdict::NoKey);
+        // Then with it.
         stage.follow(&FecOutput {
             ts: true,
             biss: Some(key.cw),
@@ -2913,7 +2923,9 @@ mod tests {
         assert_eq!(v.biss.verdict, decsat_ts::Verdict::Right);
         assert_eq!(v.biss.descrambled, 40);
         let row = &stage.analyser.pids[&0x100];
-        assert_eq!((row.scrambled, row.descrambled), (0, 40));
+        // The history kept; the state as it is now.
+        assert_eq!((row.scrambled, row.descrambled), (10, 40));
+        assert!(!row.scrambled_now && row.descrambled_now);
         assert_eq!(row.pes_stream_id, Some(0xE0));
     }
 

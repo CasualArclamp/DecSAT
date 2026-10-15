@@ -81,8 +81,8 @@ real carriers stay put.
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
-| **BISS descrambling** (DVB-CSA, BISS mode 1): the key typed in the analyser or the VFO panel, checked against the stream, remembered for its carrier; every output then clear | ✅ bit-exact against VLC's CSA both ways |
-| **In-app TV player**: a service of the TS decoded by ffmpeg (H.264 incl. interlaced, MPEG-2, HEVC; MP2/AAC/AC-3…), deinterlaced, its sound through the app's audio, pictures timed by the sound | ✅ on a scrambled DVB-S2 test carrier |
+| **BISS descrambling** (DVB-CSA, BISS mode 1): the key typed in the analyser or the VFO panel, checked against the stream, remembered for its carrier; every output then clear | ✅ on a live BISS contribution feed (Ericsson, 8PSK 3/4); bit-exact against VLC's CSA both ways |
+| **In-app TV player**: a service of the TS decoded by ffmpeg (H.264 incl. interlaced, MPEG-2, HEVC; MP2/AAC/AC-3…), deinterlaced, its sound through the app's audio, pictures timed by the sound | ✅ on the same live feed: 1080i25 H.264, three MP2 tracks |
 | **Multicast audio** from GSE or MPE: SAP/SDP names, codecs; unannounced RTP AAC and Opus described from their packets; IPv4 fragments reassembled; now-playing messages; play in the app (volume, pause) or VLC/PotPlayer; record to file | ✅ checked on a recording of a live MPE radio multiplex |
 | Modulator (HackRF TX / IQ file) | M6 |
 
