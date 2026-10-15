@@ -1006,6 +1006,10 @@ algorithms studied from and credited to:
   Aimar) and [libdvbcsa](https://www.videolan.org/developers/libdvbcsa.html)
   (both GPL-2.0-or-later) — the DVB-CSA tables and round structure for BISS
   descrambling, checked bit-exact against VLC
+- [VLC](https://www.videolan.org)'s `modules/demux/mpeg/csa.c` (Laurent Aimar,
+  GPL-2.0-or-later) and [libdvbcsa](https://www.videolan.org/developers/libdvbcsa.html)
+  (GPL-2.0-or-later) — the DVB-CSA tables and round structure behind BISS
+  descrambling, re-done byte-wise
 - DecDRM — the waterfall's GPU ring texture
 
 The in-app TV player runs [FFmpeg](https://ffmpeg.org) as a separate

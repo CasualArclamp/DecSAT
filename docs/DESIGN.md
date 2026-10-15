@@ -19,7 +19,7 @@ Status date: 2026-10-08 (kickoff). This document is the source of truth for scop
 **Non-goals (for now)**
 - Channel bonding (S2X Annex D) and wideband / time-slicing (Annex M) — need multiple tuners or >20 MHz; file-only if ever.
 - Full two-way ACM link with a return channel (we build the pieces — RX SNR estimate + TX per-frame MODCOD — but not the closed loop over a radio return path now).
-- Conditional access / descrambling of encrypted payloads. We decode the transport, not break crypto.
+- Breaking conditional access. A BISS stream is descrambled only with a key you hold (see *BISS and the in-app player* below); nothing here attacks keys or CA systems.
 - Formal DVB certification. "Compliant" here = matches the normative bit/symbol processing and verifies against reference vectors for everything a HackRF can receive.
 
 **Targets:** QO-100 & amateur DATV; narrow Ku/C SCPC/VSAT IP carriers; wide broadcast muxes (file replay only — too wide for HackRF live); own HackRF TX later.
