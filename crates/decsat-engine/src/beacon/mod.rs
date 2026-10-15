@@ -279,8 +279,66 @@ pub struct BeaconLog {
     /// many times each has changed.
     pub map: Vec<Vec<u8>>,
     pub changed: Vec<Vec<u16>>,
+    /// Each cell's range, largest step and the bits that have toggled.
+    pub stats: Vec<Vec<CellStats>>,
     /// Bumped on every change (lets a viewer skip unchanged redraws).
     pub revision: u64,
+}
+
+/// What one word of the major frame has done.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CellStats {
+    pub lo: u8,
+    pub hi: u8,
+    /// The largest change from one major frame to the next.
+    pub max_step: u8,
+    /// Bits that have changed (OR of every change).
+    pub bits: u8,
+    /// Times seen.
+    pub seen: u32,
+}
+
+/// What a word looks like it is, from how it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordKind {
+    Unseen,
+    Constant,
+    /// Small steps over a range: a measurement (voltage, current,
+    /// temperature, position) read by an ADC.
+    Analog,
+    /// A few bits flipping: status flags, relays, heaters.
+    Status,
+    /// Everything else: big jumps (data, a word shared by several
+    /// parameters, a fast measurement).
+    Busy,
+}
+
+impl CellStats {
+    pub fn kind(&self, changes: u16) -> WordKind {
+        if self.seen == 0 {
+            WordKind::Unseen
+        } else if changes == 0 {
+            WordKind::Constant
+        } else if self.max_step <= 2 {
+            WordKind::Analog
+        } else if self.bits.count_ones() <= 3 {
+            WordKind::Status
+        } else {
+            WordKind::Busy
+        }
+    }
+}
+
+impl WordKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            WordKind::Unseen => "not seen yet",
+            WordKind::Constant => "constant",
+            WordKind::Analog => "slowly varying (a measurement?)",
+            WordKind::Status => "a few bits flipping (status flags?)",
+            WordKind::Busy => "busy",
+        }
+    }
 }
 
 /// What the beacon decoder shows.
@@ -290,6 +348,11 @@ pub struct BeaconView {
     pub telemetry: Option<TelemetryView>,
     pub framing: Option<FramingView>,
     pub counter: Option<pcm::Counter>,
+    /// A spacecraft clock found in the frames.
+    pub clock: Option<pcm::ClockWord>,
+    /// A check byte at the frames' end, and the frames passing and failing
+    /// it.
+    pub checksum: Option<(pcm::Checksum, u64, u64)>,
     pub ccsds: Option<CcsdsView>,
     /// The radio's retunes since the decoder started, Hz (see
     /// [`LogPoint::offset_hz`]).
@@ -441,6 +504,11 @@ pub struct BeaconRx {
     tm: Option<ccsds::TmRx>,
     recent: VecDeque<Vec<u8>>,
     counter: Option<pcm::Counter>,
+    clock: Option<pcm::ClockWord>,
+    since_clock: usize,
+    checksum: Option<pcm::Checksum>,
+    /// Frames passing and failing it.
+    check_counts: (u64, u64),
     since_counter: usize,
     carried: f64,
     log: Arc<Mutex<BeaconLog>>,
@@ -494,6 +562,10 @@ impl BeaconRx {
             tm: None,
             recent: VecDeque::new(),
             counter: None,
+            clock: None,
+            since_clock: 0,
+            checksum: None,
+            check_counts: (0, 0),
             since_counter: 0,
             carried: 0.0,
             log: Arc::new(Mutex::new(BeaconLog::default())),
@@ -1047,12 +1119,31 @@ impl BeaconRx {
                 log.changed.clear();
             }
         }
+        // A check byte at the end, looked for once there are frames enough;
+        // frames failing it are marked bad (a bit error) and kept out of the
+        // map and the plots.
+        if self.checksum.is_none() && self.recent.len() >= 16 && self.recent.len().is_multiple_of(8)
+        {
+            let refs: Vec<&[u8]> = self.recent.iter().map(|v| v.as_slice()).collect();
+            self.checksum = pcm::find_checksum(&refs);
+        }
+        let checked = match self.checksum {
+            Some(c) if c.check(&f.bytes) => {
+                self.check_counts.0 += 1;
+                true
+            }
+            Some(_) => {
+                self.check_counts.1 += 1;
+                false
+            }
+            None => true,
+        };
         let index = self.counter.and_then(|c| c.index(&f.bytes));
         self.log_frame(LoggedFrame {
             t_s: t,
             index,
             bytes: f.bytes,
-            good: f.sync_errors.is_some(),
+            good: f.sync_errors.is_some() && checked,
         });
     }
 
@@ -1072,6 +1163,7 @@ impl BeaconRx {
             if log.map.len() != rows {
                 log.map = vec![Vec::new(); rows];
                 log.changed = vec![Vec::new(); rows];
+                log.stats = vec![Vec::new(); rows];
             }
             if let Some(r) = row
                 && f.good
@@ -1080,9 +1172,23 @@ impl BeaconRx {
                 if log.map[r].len() != f.bytes.len() {
                     log.map[r] = vec![0; f.bytes.len()];
                     log.changed[r] = vec![0; f.bytes.len()];
+                    log.stats[r] = vec![CellStats::default(); f.bytes.len()];
                 }
                 for (j, &b) in f.bytes.iter().enumerate() {
-                    if had && log.map[r][j] != b {
+                    let old = log.map[r][j];
+                    let st = &mut log.stats[r][j];
+                    if st.seen == 0 {
+                        (st.lo, st.hi) = (b, b);
+                    } else {
+                        st.lo = st.lo.min(b);
+                        st.hi = st.hi.max(b);
+                    }
+                    if had {
+                        st.max_step = st.max_step.max(old.abs_diff(b));
+                        st.bits |= old ^ b;
+                    }
+                    st.seen = st.seen.saturating_add(1);
+                    if had && old != b {
                         log.changed[r][j] = log.changed[r][j].saturating_add(1);
                     }
                     log.map[r][j] = b;
@@ -1093,6 +1199,31 @@ impl BeaconRx {
                 log.frames.pop_front();
             }
             log.revision += 1;
+            // A clock word, looked for now and then over the last few
+            // minutes of frames.
+            self.since_clock += 1;
+            if self.since_clock >= 32 || self.clock.is_none() && self.since_clock >= 4 {
+                self.since_clock = 0;
+                let recent: Vec<(f64, &[u8])> = log
+                    .frames
+                    .iter()
+                    .rev()
+                    .take(512)
+                    .rev()
+                    .filter(|x| x.good)
+                    .map(|x| (x.t_s, x.bytes.as_slice()))
+                    .collect();
+                let skip = self
+                    .active_lock()
+                    .map_or(0, |(l, _, _)| usize::from(l.word.len) / 8);
+                self.clock = pcm::find_clock(&recent, skip);
+            }
+            if let (Some(c), true) = (self.clock.as_mut(), f.good)
+                && let Some(v) = c.read(&f.bytes)
+                && v >= c.value
+            {
+                c.value = v;
+            }
         }
         self.new_frames.push(f);
     }
@@ -1179,6 +1310,10 @@ impl BeaconRx {
             telemetry,
             framing,
             counter: self.counter,
+            clock: self.clock,
+            checksum: self
+                .checksum
+                .map(|c| (c, self.check_counts.0, self.check_counts.1)),
             ccsds,
             carried_hz: self.carried,
             unmodulated: self.unmodulated,
@@ -1392,6 +1527,8 @@ mod tests {
         assert!(f.stats.frames >= 12, "{} frames", f.stats.frames);
         let ctr = v.counter.expect("counter");
         assert_eq!(ctr.byte, 4);
+        let clock = v.clock.expect("clock");
+        assert_eq!((clock.byte, clock.len, clock.per_second), (12, 4, 1.0));
         let log = v.log.lock().unwrap();
         assert!(log.frames.iter().filter(|f| f.good).count() >= 12);
         assert!(log.points.len() >= 10);

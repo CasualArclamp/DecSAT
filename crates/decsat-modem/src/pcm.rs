@@ -637,9 +637,221 @@ pub fn find_counter(frames: &[&[u8]], skip: usize) -> Option<Counter> {
     best.map(|(_, c)| c)
 }
 
+/// A spacecraft clock in the frames: a big-endian word counting up at a
+/// steady rate (the IS-19 beacon's bytes 12–15: seconds, since
+/// 2012-05-31 17:30:48 UTC by the wall clock — 13 h before launch).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockWord {
+    pub byte: usize,
+    /// Bytes in the word (2–4).
+    pub len: usize,
+    /// Counts a second (measured: 1.0 for seconds).
+    pub per_second: f64,
+    /// Its last reading.
+    pub value: u64,
+}
+
+impl ClockWord {
+    /// The word's value in `bytes`.
+    pub fn read(&self, bytes: &[u8]) -> Option<u64> {
+        let w = bytes.get(self.byte..self.byte + self.len)?;
+        Some(w.iter().fold(0u64, |a, &b| (a << 8) | u64::from(b)))
+    }
+
+    /// Its reading in seconds.
+    pub fn seconds(&self) -> f64 {
+        self.value as f64 / self.per_second
+    }
+}
+
+/// A check byte at a frame's end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checksum {
+    pub kind: CheckKind,
+    /// The bytes it covers start here and run up to it (the last byte).
+    pub from: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckKind {
+    /// Sum mod 256 (the IS-19 beacon's: bytes 0–254 into byte 255).
+    Sum,
+    /// The sum's two's complement (the whole frame then sums to 0).
+    NegSum,
+    Xor,
+}
+
+impl Checksum {
+    /// The frame's check byte holds.
+    pub fn check(&self, bytes: &[u8]) -> bool {
+        let Some((&last, body)) = bytes.split_last() else {
+            return false;
+        };
+        let Some(body) = body.get(self.from..) else {
+            return false;
+        };
+        let sum = body.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        last == match self.kind {
+            CheckKind::Sum => sum,
+            CheckKind::NegSum => sum.wrapping_neg(),
+            CheckKind::Xor => body.iter().fold(0u8, |a, &b| a ^ b),
+        }
+    }
+
+    /// "sum of bytes 0–254 in byte 255".
+    pub fn describe(&self, frame_bytes: usize) -> String {
+        let what = match self.kind {
+            CheckKind::Sum => "sum",
+            CheckKind::NegSum => "negated sum",
+            CheckKind::Xor => "XOR",
+        };
+        format!(
+            "{what} of bytes {}–{} in byte {}",
+            self.from,
+            frame_bytes.saturating_sub(2),
+            frame_bytes.saturating_sub(1)
+        )
+    }
+}
+
+/// Find a check byte at the end of the frames: a sum, negated sum or XOR
+/// of the bytes before it (from byte 0 to 4 on) that holds in four frames
+/// in five or more (bit errors break the rest) of at least sixteen. A
+/// random last byte matches one in 256.
+pub fn find_checksum(frames: &[&[u8]]) -> Option<Checksum> {
+    if frames.len() < 16 {
+        return None;
+    }
+    let mut best: Option<(usize, Checksum)> = None;
+    for kind in [CheckKind::Sum, CheckKind::NegSum, CheckKind::Xor] {
+        for from in 0..=4 {
+            let c = Checksum { kind, from };
+            let ok = frames.iter().filter(|f| c.check(f)).count();
+            if 5 * ok >= 4 * frames.len() && best.as_ref().is_none_or(|(n, _)| ok > *n) {
+                best = Some((ok, c));
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
+/// Find a clock word in frames as (time s, bytes), in time order: a 4-,
+/// 3- or 2-byte big-endian word (same place in every frame) that never
+/// goes down, has moved by at least 4 counts, and whose rate over the
+/// frames' span is within 2 % (and a count's worth) of a power of two
+/// counts a second (1/16 to 1024) — the longest such word, earliest in the
+/// frame. The minor-frame counter wraps within seconds and so is never
+/// taken. `skip`: leading bytes left out (the sync word).
+pub fn find_clock(frames: &[(f64, &[u8])], skip: usize) -> Option<ClockWord> {
+    if frames.len() < 12 {
+        return None;
+    }
+    let span = frames.last()?.0 - frames.first()?.0;
+    if span < 5.0 {
+        return None;
+    }
+    let len = frames.iter().map(|f| f.1.len()).min()?;
+    for wlen in [4usize, 3, 2] {
+        for byte in skip..len.saturating_sub(wlen - 1) {
+            let read = |b: &[u8]| {
+                b[byte..byte + wlen]
+                    .iter()
+                    .fold(0u64, |a, &x| (a << 8) | u64::from(x))
+            };
+            // Frames that go back, or leap further than a fast clock
+            // could, are outliers (a bit error, or another word in this
+            // place once a major frame): one in twenty may be.
+            let first = read(frames[0].1);
+            let (mut prev, mut t_prev) = (first, frames[0].0);
+            let mut bad = 0usize;
+            for (t, b) in &frames[1..] {
+                let v = read(b);
+                let most = (1024.0 * (t - t_prev).max(0.0) + 2.0) as u64;
+                if v < prev || v - prev > most {
+                    bad += 1;
+                    continue;
+                }
+                (prev, t_prev) = (v, *t);
+            }
+            if 20 * bad > frames.len() || prev - first < 4 {
+                continue;
+            }
+            let rate = (prev - first) as f64 / span;
+            let p2 = rate.log2().round();
+            if !(-4.0..=10.0).contains(&p2) {
+                continue;
+            }
+            let want = 2f64.powf(p2);
+            // 2 %, and a count either way over the span.
+            if (rate - want).abs() > 0.02 * want + 1.5 / span {
+                continue;
+            }
+            return Some(ClockWord {
+                byte,
+                len: wlen,
+                per_second: want,
+                value: prev,
+            });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_a_sum_check_byte_through_bit_errors() {
+        let mut frames: Vec<Vec<u8>> = (0..40u32)
+            .map(|i| {
+                let mut f: Vec<u8> = (0..64).map(|j| (j * 31 + i * 7) as u8).collect();
+                let s = f[..63].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+                f[63] = s;
+                f
+            })
+            .collect();
+        // A few frames with a bit error.
+        for f in frames.iter_mut().step_by(9) {
+            f[20] ^= 0x10;
+        }
+        let refs: Vec<&[u8]> = frames.iter().map(|f| f.as_slice()).collect();
+        let c = find_checksum(&refs).expect("checksum");
+        assert_eq!(
+            c,
+            Checksum {
+                kind: CheckKind::Sum,
+                from: 0
+            }
+        );
+        assert!(!c.check(&frames[0]) && c.check(&frames[1]));
+        assert_eq!(c.describe(64), "sum of bytes 0–62 in byte 63");
+    }
+
+    #[test]
+    fn finds_a_seconds_clock() {
+        // 0.427 s frames; bytes 12–15 count seconds, byte 4 a counter.
+        let frames: Vec<(f64, Vec<u8>)> = (0..60)
+            .map(|i| {
+                let t = i as f64 * 0.4267;
+                let mut f = vec![0u8; 64];
+                f[..3].copy_from_slice(&[0xFA, 0xF3, 0x20]);
+                f[4] = (i % 32) as u8;
+                let c = 0x1B08_AA00u32 + t as u32;
+                f[12..16].copy_from_slice(&c.to_be_bytes());
+                f[20] = (i * 7 % 13) as u8;
+                // Once, another word in bytes 11–13.
+                if i == 17 {
+                    f[11..14].copy_from_slice(&[0x28, 0xFB, 0x48]);
+                }
+                (t, f)
+            })
+            .collect();
+        let refs: Vec<(f64, &[u8])> = frames.iter().map(|(t, f)| (*t, f.as_slice())).collect();
+        let c = find_clock(&refs, 3).expect("clock");
+        assert_eq!((c.byte, c.len, c.per_second), (12, 4, 1.0));
+        assert_eq!(c.value, 0x1B08_AA00 + 25);
+    }
 
     /// IS-19-like frames: FAF320, a fixed byte, a counter 0–31 in byte 4,
     /// then data with some fixed and some changing bytes.

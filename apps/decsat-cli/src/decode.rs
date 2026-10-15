@@ -1101,6 +1101,23 @@ pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
             f.stats.sync_ber(f.word_len),
         );
     }
+    if let Some((c, ok, bad)) = &v.checksum {
+        let bytes = v.framing.as_ref().map_or(0, |f| f.frame_bits / 8);
+        println!(
+            "  check byte: {} · {ok} frames pass, {bad} fail",
+            c.describe(bytes)
+        );
+    }
+    if let Some(c) = &v.clock {
+        println!(
+            "  clock: bytes {}–{}, {} counts a second, now {} ({:.2} years)",
+            c.byte,
+            c.byte + c.len - 1,
+            c.per_second,
+            c.value,
+            c.seconds() / (365.25 * 86400.0)
+        );
+    }
     if let Some(c) = &v.counter {
         println!(
             "  minor-frame counter: byte {} (mask {:02X}h), {}{}",

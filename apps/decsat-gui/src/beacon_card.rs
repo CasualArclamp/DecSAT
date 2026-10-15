@@ -223,6 +223,42 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
                 f.stats.frames, f.stats.flywheel, f.stats.slips, f.stats.losses
             ));
             ui.end_row();
+            if let Some((c, ok, bad)) = &b.checksum {
+                ui.label("Check byte");
+                ui.colored_label(
+                    if *bad * 20 <= *ok { GOOD } else { WAIT },
+                    format!(
+                        "{} · {:.1} % of {} frames pass",
+                        c.describe(f.frame_bits / 8),
+                        100.0 * *ok as f64 / (*ok + *bad).max(1) as f64,
+                        ok + bad
+                    ),
+                )
+                .on_hover_text(
+                    "Found in the frames: a check byte at the end. Frames failing it (a bit \
+                     error) are left out of the map and the plots.",
+                );
+                ui.end_row();
+            }
+            if let Some(c) = &b.clock {
+                ui.label("Clock");
+                let s = c.seconds();
+                ui.label(format!(
+                    "bytes {}–{}: {:.0} s ({:.2} years) at {} count{} a second",
+                    c.byte,
+                    c.byte + c.len - 1,
+                    s,
+                    s / (365.25 * 86400.0),
+                    c.per_second,
+                    if c.per_second == 1.0 { "" } else { "s" }
+                ))
+                .on_hover_text(
+                    "A word in every frame counting up steadily: the spacecraft's clock. On \
+                     Intelsat 19 it counts seconds from 2012-05-31 17:30:48 UTC (13 hours \
+                     before launch), measured against this computer's clock.",
+                );
+                ui.end_row();
+            }
             if let Some(c) = &b.counter {
                 ui.label("Counter");
                 let major = match c.modulus {
@@ -463,10 +499,22 @@ fn frame_map(ui: &mut Ui, b: &BeaconView, id: VfoId) {
         let (r, c) = cell(p);
         let v = log.map[r].get(c).copied();
         let ch = log.changed[r].get(c).copied().unwrap_or(0);
+        let st = log
+            .stats
+            .get(r)
+            .and_then(|s| s.get(c))
+            .copied()
+            .unwrap_or_default();
         let text = match v {
-            Some(v) => {
-                format!("minor frame {r}, byte {c}: {v:02X}h = {v} = {v:08b}b · changed {ch}×")
-            }
+            Some(v) => format!(
+                "minor frame {r}, byte {c}: {v:02X}h = {v} = {v:08b}b\n{} · changed {ch}× · \
+                 range {:02X}–{:02X}h · largest step {} · bits changing {:08b}",
+                st.kind(ch).name(),
+                st.lo,
+                st.hi,
+                st.max_step,
+                st.bits
+            ),
             None => format!("minor frame {r}, byte {c}: not seen yet"),
         };
         resp.clone().on_hover_text_at_pointer(text);

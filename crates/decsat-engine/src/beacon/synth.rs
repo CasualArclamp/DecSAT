@@ -49,8 +49,9 @@ pub struct Spec {
     pub clock_ppm: f64,
 }
 
-/// The channel bits for `n` bits' worth of `framing`.
-pub fn bits(framing: Framing, n: usize) -> Vec<u8> {
+/// The channel bits for `n` bits' worth of `framing`, sent at
+/// `bit_rate` (IRIG frames carry a seconds clock in bytes 12–15).
+pub fn bits(framing: Framing, n: usize, bit_rate: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(n + 65_536);
     let push_bytes = |out: &mut Vec<u8>, bytes: &[u8]| {
         for b in bytes {
@@ -81,6 +82,10 @@ pub fn bits(framing: Framing, n: usize) -> Vec<u8> {
                         _ => (j as u8).wrapping_mul(13),
                     };
                 }
+                let t = (i * frame_bytes * 8) as f64 / bit_rate;
+                let clock = 0x1B08_0000u32 + t as u32;
+                f[11] = 0x21;
+                f[12..16].copy_from_slice(&clock.to_be_bytes());
                 push_bytes(&mut out, &f);
                 i += 1;
             }
@@ -152,7 +157,7 @@ pub fn generate(s: &Spec) -> Vec<Iq> {
     let n = (s.seconds * s.rate) as usize;
     let clock = 1.0 + s.clock_ppm * 1e-6;
     let nbits = (s.seconds * s.bit_rate * clock) as usize + 16;
-    let data = bits(s.framing, nbits);
+    let data = bits(s.framing, nbits, s.bit_rate);
     let amp = 0.5;
     let modulated = !matches!(s.framing, Framing::None);
     let carrier_power = if s.suppressed || !modulated {
