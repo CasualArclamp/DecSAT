@@ -4456,3 +4456,31 @@ outbounds and voice channels as before. Test:
 `names_an_is19_outbound_and_a_call_channel` (both wide rates through the
 shaping filter); `fingerprints_find_an_outbound_and_a_call_channel` (a wide
 channel through noise and a slip; the detectors don't cross-fire).
+
+## IBS links are not CDM-600L voice (2026-10-15)
+
+Rory's VFO 21 (12 332.305 MHz on Intelsat 19, 117.0 kS/s QPSK, TPC 7/8)
+was tagged "CDM-600L voice" on the waterfall, and it isn't. Its data are
+G.704-shaped frames with a perfect FAS (19 521 frames, 0 errors), so the
+payload stage named them an E1 and `cdm_model` made any E1 a CDM-600L's
+voice. But they come 800 times a second, not 8000: 204.8 kbit/s =
+3 × 64k × 16/15 — **IBS** (IESS-309) at 3 × 64 kbit/s, timeslots 0 and 16
+the overhead. The 30 data octets are each channel's fill in turn (ABh,
+FFh, AAh × 10; TS16 FFh), no IBS synchronous scrambler: an idle link.
+
+- `payload::ibs_channels(bps)`: a link slower than 0.98 × 2048 kbit/s
+  carrying G.704 frames is IBS, n = rate × 15/16 / 64k (≤ 29; 30 is an
+  E1's own rate). `PayloadRx::set_data_rate` (the FEC stage passes the
+  modem's data rate), `PayloadStats::ibs_channels`; the label reads
+  "IBS 3 × 64 kbit/s (G.704-shaped framing, IESS-309)", and the scrambled
+  IBS label now names n as well. Without a rate (`decsat payload` on a
+  .bin) it stays "E1".
+- `cdm_model`: D&I++ or a whole E1 → CDM-600L voice; IBS (by rate or by
+  its scrambler) → the TPC data model ("CDM-570L TPC"), as nothing in it
+  says voice.
+- The E1 card's source reads "IBS 3 × 64 kbit/s, G.704-shaped frames";
+  status lines cut a payload label at its first comma outside brackets
+  (`payload_format`), so the IBS label stays whole.
+
+A label kept in the prefs for that carrier changes back as soon as a CDM
+VFO decodes it again (the newer model wins), or with Reset labels.

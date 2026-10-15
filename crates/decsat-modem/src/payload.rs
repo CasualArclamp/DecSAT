@@ -532,6 +532,9 @@ pub struct PayloadStats {
     pub e1: Option<crate::e1::E1Stats>,
     /// E1-shaped frames: whether they are IBS-scrambled, and the multiframe.
     pub ibs_sync: Option<crate::ibssync::SyncStats>,
+    /// E1-shaped frames on a link too slow for an E1: IBS, and its 64 kbit/s
+    /// channels (see [`ibs_channels`]).
+    pub ibs_channels: Option<u8>,
     /// MPEG audio frames, when that is what the data are.
     pub mpa: Option<crate::mpa::MpaStats>,
     /// D&I++ framing, likewise.
@@ -577,10 +580,37 @@ const IDLE_ONLY: f64 = 0.99;
 /// can make a few chance headers line up, never without misses.
 const MPA_FOUND: u64 = 6;
 
-/// What the E1 format is called, and what it becomes once its frames turn
-/// out to be IBS-scrambled.
+/// What the E1 format is called until its frames turn out to be IBS's.
 const E1_FOUND: &str = "E1 (G.704 framing)";
-const IBS_FOUND: &str = "IBS n × 64 kbit/s (G.704-shaped framing, IESS-309 synchronous scrambler)";
+
+/// An E1's line rate. IBS (IESS-309) at n × 64 kbit/s sends the same
+/// G.704-shaped frames — timeslots 0 and 16 its 1/15 overhead — at the data
+/// rate × 16/15 / 256 a second, so a link that carries them slower than an
+/// E1 is an IBS link, not an E1 (an idle 3 × 64k one at 204.8 kbit/s, TPC
+/// 7/8 at 12332.3 MHz on Intelsat 19, was taken for an E1 and so for a
+/// CDM-600L's voice).
+const E1_BPS: f64 = 2_048_000.0;
+
+/// The 64 kbit/s channels in an IBS link whose data rate (overhead
+/// included) is `bps`, when that is too slow for an E1: n × 64k × 16/15,
+/// so 29 channels at most — 30 is an E1's own rate, which says nothing.
+pub fn ibs_channels(bps: f64) -> Option<u8> {
+    (bps > 0.0 && bps < 0.98 * E1_BPS)
+        .then(|| (bps * 15.0 / 16.0 / 64e3).round().clamp(1.0, 29.0) as u8)
+}
+
+/// What E1-shaped frames are: an E1, or IBS at n × 64 kbit/s — as the data
+/// rate says (`channels`), or the IBS synchronous scrambler on them.
+fn e1_label(channels: Option<u8>, scrambled: bool) -> String {
+    let n = channels.map_or_else(|| "n".to_string(), |n| n.to_string());
+    match (channels, scrambled) {
+        (None, false) => E1_FOUND.into(),
+        (_, true) => {
+            format!("IBS {n} × 64 kbit/s (G.704-shaped framing, IESS-309 synchronous scrambler)")
+        }
+        (Some(_), false) => format!("IBS {n} × 64 kbit/s (G.704-shaped framing, IESS-309)"),
+    }
+}
 
 /// Whether `n` beats `best` by a clear margin (1/16).
 fn n_beats(n: u64, best: u64) -> bool {
@@ -612,6 +642,11 @@ pub struct PayloadRx {
     hdlc_inverted: Hdlc,
     /// Also try the unscrambled data with its rails skewed.
     rail_skews: bool,
+    /// The link's data rate, when the caller knows it (E1 or IBS).
+    data_bps: Option<f64>,
+    /// How E1-shaped frames were found (the label's descrambling part), for
+    /// naming them again as more is known.
+    e1_how: String,
     /// Modem frames in a row the chosen framing has been lost (Paradise).
     lost_frames: usize,
     /// Bits not yet packed into `raw` bytes.
@@ -631,6 +666,8 @@ impl PayloadRx {
         PayloadRx {
             frame_len,
             rail_skews: false,
+            data_bps: None,
+            e1_how: String::new(),
             lost_frames: 0,
             held: Vec::new(),
             chosen: None,
@@ -660,6 +697,12 @@ impl PayloadRx {
     pub fn with_rail_skews(mut self) -> Self {
         self.rail_skews = true;
         self
+    }
+
+    /// The link's data rate (bit/s), which tells IBS's G.704-shaped frames
+    /// from an E1's.
+    pub fn set_data_rate(&mut self, bps: f64) {
+        self.data_bps = Some(bps);
     }
 
     pub fn push(&mut self, frame: &[u8], out: &mut PayloadOut) {
@@ -928,9 +971,8 @@ impl PayloadRx {
                 (Format::Hdlc, Fcs::Crc32) => "HDLC (FCS-32)".into(),
                 (Format::Hdlc, Fcs::None) => unreachable!("HDLC frames carry an FCS"),
             };
-            self.stats.found = Some(format!(
-                "{}, {}{}{}",
-                what,
+            let how = format!(
+                ", {}{}{}",
                 if diff { "differential decoding, " } else { "" },
                 kind.describe(),
                 match skew {
@@ -942,7 +984,9 @@ impl PayloadRx {
                         if s > 0 { "late" } else { "early" }
                     ),
                 }
-            ));
+            );
+            self.stats.found = Some(format!("{what}{how}"));
+            self.e1_how = how;
             self.chosen = Some((Running::new(kind, diff, skew, self.frame_len), fmt));
             // Replay what was held so no frame or packet is lost; only the
             // newest frame's data go to `raw` again (the rest went out
@@ -983,20 +1027,21 @@ impl PayloadRx {
                     .push(&self.e1_frames, &mut out.e1, &mut out.ibs_data);
                 self.e1_frames.clear();
                 self.stats.e1 = Some(self.e1.stats.clone());
-                if self.ibs_sync.stats.found > 0 {
+                self.stats.ibs_channels = self.data_bps.and_then(ibs_channels);
+                let scrambled = self.ibs_sync.stats.found > 0;
+                if scrambled {
                     self.stats.ibs_sync = Some(self.ibs_sync.stats.clone());
-                    if let Some(f) = &mut self.stats.found
-                        && f.starts_with(E1_FOUND)
-                    {
-                        // (The self-synchronising scrambler searched for
-                        // first is not there: the IBS one is.)
-                        *f = f.replacen(E1_FOUND, IBS_FOUND, 1).replacen(
-                            ", not scrambled",
-                            ", no other scrambler",
-                            1,
-                        );
-                    }
                 }
+                let label = e1_label(self.stats.ibs_channels, scrambled);
+                // (With the IBS scrambler found, the scramblers searched for
+                // first are not there: it is.)
+                let how = if scrambled {
+                    self.e1_how
+                        .replacen(", not scrambled", ", no other scrambler", 1)
+                } else {
+                    self.e1_how.clone()
+                };
+                self.stats.found = Some(format!("{label}{how}"));
             }
             Format::DiPlus => {
                 self.dandi.push(&bits, &mut out.dandi);
@@ -1278,6 +1323,49 @@ mod tests {
         assert!(rx.stats.found.as_ref().unwrap().contains("taps 3, 20"));
         assert!(frames.len() > 300, "{}", frames.len());
         assert!(frames.iter().all(|f| f[1] == 0xD5));
+    }
+
+    #[test]
+    fn g704_frames_slower_than_an_e1_are_ibs() {
+        use crate::e1::E1Tx;
+        // An idle IBS 3 × 64k link (12332.3 MHz on Intelsat 19): each
+        // channel's fill in turn through the 30 data octets, TS16 FFh.
+        const L: usize = 14280;
+        let mut tx = E1Tx::new();
+        let mut bits = Vec::new();
+        for _ in 0..400 {
+            let mut ts = [0xFFu8; TIMESLOTS];
+            let data = (1..16).chain(17..TIMESLOTS);
+            for (k, t) in data.enumerate() {
+                ts[t] = [0xAB, 0xFF, 0xAA][k % 3];
+            }
+            tx.frame(&ts, &mut bits);
+        }
+        let run = |rate: Option<f64>| {
+            let mut rx = PayloadRx::new(L);
+            if let Some(bps) = rate {
+                rx.set_data_rate(bps);
+            }
+            let mut out = PayloadOut::default();
+            for f in bits.as_chunks::<L>().0 {
+                rx.push(f, &mut out);
+            }
+            assert_eq!(rx.format(), Some(Format::E1), "{:?}", rx.stats);
+            rx.stats
+        };
+        // Its rate not known: an E1, as before.
+        let st = run(None);
+        assert!(st.found.unwrap().starts_with("E1 (G.704 framing), "));
+        assert_eq!(st.ibs_channels, None);
+        // At 204.8 kbit/s (TPC 7/8 at 117 kBd): IBS, 3 × 64k.
+        let st = run(Some(204_786.8));
+        let found = st.found.unwrap();
+        assert!(found.starts_with("IBS 3 × 64 kbit/s (G.704"), "{found}");
+        assert_eq!(st.ibs_channels, Some(3));
+        // At an E1's own rate: an E1.
+        assert_eq!(ibs_channels(2_048_000.0), None);
+        assert_eq!(ibs_channels(256e3 * 16.0 / 15.0), Some(4));
+        assert_eq!(ibs_channels(29.0 * 64e3 * 16.0 / 15.0), Some(29));
     }
 
     #[test]

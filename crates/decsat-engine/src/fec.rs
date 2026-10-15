@@ -2425,6 +2425,8 @@ fn run(
                     "fastlink" => PayloadRx::new(block).with_rail_skews(),
                     _ => PayloadRx::new(block),
                 });
+                // (G.704-shaped frames slower than an E1 are IBS's.)
+                pay.set_data_rate(data_bps);
                 let o = output.lock().unwrap().clone();
                 // Activity in the TDM multiplex (any channel changing from
                 // one 20 ms frame to the next), held 10 s (5000 frames).
@@ -2642,6 +2644,13 @@ fn run(
                     };
                     let mut view = stage.view(st);
                     view.packets = pay.stats.slots.as_ref().map(|p| (p.slot_packets, p.lost));
+                    // G.704-shaped frames on a link slower than an E1: IBS,
+                    // its frames' timeslots shown as they come.
+                    if let (None, None, Some(n)) =
+                        (&pay.stats.dandi, &pay.stats.slots, pay.stats.ibs_channels)
+                    {
+                        view.source = format!("IBS {n} × 64 kbit/s, G.704-shaped frames");
+                    }
                     s.e1 = Some(view);
                 }
                 if let Some(stage) = &mut programme {

@@ -938,15 +938,19 @@ fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
 }
 
 /// The Comtech model a carrier is, from the chain it runs and what its data
-/// carry: Drop & Insert (or E1) timeslots → the CDM-600L's voice; HDLC
-/// packets carrying timeslots → a CDM-570L trunk (voice beside its IP);
-/// anything else on TPC 2964 → a CDM-570L's data; the K = 7 code → a
+/// carry: Drop & Insert++ (or a whole E1's) timeslots → the CDM-600L's
+/// voice; HDLC packets carrying timeslots → a CDM-570L trunk (voice beside
+/// its IP); anything else on TPC 2964 → a CDM-570L's data — IBS's
+/// G.704-shaped frames too, which say nothing of voice; the K = 7 code → a
 /// CDM-570L's (the radar carriers); a FastLink is a Q-Flex.
 pub fn cdm_model(chain: DecoderKind, f: Option<&crate::fec::FecStats>) -> DecoderKind {
     let p = f.and_then(|f| f.payload.as_ref());
     match chain {
         DecoderKind::Tpc2964 => {
-            if p.is_some_and(|p| p.dandi.is_some() || p.e1.is_some()) {
+            let e1 = |p: &decsat_modem::payload::PayloadStats| {
+                p.e1.is_some() && p.ibs_channels.is_none() && p.ibs_sync.is_none()
+            };
+            if p.is_some_and(|p| p.dandi.is_some() || e1(p)) {
                 DecoderKind::Cdm600Voice
             } else if p
                 .and_then(|p| p.slots.as_ref())
@@ -2372,6 +2376,22 @@ fn viterbi_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
     format!("{lock} · {}", code_text(f))
 }
 
+/// A payload label's format: up to its first comma outside brackets (the
+/// scrambling follows it; "IBS 3 × 64 kbit/s (G.704-shaped framing,
+/// IESS-309)" keeps its bracket whole).
+fn payload_format(found: &str) -> &str {
+    let mut depth = 0i32;
+    for (i, c) in found.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => return &found[..i],
+            _ => {}
+        }
+    }
+    found
+}
+
 /// What the convolutional-code search has found (the Viterbi chain's, or
 /// the generic PSK decoder's): the code and what its data carry, or how
 /// the search is going, or that there is no such code.
@@ -2380,7 +2400,7 @@ fn code_text(f: Option<&crate::fec::FecStats>) -> String {
         f.and_then(|f| f.payload.as_ref())
             .and_then(|p| p.found.as_deref())
             .map_or("payload not recognised yet".to_string(), |p| {
-                p.split(',').next().unwrap_or(p).to_string()
+                payload_format(p).to_string()
             })
     };
     let k7 = f.and_then(|f| f.viterbi.as_ref());
@@ -2424,7 +2444,7 @@ fn fastlink_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         .and_then(|f| f.payload.as_ref())
         .and_then(|p| p.found.as_deref())
         .map_or("payload not recognised yet".to_string(), |p| {
-            p.split(',').next().unwrap_or(p).to_string()
+            payload_format(p).to_string()
         });
     format!(
         "{lock} · {} frames · {} codewords ({} failed) · BER {:.1e} · {payload}",
@@ -2596,7 +2616,7 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         .and_then(|f| f.payload.as_ref())
         .and_then(|p| p.found.as_deref())
         .map_or("payload not recognised yet".to_string(), |p| {
-            p.split(',').next().unwrap_or(p).to_string()
+            payload_format(p).to_string()
         });
     // Comtech's code is named; TPC 2964 is the one the decoder is known by.
     let code = match t.code {
@@ -2896,6 +2916,32 @@ mod tests {
             cdm_model(DecoderKind::Tpc2964, Some(&di)),
             DecoderKind::Cdm600Voice
         );
+        // A whole E1: voice. G.704-shaped frames slower than an E1, or under
+        // the IBS scrambler: IBS, a CDM-570L's data as far as can be told
+        // (an idle 3 × 64k link on Intelsat 19 was badged CDM-600L voice).
+        let e1 = |ibs_channels, ibs_sync| {
+            with(PayloadStats {
+                e1: Some(Default::default()),
+                ibs_channels,
+                ibs_sync,
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            cdm_model(DecoderKind::Tpc2964, Some(&e1(None, None))),
+            DecoderKind::Cdm600Voice
+        );
+        assert_eq!(
+            cdm_model(DecoderKind::Tpc2964, Some(&e1(Some(3), None))),
+            DecoderKind::Tpc2964
+        );
+        assert_eq!(
+            cdm_model(
+                DecoderKind::Tpc2964,
+                Some(&e1(None, Some(Default::default())))
+            ),
+            DecoderKind::Tpc2964
+        );
         let slots = |n| {
             with(PayloadStats {
                 slots: Some(decsat_modem::slotpkt::SlotStats {
@@ -2915,6 +2961,19 @@ mod tests {
             cdm_model(DecoderKind::Tpc2964, Some(&slots(0))),
             DecoderKind::Tpc2964
         );
+    }
+
+    #[test]
+    fn a_payload_label_cut_to_its_format() {
+        assert_eq!(
+            payload_format("IBS 3 × 64 kbit/s (G.704-shaped framing, IESS-309), additive"),
+            "IBS 3 × 64 kbit/s (G.704-shaped framing, IESS-309)"
+        );
+        assert_eq!(
+            payload_format("HDLC (FCS-16), not scrambled"),
+            "HDLC (FCS-16)"
+        );
+        assert_eq!(payload_format("MPEG-TS"), "MPEG-TS");
     }
 
     #[test]
