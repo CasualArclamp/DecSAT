@@ -744,7 +744,103 @@ pub(crate) fn report(st: &VfoStatus) {
         for p in &t.report.programmes {
             println!("  programme {:?}", p.name);
         }
+        if let Some(r) = &t.rcs {
+            print_rcs(r);
+        }
         print_byte_text("ts text", &t.text);
+    }
+}
+
+/// A VSAT hub's DVB-RCS signalling.
+fn print_rcs(r: &decsat_ts::rcs::RcsView) {
+    use decsat_ts::rcs::{descriptor_name, table_name};
+    println!(
+        "dvb-rcs: network {} {:?}",
+        r.network_id.map_or("?".into(), |n| n.to_string()),
+        r.network_name.as_deref().unwrap_or("")
+    );
+    for f in &r.forward {
+        println!(
+            "  forward link: {:.5} GHz {}, {}, {:.1} kS/s{}{}, satellite {} at {:.1}°, beam {}, NCC {}",
+            f.frequency_hz / 1e9,
+            ["H", "V", "L", "R"][f.polarization as usize & 3],
+            f.standard_name(),
+            f.symbol_rate / 1e3,
+            f.isi.map_or(String::new(), |i| format!(", ISI {i}")),
+            f.roll_off
+                .map_or(String::new(), |a| format!(", roll-off {a:.2}")),
+            f.satellite_id,
+            f.orbital_deg,
+            f.beam_id,
+            f.ncc_id
+        );
+    }
+    for l in &r.returns {
+        println!(
+            "  return link: satellite {}, beam {}, gateway {}, superframe {}",
+            l.satellite_id, l.beam_id, l.gateway_id, l.superframe_id
+        );
+    }
+    if let Some(n) = &r.ncr {
+        println!(
+            "  NCR on PID {:04X}h: {} packets{}{}",
+            n.pid,
+            n.packets,
+            n.interval_s
+                .map_or(String::new(), |i| format!(", every {:.1} ms", i * 1e3)),
+            n.ppm.map_or(String::new(), |p| format!(", {p:+.1} ppm"))
+        );
+    }
+    if r.tim_status.is_some() {
+        let d: Vec<String> = r
+            .tim_descriptors
+            .iter()
+            .map(|&t| format!("{} ({t:02X}h)", descriptor_name(t)))
+            .collect();
+        let flags = r.tim_flags();
+        println!(
+            "  broadcast TIM: {}; {}",
+            if flags.is_empty() {
+                "network status normal".to_string()
+            } else {
+                flags.join(", ")
+            },
+            d.join(", ")
+        );
+    }
+    for sf in &r.superframes {
+        println!(
+            "  superframe {}: {:.5} GHz, {:.2} ms, {} frames",
+            sf.id,
+            sf.centre_hz / 1e9,
+            sf.duration_s * 1e3,
+            sf.frames.len()
+        );
+    }
+    for t in &r.timeslots {
+        println!(
+            "  timeslot type {}: {:.1} kS/s {} {} {}, {}",
+            t.id,
+            t.symbol_rate / 1e3,
+            t.modulation_name(),
+            if t.turbo { "turbo" } else { "K=7" },
+            t.rate_name(),
+            t.payload_name()
+        );
+    }
+    for (pid, t) in &r.declared_missing {
+        println!("  declared, not sent: {} on PID {pid:04X}h", table_name(*t));
+    }
+    for (id, t) in &r.tables {
+        println!(
+            "  table {id:02X}h {}: PID {:04X}h, {} sections{}, {} B",
+            table_name(*id),
+            t.pid,
+            t.sections,
+            t.interval_s()
+                .map_or(String::new(), |s| format!(" every {:.1} ms", s * 1e3)),
+            t.last_len
+        );
     }
 }
 

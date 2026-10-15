@@ -6,12 +6,14 @@
 //!   programmes and service names.
 //! - [`sink`]: a `.ts` file, UDP, or a TCP/HTTP server for VLC and PotPlayer.
 //! - [`csa`] and [`biss`]: DVB-CSA descrambling with a BISS key.
+//! - [`rcs`]: a VSAT hub's DVB-RCS signalling — the return link it runs.
 
 pub mod biss;
 pub mod csa;
 pub mod deframe;
 pub mod mpe;
 pub mod psi;
+pub mod rcs;
 pub mod section;
 pub mod sink;
 

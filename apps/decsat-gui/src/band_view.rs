@@ -862,7 +862,13 @@ impl BandView {
             let galley = painter.layout_no_wrap(label, font, Color32::BLACK);
             // Room for a ✕ at the right end that deletes the VFO.
             let lw = galley.size().x + 10.0 + 16.0;
-            let lx = xc.clamp(rect.left() + lw / 2.0, rect.right() - lw / 2.0);
+            // Kept inside the view — unless the view is narrower than the
+            // label (a squeezed window), when `clamp` would panic.
+            let lx = if rect.width() > lw {
+                xc.clamp(rect.left() + lw / 2.0, rect.right() - lw / 2.0)
+            } else {
+                rect.center().x
+            };
             let lr = Rect::from_center_size(pos2(lx, spec.top() + 11.0), vec2(lw, 17.0));
             painter.rect_filled(
                 lr,

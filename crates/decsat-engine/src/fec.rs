@@ -1204,6 +1204,9 @@ pub struct TsView {
     pub biss: DescrambleStats,
     /// Packets the in-app player's tap dropped (the player behind).
     pub tap_dropped: u64,
+    /// A VSAT hub's DVB-RCS signalling in the stream: the return link it
+    /// describes and runs.
+    pub rcs: Option<decsat_ts::rcs::RcsView>,
 }
 
 /// IP out of GSE, for display.
@@ -2136,6 +2139,9 @@ struct TsStage {
     descrambler: Descrambler,
     /// The in-app player's copy.
     tap: Option<TsTap>,
+    /// DVB-RCS signalling, and its view as of the last report.
+    rcs: decsat_ts::rcs::RcsRx,
+    rcs_view: Option<decsat_ts::rcs::RcsView>,
 }
 
 impl TsStage {
@@ -2168,6 +2174,8 @@ impl TsStage {
             text: decsat_modem::text::ByteText::new(),
             descrambler: Descrambler::new(),
             tap: None,
+            rcs: decsat_ts::rcs::RcsRx::new(),
+            rcs_view: None,
         }
     }
 
@@ -2251,6 +2259,7 @@ impl TsStage {
         for p in &mut self.packets {
             let descrambled = self.descrambler.packet(p) == Outcome::Descrambled;
             self.analyser.packet(p);
+            self.rcs.packet(p);
             if descrambled {
                 self.analyser
                     .note_descrambled(u16::from_be_bytes([p[1] & 0x1F, p[2]]));
@@ -2284,6 +2293,7 @@ impl TsStage {
 
     fn tick(&mut self, secs: f64) {
         self.analyser.tick(secs);
+        self.rcs.tick(secs);
         self.win.1 += secs;
         if self.win.1 >= 2.0 || (self.ts_bps == 0.0 && self.win.1 > 0.2) {
             self.ts_bps = self.win.0 * 8.0 / self.win.1;
@@ -2301,6 +2311,7 @@ impl TsStage {
             .is_none_or(|t| t.elapsed().as_millis() >= 250)
         {
             self.report = self.analyser.report();
+            self.rcs_view = self.rcs.active().then(|| self.rcs.view());
             self.report_at = Some(Instant::now());
         }
         let d = &self.deframer.stats;
@@ -2326,6 +2337,7 @@ impl TsStage {
             biss_key: self.descrambler.has_key(),
             biss: self.descrambler.stats,
             tap_dropped: self.tap.as_ref().map_or(0, TsTap::dropped),
+            rcs: self.rcs_view.clone(),
         }
     }
 }

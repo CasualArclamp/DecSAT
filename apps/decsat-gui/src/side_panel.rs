@@ -3672,6 +3672,299 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
     {
         actions.push(Action::OpenTsViewer(id));
     }
+    if let Some(rcs) = &t.rcs {
+        rcs_card(ui, rcs);
+    }
+}
+
+/// What the interactive network card is about.
+const RCS_TIP: &str = "DVB-RCS signalling (EN 301 790; EN 301 545-2 for RCS2) in the \
+     transport stream: what a VSAT hub's outbound tells its terminals about the return \
+     link — the forward and return links in the RCS map, the network clock (NCR) every \
+     terminal times its bursts by, the superframe, frame and timeslot plans, the burst \
+     time plan, corrections and terminal information. A hub may declare tables in its \
+     PMT and never send them, running its return link from tables of its own (user \
+     defined, C0h–FEh) instead; their rates still show its timing.";
+
+/// Polarization codes of the RCS link descriptors (EN 301 790 Table 63).
+fn rcs_polarization(p: u8) -> &'static str {
+    match p {
+        0 => "H",
+        1 => "V",
+        2 => "L",
+        _ => "R",
+    }
+}
+
+/// A frequency in hertz, as GHz or MHz.
+fn rcs_freq(hz: f64) -> String {
+    if hz >= 1e9 {
+        format!("{:.5} GHz", hz / 1e9)
+    } else {
+        format!("{:.3} MHz", hz / 1e6)
+    }
+}
+
+/// A VSAT hub's DVB-RCS signalling: its links, clock, plans and tables.
+fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView) {
+    use decsat_ts::rcs::{descriptor_name, table_name};
+    // One fact a row, wrapping at the panel's width: a grid of long values
+    // would widen the side panel over the waterfall.
+    fn row(ui: &mut Ui, name: &str, text: RichText) -> egui::Response {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(name).strong());
+            ui.label(text);
+        })
+        .response
+    }
+    ui.add_space(6.0);
+    ui.label(RichText::new("Interactive network (DVB-RCS)").strong())
+        .on_hover_text(RCS_TIP);
+    if r.network_name.is_some() || r.network_id.is_some() {
+        let name = r.network_name.as_deref().unwrap_or("(no name)");
+        row(
+            ui,
+            "Network",
+            RichText::new(match r.network_id {
+                Some(id) => format!("{name} · network {id}"),
+                None => name.to_string(),
+            }),
+        );
+    }
+    for l in r
+        .linkages
+        .iter()
+        .filter(|l| l.interactive_network_id.is_some())
+    {
+        let pops: Vec<String> = l
+            .populations
+            .iter()
+            .map(|(b, m)| format!("{b:04X}h/{m:04X}h"))
+            .collect();
+        row(
+            ui,
+            "Serves",
+            RichText::new(format!(
+                "interactive network {} · populations {}",
+                l.interactive_network_id.unwrap_or_default(),
+                pops.join(", ")
+            )),
+        )
+        .on_hover_text("Population ID base/mask: the terminals this signalling is for");
+    }
+    for f in &r.forward {
+        let mut text = format!(
+            "{} {} · {} · {} kS/s",
+            rcs_freq(f.frequency_hz),
+            rcs_polarization(f.polarization),
+            f.standard_name(),
+            f.symbol_rate / 1e3
+        );
+        if let Some(i) = f.isi {
+            text.push_str(&format!(" · ISI {i}"));
+        }
+        if let Some(a) = f.roll_off {
+            text.push_str(&format!(" · roll-off {a:.2}"));
+        }
+        if f.s2x_mode.is_some_and(|m| !matches!(m, 1 | 2)) {
+            text.push_str(" · S2X fields reserved");
+        }
+        row(ui, "Forward link", RichText::new(text)).on_hover_text(format!(
+            "Satellite {} at {:.1}°{}, beam {}, NCC {}, link {} ({}). The frequency is the \
+             downlink the terminals tune.",
+            f.satellite_id,
+            f.orbital_deg.abs(),
+            if f.orbital_deg >= 0.0 { "E" } else { "W" },
+            f.beam_id,
+            f.ncc_id,
+            f.local_link_id,
+            match f.usage {
+                0 => "signalling and data",
+                1 => "signalling only",
+                2 => "data only",
+                7 => "released",
+                _ => "reserved",
+            }
+        ));
+    }
+    for l in &r.returns {
+        row(
+            ui,
+            "Return link",
+            RichText::new(format!(
+                "satellite {}, beam {}, gateway {} · superframe {}{}",
+                l.satellite_id,
+                l.beam_id,
+                l.gateway_id,
+                l.superframe_id,
+                if l.tx_offset_hz != 0.0 {
+                    format!(" · Tx offset {:+.1} kHz", l.tx_offset_hz / 1e3)
+                } else {
+                    String::new()
+                }
+            )),
+        );
+    }
+    if let Some(n) = &r.ncr {
+        let mut text = format!("PID {:04X}h", n.pid);
+        if let Some(i) = n.interval_s {
+            text.push_str(&format!(" · every {:.1} ms", i * 1e3));
+        }
+        if let Some(p) = n.ppm {
+            text.push_str(&format!(" · {p:+.1} ppm"));
+        }
+        row(ui, "Clock (NCR)", RichText::new(text)).on_hover_text(
+            "The network clock reference: a 27 MHz count in a PCR, which every terminal \
+             locks to and times its return bursts by. The ppm is its rate against the \
+             carrier's own symbol clock: 0 when the hub makes both from one reference.",
+        );
+    }
+    if let Some(s) = r.tim_status {
+        let flags = r.tim_flags();
+        let descs: Vec<String> = r
+            .tim_descriptors
+            .iter()
+            .map(|&t| format!("{} ({t:02X}h)", descriptor_name(t)))
+            .collect();
+        let status = if flags.is_empty() {
+            "network status normal".to_string()
+        } else {
+            flags.join(", ")
+        };
+        let mut text = RichText::new(format!("{status} · {}", descs.join(", ")));
+        if s & 0x1F != 0 {
+            text = text.color(Color32::from_rgb(240, 200, 80));
+        }
+        row(ui, "Terminal info", text).on_hover_text(
+            "The broadcast TIM: the network status flags (Table 48) and the descriptors \
+             it carries",
+        );
+    }
+    if r.tim_unicast > 0 {
+        row(
+            ui,
+            "Terminal info",
+            RichText::new(format!(
+                "{} TIMs to {} terminals",
+                r.tim_unicast, r.tim_macs
+            )),
+        );
+    }
+    for sf in &r.superframes {
+        row(
+            ui,
+            "Superframe",
+            RichText::new(format!(
+                "{} · {} (uplink) · {:.2} ms · {} frames · count {}",
+                sf.id,
+                rcs_freq(sf.centre_hz),
+                sf.duration_s * 1e3,
+                sf.frames.len(),
+                sf.counter
+            )),
+        );
+    }
+    for f in &r.frame_types {
+        row(
+            ui,
+            "Frame type",
+            RichText::new(format!(
+                "{} · {:.2} ms · {} timeslots in {} groups",
+                f.id,
+                f.duration_s * 1e3,
+                f.timeslots,
+                f.groups.len()
+            )),
+        );
+    }
+    for t in &r.timeslots {
+        row(
+            ui,
+            "Timeslot type",
+            RichText::new(format!(
+                "{} · {:.1} kS/s · {} {} {} · {} · {:.3} ms",
+                t.id,
+                t.symbol_rate / 1e3,
+                t.modulation_name(),
+                if t.turbo { "turbo" } else { "K = 7" },
+                t.rate_name(),
+                t.payload_name(),
+                t.duration_s * 1e3
+            )),
+        );
+    }
+    if r.tbtp_assignments > 0 {
+        row(
+            ui,
+            "Burst time plan",
+            RichText::new(format!(
+                "{} assignments to {} terminals",
+                r.tbtp_assignments, r.tbtp_logons
+            )),
+        );
+    }
+    if r.cmt_entries > 0 {
+        row(
+            ui,
+            "Corrections",
+            RichText::new(format!("{} to {} terminals", r.cmt_entries, r.cmt_logons)),
+        );
+    }
+    if !r.declared_missing.is_empty() {
+        let v: Vec<String> = r
+            .declared_missing
+            .iter()
+            .map(|(pid, t)| format!("{} ({pid:04X}h)", table_name(*t)))
+            .collect();
+        row(
+            ui,
+            "Not sent",
+            RichText::new(v.join(", ")).color(Color32::from_rgb(240, 200, 80)),
+        )
+        .on_hover_text(
+            "Declared in the PMT, never seen: the return link is not run by the standard's \
+             plans (a vendor's own tables do it instead)",
+        );
+    }
+    egui::CollapsingHeader::new(
+        RichText::new(format!("Signalling tables ({})", r.tables.len()))
+            .small()
+            .strong(),
+    )
+    .id_salt("rcs_tables")
+    .show(ui, |ui| {
+        egui::Grid::new("rcs_table_rows")
+            .num_columns(5)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["table", "PID", "sections", "every", "size"] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for (id, t) in &r.tables {
+                    ui.label(RichText::new(format!("{id:02X}h {}", table_name(*id))).small());
+                    ui.label(RichText::new(format!("{:04X}h", t.pid)).small());
+                    ui.label(
+                        RichText::new(if t.crc_bad > 0 {
+                            format!("{} ({} bad)", t.sections, t.crc_bad)
+                        } else {
+                            t.sections.to_string()
+                        })
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(
+                            t.interval_s()
+                                .map_or("–".into(), |s| format!("{:.1} ms", s * 1e3)),
+                        )
+                        .small(),
+                    );
+                    ui.label(RichText::new(format!("{} B", t.last_len)).small());
+                    ui.end_row();
+                }
+            });
+    });
 }
 
 /// The decoder menu: every kind, the Comtech CDM presets folded into one
@@ -4081,10 +4374,17 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
         }
         if !g.other_protocols.is_empty() {
             ui.label("Not IP");
+            // DVB-RCS2's own types (EN 301 545-2 Table 5-1) named.
             let v: Vec<String> = g
                 .other_protocols
                 .iter()
-                .map(|(t, n)| format!("0x{t:04X} ×{n}"))
+                .map(|(t, n)| match t {
+                    0x0081 => format!("0x0081 NCR (RCS2) ×{n}"),
+                    0x0082 => format!("0x0082 RCS2 signalling ×{n}"),
+                    0x0085 => format!("0x0085 TRANSEC ×{n}"),
+                    0x0086 => format!("0x0086 encrypted layer 2 ×{n}"),
+                    _ => format!("0x{t:04X} ×{n}"),
+                })
                 .collect();
             ui.label(v.join(", "));
             ui.end_row();
