@@ -97,6 +97,11 @@ pub enum DecoderKind {
     /// (preamble, pilots, fixed fields) read blind, the slot grid, frame and
     /// terminals; each burst's data symbols to a `.bursts` file on Record.
     Tdma,
+    /// A return pool (a VSAT network's terminals sharing a block: carriers
+    /// a hub resizes and moves, Mx-DMA style, and/or MF-TDMA bursts): its
+    /// layout over time and its slot and frame grid ([`crate::tdma::pool`]),
+    /// matched against an outbound's signalling timing in the GUI.
+    ReturnPool,
     /// Record the VFO's narrowband IQ.
     IqRecord,
     /// Zoomed spectrum and level only.
@@ -104,7 +109,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 18] = [
+    pub const ALL: [DecoderKind; 19] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -121,6 +126,7 @@ impl DecoderKind {
         DecoderKind::Beacon,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
+        DecoderKind::ReturnPool,
         DecoderKind::IqRecord,
         DecoderKind::Spectrum,
     ];
@@ -145,6 +151,7 @@ impl DecoderKind {
             DecoderKind::Beacon => "Satellite beacon (carrier, PCM/PM telemetry, CCSDS)",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
+            DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
             DecoderKind::IqRecord => "IQ recorder",
             DecoderKind::Spectrum => "Spectrum only",
         }
@@ -170,6 +177,7 @@ impl DecoderKind {
             DecoderKind::Beacon => "beacon",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
+            DecoderKind::ReturnPool => "return-pool",
             DecoderKind::IqRecord => "iq-record",
             DecoderKind::Spectrum => "spectrum",
         }
@@ -295,6 +303,7 @@ impl DecoderKind {
             DecoderKind::Beacon => "BCN",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
+            DecoderKind::ReturnPool => "POOL",
             DecoderKind::IqRecord => "REC",
             DecoderKind::Spectrum => "SPEC",
         }
@@ -318,7 +327,7 @@ impl SignalMode {
 
     /// The mode a decoder belongs to (the tools, either: SCPC).
     pub fn of(decoder: DecoderKind) -> Self {
-        if decoder == DecoderKind::Tdma {
+        if matches!(decoder, DecoderKind::Tdma | DecoderKind::ReturnPool) {
             SignalMode::Tdma
         } else {
             SignalMode::Scpc
@@ -355,12 +364,12 @@ impl SignalMode {
 }
 
 impl DecoderKind {
-    /// Offered in `mode`: the burst analyser in TDMA, the rest in SCPC, the
-    /// IQ recorder and the spectrum in both.
+    /// Offered in `mode`: the burst analyser and the return pool in TDMA,
+    /// the rest in SCPC, the IQ recorder and the spectrum in both.
     pub fn fits(self, mode: SignalMode) -> bool {
         match self {
             DecoderKind::IqRecord | DecoderKind::Spectrum => true,
-            DecoderKind::Tdma => mode == SignalMode::Tdma,
+            DecoderKind::Tdma | DecoderKind::ReturnPool => mode == SignalMode::Tdma,
             _ => mode == SignalMode::Scpc,
         }
     }
@@ -585,6 +594,8 @@ pub struct VfoStatus {
     pub cid: Option<crate::cid::CidView>,
     /// TDMA: the carriers, their bursts, layouts, slots and terminals.
     pub tdma: Option<crate::tdma::TdmaView>,
+    /// A return pool: its layout over time and its grid.
+    pub pool: Option<crate::tdma::pool::PoolView>,
     /// The Intelsat 19 DAMA outbound: frames, packets, call signalling.
     pub is19: Option<decsat_modem::is19::OutboundView>,
     /// A satellite beacon: its carrier, telemetry and frames.
@@ -887,6 +898,8 @@ enum Decoder {
     },
     /// TDMA: the analyser runs on the VFO's baseband from the start.
     Tdma(Box<crate::tdma::TdmaAnalyser>),
+    /// A return pool: the tracker on the VFO's baseband from the start.
+    Pool(Box<crate::tdma::pool::PoolTracker>),
     /// The Intelsat 19 DAMA outbound: Identify's first look centres the
     /// carrier, then QPSK at the measured rate into the framer.
     Is19 {
@@ -1218,6 +1231,12 @@ impl Worker {
                 ddc.out_rate(),
                 s.bandwidth_hz.min(ddc.out_rate()),
             ))),
+            DecoderKind::ReturnPool => {
+                Decoder::Pool(Box::new(crate::tdma::pool::PoolTracker::new(
+                    ddc.out_rate(),
+                    s.bandwidth_hz.min(ddc.out_rate()),
+                )))
+            }
             DecoderKind::PskSymbols => Decoder::Psk {
                 buf: Vec::new(),
                 demod: None,
@@ -1881,6 +1900,7 @@ impl Worker {
                     files.write(&frames, &points, rx.carried_total());
                 }
             }
+            Decoder::Pool(p) => p.push(&self.bb),
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
                 let tag = format!(
@@ -2297,6 +2317,25 @@ impl Worker {
                     _ => v.message.clone(),
                 };
                 st.beacon = Some(v);
+            }
+            Decoder::Pool(p) => {
+                let v = p.view().clone();
+                st.message = match (v.slot_s, v.frame_s) {
+                    _ if v.seconds < 1.0 => "listening…".into(),
+                    (Some(s), Some(f)) => format!(
+                        "{} carriers · {:.3} ms slots · {:.3} ms frame",
+                        v.carriers.len(),
+                        s * 1e3,
+                        f * 1e3
+                    ),
+                    (Some(s), None) => format!(
+                        "{} carriers · repeats every {:.3} ms",
+                        v.carriers.len(),
+                        s * 1e3
+                    ),
+                    _ => format!("{} carriers · finding the grid…", v.carriers.len()),
+                };
+                st.pool = Some(v);
             }
             Decoder::Tdma(a) => {
                 let v = a.view();

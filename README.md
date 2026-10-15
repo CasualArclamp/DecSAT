@@ -83,7 +83,7 @@ real carriers stay put.
 | **S2X superframing** (Annex E): super-frames found by their start sequence, their format read, and formats 0 (S2X) and 1 (S2 legacy) decoded with the super-frame pilots on or off; the other formats named | ✅ on test signals (none seen live yet) |
 | **ACM terminal table**: each GSE label (a terminal's MAC) — its bytes, its IP addresses and the MODCODs the hub sends it in, which is the terminal's link as the hub sees it | ✅ live: 25 terminals of a hub, QPSK 5/6 to 16APSK 5/6 |
 | **DVB-RCS signalling** in a hub's outbound (EN 301 790 / 545-2): the forward and return links of the RCS map, the network clock (NCR), the terminal information, superframe/frame/timeslot plans, burst time plan and corrections when sent — and every signalling table's rate, the vendor's own included | ✅ live (RCS2 over GSE: its PDU types named only) |
-| **Return pools** (TDMA VFOs): the pool's layout over time — a hub resizing and moving its terminals' carriers — and the slot and frame grid of its bursts, tied to an outbound VFO whose signalling keeps the same time | ✅ live: 5.025 ms slots in a 40.200 ms frame, matching the outbound's 40.2 ms table |
+| **Return pools** (TDMA mode's *Return pool* decoder): the pool's layout over time — a hub resizing and moving its terminals' carriers — and the slot and frame grid of its bursts, tied to an outbound VFO whose signalling keeps the same time | ✅ live: 5.025 ms slots in a 40.200 ms frame, matching the outbound's 40.2 ms table |
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
@@ -211,9 +211,9 @@ id with its PID, count, period and size, a vendor's own included. Tables a
 PMT declares but never sends are listed too: a hub that runs its return
 with tables of its own still shows its timing in their rates.
 
-A **TDMA** VFO over the return shows the **Return pool** above its bursts:
-the carriers now (a 200 ms average split at the guards between them), how
-often the layout changes, a map of the layouts over two minutes (a hub
+The **Return pool** decoder (TDMA mode, beside the burst analyser) over
+the return shows the carriers now (a 200 ms average split at the guards
+between them), how often the layout changes, a map of the layouts over two minutes (a hub
 resizing and moving its terminals' carriers, Mx-DMA style), and the grid —
 the slot, from the repeat of the bursts' guard times, and the frame, the
 multiple of it the envelope repeats over. When another VFO is decoding an
@@ -229,7 +229,7 @@ whose width the hub changes every few seconds and a block of bursts in
 
 ```bash
 decsat decode outbound_8Msps.cs8 --decoder ip --offset -881700 --bandwidth 1300000
-decsat decode outbound_8Msps.cs8 --decoder tdma --offset 580000 --bandwidth 900000
+decsat decode outbound_8Msps.cs8 --decoder pool --offset 580000 --bandwidth 900000
 ```
 
 ### DVB-S2 → MPEG-TS → VLC / PotPlayer

@@ -1043,7 +1043,13 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     if v.settings.decoder == DecoderKind::Tdma
         && let Some(t) = &st.tdma
     {
-        // Other VFOs' DVB-RCS signalling, to tie a pool's frame to an
+        tdma_card(ui, t, inp.rf_center + v.settings.offset_hz, v.id);
+    }
+
+    if v.settings.decoder == DecoderKind::ReturnPool
+        && let Some(p) = &st.pool
+    {
+        // Other VFOs' DVB-RCS signalling, to tie the pool's frame to an
         // outbound's clock.
         let outbounds: Vec<(String, &decsat_ts::rcs::RcsView)> = inp
             .vfos
@@ -1062,10 +1068,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 Some((o.settings.name.clone(), rcs))
             })
             .collect();
-        if let Some(p) = &t.pool {
-            pool_section(ui, p, inp.rf_center + v.settings.offset_hz, &outbounds);
-        }
-        tdma_card(ui, t, inp.rf_center + v.settings.offset_hz, v.id);
+        pool_section(ui, p, inp.rf_center + v.settings.offset_hz, &outbounds);
     }
 
     // The chain running (the CDM type-found model's, once picked) and the

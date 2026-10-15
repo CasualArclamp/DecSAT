@@ -14,9 +14,8 @@
 //! 4. [`slots`]: the slot grid and frame the bursts keep, and the terminals
 //!    sending them.
 //!
-//! Beside them, [`pool`] watches the whole VFO as a return pool: its
-//! carriers' edges over time (a hub resizing and moving them) and the frame
-//! grid of the bursts in it.
+//! [`pool`] is a decoder of its own (*Return pool*): the whole VFO as a
+//! return pool, its layout over time and the frame grid of its bursts.
 //!
 //! Recording writes every burst's data symbols to a `.bursts` file (and a
 //! line per burst to a `.csv`, with its header fields' values — the short
@@ -372,9 +371,6 @@ pub struct TdmaView {
     /// Gathering the first look (0..1), before the carriers are known.
     pub progress: f32,
     pub message: String,
-    /// The VFO as a return pool: its carriers over time and its grid, once
-    /// there is more than one carrier or a grid.
-    pub pool: Option<pool::PoolView>,
 }
 
 /// A channel's front: a mixer, and a decimating FIR when the VFO's rate is
@@ -1087,8 +1083,6 @@ pub struct TdmaAnalyser {
     open_failed: bool,
     message: String,
     done: Vec<Done>,
-    /// The whole VFO as a return pool.
-    pool: pool::PoolTracker,
 }
 
 impl TdmaAnalyser {
@@ -1114,7 +1108,6 @@ impl TdmaAnalyser {
             open_failed: false,
             message: "listening…".into(),
             done: Vec::new(),
-            pool: pool::PoolTracker::new(rate, bandwidth),
         }
     }
 
@@ -1122,7 +1115,6 @@ impl TdmaAnalyser {
     /// to demodulate as, `None` to find it.
     pub fn push(&mut self, x: &[Iq], modulation: Option<Modulation>) {
         self.samples += x.len() as u64;
-        self.pool.push(x);
         self.peak.push(x);
         self.history.extend(x.iter().copied());
         let keep = ((HISTORY_S * self.rate) as usize).min(HISTORY_MAX);
@@ -1522,10 +1514,6 @@ impl TdmaAnalyser {
                 (s / LOOK_MAX_S).max((s / FIRST_LOOK_S).min(1.0) * 0.1) as f32
             },
             message,
-            pool: {
-                let p = self.pool.view();
-                (p.carriers.len() > 1 || p.slot_s.is_some()).then(|| p.clone())
-            },
         }
     }
 }

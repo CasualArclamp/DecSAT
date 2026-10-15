@@ -457,6 +457,13 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             Some(t) if t.progress >= 1.0 => "no TDMA".into(),
             _ => format!("{:.0} %", st.progress * 100.0),
         },
+        DecoderKind::ReturnPool => match &st.pool {
+            Some(p) => match p.frame_s.or(p.slot_s) {
+                Some(f) => format!("{}× · {:.3} ms frame", p.carriers.len(), f * 1e3),
+                None => format!("{}× carriers", p.carriers.len()),
+            },
+            None => "listening".into(),
+        },
         DecoderKind::IqRecord => st
             .recording
             .as_ref()

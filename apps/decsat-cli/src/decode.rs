@@ -71,6 +71,7 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "cid" | "carrier-id" => DecoderKind::CarrierId,
         "psk" => DecoderKind::PskSymbols,
         "tdma" => DecoderKind::Tdma,
+        "pool" | "return-pool" => DecoderKind::ReturnPool,
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         other => bail!(
@@ -360,6 +361,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(t) = &st.tdma {
         print_tdma(t);
+    }
+    if let Some(p) = &st.pool {
+        print_pool(p);
     }
     if let Some(v) = &st.is19 {
         print_is19(v);
@@ -1490,9 +1494,6 @@ pub(crate) fn print_is19(v: &decsat_modem::is19::OutboundView) {
 }
 
 pub(crate) fn print_tdma(v: &decsat_engine::TdmaView) {
-    if let Some(p) = &v.pool {
-        print_pool(p);
-    }
     for (i, c) in v.channels.iter().enumerate() {
         println!(
             "tdma #{i}: {:+.1} kHz, {:.1} kS/s α {:.2}, {} · {} bursts ({:.0}/s, on {:.0} %) · {} · MER {:.1} dB, {:.1} dB over the floor",

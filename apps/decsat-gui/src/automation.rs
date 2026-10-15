@@ -201,6 +201,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "cid" | "carrier-id" => CarrierId,
         "psk" => PskSymbols,
         "tdma" => Tdma,
+        "pool" | "return-pool" => ReturnPool,
         "is19" | "is19-outbound" | "i19" => Is19Outbound,
         "beacon" | "tlm" | "telemetry" => Beacon,
         "rec" | "iq" => IqRecord,
