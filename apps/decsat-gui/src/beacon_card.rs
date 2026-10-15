@@ -493,7 +493,11 @@ fn frame_map(ui: &mut Ui, b: &BeaconView, id: VfoId) {
         Color32::WHITE,
     );
     let pick_key = egui::Id::new(("beacon_pick", id));
-    let mut pick: Option<Pick> = ui.data(|d| d.get_temp(pick_key));
+    // Rust note: egui's memory is keyed by type as well as id — the pick is
+    // stored as an `Option<Pick>` (so Close can store `None`), and must be
+    // read back as one: read as a plain `Pick` it is never found, and the
+    // plot lasted only the frame of the click.
+    let mut pick: Option<Pick> = ui.data(|d| d.get_temp::<Option<Pick>>(pick_key)).flatten();
     let cell = |p: egui::Pos2| {
         let c = ((p.x - rect.left()) / rect.width() * cols as f32) as usize;
         let r = ((p.y - rect.top()) / rect.height() * rows as f32) as usize;
