@@ -374,6 +374,11 @@ pub struct RcsRx {
     ncr_last: Option<(u64, f64)>,
     ncr_packets: u64,
     clock: f64,
+    /// The receiver's own time of the packets coming in now (its samples
+    /// counted from the source), when the demodulator says: the burst plan's
+    /// arrivals in it, so they line up with another VFO's view of the same
+    /// signal. `None`: the signal time above.
+    source_s: Option<f64>,
     tbtp_logons: BTreeSet<u16>,
     cmt_logons: BTreeSet<u16>,
     tim_macs: BTreeSet<[u8; 6]>,
@@ -538,6 +543,12 @@ impl RcsRx {
         self.clock += secs;
     }
 
+    /// The packets coming next arrived at `t` on the receiver's own clock
+    /// (seconds of source samples, shared by every VFO of one receiver).
+    pub fn at_source(&mut self, t: f64) {
+        self.source_s = Some(t);
+    }
+
     /// Something RCS has been seen: declared tables, an NCR, or an RCS table.
     pub fn active(&self) -> bool {
         !self.declared.is_empty() || !self.view.tables.is_empty()
@@ -656,7 +667,7 @@ impl RcsRx {
                 if let Some(f) = crate::newtec::parse_plan(s) {
                     self.plan
                         .get_or_insert_with(crate::newtec::PlanRx::new)
-                        .push(f, self.clock);
+                        .push(f, self.source_s.unwrap_or(self.clock));
                 }
             }
             _ => {}

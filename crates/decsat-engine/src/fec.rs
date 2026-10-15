@@ -2233,6 +2233,12 @@ impl TsStage {
         }
     }
 
+    /// The packets coming next arrived at `t` on the receiver's source
+    /// clock (for the burst plan's arrival times).
+    fn at_source(&mut self, t: f64) {
+        self.rcs.at_source(t);
+    }
+
     fn data_field(&mut self, field: &[u8], h: &BbHeader) {
         self.issy |= h.issyi;
         self.packets.clear();
@@ -2501,6 +2507,55 @@ pub fn hdlc_ip(frame: &[u8]) -> Option<(&[u8], IpInfo)> {
     None
 }
 
+/// How long the frames' source times are compared over, s of symbols.
+const SOURCE_WINDOW_S: f64 = 2.0;
+
+/// The demodulated frames' times on the receiver's source clock (the one
+/// every VFO shares). Symbols counted by the FEC run at the carrier's own
+/// time but start from nothing and skip whatever was lost; each frame comes
+/// tagged with the end of the source block it left the demodulator in,
+/// which is never earlier than its end. So the offset between the two
+/// clocks is the least (block end − symbol time) over the recent frames:
+/// the frames that finished just as a block ended pin it down to the
+/// demodulator's own small delay. Started afresh after a gap (the symbols
+/// count skips what was lost); a sliding window lets it rise with frames
+/// that never reached here (dropped from the queue) all the same.
+#[derive(Default)]
+struct SourceClock {
+    /// Symbol time, s.
+    sym: f64,
+    /// (symbol time, block end − symbol time), the values rising: a
+    /// monotonic queue, its front the window's least.
+    recent: VecDeque<(f64, f64)>,
+}
+
+impl SourceClock {
+    /// A frame of `secs` came, from a block ending at `src_s`; `lost`: frames
+    /// went missing before it. Its end on the source clock, once known.
+    fn frame(&mut self, secs: f64, src_s: Option<f64>, lost: bool) -> Option<f64> {
+        if lost {
+            self.recent.clear();
+        }
+        self.sym += secs;
+        if let Some(s) = src_s {
+            let v = s - self.sym;
+            while self.recent.back().is_some_and(|b| b.1 >= v) {
+                self.recent.pop_back();
+            }
+            self.recent.push_back((self.sym, v));
+        }
+        while self
+            .recent
+            .front()
+            .is_some_and(|f| f.0 < self.sym - SOURCE_WINDOW_S)
+            && self.recent.len() > 1
+        {
+            self.recent.pop_front();
+        }
+        self.recent.front().map(|f| self.sym + f.1)
+    }
+}
+
 fn run(
     rx: Receiver<FecInput>,
     stats: Arc<Mutex<FecStats>>,
@@ -2539,6 +2594,7 @@ fn run(
     let mut e1: Option<E1Stage> = None;
     let mut programme: Option<crate::programme::ProgrammeStage> = None;
     let mut radar: Option<crate::radar::RadarStage> = None;
+    let mut src_clock = SourceClock::default();
     while let Ok(input) = rx.recv() {
         let _done = pending.guard();
         if quit.load(Ordering::Relaxed) {
@@ -2919,9 +2975,10 @@ fn run(
         // A stream reassembled across frames breaks at any frame missing in
         // between: one the demodulator never saw (lock regained), one dropped
         // from the queue, or one that would not decode.
-        let broken = f.after_gap
-            || gap.swap(false, Ordering::Relaxed)
-            || out.as_ref().is_some_and(|b| !b.ok());
+        let lost = f.after_gap || gap.swap(false, Ordering::Relaxed);
+        let broken = lost || out.as_ref().is_some_and(|b| !b.ok());
+        // This frame's end on the receiver's source clock.
+        let src_end = src_clock.frame(secs, f.src_s, lost);
         if broken {
             for t in ts.values_mut() {
                 t.deframer.discontinuity();
@@ -2972,6 +3029,9 @@ fn run(
                 let primary = primary_isi(&o, &ts);
                 let stage = ts.get_mut(&isi).expect("just made");
                 stage.follow(&ts_output(&o, primary == Some(isi)));
+                if let Some(t) = src_end {
+                    stage.at_source(t);
+                }
                 stage.data_field(&b.bytes[BBHEADER_LEN..end], h);
                 // IP by MPE joins the IP stage (statistics, multicast audio).
                 if !stage.datagrams.is_empty() || ip.is_some() {
@@ -3095,6 +3155,39 @@ fn ts_output(o: &FecOutput, primary: bool) -> FecOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_are_timed_on_the_source_clock() {
+        // 7.3 ms frames whose symbols begin 3.2 s into the source; each
+        // leaves the demodulator 0.2 ms after it ends, in a 40 ms block,
+        // and is tagged with that block's end.
+        let (frame, block, delay) = (0.0073, 0.04, 0.0002);
+        let tag = |end: f64| ((end + delay) / block).ceil() * block;
+        let mut c = SourceClock::default();
+        let mut end = 3.2;
+        for i in 0..1000 {
+            end += frame;
+            let got = c.frame(frame, Some(tag(end)), i == 0).unwrap();
+            // Never early; within a block always, and once a few dozen
+            // frames have come, within a fraction of a millisecond.
+            assert!(got >= end + delay - 1e-9, "frame {i}: {got} before {end}");
+            assert!(got - end < block, "frame {i}");
+            if i > 300 {
+                assert!(got - end < delay + 5e-4, "frame {i}: {} late", got - end);
+            }
+        }
+        // A second of frames lost: the symbol count skips it, the offset
+        // starts again from the frame after.
+        end += 1.0;
+        for i in 0..400 {
+            end += frame;
+            let got = c.frame(frame, Some(tag(end)), i == 0).unwrap();
+            assert!(got >= end + delay - 1e-9, "after the gap, frame {i}");
+            if i > 300 {
+                assert!(got - end < delay + 5e-4, "after the gap, frame {i}");
+            }
+        }
+    }
     use crate::demod::Demod;
 
     /// With a BISS key the TS stage descrambles before everything: the

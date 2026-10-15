@@ -925,6 +925,14 @@ fn print_plan(p: &decsat_ts::newtec::PlanView) {
             String::new()
         }
     );
+    if let Some(c) = &p.clock {
+        println!(
+            "    arrivals ±{:.1} ms about their line ({} of {} frames on it)",
+            c.jitter_s * 1e3,
+            c.frames,
+            c.frames + c.outliers
+        );
+    }
     for w in p.widths.iter().filter(|w| w.bursts >= 20) {
         println!(
             "    code {:04X}h: {} slot{} × {:.2} kHz{} ({} bursts, {} pairs{})",

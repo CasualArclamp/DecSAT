@@ -661,7 +661,10 @@ impl CarrierState {
 /// the GUI could freeze it behind a busy worker. Settings go in a mailbox slot
 /// instead, and a non-blocking `Wake` tells the worker to look.
 pub(crate) enum VfoMsg {
-    Block(Arc<Vec<Iq>>),
+    /// A block of the receiver's samples and when its first one came on the
+    /// source clock (s): what lets two VFOs line up their views of one
+    /// signal.
+    Block(Arc<Vec<Iq>>, f64),
     Wake,
 }
 
@@ -702,18 +705,23 @@ pub(crate) struct VfoHandle {
 }
 
 impl VfoHandle {
-    /// Queue a block; drop it (and count) if the worker is behind — or,
-    /// lossless, wait for it.
-    pub fn offer(&self, block: &Arc<Vec<Iq>>) {
+    /// Queue a block, its first sample at `start_s` on the source clock;
+    /// drop it (and count) if the worker is behind — or, lossless, wait for
+    /// it.
+    pub fn offer(&self, block: &Arc<Vec<Iq>>, start_s: f64) {
         if !self.settings.enabled || out_of_span(&self.settings, self.in_rate) {
             return;
         }
         self.pending.add();
         if self.lossless {
-            if self.tx.send(VfoMsg::Block(Arc::clone(block))).is_err() {
+            if self
+                .tx
+                .send(VfoMsg::Block(Arc::clone(block), start_s))
+                .is_err()
+            {
                 self.pending.done();
             }
-        } else if let Err(e) = self.tx.try_send(VfoMsg::Block(Arc::clone(block))) {
+        } else if let Err(e) = self.tx.try_send(VfoMsg::Block(Arc::clone(block), start_s)) {
             self.pending.done();
             if let TrySendError::Full(_) = e {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -1093,6 +1101,9 @@ struct Worker {
     /// checks in a row that found it moved.
     rate_watch: Vec<Iq>,
     rate_moves: u8,
+    /// The block being worked on: its first sample and its end on the
+    /// source clock, s.
+    block_s: (f64, f64),
 }
 
 /// How much signal (s) each check of a blind symbol rate looks at.
@@ -1155,6 +1166,7 @@ impl Worker {
             follow_samples: 0,
             rate_watch: Vec::new(),
             rate_moves: 0,
+            block_s: (0.0, 0.0),
         }
     }
 
@@ -1438,7 +1450,7 @@ impl Worker {
             }
             match msg {
                 VfoMsg::Wake => {}
-                VfoMsg::Block(block) => {
+                VfoMsg::Block(block, start_s) => {
                     let pending = self.pending.clone();
                     let _done = pending.guard();
                     // Blocks dropped since the last one: tell the CID
@@ -1455,6 +1467,7 @@ impl Worker {
                         }
                     }
                     let t0 = Instant::now();
+                    self.block_s = (start_s, start_s + block.len() as f64 / self.in_rate);
                     self.bb.clear();
                     self.ddc.process(&block, &mut self.bb);
                     let n = self.bb.len();
@@ -1612,7 +1625,8 @@ impl Worker {
                 Some(d) => {
                     self.frames.clear();
                     d.process(&self.bb, &mut self.frames);
-                    for f in &self.frames {
+                    for f in &mut self.frames {
+                        f.src_s = Some(self.block_s.1);
                         *self.modcods.entry(f.pls.modcod).or_default() += 1;
                         if f.pls.modcod != 0 {
                             self.last_modcod = Some(f.pls.modcod);
@@ -1655,7 +1669,8 @@ impl Worker {
                                 self.pending.clone(),
                             )
                             .lossless(self.lossless);
-                            for f in self.frames.drain(..) {
+                            for mut f in self.frames.drain(..) {
+                                f.src_s = Some(self.block_s.1);
                                 w.offer(f);
                             }
                             *fec = Some(w);
@@ -1900,7 +1915,7 @@ impl Worker {
                     files.write(&frames, &points, rx.carried_total());
                 }
             }
-            Decoder::Pool(p) => p.push(&self.bb),
+            Decoder::Pool(p) => p.push_at(&self.bb, self.block_s.0),
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
                 let tag = format!(

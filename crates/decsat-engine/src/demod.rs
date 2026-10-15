@@ -116,6 +116,10 @@ pub struct PlFrame {
     /// matched (1 when clean). Its payload is then as sent before
     /// scrambling throughout — header, pilots, and pi/2-BPSK data too.
     pub vlsnr: Option<(u8, f32)>,
+    /// The end of the receiver's block (its source clock, s) the frame came
+    /// out of the demodulator in — no earlier than the frame's own end — as
+    /// the VFO sets it; `None` from the demodulator itself.
+    pub src_s: Option<f64>,
 }
 
 impl PlFrame {
@@ -523,6 +527,7 @@ impl Demod {
                             noise_var,
                             after_gap: confirmed == 0,
                             vlsnr,
+                            src_s: None,
                         });
                         self.frames += 1;
                         // Frames on the grid: the timing loop can go quiet.

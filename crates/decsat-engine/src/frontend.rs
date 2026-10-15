@@ -331,6 +331,10 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     let mut avg_lin: Vec<f32> = Vec::new();
     let mut row_seq = 0u64;
     let mut samples = 0u64;
+    // The source clock the VFOs share: samples so far, plus a second's
+    // jump at each rewind of a looping file, so a decoder that lines up
+    // two VFOs sees the signal break there rather than run on.
+    let mut source_samples = 0u64;
     let mut load = 0.0f32;
     let mut input_dbfs: Option<f32> = None;
     let mut paused = false;
@@ -402,6 +406,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
             match source.read(&mut tmp) {
                 Ok(0) => {
                     if opts.loop_file && matches!(source.rewind(), Ok(true)) {
+                        source_samples += rate as u64;
                         continue;
                     }
                     set_state(SourceState::Ended);
@@ -431,6 +436,8 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         }
         let block = Arc::new(block);
         samples += block_len as u64;
+        let block_start_s = source_samples as f64 / rate;
+        source_samples += block_len as u64;
         // The block's level, smoothed over about five blocks.
         let power = block.iter().map(|z| z.norm_sqr() as f64).sum::<f64>() / block_len as f64;
         let level = 10.0 * power.max(1e-20).log10() as f32;
@@ -505,7 +512,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         }
 
         for h in shared.vfos.lock().unwrap().values() {
-            h.offer(&block);
+            h.offer(&block, block_start_s);
         }
 
         let used = t0.elapsed().as_secs_f64() / (block_len as f64 / rate);
@@ -685,5 +692,109 @@ mod tests {
 
         drop(eng);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A hub's outbound and its return pool in one capture: the burst
+    /// plan lined up in frequency and time, followed every five seconds of
+    /// signal, and each terminal's level at the end. Run by hand with the
+    /// 172B capture (8 MS/s cs8; outbound −881.7 kHz, pool +580 kHz):
+    /// `DECSAT_172B=<file> cargo test -p decsat-engine --release
+    /// plan_on_a_capture -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn plan_on_a_capture() {
+        use crate::tdma::pool::{align_plan, lead_scores, match_plan, terminal_levels};
+        let Ok(path) = std::env::var("DECSAT_172B") else {
+            return;
+        };
+        let src = IqFileReader::open(path.as_ref(), SampleFormat::Cs8, 8e6, 1 << 16).unwrap();
+        let mut eng = Engine::start(
+            Box::new(src),
+            EngineOptions {
+                realtime: false,
+                loop_file: false,
+                ..Default::default()
+            },
+        );
+        let out = eng.add_vfo(VfoSettings::new(
+            "VFO 1",
+            -881_700.0,
+            1_300_000.0,
+            DecoderKind::Dvbs2Ts,
+        ));
+        let pool = eng.add_vfo(VfoSettings::new(
+            "VFO 2",
+            580_000.0,
+            900_000.0,
+            DecoderKind::ReturnPool,
+        ));
+        let mut prior = None;
+        let mut shown = 0.0;
+        let look = |eng: &Engine, prior: &mut Option<_>, last: bool| {
+            let (Some(o), Some(p)) = (eng.vfo_status(out), eng.vfo_status(pool)) else {
+                return;
+            };
+            let Some(p) = p.pool else { return };
+            let Some(plan) = o
+                .fec
+                .and_then(|f| f.ts)
+                .and_then(|t| t.rcs)
+                .and_then(|r| r.plan)
+            else {
+                println!("{:.1} s: no plan yet", p.now_s);
+                return;
+            };
+            let m = match_plan(&p, &plan);
+            println!(
+                "{:.1} s: plan {} frames, clock {:?}; pool slot {:?} frame {:?} boundary {:?},                  {} slot rows; frequency {:?}",
+                p.now_s,
+                plan.frames,
+                plan.clock,
+                p.slot_s,
+                p.frame_s,
+                p.boundary_s,
+                p.slot_rows.len(),
+                m
+            );
+            let Some(m) = m else { return };
+            let t = align_plan(&p, &plan, m.offset_hz, prior.as_ref());
+            println!(
+                "  timing {t:?} ({:.2} frames)",
+                t.map_or(0.0, |t| t.lead_frames())
+            );
+            if last && let Some(s) = lead_scores(&p, &plan, m.offset_hz) {
+                for (lead, r, n) in &s.tried {
+                    println!(
+                        "    lead {:8.2} ms ({:6.3} frames): {r:+.3} over {n}",
+                        lead * 1e3,
+                        lead / s.frame_s
+                    );
+                }
+            }
+            if let Some(t) = t {
+                *prior = Some(t);
+                if last {
+                    for l in terminal_levels(&p, &plan, &t, m.offset_hz) {
+                        println!("  {l:?}");
+                    }
+                }
+            }
+        };
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let ended = eng.front().state == SourceState::Ended;
+            let now = eng
+                .vfo_status(pool)
+                .and_then(|s| s.pool)
+                .map_or(0.0, |p| p.now_s);
+            if now - shown >= 5.0 {
+                shown = now;
+                look(&eng, &mut prior, false);
+            }
+            if ended && eng.settled() {
+                break;
+            }
+        }
+        look(&eng, &mut prior, true);
     }
 }

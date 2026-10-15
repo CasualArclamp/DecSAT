@@ -51,9 +51,17 @@
 //! above it; nothing in the tables gives that zero, so
 //! [`PlanView::occupancy`] is there to find it against a return VFO's
 //! spectrum. The plan for frame n is sent eight frames ahead of the bursts
-//! reaching the satellite and back down (the terminals' lead time).
+//! reaching the satellite and back down (the terminals' lead time): on
+//! 172B it arrives 295 ms (7.34 frames) before frame n's first slot is
+//! received, during frame n − 8.
+//!
+//! When the sections arrive jitters by ±25 ms (the outbound's multiplex), so
+//! [`PlanClock`] fits a line through arrival against counter: each frame's
+//! arrival as the hub keeps time, which a return VFO's slots can then be
+//! lined up against.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 
 /// The burst plan's table id.
 pub const PLAN_TABLE: u8 = 0xD1;
@@ -64,8 +72,12 @@ pub const FREQ_UNIT_HZ: f64 = 50.0;
 /// The frame time's ticks a second: the NCR's 27 MHz × 64.
 pub const TIME_HZ: f64 = 27e6 * 64.0;
 
-/// Frames kept for the map.
-const KEEP_FRAMES: usize = 32;
+/// Frames kept: for the map, and half a minute for the arrival line and a
+/// return pool to be lined up against.
+const KEEP_FRAMES: usize = 750;
+
+/// Frames the arrival line needs before it is fitted.
+const CLOCK_MIN_FRAMES: usize = 20;
 
 /// Neighbour spacings beyond this (50 Hz units, 1 MHz) are gaps, not
 /// neighbours.
@@ -120,6 +132,86 @@ pub struct PlanFrame {
     pub bursts: Vec<PlanBurst>,
     /// Signal time the section came in at, s.
     pub arrival_s: f64,
+}
+
+/// When the plan's frames arrive, jitter taken out: a line through each
+/// frame's arrival against its counter, on the receiver's clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlanClock {
+    /// The newest frame's counter, and its arrival on the line, s.
+    pub counter: u32,
+    pub at_s: f64,
+    /// The line's slope: a frame, s (the hub's, from the plan's times).
+    pub period_s: f64,
+    /// The arrivals' spread about the line (a robust standard deviation), s.
+    pub jitter_s: f64,
+    /// Frames on the line, and frames left off it (late or early by more
+    /// than three spreads).
+    pub frames: usize,
+    pub outliers: usize,
+}
+
+impl PlanClock {
+    /// When frame `counter` arrives on the line, s.
+    pub fn arrival_of(&self, counter: u32) -> f64 {
+        // Rust note: `wrapping_sub` then `as i32` is the signed distance
+        // between two counters, right across the 32-bit wrap.
+        self.at_s + f64::from(counter.wrapping_sub(self.counter) as i32) * self.period_s
+    }
+}
+
+/// The median of `v` (reordered); 0 when empty.
+fn median(v: &mut [f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let m = v.len() / 2;
+    *v.select_nth_unstable_by(m, f64::total_cmp).1
+}
+
+/// The arrival line through `points` (counter, arrival s) at a slope of
+/// `period` a frame — the plan's own frame, from its times: ±25 ms of
+/// jitter over half a minute gives a fitted slope to only 1 part in 10⁴
+/// (4 ms at the ends of the line), while the hub's clock and the
+/// receiver's agree to a few parts in 10⁶. The intercept from the median,
+/// then the mean of the arrivals within three robust spreads of the line,
+/// twice over.
+pub fn fit_clock(points: &[(u32, f64)], period: f64) -> Option<PlanClock> {
+    let &(c_ref, _) = points.last()?;
+    if points.len() < CLOCK_MIN_FRAMES || period <= 0.0 {
+        return None;
+    }
+    // Each arrival less the line through 0 at the newest frame.
+    let resid: Vec<f64> = points
+        .iter()
+        .map(|&(c, y)| y - f64::from(c.wrapping_sub(c_ref) as i32) * period)
+        .collect();
+    let mut work = resid.clone();
+    let mut icpt = median(&mut work);
+    let (mut spread, mut inliers) = (0.0, resid.len());
+    for _ in 0..2 {
+        work.clear();
+        work.extend(resid.iter().map(|r| (r - icpt).abs()));
+        spread = 1.4826 * median(&mut work);
+        let limit = (3.0 * spread).max(2e-3);
+        let (sum, n) = resid
+            .iter()
+            .filter(|&&r| (r - icpt).abs() <= limit)
+            .fold((0.0, 0usize), |(s, n), r| (s + r, n + 1));
+        if n == 0 {
+            break;
+        }
+        inliers = n;
+        icpt = sum / n as f64;
+    }
+    Some(PlanClock {
+        counter: c_ref,
+        at_s: icpt,
+        period_s: period,
+        jitter_s: spread,
+        frames: inliers,
+        outliers: points.len() - inliers,
+    })
 }
 
 /// A whole D1h section (header to CRC; the caller checks the CRC) as a
@@ -232,8 +324,13 @@ pub struct PlanView {
     pub widths: Vec<CodeWidth>,
     /// Busiest first.
     pub terminals: Vec<PlanTerminal>,
-    /// The latest frames, oldest first.
-    pub recent: Vec<PlanFrame>,
+    /// The latest frames (up to half a minute), oldest first. Behind an
+    /// `Arc` (a shared, reference-counted pointer): the view is cloned on
+    /// its way to the GUI several times a second, and this is the bulk of it.
+    pub recent: Arc<Vec<PlanFrame>>,
+    /// The frames' arrival as a line through their counters, once enough
+    /// have come.
+    pub clock: Option<PlanClock>,
     /// How often each frequency is in a burst (0..1 of the slots), in
     /// 2 kHz bins from `occupancy_start_hz` — the plan's spectrum, to line
     /// up with a return VFO's.
@@ -288,8 +385,9 @@ pub struct PlanRx {
     missed: u64,
     first: Option<(u64, u32)>,
     last: Option<(u64, u32)>,
-    first_arrival: f64,
     last_arrival: f64,
+    /// Signal time the plan has been followed for, jumps left out, s.
+    listened: f64,
     slots: u8,
     bursts: u64,
     terminals: BTreeMap<u16, Tally>,
@@ -309,15 +407,27 @@ impl PlanRx {
     /// A frame's plan, come in at signal time `now`.
     pub fn push(&mut self, mut f: PlanFrame, now: f64) {
         f.arrival_s = now;
-        if let Some((_, c)) = self.last {
+        if let Some((t, c)) = self.last {
             if f.counter == c {
                 return; // a repeat
             }
-            self.missed += u64::from(f.counter.wrapping_sub(c).saturating_sub(1).min(1000));
+            // The hub's time since the last frame against ours: apart by
+            // more than the jitter allows, the signal jumped (a file
+            // played round again, the receiver's time base reset) and the
+            // arrivals so far no longer line up with what comes.
+            let hub = f.time.wrapping_sub(t) as i64 as f64 / TIME_HZ;
+            let ours = now - self.last_arrival;
+            let ahead = f.counter.wrapping_sub(c) as i32;
+            if ahead <= 0 || (hub - ours).abs() > 0.5 {
+                self.frames.clear();
+                self.first = None;
+            } else {
+                self.missed += u64::from((ahead as u32 - 1).min(1000));
+                self.listened += ours.max(0.0);
+            }
         }
         if self.first.is_none() {
             self.first = Some((f.time, f.counter));
-            self.first_arrival = now;
         }
         self.last = Some((f.time, f.counter));
         self.last_arrival = now;
@@ -541,7 +651,7 @@ impl PlanRx {
             slots: self.slots,
             bursts: self.bursts,
             widths,
-            recent: self.frames.iter().cloned().collect(),
+            recent: Arc::new(self.frames.iter().cloned().collect()),
             occupancy_bin_hz: OCC_BIN as f64 * FREQ_UNIT_HZ,
             ..PlanView::default()
         };
@@ -550,6 +660,14 @@ impl PlanRx {
             if frames > 0 && t1 > t0 {
                 v.period_s = Some((t1 - t0) as f64 / TIME_HZ / frames as f64);
             }
+        }
+        if let Some(p) = v.period_s {
+            let points: Vec<(u32, f64)> = self
+                .frames
+                .iter()
+                .map(|f| (f.counter, f.arrival_s))
+                .collect();
+            v.clock = fit_clock(&points, p);
         }
         if self.count > 0 {
             v.bursts_per_frame = self.bursts as f64 / self.count as f64;
@@ -590,7 +708,7 @@ impl PlanRx {
             v.span = Some((lo * FREQ_UNIT_HZ, hi * FREQ_UNIT_HZ));
             v.load = area_total / ((hi - lo) * frame_slots);
         }
-        let secs = (self.last_arrival - self.first_arrival).max(1e-9);
+        let secs = self.listened.max(1e-9);
         let mut terms: Vec<PlanTerminal> = self
             .terminals
             .iter()
@@ -765,6 +883,65 @@ mod tests {
         assert!((lo - 250e3).abs() < 3e3, "{lo}");
         assert!(v.occupancy.iter().cloned().fold(0.0f32, f32::max) > 0.95);
         assert!(v.load > 0.5 && v.load <= 1.0, "{}", v.load);
+    }
+
+    #[test]
+    fn the_arrival_line_takes_out_the_jitter() {
+        // Frames every 40.2 ms by the hub's clock, ours 20 ppm fast; each
+        // arrives up to ±25 ms late or early, one in twenty a quarter
+        // second late, one in seven lost; counters across the 32-bit wrap.
+        let period = 0.0402;
+        let ours = period * (1.0 + 20e-6);
+        let mut rx = PlanRx::new();
+        let mut seed = 11u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            f64::from(seed >> 8) / f64::from(1u32 << 24)
+        };
+        let c0 = u32::MAX - 300;
+        let mut last = 0;
+        for k in 0..700u32 {
+            if k % 7 == 3 {
+                continue;
+            }
+            let c = c0.wrapping_add(k);
+            let mut at = 5.0 + f64::from(k) * ours + (rnd() - 0.5) * 0.05;
+            if k % 20 == 9 {
+                at += 0.25;
+            }
+            let s = plan_section(c, u64::from(k) * 69_465_600, &[burst(0, 1, 0x0104, 9000)]);
+            rx.push(parse_plan(&s).unwrap(), at);
+            last = c;
+        }
+        let v = rx.view();
+        let clock = v.clock.expect("a clock");
+        assert_eq!(clock.counter, last);
+        // (The slope from ±25 ms over 600 frames is good to ~1e-4.)
+        assert!((clock.period_s / ours - 1.0).abs() < 2e-4, "{clock:?}");
+        // On the line: frame k at 5 s + k frames.
+        for k in [0u32, 350, 699] {
+            let want = 5.0 + f64::from(k) * ours;
+            let got = clock.arrival_of(c0.wrapping_add(k));
+            assert!((got - want).abs() < 2e-3, "frame {k}: {got} against {want}");
+        }
+        assert!(
+            clock.jitter_s > 0.005 && clock.jitter_s < 0.025,
+            "{clock:?}"
+        );
+        assert!(clock.outliers >= 25, "{clock:?}");
+        // The signal starts over (a file played round): the old arrivals
+        // are dropped, not fitted with the new.
+        for k in 0..30u32 {
+            let s = plan_section(
+                c0.wrapping_add(k),
+                u64::from(k) * 69_465_600,
+                &[burst(0, 1, 0x0104, 9000)],
+            );
+            rx.push(parse_plan(&s).unwrap(), 40.0 + f64::from(k) * ours);
+        }
+        let clock = rx.view().clock.expect("a clock");
+        assert_eq!(clock.frames + clock.outliers, 30, "{clock:?}");
+        assert!((clock.arrival_of(c0) - 40.0).abs() < 1e-4, "{clock:?}");
     }
 
     #[test]

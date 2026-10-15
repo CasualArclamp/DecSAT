@@ -4949,3 +4949,66 @@ prints the plan under the RCS lines; GUI: *Burst plan* section in the RCS
 card (map of two frames, terminals, codes) and the plan lined up on the
 Return pool card. Also: the TS text card's recurring strings truncate (a
 long one widened the side panel to 1200 px).
+
+## The burst plan timed on the pool (2026-10-16)
+
+Asked: tie each D1h frame to the moment its bursts reach the Return pool
+VFO, so bursts can be labelled live and each terminal's level measured.
+
+- **One clock for every VFO.** Blocks now carry their first sample's time
+  on the source clock (the front end's sample count; a looping file's
+  rewind adds a second, so it reads as a break). The pool tracker times
+  everything on it (`push_at`); a jump over 0.5 ms (dropped blocks)
+  restarts its envelope and slot rows, the grid (on that clock) stays. The
+  outbound's FEC thread counts symbols, which start late and skip what was
+  lost: each PL frame is tagged with the end of the block it left the
+  demodulator in (never before its own end), and the least (tag − symbol
+  time) over the last 2 s of frames is the offset (`fec::SourceClock`,
+  started afresh after a gap). The RCS reader stamps plan sections with it
+  (`RcsRx::at_source`).
+- **The arrival line** (`newtec::PlanClock`): on 172B the sections arrive
+  ±10 ms (robust spread) about it. A fitted slope was good to only 10⁻⁴
+  (±150 ppm on the capture, 4 ms off at the ends of 30 s), so the slope is
+  the hub's frame from the plan's own times; the intercept a median, then
+  the mean within three spreads (4–7 of 750 frames left off). Half a
+  minute kept, restarted when the hub's time between frames and ours
+  disagree by 0.5 s (a file played round).
+- **Slot rows** (`PoolView::slot_rows`): once the grid is found, its phase
+  is where the guard-time dips fold deepest (on the frame's slot,
+  parabola-refined); then a row a slot — the mean of the ~1 ms FFTs wholly
+  inside it, 4 % of the slot off each end, 4 kHz bins, dB over the floor —
+  for 30 s, published once a second behind an `Arc`. The latest quarter
+  second of FFTs (`fine`) is the pool's own waterfall.
+- **Lead and phase** (`align_plan`): plan frames placed by the arrival
+  line at the pool's frame (6 ppm off the hub's here: 40.200 2475 ms),
+  every lead that puts their slots on the pool's boundaries from −2 to 24
+  frames (209), scored by the correlation of the plan's burst mask with the
+  pool's levels (0–30 dB) over every slot and bin of the plan's span
+  (prefix sums: milliseconds a lead). 172B: **295.0 ms ± 0.6 over the
+  minute = 7.34 frames**, fit 0.84; the best other lead 0.60 (the right
+  slot phase a frame off: terminals hold their slots frame to frame), the
+  median 0.47. So the plan for frame n arrives during frame n − 8 — the
+  offline "lag 8". A prior lead is kept while within 0.02 of the best.
+- **Levels** (`terminal_levels`, `burst_cn`): each planned burst's C/N over
+  its slots and the middle 80 % of its band; per terminal the median of
+  those heard (≥ 0 dB) and the share heard. 172B: 23 terminals at
+  11.2–12.6 dB and 431 at 9.0, 98–100 % heard (the hub's power control
+  holds them level).
+- **GUI** (Return pool card): "Timed: the plan is sent 8 frames ahead —
+  each frame's arrives 295.0 ms (7.34 frames) before its first slot is
+  heard here (fit 0.85; any other lead 0.60 or less)"; the pool's
+  waterfall (three frames of FFT rows, newest at the bottom, the top on a
+  frame's start) with every planned burst boxed in its terminal's colour
+  and each frame's start marked with its counter, a hover giving the burst
+  and its C/N; *Terminals heard* (C/N, heard, bursts/s). The RCS card's
+  plan shows the arrivals' spread, and its terminal table a C/N column
+  (every pool is paired with every plan each paint, cached, whichever card
+  is shown). The main waterfall's rows average 40 ms — a whole frame — so
+  the slots need the pool's own.
+- Tests: the arrival line through jitter, late outliers, losses and a
+  counter wrap, and its restart; the source clock through a gap; slot rows
+  and phase on a synthetic bursting carrier timed on a source clock; lead,
+  prior and levels on a synthetic plan and pool. By hand:
+  `DECSAT_172B=<capture> cargo test -p decsat-engine --release
+  plan_on_a_capture -- --ignored --nocapture` runs both VFOs over a
+  capture and prints all of it every 5 s of signal.

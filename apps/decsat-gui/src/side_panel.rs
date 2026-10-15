@@ -49,6 +49,7 @@ pub struct SideInput<'a> {
 
 pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<Action> {
     let mut actions = Vec::new();
+    time_plans(ui, inp);
 
     ui.horizontal(|ui| {
         ui.heading("VFOs");
@@ -1051,7 +1052,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     {
         // Other VFOs' DVB-RCS signalling, to tie the pool's frame to an
         // outbound's clock.
-        let outbounds: Vec<(String, &decsat_ts::rcs::RcsView)> = inp
+        let outbounds: Vec<Outbound> = inp
             .vfos
             .iter()
             .filter(|o| o.id != v.id)
@@ -1065,7 +1066,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                     .as_ref()?
                     .rcs
                     .as_ref()?;
-                Some((o.settings.name.clone(), rcs))
+                Some((o.id, o.settings.name.clone(), rcs))
             })
             .collect();
         pool_section(ui, p, inp.rf_center + v.settings.offset_hz, &outbounds);
@@ -3700,7 +3701,7 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
         actions.push(Action::OpenTsViewer(id));
     }
     if let Some(rcs) = &t.rcs {
-        rcs_card(ui, rcs);
+        rcs_card(ui, rcs, id);
     }
 }
 
@@ -3733,7 +3734,7 @@ fn rcs_freq(hz: f64) -> String {
 }
 
 /// A VSAT hub's DVB-RCS signalling: its links, clock, plans and tables.
-fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView) {
+fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView, id: VfoId) {
     use decsat_ts::rcs::{descriptor_name, table_name};
     // One fact a row, wrapping at the panel's width: a grid of long values
     // would widen the side panel over the waterfall.
@@ -3993,7 +3994,7 @@ fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView) {
             });
     });
     if let Some(p) = &r.plan {
-        plan_section(ui, p);
+        plan_section(ui, p, id);
     }
 }
 
@@ -4005,8 +4006,8 @@ const PLAN_TIP: &str = "A Newtec hub's own burst plan (private table D1h, read f
      how the hub packs bursts edge to edge. The map: the latest frames, a row a slot, time \
      down; a box a burst in its terminal's colour.";
 
-/// A Newtec burst plan (D1h) under the RCS card.
-fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
+/// A Newtec burst plan (D1h) under the RCS card of VFO `vfo`.
+fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView, vfo: VfoId) {
     ui.add_space(4.0);
     ui.label(RichText::new("Burst plan (D1h, Newtec)").strong())
         .on_hover_text(PLAN_TIP);
@@ -4025,6 +4026,23 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
         p.terminals.len()
     ));
     ui.label(line);
+    if let Some(c) = &p.clock {
+        ui.label(
+            RichText::new(format!(
+                "arrivals ±{:.1} ms about their line ({} of {} frames on it)",
+                c.jitter_s * 1e3,
+                c.frames,
+                c.frames + c.outliers
+            ))
+            .small(),
+        )
+        .on_hover_text(
+            "When each frame's section came in, against its counter: a line at the plan's \
+             own frame (its times), through the median, the late and early ones (three \
+             spreads off) left out. A return pool VFO places the plan's frames by this line, \
+             not by the arrivals themselves",
+        );
+    }
     if let Some((lo, hi)) = p.span {
         ui.label(
             RichText::new(format!(
@@ -4048,11 +4066,15 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
     )
     .id_salt("plan_terminals")
     .show(ui, |ui| {
+        // Each terminal's level, when a return pool VFO has timed this plan
+        // (see `pool_section`).
+        let levels: Option<Vec<decsat_engine::tdma::pool::TerminalLevel>> =
+            ui.data(|d| d.get_temp(plan_levels_id(vfo)));
         egui::Grid::new("plan_terminal_rows")
-            .num_columns(5)
+            .num_columns(6)
             .striped(true)
             .show(ui, |ui| {
-                for h in ["terminal", "bursts/s", "share", "mostly", "value"] {
+                for h in ["terminal", "bursts/s", "share", "mostly", "value", "C/N"] {
                     ui.label(RichText::new(h).small().weak());
                 }
                 ui.end_row();
@@ -4086,6 +4108,10 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView) {
                             "The 11-bit value some of its bursts carry: steady per terminal, \
                          drifting a little — a power or correction setting, unread",
                         );
+                    let level = levels
+                        .as_ref()
+                        .and_then(|l| l.iter().find(|l| l.id == t.id));
+                    level_cell(ui, level);
                     ui.end_row();
                 }
             });
@@ -6021,13 +6047,16 @@ const POOL_TIP: &str = "The VFO as a return pool: a block of spectrum a VSAT net
      explains best. A frame that an outbound's own timing matches — its NCR, or one of its \
      signalling tables — ties the pool to that outbound.";
 
+/// Another VFO's DVB-RCS signalling, for a pool: its id, name and view.
+type Outbound<'a> = (VfoId, String, &'a decsat_ts::rcs::RcsView);
+
 /// The VFO as a return pool: a map of its layout, its grid, and whether an
 /// outbound's timing matches it.
 fn pool_section(
     ui: &mut Ui,
     p: &decsat_engine::tdma::pool::PoolView,
     rf_center: f64,
-    outbounds: &[(String, &decsat_ts::rcs::RcsView)],
+    outbounds: &[Outbound],
 ) {
     ui.add_space(6.0);
     ui.label(RichText::new("Return pool").strong())
@@ -6089,7 +6118,7 @@ fn pool_section(
     // An outbound whose timing matches the frame (or the slot): its NCR
     // interval or a table's.
     for period in [p.frame_s, p.slot_s].into_iter().flatten() {
-        for (name, rcs) in outbounds {
+        for (_, name, rcs) in outbounds {
             let close = |x: f64| (x / period - 1.0).abs() < 0.003;
             let mut why = Vec::new();
             if let Some(i) = rcs.ncr.as_ref().and_then(|n| n.interval_s)
@@ -6121,21 +6150,11 @@ fn pool_section(
         }
     }
     // An outbound's burst plan, lined up with the pool's mean spectrum (a
-    // second's worth of new plan or signal between tries).
-    for (name, rcs) in outbounds {
+    // second's worth of new plan or signal between tries), then in time.
+    let mut drawn = false;
+    for (vfo, name, rcs) in outbounds {
         let Some(plan) = &rcs.plan else { continue };
-        let id = egui::Id::new(("plan_match", name, rf_center.to_bits()));
-        let stamp = (plan.frames / 25, p.seconds as u64);
-        let cached: Option<((u64, u64), Option<decsat_engine::tdma::pool::PlanMatch>)> =
-            ui.data(|d| d.get_temp(id));
-        let m = match cached {
-            Some((s, m)) if s == stamp => m,
-            _ => {
-                let m = decsat_engine::tdma::pool::match_plan(p, plan);
-                ui.data_mut(|d| d.insert_temp(id, (stamp, m)));
-                m
-            }
-        };
+        let (m, timed) = pair_plan(ui, p, plan, rf_center, *vfo);
         match m {
             Some(m) if m.corr >= 0.5 => {
                 ui.colored_label(
@@ -6147,10 +6166,37 @@ fn pool_section(
                     ),
                 )
                 .on_hover_text(
-                    "The plan's occupancy (how often each of its frequencies is in a burst)                      slid across this pool's mean spectrum: the offset where they match best.                      Below, the plan's latest frame on this VFO's band, a row a slot — sent                      eight frames (a third of a second) ahead of the bursts it schedules",
+                    "The plan's occupancy (how often each of its frequencies is in a burst) \
+                     slid across this pool's mean spectrum: the offset where they match best",
                 );
-                let half = p.half_band_hz.max(1.0);
-                plan_strip(ui, plan, 1, -half, half, m.offset_hz, 72.0, &freq);
+                let timed = timed.unwrap_or_default();
+                if let (Some(t), Some(clock)) = (timed.timing.filter(sure), &plan.clock) {
+                    lead_line(ui, &t, clock);
+                    pool_waterfall(ui, p, Some((plan, clock, &t, m.offset_hz)), &freq);
+                    heard_table(ui, plan, &timed.levels);
+                    drawn = true;
+                } else {
+                    match timed.timing {
+                        Some(t) => ui.label(
+                            RichText::new(format!(
+                                "timing it: no lead stands out yet (best fit {:.2} at {:.1} ms, \
+                                 {:.2} at others)",
+                                t.corr,
+                                t.lead_s * 1e3,
+                                t.next_corr
+                            ))
+                            .weak(),
+                        ),
+                        None => ui.label(
+                            RichText::new(
+                                "timing it: waiting for the pool's slots and the plan's arrivals",
+                            )
+                            .weak(),
+                        ),
+                    };
+                    let half = p.half_band_hz.max(1.0);
+                    plan_strip(ui, plan, 1, -half, half, m.offset_hz, 72.0, &freq);
+                }
             }
             Some(m) if p.seconds > 10.0 => {
                 ui.label(
@@ -6164,7 +6210,444 @@ fn pool_section(
             _ => {}
         }
     }
+    if !drawn {
+        pool_waterfall(ui, p, None, &freq);
+    }
     pool_map(ui, p);
+}
+
+/// A pool's view of outbound VFO `vfo`'s burst plan: where the plan's
+/// frequencies sit (against the pool's mean spectrum, tried again for each
+/// second's worth of new plan or signal) and, once they line up, when its
+/// frames land.
+fn pair_plan(
+    ui: &mut Ui,
+    p: &decsat_engine::tdma::pool::PoolView,
+    plan: &decsat_ts::newtec::PlanView,
+    rf_center: f64,
+    vfo: VfoId,
+) -> (
+    Option<decsat_engine::tdma::pool::PlanMatch>,
+    Option<TimedPlan>,
+) {
+    let id = egui::Id::new(("plan_match", vfo, rf_center.to_bits()));
+    let stamp = (plan.frames / 25, p.seconds as u64);
+    let cached: Option<((u64, u64), Option<decsat_engine::tdma::pool::PlanMatch>)> =
+        ui.data(|d| d.get_temp(id));
+    let m = match cached {
+        Some((s, m)) if s == stamp => m,
+        _ => {
+            let m = decsat_engine::tdma::pool::match_plan(p, plan);
+            ui.data_mut(|d| d.insert_temp(id, (stamp, m)));
+            m
+        }
+    };
+    let timed = m
+        .filter(|m| m.corr >= 0.5)
+        .map(|m| plan_timing(ui, p, plan, m.offset_hz, vfo, rf_center));
+    (m, timed)
+}
+
+/// Every return pool VFO paired with every other VFO's burst plan, which
+/// ever VFO's card is shown: an outbound's plan card gets its terminals'
+/// levels from it (cached; the work is redone every second or two).
+fn time_plans(ui: &mut Ui, inp: &SideInput) {
+    for v in inp
+        .vfos
+        .iter()
+        .filter(|v| v.settings.decoder == DecoderKind::ReturnPool)
+    {
+        let Some(p) = inp.statuses.get(&v.id).and_then(|s| s.pool.as_ref()) else {
+            continue;
+        };
+        for o in inp.vfos.iter().filter(|o| o.id != v.id) {
+            let plan = inp
+                .statuses
+                .get(&o.id)
+                .and_then(|s| s.fec.as_ref()?.ts.as_ref()?.rcs.as_ref()?.plan.as_ref());
+            if let Some(plan) = plan {
+                pair_plan(ui, p, plan, inp.rf_center + v.settings.offset_hz, o.id);
+            }
+        }
+    }
+}
+
+/// Where a plan's terminal levels are kept for the outbound VFO's own
+/// plan card.
+fn plan_levels_id(vfo: VfoId) -> egui::Id {
+    egui::Id::new(("plan_levels", vfo))
+}
+
+/// A plan timed on a pool, and its terminals' levels: worked out every two
+/// seconds of signal or 50 plan frames, kept between paints.
+#[derive(Clone, Default)]
+struct TimedPlan {
+    stamp: (u64, u64),
+    timing: Option<decsat_engine::tdma::pool::PlanTiming>,
+    levels: Vec<decsat_engine::tdma::pool::TerminalLevel>,
+}
+
+/// A timing to show: the lead stands out from every other one.
+fn sure(t: &decsat_engine::tdma::pool::PlanTiming) -> bool {
+    t.corr >= 0.3 && t.corr >= t.next_corr + 0.08
+}
+
+/// `plan` (from VFO `vfo`, its frequencies `offset_hz` off) timed on the
+/// pool `p`, the last answer followed; the levels also left for the
+/// outbound's own plan card.
+fn plan_timing(
+    ui: &mut Ui,
+    p: &decsat_engine::tdma::pool::PoolView,
+    plan: &decsat_ts::newtec::PlanView,
+    offset_hz: f64,
+    vfo: VfoId,
+    rf_center: f64,
+) -> TimedPlan {
+    use decsat_engine::tdma::pool::{align_plan, terminal_levels};
+    let id = egui::Id::new(("plan_timing", vfo, rf_center.to_bits()));
+    let stamp = (plan.frames / 50, (p.now_s / 2.0) as u64);
+    let cached: Option<TimedPlan> = ui.data(|d| d.get_temp(id));
+    if let Some(c) = &cached
+        && c.stamp == stamp
+    {
+        return c.clone();
+    }
+    let prior = cached.and_then(|c| c.timing);
+    let timing = align_plan(p, plan, offset_hz, prior.as_ref());
+    let levels = timing
+        .filter(sure)
+        .map(|t| terminal_levels(p, plan, &t, offset_hz))
+        .unwrap_or_default();
+    let t = TimedPlan {
+        stamp,
+        timing,
+        levels,
+    };
+    ui.data_mut(|d| {
+        d.insert_temp(id, t.clone());
+        d.insert_temp(plan_levels_id(vfo), t.levels.clone());
+    });
+    t
+}
+
+/// How far ahead the plan comes, in words.
+fn lead_line(
+    ui: &mut Ui,
+    t: &decsat_engine::tdma::pool::PlanTiming,
+    clock: &decsat_ts::newtec::PlanClock,
+) {
+    let frames = t.lead_frames();
+    ui.colored_label(
+        Color32::from_rgb(110, 220, 110),
+        format!(
+            "Timed: the plan is sent {} frames ahead — each frame's arrives {:.1} ms ({:.2} \
+             frames) before its first slot is heard here (fit {:.2}; any other lead {:.2} or \
+             less)",
+            frames.ceil(),
+            t.lead_s * 1e3,
+            frames,
+            t.corr,
+            t.next_corr
+        ),
+    )
+    .on_hover_text(format!(
+        "Each plan frame placed by its arrival line (arrivals ±{:.1} ms about it), every \
+         lead that puts its slots on this pool's slot grid (from the guard times) tried from \
+         {} to {} frames, each scored by how well where the plan puts a burst matches this \
+         pool's level, slot by slot and bin by bin, over {} frames. Both VFOs time the \
+         signal by the receiver's own sample clock. The plan for a frame arrives during the \
+         frame {} before it: the terminals' time to hear it, and the bursts' trip up to the \
+         satellite and back down here",
+        clock.jitter_s * 1e3,
+        -2,
+        24,
+        t.frames,
+        frames.ceil()
+    ));
+}
+
+/// A terminal's level as a table cell: its heard bursts' median C/N, with
+/// how many of its planned bursts were heard on the hover.
+fn level_cell(ui: &mut Ui, level: Option<&decsat_engine::tdma::pool::TerminalLevel>) {
+    match level {
+        Some(l) => {
+            let text = match l.cn_db {
+                Some(cn) => format!("{cn:.1} dB"),
+                None => "not heard".into(),
+            };
+            let quiet = l.heard * 10 < l.bursts * 9;
+            let mut r = RichText::new(text).small();
+            if quiet {
+                r = r.color(Color32::from_rgb(230, 170, 90));
+            }
+            ui.label(r).on_hover_text(format!(
+                "C/N in its bursts' band (the middle 80 %) and slots, the median of those \
+                 heard: {} of its {} planned bursts the pool has measured came in at 0 dB or \
+                 more{}",
+                l.heard,
+                l.bursts,
+                l.last_cn_db
+                    .map_or(String::new(), |c| format!("; the latest {c:.1} dB"))
+            ));
+        }
+        None => {
+            ui.label(RichText::new("–").small().weak());
+        }
+    }
+}
+
+/// The plan's terminals as the pool hears them: level, how many of their
+/// bursts came, how often they send.
+fn heard_table(
+    ui: &mut Ui,
+    plan: &decsat_ts::newtec::PlanView,
+    levels: &[decsat_engine::tdma::pool::TerminalLevel],
+) {
+    egui::CollapsingHeader::new(
+        RichText::new(format!("Terminals heard ({})", levels.len()))
+            .small()
+            .strong(),
+    )
+    .id_salt("pool_terminals")
+    .default_open(true)
+    .show(ui, |ui| {
+        egui::Grid::new("pool_terminal_rows")
+            .num_columns(5)
+            .striped(true)
+            .show(ui, |ui| {
+                for h in ["terminal", "C/N", "heard", "bursts/s", "mostly"] {
+                    ui.label(RichText::new(h).small().weak());
+                }
+                ui.end_row();
+                for t in &plan.terminals {
+                    let Some(l) = levels.iter().find(|l| l.id == t.id) else {
+                        continue;
+                    };
+                    ui.label(
+                        RichText::new(t.id.to_string())
+                            .small()
+                            .color(terminal_color(t.id)),
+                    );
+                    level_cell(ui, Some(l));
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.0} %",
+                            100.0 * f64::from(l.heard) / f64::from(l.bursts.max(1))
+                        ))
+                        .small(),
+                    );
+                    ui.label(RichText::new(format!("{:.1}", t.per_s)).small());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} × {}",
+                            t.slots,
+                            t.width_hz
+                                .map_or("?".into(), |w| format!("{:.0} kHz", w / 1e3))
+                        ))
+                        .small(),
+                    );
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+/// Frames of the pool shown in its waterfall.
+const WATERFALL_FRAMES: f64 = 3.0;
+
+/// The fine waterfall's texture, kept until the pool's rows change.
+#[derive(Clone)]
+struct FineTexture {
+    key: (usize, usize),
+    tex: egui::TextureHandle,
+}
+
+/// The pool's own waterfall: its latest FFTs (about a millisecond each,
+/// fine enough to show the slots and their guard times), the newest at the
+/// bottom, across the VFO's band. With a timed plan, each planned burst is
+/// a box in its terminal's colour over the rows its slots land on, its
+/// terminal written in, and each frame's start is marked with its counter.
+#[allow(clippy::type_complexity)]
+fn pool_waterfall(
+    ui: &mut Ui,
+    p: &decsat_engine::tdma::pool::PoolView,
+    timed: Option<(
+        &decsat_ts::newtec::PlanView,
+        &decsat_ts::newtec::PlanClock,
+        &decsat_engine::tdma::pool::PlanTiming,
+        f64,
+    )>,
+    freq: &dyn Fn(f64) -> String,
+) {
+    let rows = &*p.fine;
+    if rows.is_empty() || rows.bins == 0 {
+        return;
+    }
+    let window = WATERFALL_FRAMES * p.frame_s.unwrap_or(0.04);
+    let t_end = rows.t_s[rows.len() - 1] + rows.dur_s;
+    // Timed, the top is a frame's start.
+    let mut from = t_end - window;
+    if let Some((plan, clock, t, _)) = timed
+        && let Some(f) = plan.recent.last()
+    {
+        let s0 = t.frame_start(clock, f.counter);
+        from = s0 + ((from - s0) / t.frame_s).ceil() * t.frame_s - rows.dur_s / 2.0;
+    }
+    let first = rows.t_s.partition_point(|&t| t < from);
+    let n = rows.len() - first;
+    if n < 2 {
+        return;
+    }
+    // The texture: a pixel a bin and a row, oldest row at the top.
+    let key = egui::Id::new("pool_fine_texture");
+    let want = (std::sync::Arc::as_ptr(&p.fine) as usize, first);
+    let cached: Option<FineTexture> = ui.data(|d| d.get_temp(key));
+    let tex = match cached {
+        Some(c) if c.key == want => c.tex,
+        _ => {
+            let palette = crate::waterfall::palette();
+            let pixels = rows.levels[first * rows.bins..]
+                .iter()
+                .map(|v| palette[((v / 25.0).clamp(0.0, 1.0) * 255.0) as usize])
+                .collect();
+            let img = egui::ColorImage::new([rows.bins, n], pixels);
+            let tex = ui
+                .ctx()
+                .load_texture("pool_fine", img, egui::TextureOptions::LINEAR);
+            ui.data_mut(|d| {
+                d.insert_temp(
+                    key,
+                    FineTexture {
+                        key: want,
+                        tex: tex.clone(),
+                    },
+                )
+            });
+            tex
+        }
+    };
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2(ui.available_width() - RIGHT_PAD, 200.0),
+        Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.image(
+        tex.id(),
+        rect,
+        egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    let (lo_hz, hi_hz) = (
+        rows.start_hz - rows.bin_hz / 2.0,
+        rows.start_hz + (rows.bins as f64 - 0.5) * rows.bin_hz,
+    );
+    let t_top = rows.t_s[first];
+    let x_of = |hz: f64| rect.left() + rect.width() * (((hz - lo_hz) / (hi_hz - lo_hz)) as f32);
+    let y_of = |t: f64| rect.top() + rect.height() * (((t - t_top) / (t_end - t_top)) as f32);
+    let pointer = resp.hover_pos();
+    let mut hover = None;
+    if let Some((plan, clock, t, offset)) = timed {
+        // The newest frames are still to come: their plans arrive ahead.
+        for f in plan.recent.iter().rev().take(24) {
+            let start = t.frame_start(clock, f.counter);
+            if start > t_end || start + t.frame_s < t_top {
+                continue;
+            }
+            if start >= t_top - rows.dur_s {
+                let y = y_of(start.max(t_top));
+                painter.hline(rect.x_range(), y, (1.0, Color32::from_white_alpha(90)));
+                painter.text(
+                    pos2(rect.left() + 2.0, y + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("frame {}", f.counter),
+                    egui::FontId::proportional(9.0),
+                    Color32::from_white_alpha(170),
+                );
+            }
+            for b in &f.bursts {
+                let Some((a, c)) = plan.edges(b) else {
+                    continue;
+                };
+                let t0 = start + f64::from(b.slot) * t.slot_s;
+                let t1 = t0 + f64::from(b.slots()) * t.slot_s;
+                if t1 < t_top || t0 > t_end {
+                    continue;
+                }
+                let r = egui::Rect::from_min_max(
+                    pos2(x_of(a + offset), y_of(t0.max(t_top))),
+                    pos2(x_of(c + offset), y_of(t1.min(t_end))),
+                )
+                .shrink(1.0);
+                let col = terminal_color(b.terminal);
+                painter.rect_stroke(r, CornerRadius::ZERO, (1.5, col), egui::StrokeKind::Inside);
+                if r.width() > 18.0 && r.height() > 9.0 {
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        b.terminal.to_string(),
+                        egui::FontId::proportional(9.0),
+                        col,
+                    );
+                }
+                if pointer.is_some_and(|q| r.contains(q)) {
+                    let cn = fine_cn(rows, t0, t1, a + offset, c + offset)
+                        .map_or(String::new(), |cn| format!(" · C/N {cn:.1} dB"));
+                    hover = Some(format!(
+                        "terminal {} · frame {} · slot {}{} · {:.1} kHz wide at {} (code \
+                         {:04X}h){cn}",
+                        b.terminal,
+                        f.counter,
+                        b.slot,
+                        if b.slots() > 1 {
+                            format!("–{}", b.slot + b.slots() - 1)
+                        } else {
+                            String::new()
+                        },
+                        (c - a) / 1e3,
+                        freq((a + c) / 2.0 + offset),
+                        b.code
+                    ));
+                }
+            }
+        }
+    }
+    resp.on_hover_text(hover.unwrap_or_else(|| {
+        format!(
+            "The pool's latest {:.0} ms, an FFT ({:.2} ms) a row, newest at the bottom; across, \
+             the VFO's band ({:.0} kHz), 0–25 dB over the floor. {}",
+            (t_end - t_top) * 1e3,
+            rows.dur_s * 1e3,
+            (hi_hz - lo_hz) / 1e3,
+            if timed.is_some() {
+                "Boxes: the burst plan's bursts where it puts them, in each terminal's colour"
+            } else {
+                "An outbound's burst plan, once timed on the pool, is drawn over it"
+            }
+        )
+    }));
+}
+
+/// A burst's C/N in the fine rows, dB: the FFTs wholly inside `t0..t1`
+/// (a tenth of a slot off each end) over the middle 80 % of `lo..hi`.
+fn fine_cn(
+    rows: &decsat_engine::tdma::pool::SpectrumRows,
+    t0: f64,
+    t1: f64,
+    lo: f64,
+    hi: f64,
+) -> Option<f32> {
+    let edge = (hi - lo) * 0.1;
+    let bins = rows.bins_in(lo + edge, hi - edge);
+    let (mut sum, mut n) = (0f64, 0usize);
+    for (i, &t) in rows.t_s.iter().enumerate() {
+        if t >= t0 + 0.0005 && t + rows.dur_s <= t1 - 0.0005 {
+            for &v in &rows.row(i)[bins.clone()] {
+                sum += 10f64.powf(f64::from(v) / 10.0);
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| (10.0 * (sum / n as f64 - 1.0).max(1e-3).log10()) as f32)
 }
 
 /// The pool's layouts over time: each layout's carriers as bars across the
