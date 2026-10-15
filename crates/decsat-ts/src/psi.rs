@@ -101,9 +101,22 @@ impl EsInfo {
         }
     }
 
+    /// What it is, without the language: "H.264 video", "AC-3 audio"…
+    pub fn base(&self) -> &'static str {
+        self.kind.unwrap_or(stream_type_name(self.stream_type))
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.base().ends_with("video")
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.base().ends_with("audio")
+    }
+
     /// "H.264 video", "AC-3 audio (eng)", "subtitles (fra)"…
     pub fn describe(&self) -> String {
-        let base = self.kind.unwrap_or(stream_type_name(self.stream_type));
+        let base = self.base();
         match &self.language {
             Some(l) => format!("{base} ({l})"),
             None => base.to_string(),
@@ -172,6 +185,9 @@ pub struct PidStats {
     pub errors: u64,
     /// Packets with scrambling control set: encrypted (conditional access).
     pub scrambled: u64,
+    /// Packets that came scrambled and were descrambled (a BISS key)
+    /// before the analyser saw them.
+    pub descrambled: u64,
     /// Packets carrying a PCR.
     pub pcr: u64,
     /// The stream id of the PES it carries, if it carries PES.
@@ -294,6 +310,13 @@ impl TsAnalyser {
         ) || self.pmt_pids.contains_key(&pid);
         if is_si {
             self.si_payload(pid, pusi, payload);
+        }
+    }
+
+    /// Packet `pid` just looked at had been descrambled.
+    pub fn note_descrambled(&mut self, pid: u16) {
+        if let Some(st) = self.pids.get_mut(&pid) {
+            st.descrambled += 1;
         }
     }
 

@@ -558,11 +558,14 @@ pub fn rename_satellite(old: &str, new: &str) -> std::io::Result<()> {
 fn rename_in(all: &mut Vec<(String, String)>, old: &str, new: &str) {
     let (old_plan, new_plan) = (plan_key(old), plan_key(new));
     let (old_caps, new_caps) = (caps_prefix(old), caps_prefix(new));
+    let (old_biss, new_biss) = (biss_prefix(old), biss_prefix(new));
     for (k, _) in all.iter_mut() {
         if *k == old_plan {
             *k = new_plan.clone();
         } else if let Some(rest) = k.strip_prefix(&old_caps) {
             *k = format!("{new_caps}{rest}");
+        } else if let Some(rest) = k.strip_prefix(&old_biss) {
+            *k = format!("{new_biss}{rest}");
         }
     }
     let mut names = names_in(all);
@@ -620,6 +623,73 @@ fn caps_prefix(sat: &str) -> String {
         "" => "carrier_caps.rf".into(),
         s => format!("carrier_caps.{s}.rf"),
     }
+}
+
+/// The ffmpeg the player was pointed at, if it was (otherwise it is
+/// looked for: see `decsat_video::find_ffmpeg`).
+pub fn ffmpeg_path() -> Option<PathBuf> {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "ffmpeg")
+        .map(|(_, v)| PathBuf::from(v))
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
+    write_key(
+        "ffmpeg",
+        &path.map(|p| p.display().to_string()).unwrap_or_default(),
+    )
+}
+
+/// What satellite `sat`'s BISS-key keys start with.
+fn biss_prefix(sat: &str) -> String {
+    match satellite_slug(sat).as_str() {
+        "" => "biss.rf".into(),
+        s => format!("biss.{s}.rf"),
+    }
+}
+
+/// A carrier within this of one a BISS key is kept for is that carrier, Hz:
+/// a VFO set a little off, an LO trim. BISS carriers are megahertz wide,
+/// so no two are this close.
+pub const BISS_SAME_CARRIER_HZ: f64 = 300e3;
+
+/// The key under which satellite `sat`'s carrier at `rf_hz` has a BISS key
+/// kept, if it has: the nearest within [`BISS_SAME_CARRIER_HZ`].
+fn biss_kept_key(all: &[(String, String)], sat: &str, rf_hz: f64) -> Option<String> {
+    let prefix = biss_prefix(sat);
+    all.iter()
+        .filter_map(|(k, _)| {
+            let d = (carrier_caps_hz(&prefix, k)? - rf_hz).abs();
+            (d <= BISS_SAME_CARRIER_HZ).then_some((d, k.clone()))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, k)| k)
+}
+
+/// The BISS key kept for satellite `sat`'s carrier at `rf_hz`
+/// (`biss.<satellite>.rf<kHz>khz`), as its 16 digits.
+pub fn biss_key(sat: &str, rf_hz: f64) -> Option<String> {
+    let all = read_all();
+    let key = biss_kept_key(&all, sat, rf_hz)?;
+    all.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+}
+
+/// Keep `key` for satellite `sat`'s carrier at `rf_hz` (under the key it is
+/// already kept under, when it is), or with `None` forget it. Kept in the
+/// user's settings only, like everything here.
+pub fn set_biss_key(sat: &str, rf_hz: f64, key: Option<&str>) -> std::io::Result<()> {
+    let mut all = read_all();
+    let kept = biss_kept_key(&all, sat, rf_hz);
+    match key {
+        Some(v) => {
+            let k = kept.unwrap_or_else(|| format!("{}{:.0}khz", biss_prefix(sat), rf_hz / 1e3));
+            set_in(&mut all, &k, v.to_string());
+        }
+        None => all.retain(|(k, _)| Some(k) != kept.as_ref()),
+    }
+    write_all(&all)
 }
 
 /// Set `key` to `value` in the settings in hand.
@@ -767,5 +837,33 @@ mod tests {
         assert!(!a.same(&RadarId::Source(4, 99)));
         assert!(RadarId::Source(4, 22).same(&RadarId::Source(4, 22)));
         assert_eq!(RadarId::Source(4, 22).label(), "SAC 4 SIC 22");
+    }
+
+    #[test]
+    fn a_biss_key_is_found_by_its_carrier_and_satellite() {
+        // Made-up keys.
+        let mut all = kept(&[
+            ("biss.horizons_3e.rf11611677khz", "1234 569C 789A BCCE"),
+            ("biss.horizons_3e.rf11640000khz", "0000 0000 0000 0000"),
+            ("biss.rf11611677khz", "AAAA AA FE BBBB BB 77"),
+        ]);
+        // A VFO a little off its carrier finds it; another satellite's
+        // carrier at the same RF is its own.
+        assert_eq!(
+            biss_kept_key(&all, "Horizons 3e", 11_611_800e3).as_deref(),
+            Some("biss.horizons_3e.rf11611677khz")
+        );
+        assert_eq!(biss_kept_key(&all, "Horizons 3e", 11_612_100e3), None);
+        assert_eq!(
+            biss_kept_key(&all, "", 11_611_677e3).as_deref(),
+            Some("biss.rf11611677khz")
+        );
+        assert_eq!(biss_kept_key(&all, "Intelsat 19", 11_611_677e3), None);
+        // A rename takes the keys along.
+        rename_in(&mut all, "Horizons 3e", "H3e");
+        assert_eq!(
+            biss_kept_key(&all, "H3e", 11_611_677e3).as_deref(),
+            Some("biss.h3e.rf11611677khz")
+        );
     }
 }

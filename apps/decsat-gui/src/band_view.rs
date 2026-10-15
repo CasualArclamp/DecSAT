@@ -47,6 +47,9 @@ pub enum Action {
     Play(VfoId, crate::player::Player),
     /// Open the TS analyser window on a VFO.
     OpenTsViewer(VfoId),
+    /// Play a service of a VFO's TS in the app (its number; `None`: the
+    /// first with pictures).
+    Watch(VfoId, Option<u16>),
     /// Open the radar scope on a VFO's radar feed.
     OpenRadarScope(VfoId),
     /// Play a VFO's multicast audio stream (group:port): in the app, or in

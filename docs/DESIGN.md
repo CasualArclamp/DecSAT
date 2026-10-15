@@ -263,7 +263,11 @@ crates/
   decsat-gse      GSE de-encapsulation + reassembly; standard + proprietary
                   variants (header-len, split frag-id); label/protocol handling
   decsat-ts       TS-mode BBFRAME → MPEG-TS; null-packet reinsertion, sync,
-                  Generic/Newtec CRC variants
+                  Generic/Newtec CRC variants; PSI/SI analyser; outputs;
+                  DVB-CSA + BISS descrambling (csa, biss)
+  decsat-video    the in-app TV player: ffmpeg as a child process (TS in,
+                  Matroska of raw RGBA + float PCM out), the pictures timed
+                  by the sound
   decsat-ip       IPv4/IPv6 parse, PCAP writer and reader, stream
                   classification + stats, blind IP-header-checksum fallback
                   search; a radar station's monitoring multicast (rcms)
@@ -296,6 +300,27 @@ apps/
   decsat-gui      egui/glow: constellation, spectrum, ACM timeline, stream table
 docs/ DESIGN.md, reference/ (git-ignored), samples/ (git-ignored), exe/, scripts/, .github/
 ```
+
+### BISS and the in-app player (decided 2026-10-15)
+
+- **BISS mode 1 only**: a 12-digit key (checksums added) or 16 digits as
+  typed; one control word for even and odd. BISS-E (injected ID +
+  encrypted session word) is not done; its decrypted 16-digit key works.
+- **Descrambled in the TS stage, ahead of everything**: analyser, MPE,
+  `.ts`, UDP, HTTP and the player all see the clear stream. The key's fit
+  is judged from PES start codes after descrambling.
+- **Keys remembered per satellite and carrier** (`biss.<sat>.rf<kHz>khz`
+  in prefs, ±300 kHz), saved once a key is seen to fit, offered once per
+  VFO per carrier when it is scrambled with no key typed.
+- **Player = ffmpeg.exe as a child process**, not libav linked in: no
+  build or CI change, and it decodes everything contribution feeds carry
+  (interlaced and 4:2:2 H.264, MPEG-2, HEVC, AC-3, S302M). The GUI hands
+  the programme's PIDs to its stdin through a tap in the VFO's settings
+  (`decsat_ts::TsTap`, bounded, never blocks the FEC thread); ffmpeg writes
+  Matroska (raw RGBA 960×540 letterboxed by DAR, f32 stereo 48 kHz) with
+  per-block timestamps; audio goes to a `decsat_audio` PCM player and the
+  pictures follow its clock (the wall clock without sound). ffmpeg that
+  stops is restarted (a stream still scrambled at first).
 
 ## 5. FEC — the heavy part
 

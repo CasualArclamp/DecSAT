@@ -1,7 +1,8 @@
 //! Playing a stream in the app: depacketise → decode → resample → sound card.
 //!
-//! The receiver hands each UDP payload of the stream to [`AudioPlayer::packet`],
-//! which only queues it; a thread of the player's own does the rest, so a
+//! The receiver hands each UDP payload of the stream to [`AudioPlayer::packet`]
+//! (or, for audio decoded elsewhere — the video player's — PCM to
+//! [`AudioPlayer::push_pcm`]), which only queues it; a thread of the player's own does the rest, so a
 //! slow decode never holds up the FEC thread. The sound card pulls from a
 //! ring buffer, filled at its own rate by the resampler.
 //!
@@ -30,13 +31,17 @@ use std::time::Duration;
 use decsat_ip::AudioStream;
 
 use crate::decode::{Block, Decoder};
-use crate::depay::Depacketizer;
+use crate::depay::{Depacketizer, Unit};
 use crate::resample::Resampler;
 
 /// Buffered before play starts (and after running dry), milliseconds.
 pub const START_MS: u32 = 400;
 /// Buffer level beyond which audio is cut back to `START_MS`.
 const MAX_MS: u32 = 2000;
+/// The same for PCM decoded elsewhere (the video player's): its decoder
+/// hands over its start-up backlog in one go, which is cut rather than
+/// played a second late (the pictures follow the sound).
+const PCM_MAX_MS: u32 = 800;
 /// Payloads queued for the player thread before new ones are dropped.
 const QUEUE: usize = 512;
 
@@ -168,6 +173,8 @@ struct Shared {
     level: [AtomicU32; 2],
     /// Stereo frames handed to the output (counted for the null output).
     played: AtomicU64,
+    /// Buffer level beyond which audio is cut back to `START_MS`.
+    max_ms: u32,
 }
 
 /// A handle on a running player: its status, level and pause control.
@@ -219,9 +226,17 @@ impl AudioHandle {
     }
 }
 
-/// Plays one multicast audio stream.
+/// What the player thread is handed.
+enum Input {
+    /// A UDP payload of the stream, to depacketise and decode.
+    Payload(Vec<u8>),
+    /// Audio already decoded: interleaved stereo at `rate`.
+    Pcm { rate: u32, samples: Vec<f32> },
+}
+
+/// Plays one multicast audio stream (or PCM decoded elsewhere).
 pub struct AudioPlayer {
-    tx: Option<SyncSender<Vec<u8>>>,
+    tx: Option<SyncSender<Input>>,
     handle: AudioHandle,
     join: Option<JoinHandle<()>>,
     /// Payloads passed on (and dropped because the player fell behind).
@@ -236,6 +251,22 @@ impl AudioPlayer {
         if depay.is_ts() {
             return Err("an MPEG-TS stream: open it in VLC".into());
         }
+        let carriage = depay.carriage.clone();
+        Self::spawn(Some(depay), carriage, output, MAX_MS)
+    }
+
+    /// Start a player for audio decoded elsewhere, handed over with
+    /// [`AudioPlayer::push_pcm`]; `label` says what it is ("from ffmpeg").
+    pub fn start_pcm(label: &str, output: OutputKind) -> Result<AudioPlayer, String> {
+        Self::spawn(None, label.to_string(), output, PCM_MAX_MS)
+    }
+
+    fn spawn(
+        depay: Option<Depacketizer>,
+        carriage: String,
+        output: OutputKind,
+        max_ms: u32,
+    ) -> Result<AudioPlayer, String> {
         let shared = Arc::new(Shared {
             ring: Mutex::new(Ring {
                 buf: VecDeque::new(),
@@ -244,13 +275,14 @@ impl AudioPlayer {
             }),
             paused: AtomicBool::new(false),
             status: Mutex::new(Status {
-                carriage: depay.carriage.clone(),
+                carriage,
                 ..Default::default()
             }),
             level: [AtomicU32::new(0), AtomicU32::new(0)],
             played: AtomicU64::new(0),
+            max_ms,
         });
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(QUEUE);
+        let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE);
         let sh = shared.clone();
         let join = std::thread::Builder::new()
             .name("decsat-audio".into())
@@ -267,8 +299,18 @@ impl AudioPlayer {
 
     /// One UDP payload of the stream.
     pub fn packet(&mut self, udp_payload: &[u8]) {
+        self.send(Input::Payload(udp_payload.to_vec()));
+    }
+
+    /// Decoded audio: interleaved stereo samples at `rate` (for a player
+    /// made by [`AudioPlayer::start_pcm`]).
+    pub fn push_pcm(&mut self, rate: u32, samples: Vec<f32>) {
+        self.send(Input::Pcm { rate, samples });
+    }
+
+    fn send(&mut self, input: Input) {
         let Some(tx) = &self.tx else { return };
-        match tx.try_send(udp_payload.to_vec()) {
+        match tx.try_send(input) {
             Ok(()) => self.forwarded += 1,
             Err(TrySendError::Full(_)) => self.dropped += 1,
             Err(TrySendError::Disconnected(_)) => self.tx = None,
@@ -411,7 +453,12 @@ where
 }
 
 /// The player thread.
-fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, kind: OutputKind) {
+fn run(
+    rx: mpsc::Receiver<Input>,
+    mut depay: Option<Depacketizer>,
+    sh: Arc<Shared>,
+    kind: OutputKind,
+) {
     let mut changes = OUTPUT_CHANGES.load(Ordering::Relaxed);
     let mut out = match open_output(kind, &sh) {
         Ok((o, name)) => {
@@ -464,7 +511,16 @@ fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, ki
             }
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(p) => depay.packet(&p, &mut units),
+            Ok(Input::Payload(p)) => {
+                if let Some(d) = &mut depay {
+                    d.packet(&p, &mut units);
+                }
+            }
+            Ok(Input::Pcm { rate, samples }) => units.push(Unit::Pcm {
+                rate,
+                channels: 2,
+                samples,
+            }),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -508,7 +564,7 @@ fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, ki
             let mut ring = sh.ring.lock().unwrap();
             ring.buf.extend(resampled.iter().copied());
             let level_ms = ring.buf.len() as f64 / per_ms;
-            if level_ms > MAX_MS as f64 {
+            if level_ms > sh.max_ms as f64 {
                 let cut = (ring.buf.len() - (START_MS as f64 * per_ms) as usize) & !1;
                 ring.buf.drain(..cut);
             }
@@ -525,7 +581,7 @@ fn run(rx: mpsc::Receiver<Vec<u8>>, mut depay: Depacketizer, sh: Arc<Shared>, ki
         s.codec = dec.description.clone();
         s.decoded = dec.decoded;
         s.decode_errors = dec.errors;
-        s.lost_packets = depay.lost;
+        s.lost_packets = depay.as_ref().map_or(0, |d| d.lost);
         if dec.decoded == 0 && dec.errors > 0 {
             s.error = dec.last_error.clone();
         } else if dec.decoded > 0 {
@@ -572,6 +628,26 @@ mod tests {
         drop(p);
         // The handle outlives the player.
         let _ = h.status();
+    }
+
+    #[test]
+    fn plays_pcm_handed_to_it() {
+        let mut p = AudioPlayer::start_pcm("test", OutputKind::Null).unwrap();
+        let h = p.handle();
+        for _ in 0..20 {
+            p.push_pcm(48_000, vec![0.25; 2 * 960]);
+        }
+        let t0 = std::time::Instant::now();
+        while h.played_frames() < 15 * 960 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(h.played_frames() >= 15 * 960, "{}", h.played_frames());
+        assert_eq!(h.status().carriage, "test");
+        assert!(
+            h.status().codec.is_some_and(|c| c.contains("PCM")),
+            "{:?}",
+            h.status()
+        );
     }
 
     #[test]

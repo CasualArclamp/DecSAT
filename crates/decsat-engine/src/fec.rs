@@ -40,7 +40,8 @@ use decsat_ip::{
     Reassembler,
 };
 use decsat_ts::{
-    MpeExtractor, MpeStats, TS_LEN, TcpSink, TsAnalyser, TsDeframer, TsFile, TsReport, UdpSink,
+    DescrambleStats, Descrambler, MpeExtractor, MpeStats, Outcome, TS_LEN, TcpSink, TsAnalyser,
+    TsDeframer, TsFile, TsReport, TsTap, UdpSink,
 };
 
 use crate::demod::{PILOT_AFTER, PILOT_PERIOD, PlFrame};
@@ -1189,6 +1190,11 @@ pub struct TsView {
     pub error: Option<String>,
     /// Text in the packets' payloads.
     pub text: decsat_modem::text::ByteTextView,
+    /// BISS: a key set, and what it has done (whether it fits).
+    pub biss_key: bool,
+    pub biss: DescrambleStats,
+    /// Packets the in-app player's tap dropped (the player behind).
+    pub tap_dropped: u64,
 }
 
 /// IP out of GSE, for display.
@@ -1295,6 +1301,11 @@ pub struct FecOutput {
     pub ts_udp: Option<SocketAddr>,
     /// Serve the MPEG-TS over TCP/HTTP here.
     pub ts_tcp: Option<SocketAddr>,
+    /// Descramble the MPEG-TS with this BISS control word, before the
+    /// analyser and every output.
+    pub biss: Option<[u8; 8]>,
+    /// Hand a copy of the MPEG-TS to the in-app player.
+    pub ts_tap: Option<TsTap>,
     /// Play this multicast audio stream (group:port): in the app, or
     /// relayed to an external player when `audio_external`.
     pub audio_play: Option<SocketAddr>,
@@ -1973,6 +1984,10 @@ struct TsStage {
     direct: u64,
     /// Text in the payloads.
     text: decsat_modem::text::ByteText,
+    /// BISS descrambling, ahead of everything else.
+    descrambler: Descrambler,
+    /// The in-app player's copy.
+    tap: Option<TsTap>,
 }
 
 impl TsStage {
@@ -1997,11 +2012,17 @@ impl TsStage {
             datagrams: Vec::new(),
             direct: 0,
             text: decsat_modem::text::ByteText::new(),
+            descrambler: Descrambler::new(),
+            tap: None,
         }
     }
 
     /// Open, close or move the outputs to match `o`.
     fn follow(&mut self, o: &FecOutput) {
+        self.descrambler.set_cw(o.biss);
+        if self.tap != o.ts_tap {
+            self.tap = o.ts_tap.clone();
+        }
         match (o.ts_record, self.file.is_some()) {
             (true, false) if self.file_path.is_none() || self.error.is_none() => {
                 let stamp = SystemTime::now()
@@ -2065,11 +2086,20 @@ impl TsStage {
         self.forward();
     }
 
-    /// The packets just taken to the analyser, MPE and the outputs.
+    /// The packets just taken to the analyser, MPE and the outputs —
+    /// descrambled first, when there is a BISS key.
     fn forward(&mut self) {
         self.datagrams.clear();
-        for p in &self.packets {
+        // Rust note: `&mut self.packets` and the other fields used in the
+        // loop are borrowed separately, which the compiler allows for
+        // fields named directly.
+        for p in &mut self.packets {
+            let descrambled = self.descrambler.packet(p) == Outcome::Descrambled;
             self.analyser.packet(p);
+            if descrambled {
+                self.analyser
+                    .note_descrambled(u16::from_be_bytes([p[1] & 0x1F, p[2]]));
+            }
             self.mpe.packet(p, &mut self.datagrams);
             // Text per PID, so a table's strings carry across packets.
             let pid = u16::from_be_bytes([p[1] & 0x1F, p[2]]);
@@ -2091,6 +2121,9 @@ impl TsStage {
         }
         if let Some(t) = &mut self.tcp {
             t.write(&self.packets);
+        }
+        if let Some(t) = &self.tap {
+            t.send(&self.packets);
         }
     }
 
@@ -2135,6 +2168,9 @@ impl TsStage {
             tcp: self.tcp.as_ref().map(|t| (t.addr, t.clients())),
             error: self.error.clone(),
             text: self.text.view(),
+            biss_key: self.descrambler.has_key(),
+            biss: self.descrambler.stats,
+            tap_dropped: self.tap.as_ref().map_or(0, TsTap::dropped),
         }
     }
 }
@@ -2835,6 +2871,51 @@ fn run(
 mod tests {
     use super::*;
     use crate::demod::Demod;
+
+    /// With a BISS key the TS stage descrambles before everything: the
+    /// analyser sees clear PES (and says the key fits) and the player's
+    /// tap gets the clear packets.
+    #[test]
+    fn a_biss_key_descrambles_for_the_analyser_and_the_tap() {
+        let key = decsat_ts::BissKey::parse("0123 4567 89AB").unwrap();
+        let csa = decsat_ts::csa::Key::new(key.cw);
+        let clear: Vec<[u8; TS_LEN]> = (0..40u8)
+            .map(|i| {
+                let mut p = [0x5Au8; TS_LEN];
+                p[..4].copy_from_slice(&[
+                    0x47,
+                    if i % 5 == 0 { 0x41 } else { 0x01 },
+                    0x00,
+                    0x10 | (i & 15),
+                ]);
+                if i % 5 == 0 {
+                    p[4..13].copy_from_slice(&[0, 0, 1, 0xE0, 0, 0, 0x80, 0, 0]);
+                }
+                p
+            })
+            .collect();
+        let mut scrambled = clear.clone();
+        for p in &mut scrambled {
+            decsat_ts::biss::scramble_packet(&csa, p);
+        }
+        let (tap, rx) = TsTap::new(4);
+        let mut stage = TsStage::new();
+        stage.follow(&FecOutput {
+            ts: true,
+            biss: Some(key.cw),
+            ts_tap: Some(tap),
+            ..FecOutput::default()
+        });
+        stage.packets_in(&scrambled);
+        assert_eq!(rx.try_recv().unwrap(), clear);
+        let v = stage.view();
+        assert!(v.biss_key);
+        assert_eq!(v.biss.verdict, decsat_ts::Verdict::Right);
+        assert_eq!(v.biss.descrambled, 40);
+        let row = &stage.analyser.pids[&0x100];
+        assert_eq!((row.scrambled, row.descrambled), (0, 40));
+        assert_eq!(row.pes_stream_id, Some(0xE0));
+    }
 
     /// IP over Frame Relay in HDLC (the 12335.13 MHz TPC carrier's: DLCI
     /// 100, NLPID CCh) reaches the IP stage, and a radar station's

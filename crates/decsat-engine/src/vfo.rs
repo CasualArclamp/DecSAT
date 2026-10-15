@@ -425,6 +425,13 @@ pub struct VfoSettings {
     /// DVB-S2 → MPEG-TS: serve the TS over TCP/HTTP on `ts_tcp`.
     pub ts_tcp_on: bool,
     pub ts_tcp: String,
+    /// DVB-S2 → MPEG-TS: the BISS key, as typed (12 or 16 hex digits;
+    /// anything else, empty included, leaves scrambled packets as they
+    /// are). With a key every output carries the descrambled stream.
+    pub biss_key: String,
+    /// DVB-S2 → MPEG-TS: a copy of the (descrambled) stream for the in-app
+    /// player.
+    pub ts_tap: Option<decsat_ts::TsTap>,
     /// DVB-S2 → IP or TS: play this multicast audio stream (group:port), in
     /// the app or (`audio_external`) relayed to a media player.
     pub audio_play: Option<std::net::SocketAddr>,
@@ -491,6 +498,8 @@ impl VfoSettings {
             ts_udp: "127.0.0.1:1234".into(),
             ts_tcp_on: false,
             ts_tcp: "127.0.0.1:8001".into(),
+            biss_key: String::new(),
+            ts_tap: None,
             audio_play: None,
             audio_external: false,
             audio_record: None,
@@ -2749,6 +2758,11 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc) -> FecOutput {
         ts_record: s.record && s.decoder.outputs_ts(),
         ts_udp: s.ts_udp_on.then(|| s.ts_udp.trim().parse().ok()).flatten(),
         ts_tcp: s.ts_tcp_on.then(|| s.ts_tcp.trim().parse().ok()).flatten(),
+        biss: decsat_ts::BissKey::parse(&s.biss_key)
+            .ok()
+            .map(|k| k.cw)
+            .filter(|_| s.decoder.outputs_ts()),
+        ts_tap: s.ts_tap.clone().filter(|_| s.decoder.outputs_ts()),
         audio_play: s.audio_play,
         audio_external: s.audio_external,
         audio_record: s.audio_record,

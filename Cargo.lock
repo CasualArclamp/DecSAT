@@ -692,6 +692,7 @@ dependencies = [
  "decsat-ip",
  "decsat-mod",
  "decsat-ts",
+ "decsat-video",
  "eframe",
  "egui_plot",
  "image",
@@ -757,6 +758,14 @@ dependencies = [
  "decsat-frame",
  "decsat-ip",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "decsat-video"
+version = "0.10.13"
+dependencies = [
+ "decsat-audio",
+ "decsat-ts",
 ]
 
 [[package]]

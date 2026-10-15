@@ -27,6 +27,7 @@ decsat-io = { path = "../../crates/decsat-io" }
 decsat-engine = { path = "../../crates/decsat-engine" }
 decsat-mod = { path = "../../crates/decsat-mod" }
 decsat-audio = { path = "../../crates/decsat-audio" }
+decsat-video = { path = "../../crates/decsat-video" }
 anyhow.workspace = true
 # The glow (OpenGL) renderer instead of eframe's default wgpu: plenty for 2-D
 # plots and a much smaller build. "x11"/"wayland" only matter on Linux.

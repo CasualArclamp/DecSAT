@@ -4722,3 +4722,51 @@ holds the subcarrier's sidebands and its 2nd-harmonic line at 153.6 kHz,
 which keeps the phase exact); decodes the same 26/26 frames, C/N0 57.7
 dB-Hz (the full-rate file read 61.7: its outer band was already filtered,
 lowering the floor). The 252 MB original went to the Recycle Bin.
+
+## BISS descrambling and the in-app TV player (2026-10-15)
+
+Asked for from a live BISS-scrambled contribution feed (Ericsson encoder,
+"Sydney_1 MP4 HD_SD", 8PSK 3/4 at 3.58 MS/s, H.264 + three MPEG-1 audio).
+
+- `decsat_ts::csa`: DVB-CSA (block + stream cipher), byte-wise, the shift
+  registers packed in u64s; tables from VLC's `csa.c` / libdvbcsa (one
+  slip in the remembered Z output wiring caught before testing: the
+  symmetric form uses every S-box bit once). **Checked against VLC 3.0**:
+  VLC's TS muxer scrambled an x264 + MP2 stream (`csa-ck=…`), this
+  descrambled it to the same decoded frames (383/384; the last audio
+  frame is cut by VLC's remux in both directions), and VLC descrambled
+  this module's scrambling to the same frames. Two of VLC's packets (a
+  full payload — it decodes to x264's settings text — and one with a
+  6-byte residue) are a regression test. Speed: 212k packets in 2.25 s
+  release, ~140 Mbit/s of TS a core.
+- `decsat_ts::biss`: key parsing (12/16 digits, checksum bytes),
+  `Descrambler` with the verdict (right / wrong / partly / checking) from
+  PES start codes over the last 32 PES starts; `scramble_packet`.
+- Engine: `VfoSettings::biss_key` → `FecOutput::biss` → the TS stage
+  descrambles before the analyser and outputs; `PidStats::descrambled`;
+  `TsView::biss`. `VfoSettings::ts_tap` / `FecOutput::ts_tap`: the
+  player's copy of the stream (`decsat_ts::TsTap`, bounded, drops when
+  behind).
+- `decsat-audio`: `AudioPlayer::start_pcm` / `push_pcm` — PCM decoded
+  elsewhere, with an 800 ms ceiling (ffmpeg's 1.5 s probe backlog is cut,
+  not played late).
+- `decsat-video` (new): ffmpeg found (prefs `ffmpeg=`, beside the exe,
+  PATH, WinGet links, Program Files), run with `CREATE_NO_WINDOW` and
+  below-normal priority; a streaming Matroska reader; the A/V clock;
+  restart on exit. Found on the way: `-fflags nobuffer` stops ffmpeg's
+  mpegts → H.264 path producing any frames (dropped).
+- GUI: key row in the analyser (above the tabs), the VFO panel and the
+  player (while scrambled); flags *descrambled* / 🔓; **▶ In app** and
+  per-service **▶ Play in the app**; the player window (service and sound
+  pickers, ffmpeg's stream lines, shown/dropped, sound buffer); keys kept
+  by carrier (`biss_memory.rs`, prefs `biss.<sat>.rf<kHz>khz`).
+  Automation: `--biss-key KEY`, `--watch`.
+- CLI: `decsat biss KEY in.ts out.ts [--scramble --clear PIDs]`.
+
+**Checked end to end** on a synthetic carrier: x264 576i (SAR 64:45) + MP2
+(silent) → `decsat biss --scramble` → `decsat tx` QPSK 3/4 2 MS/s → GUI:
+without the key the analyser and panel say *scrambled: the service's BISS
+key is needed*; with it *the key fits · 2 PIDs descrambled*, 0 CC errors,
+and the player shows the picture at 16:9, *timed by the sound*, ~590 ms
+sound buffer, 4 pictures dropped at start. Not yet seen on the live
+Sydney feed (needs its key).

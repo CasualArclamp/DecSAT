@@ -10,6 +10,10 @@
 //!   thread and a bounded queue, so a slow or stalled player loses data
 //!   rather than holding up the receiver.
 //!
+//! - **A tap** ([`TsTap`]): the stream handed to something in this process
+//!   (the in-app player) over a bounded channel; when the taker falls
+//!   behind, packets are dropped and counted, never waited for.
+//!
 //! Both default to 127.0.0.1 in the GUI: reachable from this machine only,
 //! unless pointed elsewhere on purpose.
 
@@ -17,6 +21,9 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use decsat_ip::serve::StreamServer;
 
@@ -123,6 +130,65 @@ impl TcpSink {
         if !packets.is_empty() {
             self.server.write(packets.concat());
         }
+    }
+}
+
+/// A copy of a stream for a taker in this process: each batch of packets
+/// is sent as it comes; a full channel drops the batch (counted).
+///
+/// Rust note: it lives in a VFO's settings, which are compared and cloned,
+/// so `PartialEq` is by identity (two clones of one tap are equal) and
+/// `Clone` shares the one channel.
+#[derive(Clone)]
+pub struct TsTap {
+    tx: SyncSender<Vec<[u8; TS_LEN]>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl TsTap {
+    /// A tap and its receiving end, holding up to `batches` batches.
+    pub fn new(batches: usize) -> (TsTap, Receiver<Vec<[u8; TS_LEN]>>) {
+        let (tx, rx) = sync_channel(batches);
+        (
+            TsTap {
+                tx,
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            rx,
+        )
+    }
+
+    /// Hand on `packets`; false once the taker has gone.
+    pub fn send(&self, packets: &[[u8; TS_LEN]]) -> bool {
+        if packets.is_empty() {
+            return true;
+        }
+        match self.tx.try_send(packets.to_vec()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.dropped
+                    .fetch_add(packets.len() as u64, Ordering::Relaxed);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Packets dropped because the taker was behind.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl PartialEq for TsTap {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.dropped, &other.dropped)
+    }
+}
+
+impl std::fmt::Debug for TsTap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TsTap({} dropped)", self.dropped())
     }
 }
 

@@ -81,6 +81,8 @@ real carriers stay put.
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
+| **BISS descrambling** (DVB-CSA, BISS mode 1): the key typed in the analyser or the VFO panel, checked against the stream, remembered for its carrier; every output then clear | ✅ bit-exact against VLC's CSA both ways |
+| **In-app TV player**: a service of the TS decoded by ffmpeg (H.264 incl. interlaced, MPEG-2, HEVC; MP2/AAC/AC-3…), deinterlaced, its sound through the app's audio, pictures timed by the sound | ✅ on a scrambled DVB-S2 test carrier |
 | **Multicast audio** from GSE or MPE: SAP/SDP names, codecs; unannounced RTP AAC and Opus described from their packets; IPv4 fragments reassembled; now-playing messages; play in the app (volume, pause) or VLC/PotPlayer; record to file | ✅ checked on a recording of a live MPE radio multiplex |
 | Modulator (HackRF TX / IQ file) | M6 |
 
@@ -183,6 +185,7 @@ continuity errors. Send it on with any of:
 | **UDP** `127.0.0.1:1234` | VLC: `udp://@:1234` · PotPlayer: `udp://127.0.0.1:1234` |
 | **TCP / HTTP** `127.0.0.1:8001` | VLC or PotPlayer: `http://127.0.0.1:8001/` (VLC also `tcp://…`) |
 | **▶ VLC / ▶ PotPlayer** | starts the TCP server and opens the stream in the player |
+| **▶ In app** | plays a service in a window here (below) |
 
 **🔍 TS analyser** opens a window in the spirit of EBSPro's: every PID with
 what it is (PAT, PMT, H.264 video, AC-3 audio, ECM/EMM with the CA system,
@@ -194,6 +197,33 @@ Both network outputs start on 127.0.0.1, this machine only; use 0.0.0.0 (TCP)
 or another host's address (UDP) to reach the network. Several players can
 connect to the TCP server at once; one that stalls loses data rather than
 holding up the receiver.
+
+**BISS.** A stream scrambled with BISS (contribution feeds: the PIDs show
+*scrambled*, the services 🔒) takes its key in the analyser, above the
+tabs, or in the VFO panel's **BISS key** row: the 12 hex digits (the
+checksum bytes are added) or all 16. The key is checked against the
+stream — each PES packet must start `00 00 01` once descrambled — and the
+row says *the key fits*, or *not this stream's key*. With a key in, the
+analyser, the `.ts` recording, UDP, HTTP and the players all get the clear
+stream. A key that fits is remembered for its carrier (per satellite, by
+RF, in your settings only) and put back in when a VFO lands on that
+carrier again still scrambled. BISS mode 1 only (an already-decrypted
+BISS-E key in its 16-digit form works too); the descrambler is DVB-CSA,
+checked bit-exact against VLC's in both directions, and fast enough for a
+whole multiplex (~140 Mbit/s on one core). `decsat biss KEY in.ts out.ts`
+descrambles a recording (`--scramble` makes a scrambled test stream).
+
+**▶ In app** (the VFO panel's Play row, or **▶ Play in the app** on a
+service in the analyser's Services tab) plays a service in a window:
+pictures deinterlaced and fitted 16:9 (anamorphic SD shown right), its
+sound through the app's audio (the volume, mute and output device in the
+toolbar), the pictures timed by the sound. The window picks the service
+and the sound track (language), and lists what ffmpeg says the streams are.
+It needs [ffmpeg](https://ffmpeg.org) (`winget install Gyan.FFmpeg`):
+found on the PATH, beside DecSAT, or where you point it; it runs as a
+child process, below normal priority, decoding whatever it can — H.264
+(interlaced and 4:2:2 too), MPEG-2, HEVC, MPEG audio, AAC, AC-3, SMPTE 302M.
+A stream still scrambled shows the key field in the player too.
 
 ### Multicast audio
 
@@ -878,6 +908,7 @@ decsat scene                      # write the 8 MS/s test scene above
 decsat cid                        # a DVB-S2 carrier with a DVB-CID under it
 decsat test-signals tests         # both, into tests/ (see tests/README.md)
 decsat mcast recording.ts --decode --record out   # the radio in a .ts (MPE)
+decsat biss "123456 789ABC" scrambled.ts clear.ts   # a BISS-scrambled recording descrambled (says whether the key fits)
 decsat payload fastlink.bin --tdm-out frames.bin  # a modem .bin through the payload stage
 decsat decode --hackrf 1635.0 --decoder fastlink --offset 640e3 --bandwidth 200e3   --out dir --record-on-activity     # watch a FastLink live, record when a channel speaks
 decsat decode qflex_333333Sps.cf32 --decoder fastlink --out dir --tdm-record   # a Q-Flex's call voice to a .wav
@@ -971,7 +1002,14 @@ algorithms studied from and credited to:
 - [FFmpeg](https://ffmpeg.org) libavcodec's aptX decoder (© 2017 Aurelien
   Jacobs, LGPL-2.1-or-later) — the apt-X tables, ADPCM and QMF, ported to
   Rust and bit-exact against it
+- [VLC](https://www.videolan.org) (`modules/demux/mpeg/csa.c`, Laurent
+  Aimar) and [libdvbcsa](https://www.videolan.org/developers/libdvbcsa.html)
+  (both GPL-2.0-or-later) — the DVB-CSA tables and round structure for BISS
+  descrambling, checked bit-exact against VLC
 - DecDRM — the waterfall's GPU ring texture
+
+The in-app TV player runs [FFmpeg](https://ffmpeg.org) as a separate
+program, when it is installed; DecSAT does not include it.
 
 The radar scope draws OpenStreetMap's tiles (© OpenStreetMap contributors,
 ODbL; credited on the map), OurAirports' airport and runway data (public

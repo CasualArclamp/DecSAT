@@ -59,6 +59,10 @@ pub struct Options {
     pub survey: bool,
     /// Open the Ku-band beacon list.
     pub beacons: bool,
+    /// The BISS key every claimed VFO is given.
+    pub biss_key: Option<String>,
+    /// Play the selected VFO's first service in the app once its PMT is in.
+    pub watch: bool,
 }
 
 impl Options {
@@ -124,6 +128,11 @@ impl Options {
                     o.vfo_at.push((at, bw));
                 }
                 Some("--play-audio") => o.play_audio = true,
+                Some("--watch") => o.watch = true,
+                Some("--biss-key") => {
+                    let v = args.next().ok_or("--biss-key needs a key")?;
+                    o.biss_key = Some(v.to_string_lossy().into_owned());
+                }
                 Some("--wireshark") => o.wireshark = true,
                 Some("--amp") => o.amp = true,
                 Some("--decoder") => {
@@ -220,6 +229,9 @@ pub struct Automation {
     pub vfo_at: Vec<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
+    pub biss_key: Option<String>,
+    pub watch: bool,
+    pub watch_started: bool,
     pub wireshark: bool,
     /// Each claimed carrier's decoder (`--decoder a,b,…`).
     pub decoders: Vec<decsat_engine::DecoderKind>,
@@ -245,6 +257,9 @@ impl Automation {
             vfo_at: o.vfo_at.clone(),
             play_audio: o.play_audio,
             audio_started: false,
+            biss_key: o.biss_key.clone(),
+            watch: o.watch,
+            watch_started: false,
             wireshark: o.wireshark,
             decoders: o.decoders.clone(),
         }

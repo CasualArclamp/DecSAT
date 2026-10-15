@@ -1,0 +1,12 @@
+[package]
+name = "decsat-video"
+description = "DecSAT in-app TV player: a transport stream programme decoded by ffmpeg, shown in sync with its sound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decsat-ts = { path = "../decsat-ts" }
+decsat-audio = { path = "../decsat-audio" }

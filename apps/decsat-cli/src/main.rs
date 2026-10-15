@@ -4,6 +4,7 @@
 //! file and report level/spectrum occupancy). `decode` and `modulate` arrive
 //! with the later milestones.
 
+mod biss;
 mod cidgen;
 mod decode;
 mod mcast;
@@ -113,6 +114,9 @@ enum Command {
     /// List the multicast radio in a recorded transport stream (IP from MPE):
     /// what each stream is, now-playing messages; decode or record them.
     Mcast(mcast::McastArgs),
+    /// Descramble a recorded transport stream with its BISS key (or
+    /// scramble a clear one, with --scramble).
+    Biss(biss::BissArgs),
     /// Capture raw IQ from the HackRF to .cs8 files — one frequency or a
     /// sweep — named so `scan` and `decode` read them straight back.
     Record(record::RecordArgs),
@@ -320,6 +324,7 @@ fn main() -> Result<()> {
         Command::Payload(a) => payload::run(&a),
         Command::Pcap(a) => pcap::run(&a),
         Command::Record(a) => record::run(&a),
+        Command::Biss(a) => biss::run(&a),
         Command::Scan {
             file,
             format,

@@ -807,8 +807,32 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 );
                 ui.end_row();
 
+                // Only once something scrambled has been seen, or a key
+                // is in.
+                let scrambled = ts.is_some_and(|t| {
+                    t.biss_key
+                        || t.report
+                            .pids
+                            .iter()
+                            .any(|p| p.stats.scrambled > 0 || p.stats.descrambled > 0)
+                });
+                if scrambled || !s.biss_key.is_empty() {
+                    ui.label("BISS key");
+                    crate::ts_viewer::biss_field(ui, &mut s.biss_key, ts);
+                    ui.end_row();
+                }
+
                 ui.label("Play");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button("▶ In app")
+                        .on_hover_text(
+                            "Play the first service with pictures in a window here                              (decoded by ffmpeg); the analyser's Services tab plays others",
+                        )
+                        .clicked()
+                    {
+                        actions.push(Action::Watch(v.id, None));
+                    }
                     for p in [Player::Vlc, Player::PotPlayer] {
                         if ui
                             .button(format!("▶ {}", p.name()))

@@ -10,6 +10,7 @@ mod automation;
 mod band_view;
 mod beacon_card;
 mod beacon_list;
+mod biss_memory;
 mod carrier_caps;
 mod filename;
 mod format;
@@ -26,6 +27,7 @@ mod side_panel;
 mod survey;
 mod transmit;
 mod ts_viewer;
+mod tv;
 mod waterfall;
 
 use std::collections::BTreeMap;
@@ -170,6 +172,10 @@ struct App {
     names: u32,
     paused: bool,
     ts_viewer: ts_viewer::TsViewer,
+    /// The in-app player.
+    tv: tv::TvWindow,
+    /// BISS keys kept by carrier, and given back.
+    biss: biss_memory::BissMemory,
     radar_scope: radar_scope::RadarScope,
     /// The transmit panel (DVB-S2/S2X from a TS, to the HackRF or a file).
     tx: transmit::TxPanel,
@@ -249,6 +255,8 @@ impl Default for App {
             pending_player: None,
             pending_audio: None,
             ts_viewer: Default::default(),
+            tv: Default::default(),
+            biss: Default::default(),
             radar_scope: Default::default(),
             tx: Default::default(),
             note: String::new(),
@@ -829,6 +837,7 @@ impl App {
                 }
             }
             Action::OpenTsViewer(id) => self.ts_viewer.open(id),
+            Action::Watch(id, programme) => self.start_tv(id, programme, None),
             Action::OpenRadarScope(id) => self.radar_scope.open(id),
             Action::PlayAudio(id, key, p) => {
                 if let Some(v) = self.vfos.iter().find(|v| v.id == id) {
@@ -870,6 +879,98 @@ impl App {
                 }
                 self.pending_player = Some((id, p, std::time::Instant::now()));
             }
+        }
+    }
+
+    /// Play service `programme` of VFO `id`'s TS in the app (the first with
+    /// pictures, else the first, when `None`), with sound `audio`: a new
+    /// tap on the VFO's stream for a new player.
+    fn start_tv(&mut self, id: VfoId, programme: Option<u16>, audio: Option<u16>) {
+        let Some(v) = self.vfos.iter().find(|v| v.id == id) else {
+            return;
+        };
+        let ts = self
+            .statuses
+            .get(&id)
+            .and_then(|st| st.fec.as_ref())
+            .and_then(|f| f.ts.as_ref());
+        let progs = ts.map_or(&[][..], |t| &t.report.programmes[..]);
+        let p = programme
+            .and_then(|n| progs.iter().find(|p| p.number == n))
+            .or_else(|| {
+                progs
+                    .iter()
+                    .find(|p| p.streams.iter().any(|e| e.is_video()))
+            })
+            .or(progs.first())
+            .cloned();
+        let Some(p) = p else {
+            self.note = format!(
+                "{}: no services in its transport stream yet (no PAT/PMT seen)",
+                v.settings.name
+            );
+            return;
+        };
+        // About a second of a busy stream's BBFRAMEs.
+        let (tap, rx) = decsat_ts::TsTap::new(256);
+        let mut s = v.settings.clone();
+        s.ts_tap = Some(tap);
+        self.apply(Action::Update(id, s));
+        self.tv.start(id, &p, audio, rx);
+    }
+
+    /// Close the player and give its tap up.
+    fn stop_tv(&mut self) {
+        if let Some(id) = self.tv.vfo
+            && let Some(v) = self.vfos.iter().find(|v| v.id == id)
+            && v.settings.ts_tap.is_some()
+        {
+            let mut s = v.settings.clone();
+            s.ts_tap = None;
+            self.apply(Action::Update(id, s));
+        }
+        self.tv.close();
+    }
+
+    /// Set VFO `id`'s BISS key as typed.
+    fn set_biss_key(&mut self, id: VfoId, key: String) {
+        if let Some(v) = self.vfos.iter().find(|v| v.id == id)
+            && v.settings.biss_key != key
+        {
+            let mut s = v.settings.clone();
+            s.biss_key = key;
+            self.apply(Action::Update(id, s));
+        }
+    }
+
+    /// Keep BISS keys that fit, by carrier; give a scrambled carrier with
+    /// no key typed the one kept for it.
+    fn remember_biss_keys(&mut self) {
+        let centre = self.rf_center();
+        let mut give = Vec::new();
+        for v in &self.vfos {
+            let Some(ts) = self
+                .statuses
+                .get(&v.id)
+                .and_then(|st| st.fec.as_ref())
+                .and_then(|f| f.ts.as_ref())
+            else {
+                continue;
+            };
+            let rf = (centre > 0.0).then_some(centre + v.settings.offset_hz);
+            if let Some(key) = self.biss.check(&self.satellite, v.id, rf, &v.settings, ts) {
+                give.push((v.id, key, rf.unwrap_or(0.0)));
+            }
+        }
+        for (id, key, rf) in give {
+            let name = self
+                .vfos
+                .iter()
+                .find(|v| v.id == id)
+                .map(|v| v.settings.name.clone())
+                .unwrap_or_default();
+            self.note = format!("{name}: the BISS key kept for {} put in", format::freq(rf));
+            self.set_biss_key(id, key);
         }
     }
 
@@ -1670,16 +1771,18 @@ impl eframe::App for App {
                 // `--claim-auto`: as a click on its bracket, auto unless the
                 // carrier is known.
                 if self.automation.claim_auto && !known {
-                    let s = decsat_engine::VfoSettings::new(
+                    let mut s = decsat_engine::VfoSettings::new(
                         self.next_name(),
                         c.center_hz,
                         bw,
                         DecoderKind::Identify,
                     );
+                    s.biss_key = self.automation.biss_key.clone().unwrap_or_default();
                     self.apply(Action::Claim(s));
                 } else {
-                    let s =
+                    let mut s =
                         decsat_engine::VfoSettings::new(self.next_name(), c.center_hz, bw, decoder);
+                    s.biss_key = self.automation.biss_key.clone().unwrap_or_default();
                     self.apply(Action::Create(s));
                 }
             }
@@ -1716,6 +1819,20 @@ impl eframe::App for App {
             let key = std::net::SocketAddr::new(a.group, a.port);
             self.apply(Action::PlayAudio(id, key, None));
         }
+        if self.automation.watch
+            && !self.automation.watch_started
+            && let Some(id) = self.selected
+            && self
+                .statuses
+                .get(&id)
+                .and_then(|st| st.fec.as_ref())
+                .and_then(|f| f.ts.as_ref())
+                .is_some_and(|t| t.report.programmes.iter().any(|p| !p.streams.is_empty()))
+        {
+            self.automation.watch_started = true;
+            self.apply(Action::Watch(id, None));
+        }
+        self.remember_biss_keys();
         self.launch_pending_player();
         self.launch_pending_audio();
         self.automation.handle_screenshot(ctx);
@@ -1906,9 +2023,42 @@ impl eframe::App for App {
                         .get(&id)
                         .and_then(|st| st.fec.as_ref())
                         .and_then(|f| f.ts.as_ref());
-                    self.ts_viewer.show(ui.ctx(), &name, ts);
+                    let key = self
+                        .vfos
+                        .iter()
+                        .find(|v| v.id == id)
+                        .map(|v| v.settings.biss_key.clone())
+                        .unwrap_or_default();
+                    match self.ts_viewer.show(ui.ctx(), &name, &key, ts) {
+                        Some(ts_viewer::ViewerRequest::Key(k)) => self.set_biss_key(id, k),
+                        Some(ts_viewer::ViewerRequest::Watch(n)) => {
+                            actions.push(Action::Watch(id, Some(n)));
+                        }
+                        None => {}
+                    }
                 }
                 None => self.ts_viewer.vfo = None, // the VFO was deleted
+            }
+        }
+
+        // The player, likewise.
+        if let Some(id) = self.tv.vfo {
+            match self.vfos.iter().find(|v| v.id == id) {
+                Some(v) => {
+                    let (name, key) = (v.settings.name.clone(), v.settings.biss_key.clone());
+                    let ts = self
+                        .statuses
+                        .get(&id)
+                        .and_then(|st| st.fec.as_ref())
+                        .and_then(|f| f.ts.as_ref());
+                    match self.tv.show(ui.ctx(), &name, &key, ts) {
+                        Some(tv::TvRequest::Close) => self.stop_tv(),
+                        Some(tv::TvRequest::Play(p, a)) => self.start_tv(id, p, a),
+                        Some(tv::TvRequest::Key(k)) => self.set_biss_key(id, k),
+                        None => {}
+                    }
+                }
+                None => self.tv.close(), // the VFO was deleted
             }
         }
 

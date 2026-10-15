@@ -1,10 +1,11 @@
 //! The MPEG-TS analyser window, in the spirit of EBSPro's TS view: every PID
 //! with what it is, which service it belongs to and its share of the
 //! bitrate; the service tree with what is on now and next; the network's
-//! transponders; and the tables seen.
+//! transponders; and the tables seen. A scrambled stream takes its BISS
+//! key here, and a service can be played in the app.
 
 use decsat_engine::{TsView, VfoId};
-use decsat_ts::{PidRow, TsReport, ca_system_name, service_type_name};
+use decsat_ts::{BissKey, PidRow, TsReport, Verdict, ca_system_name, service_type_name};
 use eframe::egui::{self, Color32, CornerRadius, RichText, Sense, Ui, vec2};
 
 use crate::format;
@@ -27,6 +28,109 @@ enum Sort {
     Service,
 }
 
+/// What the window asks of the app.
+pub enum ViewerRequest {
+    /// The BISS key typed, for the VFO's settings.
+    Key(String),
+    /// Play this service (its number) in the app.
+    Watch(u16),
+}
+
+/// The BISS key field and what the key is doing; true when the key text
+/// changed. Shared by the analyser, the VFO panel and the player.
+pub fn biss_row(ui: &mut Ui, key: &mut String, ts: Option<&TsView>) -> bool {
+    biss_key_ui(ui, key, ts, true)
+}
+
+/// [`biss_row`] without its label (for a grid that has one).
+pub fn biss_field(ui: &mut Ui, key: &mut String, ts: Option<&TsView>) -> bool {
+    biss_key_ui(ui, key, ts, false)
+}
+
+fn biss_key_ui(ui: &mut Ui, key: &mut String, ts: Option<&TsView>, label: bool) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        if label {
+            ui.label("🔑 BISS key");
+        }
+        let parsed = BissKey::parse(key);
+        let invalid = !key.trim().is_empty() && parsed.is_err();
+        let mut edit = egui::TextEdit::singleline(key)
+            .desired_width(170.0)
+            .font(egui::TextStyle::Monospace)
+            .hint_text("12 or 16 hex digits");
+        if invalid {
+            edit = edit.text_color(Color32::from_rgb(230, 110, 110));
+        }
+        changed = ui
+            .add(edit)
+            .on_hover_text(
+                "BISS mode 1: the 12-digit key (the checksum bytes are added), or all 16 \
+                 digits. Every output then carries the descrambled stream. A key that \
+                 fits is remembered for this carrier.",
+            )
+            .changed();
+        let warn = Color32::from_rgb(240, 200, 80);
+        let bad = Color32::from_rgb(230, 110, 110);
+        let good = Color32::from_rgb(110, 220, 110);
+        match &parsed {
+            Err(e) if !key.trim().is_empty() => {
+                ui.colored_label(bad, e.to_string());
+            }
+            Ok(k) if k.checksums_off => {
+                // What the 16 digits would be with the checksums the 12
+                // give.
+                let c = k.cw;
+                let fixed = BissKey::parse(&format!(
+                    "{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                    c[0], c[1], c[2], c[4], c[5], c[6]
+                ))
+                .map(|f| f.text())
+                .unwrap_or_default();
+                ui.colored_label(warn, "checksum bytes off: used as typed")
+                    .on_hover_text(format!("With its checksums the key would be {fixed}"));
+            }
+            _ => {}
+        }
+        let Some(ts) = ts else { return };
+        let b = &ts.biss;
+        let pids = ts
+            .report
+            .pids
+            .iter()
+            .filter(|p| p.stats.descrambled > 0)
+            .count();
+        let (col, text) = match b.verdict {
+            Verdict::NothingScrambled if ts.biss_key => {
+                (good, "nothing scrambled seen".to_string())
+            }
+            Verdict::NothingScrambled => return,
+            Verdict::NoKey => (
+                warn,
+                "🔒 scrambled: the service's BISS key is needed".into(),
+            ),
+            Verdict::Checking => (warn, "checking the key…".into()),
+            Verdict::Right => (
+                good,
+                format!(
+                    "🔓 the key fits · {pids} PID{} descrambled",
+                    if pids == 1 { "" } else { "s" }
+                ),
+            ),
+            Verdict::Wrong => (
+                bad,
+                "✗ not this stream's key: the payloads come out as noise".into(),
+            ),
+            Verdict::Partly => (warn, "the key fits some packets and not others".into()),
+        };
+        ui.colored_label(col, text).on_hover_text(format!(
+            "{} of {} PES packets started right after descrambling; {} packets descrambled",
+            b.pes_right, b.pes_checked, b.descrambled
+        ));
+    });
+    changed
+}
+
 /// The analyser window's state; `vfo` is the VFO it shows (none: closed).
 #[derive(Default)]
 pub struct TsViewer {
@@ -41,11 +145,17 @@ impl TsViewer {
         self.vfo = Some(vfo);
     }
 
-    /// Draw the window for VFO `name`'s stream, if open.
-    pub fn show(&mut self, ctx: &egui::Context, name: &str, ts: Option<&TsView>) {
-        if self.vfo.is_none() {
-            return;
-        }
+    /// Draw the window for VFO `name`'s stream (its BISS key as typed:
+    /// `key`), if open.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        name: &str,
+        key: &str,
+        ts: Option<&TsView>,
+    ) -> Option<ViewerRequest> {
+        self.vfo?;
+        let mut req = None;
         let mut open = true;
         egui::Window::new(format!("MPEG-TS analyser — {name}"))
             .id(egui::Id::new("ts_viewer"))
@@ -53,7 +163,7 @@ impl TsViewer {
             .default_size([940.0, 580.0])
             .resizable(true)
             .show(ctx, |ui| match ts {
-                Some(ts) => self.contents(ui, ts),
+                Some(ts) => self.contents(ui, ts, key, &mut req),
                 None => {
                     ui.label("No transport stream on this VFO yet: it must be a DVB-S2 → MPEG-TS VFO locked on a TS carrier.");
                 }
@@ -61,9 +171,10 @@ impl TsViewer {
         if !open {
             self.vfo = None;
         }
+        req
     }
 
-    fn contents(&mut self, ui: &mut Ui, ts: &TsView) {
+    fn contents(&mut self, ui: &mut Ui, ts: &TsView, key: &str, req: &mut Option<ViewerRequest>) {
         let r = &ts.report;
         // Summary line.
         ui.horizontal_wrapped(|ui| {
@@ -92,6 +203,18 @@ impl TsViewer {
             };
             ui.colored_label(col, errs);
         });
+        // The key row while there is something to descramble, or a key.
+        if ts.biss_key
+            || !key.is_empty()
+            || r.pids
+                .iter()
+                .any(|p| p.stats.scrambled > 0 || p.stats.descrambled > 0)
+        {
+            let mut k = key.to_string();
+            if biss_row(ui, &mut k, Some(ts)) {
+                *req = Some(ViewerRequest::Key(k));
+            }
+        }
         ui.separator();
         ui.horizontal(|ui| {
             for (t, label) in [
@@ -106,7 +229,11 @@ impl TsViewer {
         ui.separator();
         match self.tab {
             Tab::Pids => self.pids(ui, r),
-            Tab::Services => services(ui, r),
+            Tab::Services => {
+                if let Some(n) = services(ui, r) {
+                    *req = Some(ViewerRequest::Watch(n));
+                }
+            }
             Tab::Network => network(ui, r),
             Tab::Tables => tables(ui, r),
         }
@@ -182,6 +309,9 @@ impl TsViewer {
                             if s.scrambled > 0 {
                                 flags.push("scrambled");
                             }
+                            if s.descrambled > 0 {
+                                flags.push("descrambled");
+                            }
                             if s.pcr > 0 {
                                 flags.push("PCR");
                             }
@@ -211,11 +341,13 @@ fn share_bar(ui: &mut Ui, share: f64) {
     );
 }
 
-fn services(ui: &mut Ui, r: &TsReport) {
+/// The services; the number of one whose ▶ was clicked.
+fn services(ui: &mut Ui, r: &TsReport) -> Option<u16> {
     if r.programmes.is_empty() {
         ui.label("No PAT or SDT seen yet.");
-        return;
+        return None;
     }
+    let mut watch = None;
     let rate = |pid: u16| {
         r.pids
             .iter()
@@ -223,6 +355,11 @@ fn services(ui: &mut Ui, r: &TsReport) {
             .map_or(0.0, |p| p.stats.rate_bps)
     };
     let scrambled = |pid: u16| r.pids.iter().any(|p| p.pid == pid && p.stats.scrambled > 0);
+    let descrambled = |pid: u16| {
+        r.pids
+            .iter()
+            .any(|p| p.pid == pid && p.stats.descrambled > 0)
+    };
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -240,11 +377,27 @@ fn services(ui: &mut Ui, r: &TsReport) {
                     head += &format!("  · {}", format::bitrate(total));
                 }
                 let encrypted = p.streams.iter().any(|e| scrambled(e.pid));
+                let clear_now = p.streams.iter().any(|e| descrambled(e.pid));
                 egui::CollapsingHeader::new(RichText::new(head).strong())
                     .id_salt(("svc", p.number))
                     .default_open(true)
                     .show(ui, |ui| {
-                        if encrypted || !p.ca_systems.is_empty() || p.free_ca {
+                        if p.streams.iter().any(|e| e.is_video() || e.is_audio())
+                            && ui
+                                .button("▶ Play in the app")
+                                .on_hover_text(
+                                    "Decode it with ffmpeg and show it in a window, with its sound",
+                                )
+                                .clicked()
+                        {
+                            watch = Some(p.number);
+                        }
+                        if clear_now {
+                            ui.colored_label(
+                                Color32::from_rgb(110, 220, 110),
+                                "🔓 descrambled with the BISS key",
+                            );
+                        } else if encrypted || !p.ca_systems.is_empty() || p.free_ca {
                             let cas: Vec<String> = p
                                 .ca_systems
                                 .iter()
@@ -319,7 +472,13 @@ fn services(ui: &mut Ui, r: &TsReport) {
                                     ui.label(
                                         RichText::new(format!("    {:#06x}", e.pid)).monospace(),
                                     );
-                                    let lock = if scrambled(e.pid) { "  🔒" } else { "" };
+                                    let lock = if scrambled(e.pid) {
+                                        "  🔒"
+                                    } else if descrambled(e.pid) {
+                                        "  🔓"
+                                    } else {
+                                        ""
+                                    };
                                     ui.label(format!("{}{lock}", e.describe()));
                                     ui.label(format!("{:.1} kbit/s", rate(e.pid) / 1e3));
                                     ui.end_row();
@@ -328,6 +487,7 @@ fn services(ui: &mut Ui, r: &TsReport) {
                     });
             }
         });
+    watch
 }
 
 fn network(ui: &mut Ui, r: &TsReport) {
