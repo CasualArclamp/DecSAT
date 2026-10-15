@@ -16,12 +16,14 @@ track reports in IBM bisync or ASTERIX, ADS-B in IP — onto a radar scope
 with a map; DVB-CID carrier IDs too. It was called **DecDVB** until
 October 2026.
 
-![DecSAT: carriers in an 8 MS/s span, each claimed by an Identify VFO; the selected one is identified as a DVB-S2X ACM carrier at 500 kS/s with its four MODCODs listed](docs/images/waterfall.png)
+![DecSAT: four carriers in an 8 MS/s span, each claimed by an Identify VFO; the selected one is identified as a DVB-S2 CCM carrier at 1 MS/s, QPSK 1/2, locked](docs/images/waterfall.png)
 
-*A synthetic 8 MS/s test scene (`decsat scene`): a DVB-S2 CCM carrier, an
+*A synthetic 8 MS/s test scene (`decsat scene`, its file named for
+12.529 GHz to label the axis): a DVB-S2 CCM carrier, a TPC 2964 carrier, an
 ACM carrier mixing S2 and S2X MODCODs (QPSK 1/2 → 8PSK 25/36 → 16APSK 26/45 →
-32APSK 32/45), a DVB-S carrier and a CW tone (the scene has since gained a
-TPC 2964 carrier). Every carrier was found and identified blind.*
+32APSK 32/45), a DVB-S carrier and a CW tone. Every carrier was found and
+identified blind. Across the top: the menus, the play button, the input
+level and the frequency.*
 
 > Early development. [`docs/DESIGN.md`](docs/DESIGN.md) holds the scope and the
 > milestone plan, [`docs/STATUS.md`](docs/STATUS.md) what is done.
@@ -92,9 +94,10 @@ real carriers stay put.
 cargo run --release -p decsat-gui -- capture_8Msps.cs8
 ```
 
-Or open a capture from the toolbar, or drop it on the window. The sample rate,
+Or open a capture with **File ▸ Open IQ…**, or drop it on the window. The sample rate,
 centre frequency and format are read from the file name when it carries them
-(gqrx, SDR++ and DecSAT's own recordings do); otherwise set them in the toolbar.
+(gqrx, SDR++ and DecSAT's own recordings do); otherwise set them under
+*Raw IQ files* in the File menu and press **⟳ Apply**.
 
 DecSAT names its recordings — IQ, symbols, modem data, PCAP, TS, voice — by
 the RF frequency they hold, e.g. `decsat-ASA245_LHI-BN-12346.0340MHz-…`: the
@@ -122,7 +125,7 @@ The big readout at the top is the centre frequency, as in SDR++: wheel over a
 digit or click its upper/lower half to step it, right-click to zero that digit
 and every one below it. With the HackRF running it retunes the radio.
 
-**📁 Output folder…** in the toolbar sets where IQ recordings, symbol files,
+**File ▸ 📁 Output folder…** sets where IQ recordings, symbol files,
 PCAP and TS files go (default `Documents\DecSAT`); it is remembered between
 runs and applies to existing VFOs too.
 
@@ -136,9 +139,9 @@ quasi-error-free Es/N0 of EN 302 307's tables and an Es/N0 bar; then the
 receive chain stage by stage with health dots — demodulator, PL frames,
 LDPC and BCH (an ACM carrier's MODCODs with their share, frames good and
 margin), the FEC thread's load, the baseband. The
-status bar counts the carriers and narrow lines, and shows the front end's
-load and the input level — orange when the HackRF's gain is too high (see
-*HackRF One* below).
+status bar counts the carriers and narrow lines and shows the front end's
+load; the input level is beside the play button — orange when the HackRF's
+gain is too high (see *HackRF One* below).
 
 ### DVB-S2 → GSE/IP → PCAP
 
@@ -216,8 +219,8 @@ descrambles a recording (`--scramble` makes a scrambled test stream).
 **▶ In app** (the VFO panel's Play row, or **▶ Play in the app** on a
 service in the analyser's Services tab) plays a service in a window:
 pictures deinterlaced and fitted 16:9 (anamorphic SD shown right), its
-sound through the app's audio (the volume, mute and output device in the
-toolbar) with a volume slider of its own, the pictures timed by the sound.
+sound through the app's audio (the volume and mute at the top right, the
+output device in the Audio menu) with a volume slider of its own, the pictures timed by the sound.
 The window picks the service
 and the sound track (language), and lists what ffmpeg says the streams are.
 It needs [ffmpeg](https://ffmpeg.org) (`winget install Gyan.FFmpeg`):
@@ -389,12 +392,12 @@ only a status packet every two seconds.
 The **Comtech CDM modem** entry's voice models — CDM-600L voice, CDM-570L
 trunk, or *type found*, which picks the chain from the first look and the
 model from the data — play every channel with G.728 by itself.
-**One voice at a time** (the toolbar, on by default) works like a scanner's
+**One voice at a time** (the Audio menu, on by default) works like a scanner's
 hang time across all carriers and channels: whoever speaks first is heard,
 and the others wait until they have been quiet for the **hold** (3 s, set
 beside it); off, everyone is mixed. A channel played with ▶ is always heard.
-The toolbar's **Volume** and 🔊 mute are the master for everything played,
-and the list beside them picks the sound output (the system's default, or
+The volume slider and 🔊 mute at the top right are the master for
+everything played, and **Audio ▸ Output** picks the sound output (the system's default, or
 any device by name — a headset, a virtual cable into other software);
 players already running move to it at once, and the choice is remembered.
 Offline:
@@ -662,14 +665,14 @@ beacon**:
   dragging the dashed **TLM** marks either side of the carrier on the
   waterfall. A subcarrier placed by hand snaps to its own line nearby.
 
-**Beacons…** (toolbar) lists the Ku-band beacons of the satellites from
+**Tools ▸ Beacons…** lists the Ku-band beacons of the satellites from
 110°E to 180°E — 54 satellites, 87 beacons, researched October 2026: the
 operators' own figures where they publish them (Optus's payload documents,
 FCC grants for Intelsat 19 and Eutelsat 172B/174A), community lists
 (satbeams, frequencyplansatellites, reception reports) marked
 *unconfirmed* otherwise, and the satellites whose beacons are not published
 at all. Click a frequency to retune the radio there and put a beacon VFO on
-it; the toolbar's satellite's beacons (by name, or by a position such as
+it; the chosen satellite's beacons (by name, or by a position such as
 `160`) are marked on the waterfall. The list is
 `apps/decsat-gui/src/ku_beacons.csv`.
 
@@ -807,7 +810,7 @@ demodulating with what it found, so the constellation and Es/N0 stay live.
 
 ### Survey
 
-**Survey…** in the toolbar tries every clean carrier the receiver sees, in
+**Tools ▸ Survey…** tries every clean carrier the receiver sees, in
 frequency order, a few at a time (*At once*, 1–4): each gets a VFO of its
 own for Identify, then the decoder for what it is — DVB-S2 to GSE/IP, the
 modem carriers through the Comtech entry's *type found* (TPC 2964, the
@@ -821,8 +824,8 @@ no lock, no decoder, no signal), what it decoded as, what it carries
 puts a kept VFO on a decoded one, **Save CSV** writes the table to the
 output folder. The waterfall's ADS-B and RADAR tags learn as it goes, and a
 retune stops it. `--survey` runs one unattended (with `--screenshot` to
-keep the picture). **Reset labels** (in the toolbar beside *Survey…*, and
-in its window) removes every carrier label on the waterfall — the modem,
+keep the picture). **Reset labels** (in the Satellite menu, and in the
+survey's window) removes every carrier label on the waterfall — the modem,
 ADS-B and RADAR tags, kept between runs — and the survey's results, in one
 click: after false decodes, or once the satellite's carriers have moved. A
 carrier with a VFO still decoding on it is labelled again.
@@ -840,7 +843,7 @@ unattended.
 
 ### Frequency plan
 
-**📋 Plan…** loads a frequency plan — an SDR++ frequency-manager bookmark
+**Satellite ▸ 📋 Plan…** loads a frequency plan — an SDR++ frequency-manager bookmark
 list (`.json`: name, RF frequency, bandwidth per carrier). Its carriers are
 marked along the foot of the spectrum and named where there is room (zoom in
 for more); hovering names the one under the pointer, clicking a name makes a
@@ -848,12 +851,12 @@ VFO on that carrier with its name and width, and a VFO drawn or claimed on a
 plan carrier takes its name. A carrier given `"color": "#rrggbb"` in the
 file is marked in that colour (to tell modem types apart, say); SDR++ ignores
 the field. The plan stays your own file: only its path is remembered
-(right-click the button to stop using it).
+(**Put the plan away** stops using it).
 
 **Satellites:** the plan and the carrier labels the decoders learn belong to
 the satellite the dish is on — another satellite's carriers at the same
-frequencies are other carriers. The toolbar's satellite list (beside
-**📋 Plan…**) says which one that is: each satellite keeps its own plan and
+frequencies are other carriers. The satellite list at the top right
+(beside **LO trim**) says which one that is: each satellite keeps its own plan and
 labels, and only the chosen one's are shown, given to new VFOs and cleared
 by **Reset labels**. Type a name in the list and **Add** a satellite (it starts
 with no plan or labels); **Rename this one** names the chosen one — the plan
@@ -861,18 +864,19 @@ and labels kept before satellites were named are listed as *(unnamed)* until
 you name them.
 
 An LNB's oscillator is rarely exactly on 10600 MHz and drifts as it warms,
-so the carriers sit a few kHz off their plan frequencies. **LO trim** in the
-toolbar corrects the RF scale for that on the fly (drag or type kHz;
-right-click for zero) without retuning anything; **⟲ Align** sets it from
+so the carriers sit a few kHz off their plan frequencies. **LO trim** at the
+top right corrects the RF scale for that on the fly (drag or type kHz;
+right-click for zero) without retuning anything; **Satellite ▸ ⟲ Align LO trim to the plan** sets it from
 the carriers in view — the trim at which most of them land on plan carriers
-of like width, searching ±3 MHz — and **keep** repeats that every 5 s in
+of like width, searching ±3 MHz — and **keep it aligned** repeats that every 5 s in
 small steps as the LNB drifts. The frequency bar shows the trim; it is saved
 with the session.
 
 ### Transmitting (DVB-S2/S2X DATV)
 
-**📡 Transmit…** in the toolbar opens the transmit panel: an MPEG-TS on a
-DVB-S2 or S2X carrier, to the HackRF or to an IQ file.
+**Tools ▸ 📡 Transmit…** opens the transmit panel: an MPEG-TS on a
+DVB-S2 or S2X carrier, to the HackRF or to an IQ file. While it transmits, a
+red **📡 Transmitting** button sits at the right of the menu bar.
 
 - **Source:** a `.ts` file (played at its own rate, read from its PCRs;
   looped if you like), a UDP stream (raw TS or RTP, as ffmpeg or OBS send
@@ -940,16 +944,19 @@ In an existing clone, `git submodule update --init` fetches them.
 
 ### HackRF One
 
-Click **📡 HackRF** in the toolbar, set the frequency, sample rate and gains,
-and **Start**. Frequency and gains apply live. **LNB LO** only labels the axis
+**▶ Start** at the top left starts the HackRF with its settings and
+**⏹ Stop** stops it (green while it runs). **File ▸ 📡 HackRF settings…** (or
+the source at the right of the menu bar) sets the frequency, sample rate and
+gains; frequency and gains apply live. **LNB LO** only labels the axis
 (RF = tuned + LO): 10600 MHz by default (a universal Ku LNB's high band),
 9750 MHz for its low band or QO-100, 0 without one.
 
 **Gain:** the HackRF's LNA and mixer compress long before its ADC clips,
 and the products land on the carriers, which then slip and lose frames —
 at LNA 40 dB a clean 14 dB carrier in a full Ku-band slice lost most of its
-frames, at LNA 24 dB none. The status bar's **input** level turns orange
-above −25 dBFS: lower the LNA gain. A carrier that still misbehaves at one
+frames, at LNA 24 dB none. The **input** level beside the play button
+turns orange above −25 dBFS (the tick on its bar): lower the LNA gain. It
+also counts the USB buffers dropped since Start. A carrier that still misbehaves at one
 tuning (slips, a raised noise floor beside it) is usually clean a few MHz
 either side — the HackRF's synthesisers put noise at particular offsets —
 so retune a little.
@@ -971,7 +978,7 @@ the HackRF already uses on Windows (Zadig, or the official tools). DecSAT only
 ever **receives**, and keeps the antenna-port power **off** — feed an LNB from
 an external inserter.
 
-**DC removal** (toolbar, on by default) subtracts the IQ mean, tracked
+**DC removal** (View menu, on by default) subtracts the IQ mean, tracked
 sample by sample with a 0.2 s time constant, before the waterfall and the
 VFOs, which removes the spike the HackRF leaves at the centre frequency.
 Its notch is under a hertz wide, so a carrier a few tens of hertz off the
