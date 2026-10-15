@@ -29,6 +29,8 @@ use decsat_dsp::{Agc, CarrierPll, Fir, LOCK_COHERENCE, SymbolSync, cis, rrc_taps
 use decsat_fec::Constellation;
 use decsat_frame::pi2bpsk::map_bpsk;
 use decsat_frame::vlsnr::{self, Slot, VLSNR_HEADER_LEN};
+
+use crate::superframe::{SfStripper, SfView};
 use decsat_frame::{
     PILOT_BLK_LEN, PLHEADER_LEN, PlHeaderCorrelator, PlScrambler, PlsInfo, PlscDecoder, PlscDemap,
     PlscEncoder, SLOT_LEN, SLOTS_PER_PILOT_BLK, SOF_BIG_ENDIAN, SOF_LEN,
@@ -222,6 +224,10 @@ pub struct Demod {
     amp: f32,
     noise: f32,
     level_fresh: bool,
+    /// S2X super-frames (Annex E): found, and their own symbols taken out
+    /// between timing and framing.
+    superframes: SfStripper,
+    stripped: Vec<Iq>,
 }
 
 impl Demod {
@@ -270,6 +276,23 @@ impl Demod {
             amp: 1.0,
             noise: 1.0,
             level_fresh: true,
+            superframes: SfStripper::new(),
+            stripped: Vec::new(),
+        }
+    }
+
+    /// What the super-frame stage has found.
+    pub fn superframes(&self) -> SfView {
+        self.superframes.view()
+    }
+
+    /// A PLS code's frame as it comes: inside super-frames of format 0 or 1
+    /// without pilot blocks of its own (the pilot bit then means SF-pilots).
+    fn frame_pls(&self, pls: PlsInfo) -> PlsInfo {
+        if self.superframes.view().carries_plframes() {
+            pls.without_pilot_blocks()
+        } else {
+            pls
         }
     }
 
@@ -387,9 +410,12 @@ impl Demod {
             self.agc.process(&mut self.filtered);
             self.new_sym.clear();
             self.sync.process(&self.filtered, &mut self.new_sym);
+            // Super-frames' own symbols out (none until some are found).
+            self.stripped.clear();
+            self.superframes.push(&self.new_sym, &mut self.stripped);
 
-            self.sym.extend_from_slice(&self.new_sym);
-            self.corr.process(&self.new_sym, &mut self.metric);
+            self.sym.extend_from_slice(&self.stripped);
+            self.corr.process(&self.stripped, &mut self.metric);
             self.advance(out);
             self.trim();
         }
@@ -397,8 +423,10 @@ impl Demod {
 
     fn decode_at(&mut self, hdr_end: usize) -> PlsInfo {
         // The last SOF symbol plus the 64 PLS symbols: 65 ending at `hdr_end`.
-        self.dec
-            .decode(&self.sym[hdr_end - 64..=hdr_end], PlscDemap::Differential)
+        let pls = self
+            .dec
+            .decode(&self.sym[hdr_end - 64..=hdr_end], PlscDemap::Differential);
+        self.frame_pls(pls)
     }
 
     fn advance(&mut self, out: &mut Vec<PlFrame>) {
@@ -537,7 +565,10 @@ impl Demod {
             let n = SOF_LEN - 1 + k;
             *b = derotate(n, self.sym[h0 + n]);
         }
+        // (Rust note: decoded first, then adjusted — the decoder's `&mut`
+        // borrow must end before `frame_pls` borrows `self` again.)
         let pls = self.dec.decode(&buf, PlscDemap::CoherentSoft);
+        let pls = self.frame_pls(pls);
         self.header_reference(pls.plsc);
         let (mut acc, mut mag) = (Iq::new(0.0, 0.0), 0f32);
         for n in 0..PLHEADER_LEN {
@@ -903,7 +934,7 @@ fn frame_constellation(pls: PlsInfo) -> Constellation {
 /// longer lag in turn (each lag's phase is read only after the coarser
 /// estimate is removed, so it never wraps while the error stays under
 /// 1/(2·lag)).
-fn tone_freq(blocks: &[&[Iq]], lags: &[usize]) -> f64 {
+pub(crate) fn tone_freq(blocks: &[&[Iq]], lags: &[usize]) -> f64 {
     let mut f = 0.0;
     for &lag in lags {
         let mut acc = Iq::new(0.0, 0.0);

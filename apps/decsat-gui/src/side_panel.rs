@@ -4995,6 +4995,23 @@ fn dvb_chain(
                     "PL frames",
                     format!("{state}{} · {} lock losses", st.frames, st.lock_losses),
                 );
+                if let Some(sf) = st.superframes.filter(|s| s.found()) {
+                    let colour = if sf.carries_plframes() {
+                        HEALTH_OK
+                    } else if sf.locked {
+                        HEALTH_WARN
+                    } else {
+                        HEALTH_BAD
+                    };
+                    stage(ui, colour, "Super-frames", sf.summary()).on_hover_text(format!(
+                        "S2X super-frames (EN 302 307-2 Annex E): 612 540 symbols, each \
+                         opened by a start-of-super-frame sequence and a format indicator, \
+                         with SF-pilots every 16 slots when on. They are taken out before \
+                         PL framing, and the frames' own pilot bit then announces the \
+                         SF-pilots. Latest SOSF match {:.2}, format indicator {:.2}.",
+                        sf.sosf_match, sf.sffi_match
+                    ));
+                }
                 if let Some(f) = fec {
                     if f.frames == 0 {
                         stage(ui, grey, "LDPC + BCH", "no data frames yet".into());

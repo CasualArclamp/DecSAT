@@ -92,6 +92,9 @@ pub struct PlFramer {
     source: Box<dyn BbFrameSource>,
     fec: FecEncoder,
     data: Vec<Iq>,
+    /// Frames for a super-frame of format 0 or 1 (EN 302 307-2 §E.3.2.1):
+    /// no pilot blocks, the pilot bit saying whether the SF-pilots are on.
+    superframed: bool,
 }
 
 impl PlFramer {
@@ -103,7 +106,16 @@ impl PlFramer {
             source: Box::new(TsBbFramer::new(seed ^ 0x7E57)),
             fec: FecEncoder::new(),
             data: Vec::new(),
+            superframed: false,
         }
+    }
+
+    /// Build frames for super-frames of format 0 or 1 ([`crate::Superframer`]):
+    /// a frame spec's pilots set the PLHEADER's pilot bit (the SF-pilots'
+    /// signal) but put no pilot blocks in the frame.
+    pub fn superframed(mut self) -> Self {
+        self.superframed = true;
+        self
     }
 
     /// Take BBFRAMEs from `source` instead (e.g. IP over GSE).
@@ -132,7 +144,10 @@ impl PlFramer {
     /// # Panics
     /// For S2's unused MODCODs 29–31.
     pub fn build(&mut self, spec: FrameSpec, out: &mut Vec<Iq>) {
-        let info = spec.info();
+        let mut info = spec.info();
+        if self.superframed {
+            info = info.without_pilot_blocks();
+        }
         let start = out.len();
 
         // PLHEADER: SOF then PLS code, pi/2-BPSK, continuous symbol index.

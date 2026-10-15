@@ -21,6 +21,7 @@ pub mod radar;
 pub mod rf;
 pub mod spectrum;
 pub mod streams;
+pub mod superframe;
 pub mod tdma;
 pub mod tx;
 pub mod vfo;

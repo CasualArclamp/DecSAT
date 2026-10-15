@@ -2,8 +2,8 @@
 //!
 //! M1 covers the PLHEADER: the 26-symbol SOF, the 64-symbol PLS code and the
 //! pi/2-BPSK mapping both are carried in, plus the PLFRAME geometry (slots,
-//! pilot blocks) that the PLS code implies. BBFRAME/BBHEADER parsing and
-//! superframing follow in M2 and M5 — see `docs/DESIGN.md`.
+//! pilot blocks) that the PLS code implies; BBFRAMEs and their header
+//! (`bbframe`), VL-SNR (`vlsnr`) and S2X super-frames (`superframe`).
 
 pub mod bbframe;
 pub mod defs;
@@ -11,6 +11,7 @@ pub mod pi2bpsk;
 pub mod plsc;
 pub mod rm;
 pub mod scramble;
+pub mod superframe;
 pub mod sync;
 pub mod vlsnr;
 mod vlsnr_tables;

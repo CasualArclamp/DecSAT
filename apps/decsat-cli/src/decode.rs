@@ -403,6 +403,9 @@ pub(crate) fn report(st: &VfoStatus) {
             println!("  text \"{t}\"");
         }
     }
+    if let Some(sf) = st.superframes.filter(|s| s.found()) {
+        println!("super-frames: {}", sf.summary());
+    }
     let Some(f) = &st.fec else { return };
     // DVB-S2: what the FEC made of the frames, and the latest BBHEADER.
     if f.frames > 0 || f.last_header.is_some() {

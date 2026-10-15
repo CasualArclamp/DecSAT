@@ -575,6 +575,8 @@ pub struct VfoStatus {
     /// DVB-S2: the PL scrambling sequence in use (it may have been found,
     /// not set).
     pub gold_code: Option<u32>,
+    /// DVB-S2/S2X: super-frames (Annex E), once looked for.
+    pub superframes: Option<crate::superframe::SfView>,
     /// DVB-S2 decoders: what FEC has made of the frames.
     pub fec: Option<FecStats>,
     /// Generic PSK: text found in the decided bits.
@@ -2152,6 +2154,7 @@ impl Worker {
                         });
                     }
                     st.gold_code = Some(d.gold_code());
+                    st.superframes = Some(d.superframes());
                     let fec = fec.as_ref().map(|w| w.stats());
                     st.message = match (d.lock_state(), &fec) {
                         (LockState::Searching, _) => "searching for PLHEADERs".into(),

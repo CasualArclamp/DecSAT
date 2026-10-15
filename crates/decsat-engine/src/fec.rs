@@ -3608,9 +3608,15 @@ mod tests {
         seed: u64,
     ) -> Vec<Iq> {
         let syms = framer.build_schedule(schedule, n_sym);
+        channel(&syms, cycles, esn0_db, seed)
+    }
+
+    /// Symbols shaped at 4 samples a symbol, offset by `cycles` per symbol,
+    /// at `esn0_db`.
+    fn channel(syms: &[Iq], cycles: f64, esn0_db: f64, seed: u64) -> Vec<Iq> {
         let mut sh = Shaper::new(4, 0.25, 16);
         let mut x = Vec::new();
-        sh.process(&syms, &mut x);
+        sh.process(syms, &mut x);
         let mut s = seed | 1;
         let mut uniform = move || {
             s ^= s >> 12;
@@ -3759,6 +3765,43 @@ mod tests {
         assert!(g.packets > 40, "{} IP packets", g.packets);
         // Every UDP checksum holds: the slices went back together right.
         assert_eq!(g.encrypted_flows, 0);
+    }
+
+    #[test]
+    fn decodes_a_super_framed_s2x_carrier() {
+        // Format 0 with SF-pilots on: S2X PLFRAMEs with no pilot blocks of
+        // their own (their pilot bit announcing the SF-pilots), in ACM, laid
+        // into super-frames; the receiver tuning in mid-way.
+        use decsat_frame::superframe::SFL;
+        let schedule = [
+            FrameSpec::new(4, true, true),
+            FrameSpec::new(12, true, true),
+        ];
+        let mut framer = PlFramer::new(0, 12).superframed();
+        let frames = framer.build_schedule(&schedule, 5 * SFL / 2);
+        let mut sf = decsat_mod::Superframer::new(0, true);
+        let mut syms = Vec::new();
+        sf.push(&frames, &mut syms);
+        let x = channel(&syms[150_000..], 0.001, 10.0, 12);
+
+        let mut d = Demod::new(4.0, 1.0, 0.25, 0);
+        let mut fec = FecDecoder::new();
+        let mut frames = Vec::new();
+        let mut got = Vec::new();
+        for chunk in x.chunks(50_000) {
+            frames.clear();
+            d.process(chunk, &mut frames);
+            got.extend(frames.iter().filter_map(|f| fec.decode(f)));
+        }
+        let v = d.superframes();
+        assert!(v.locked, "{v:?}");
+        assert_eq!(v.format, Some(0));
+        assert!(v.pilots, "{v:?}");
+        assert!(v.superframes >= 2, "{v:?}");
+        // Once the super-frames are found the frames decode, both MODCODs.
+        let good = got.iter().filter(|b| b.ok()).count();
+        assert!(good > 60, "{good} good of {}", got.len());
+        assert!(got.iter().any(|b| b.ok() && b.pls.modcod == 12));
     }
 
     fn decode_all(x: &[Iq]) -> Vec<BbFrame> {

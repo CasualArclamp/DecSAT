@@ -181,6 +181,26 @@ impl PlsInfo {
         }
     }
 
+    /// The frame as a super-frame of format 0 or 1 carries it (EN 302 307-2
+    /// §E.3.2.1): no pilot blocks of its own. Its pilot bit (kept in `plsc`)
+    /// says instead whether the super-frame's own pilots are on. VL-SNR
+    /// frames, whose pilots Annex E redefines, are left as they are.
+    pub fn without_pilot_blocks(self) -> Self {
+        if !self.has_pilots || self.vlsnr.is_some() {
+            return self;
+        }
+        Self::geometry(
+            self.plsc,
+            self.modcod,
+            self.frame,
+            false,
+            self.dummy_frame,
+            self.n_mod,
+            self.n_slots,
+        )
+        .with(self.vlsnr, self.reserved)
+    }
+
     /// An S2 frame from its fields.
     pub fn from_fields(modcod: u8, short_fecframe: bool, has_pilots: bool) -> Self {
         Self::parse(((modcod & 0x1F) << 2) | ((short_fecframe as u8) << 1) | has_pilots as u8)
