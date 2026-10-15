@@ -420,6 +420,22 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             }
             None => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "BCN 58 dB-Hz · TLM 4.8k" — the carrier's C/N0 and the telemetry's
+        // bit rate (once frames are found), "CW" when there is none.
+        DecoderKind::Beacon => match st.beacon.as_ref().and_then(|b| b.carrier.map(|c| (b, c))) {
+            Some((b, c)) => {
+                let rec = if st.recording_active { " ● REC" } else { "" };
+                let lock = if c.locked { "" } else { " no lock" };
+                let what = match (&b.telemetry, &b.framing) {
+                    (Some(t), Some(_)) => format!(" · TLM {}", format::bitrate(t.bit_rate)),
+                    (Some(t), None) => format!(" · {} frames?", format::bitrate(t.bit_rate)),
+                    (None, _) if b.unmodulated => " · CW".into(),
+                    (None, _) => String::new(),
+                };
+                format!("BCN {:.0} dB-Hz{lock}{what}{rec}", c.cn0_dbhz)
+            }
+            None => format!("acq {:.0} %", st.progress * 100.0),
+        },
         // "3× TDMA 4900/s": the carriers in it and their bursts a second.
         DecoderKind::Tdma => match &st.tdma {
             Some(t) if !t.channels.is_empty() => {

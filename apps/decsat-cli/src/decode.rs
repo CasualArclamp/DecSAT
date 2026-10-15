@@ -72,8 +72,9 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "psk" => DecoderKind::PskSymbols,
         "tdma" => DecoderKind::Tdma,
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
+        "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, beacon)"
         ),
     })
 }
@@ -362,6 +363,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(v) = &st.is19 {
         print_is19(v);
+    }
+    if let Some(v) = &st.beacon {
+        print_beacon(v);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text};
@@ -1035,6 +1039,117 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
             100.0 * ch.change_4ms,
             100.0 * ch.ones
         );
+    }
+}
+
+/// A beacon: its carrier, the telemetry's physical layer, the frames, and
+/// the last few frames in hex.
+pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
+    if let Some(c) = &v.carrier {
+        println!(
+            "beacon carrier: {}{}, offset {:+.1} Hz from the centre, C/N0 {:.1} dB-Hz, level {:.1} dB{}{}{}",
+            if c.residual {
+                "residual, "
+            } else {
+                "suppressed, "
+            },
+            if c.locked { "locked" } else { "not locked" },
+            c.band_offset_hz,
+            c.cn0_dbhz,
+            c.level_db,
+            c.drift_hz_min
+                .map_or(String::new(), |d| format!(", drift {d:+.1} Hz/min")),
+            c.index_rad
+                .map_or(String::new(), |m| format!(", modulation index {m:.2} rad")),
+            format_args!(", loop {:.0} Hz", c.loop_hz),
+        );
+    }
+    match &v.telemetry {
+        Some(t) => println!(
+            "  telemetry: {} · {:.2} bit/s {}{} · {} bits{}",
+            t.riding.describe(),
+            t.bit_rate,
+            t.coding.name(),
+            t.eb_n0_db
+                .map_or(String::new(), |e| format!(" · Eb/N0 ≈ {e:.1} dB")),
+            t.bits,
+            t.conv
+                .as_ref()
+                .map_or(String::new(), |c| format!(" · convolutional code {c}")),
+        ),
+        None if v.unmodulated => println!("  telemetry: none found (an unmodulated carrier)"),
+        None => println!("  telemetry: not found yet"),
+    }
+    if let Some(f) = &v.framing {
+        println!(
+            "  frames: sync {} ({}{}), {} bits ({:.3} s), {}{} · {} frames, {} kept without their word, {} slips, {} losses, sync-word BER {:.1e}",
+            f.word_hex,
+            f.word_name,
+            if f.blind { ", found blind" } else { "" },
+            f.frame_bits,
+            f.frame_seconds,
+            f.reading.name(),
+            if f.coded {
+                ", after the Viterbi decoder"
+            } else {
+                ""
+            },
+            f.stats.frames,
+            f.stats.flywheel,
+            f.stats.slips,
+            f.stats.losses,
+            f.stats.sync_ber(f.word_len),
+        );
+    }
+    if let Some(c) = &v.counter {
+        println!(
+            "  minor-frame counter: byte {} (mask {:02X}h), {}{}",
+            c.byte,
+            c.mask,
+            match c.modulus {
+                Some(m) => format!("{} minor frames a major frame", m),
+                None => "wrap not seen yet".into(),
+            },
+            if c.down { ", counting down" } else { "" }
+        );
+    }
+    if let Some(c) = &v.ccsds {
+        let s = &c.stats;
+        println!(
+            "  ccsds: {} · {} codeblocks, {} decoded, {} failed, {} symbols corrected, CRC {} ok / {} bad, {} frames missing",
+            c.format.as_deref().unwrap_or("layout not found"),
+            s.blocks,
+            s.decoded,
+            s.failed,
+            s.corrected,
+            s.crc_ok,
+            s.crc_bad,
+            s.lost
+        );
+        for ((scid, vcid), vc) in &s.channels {
+            println!(
+                "    spacecraft {scid} ({scid:03X}h) VC {vcid}: {} frames ({} idle), last count {}",
+                vc.frames, vc.idle, vc.last_count
+            );
+        }
+    }
+    let log = v.log.lock().unwrap_or_else(|e| e.into_inner());
+    let good: Vec<_> = log.frames.iter().filter(|f| f.good).collect();
+    if !good.is_empty() {
+        println!("  last frames (index: first 48 bytes):");
+        for f in good.iter().rev().take(6).rev() {
+            let hex: String = f
+                .bytes
+                .iter()
+                .take(48)
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            println!(
+                "    {:9.3} s  {:>4}: {hex}",
+                f.t_s,
+                f.index.map_or("-".to_string(), |i| i.to_string())
+            );
+        }
     }
 }
 

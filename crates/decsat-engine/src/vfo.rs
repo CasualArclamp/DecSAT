@@ -80,6 +80,13 @@ pub enum DecoderKind {
     /// the packet stream, with the call signalling (request acks, channel
     /// assignments) picked out.
     Is19Outbound,
+    /// A satellite beacon: its carrier tracked and measured (frequency,
+    /// drift, C/N0) and any telemetry on it decoded blind — PCM/PSK/PM on a
+    /// subcarrier, PCM/PM, or suppressed-carrier BPSK/QPSK; IRIG-style
+    /// minor frames on a known or blind-found sync word, or CCSDS transfer
+    /// frames (Reed–Solomon, randomiser, the K = 7 code). See
+    /// [`crate::beacon`].
+    Beacon,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -97,7 +104,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 17] = [
+    pub const ALL: [DecoderKind; 18] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -111,6 +118,7 @@ impl DecoderKind {
         DecoderKind::Viterbi,
         DecoderKind::CarrierId,
         DecoderKind::Is19Outbound,
+        DecoderKind::Beacon,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::IqRecord,
@@ -134,6 +142,7 @@ impl DecoderKind {
             DecoderKind::Is19Outbound => {
                 "IS-19 DAMA outbound (102.4 kBd) → packets, call signalling"
             }
+            DecoderKind::Beacon => "Satellite beacon (carrier, PCM/PM telemetry, CCSDS)",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::IqRecord => "IQ recorder",
@@ -158,6 +167,7 @@ impl DecoderKind {
             DecoderKind::Viterbi => "viterbi",
             DecoderKind::CarrierId => "carrier-id",
             DecoderKind::Is19Outbound => "is19-outbound",
+            DecoderKind::Beacon => "beacon",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::IqRecord => "iq-record",
@@ -263,6 +273,7 @@ impl DecoderKind {
                 | DecoderKind::Viterbi
                 | DecoderKind::PskSymbols
                 | DecoderKind::Is19Outbound
+                | DecoderKind::Beacon
         )
     }
 
@@ -281,6 +292,7 @@ impl DecoderKind {
             DecoderKind::Viterbi => "VIT",
             DecoderKind::CarrierId => "CID",
             DecoderKind::Is19Outbound => "I19",
+            DecoderKind::Beacon => "BCN",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::IqRecord => "REC",
@@ -549,6 +561,8 @@ pub struct VfoStatus {
     pub tdma: Option<crate::tdma::TdmaView>,
     /// The Intelsat 19 DAMA outbound: frames, packets, call signalling.
     pub is19: Option<decsat_modem::is19::OutboundView>,
+    /// A satellite beacon: its carrier, telemetry and frames.
+    pub beacon: Option<crate::beacon::BeaconView>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -855,6 +869,11 @@ enum Decoder {
         rx: Option<Box<decsat_modem::is19::OutboundRx>>,
         file: Is19File,
     },
+    /// A satellite beacon: the receiver, and its files while recording.
+    Beacon {
+        rx: Box<crate::beacon::BeaconRx>,
+        files: crate::beacon::BeaconFiles,
+    },
     Psk {
         buf: Vec<Iq>,
         demod: Option<Box<PskDemod>>,
@@ -1158,6 +1177,13 @@ impl Worker {
                 rx: None,
                 file: Is19File::default(),
             },
+            DecoderKind::Beacon => Decoder::Beacon {
+                rx: Box::new(crate::beacon::BeaconRx::new(
+                    ddc.out_rate(),
+                    s.bandwidth_hz.min(ddc.out_rate()),
+                )),
+                files: crate::beacon::BeaconFiles::default(),
+            },
             DecoderKind::Tdma => Decoder::Tdma(Box::new(crate::tdma::TdmaAnalyser::new(
                 ddc.out_rate(),
                 s.bandwidth_hz.min(ddc.out_rate()),
@@ -1219,6 +1245,10 @@ impl Worker {
             if let Decoder::Psk { carrier_hz, .. } = &mut self.decoder {
                 *carrier_hz += carried;
             }
+            // A beacon's log keeps its frequencies as first tuned.
+            if let Decoder::Beacon { rx, .. } = &mut self.decoder {
+                rx.carried(carried);
+            }
         }
         // An enable/disable or a rename changes nothing about the signal; a
         // retune does. Without the reset an Identify VFO dragged onto another
@@ -1271,6 +1301,13 @@ impl Worker {
             {
                 (d.carrier_offset_hz(), d.symbol_rate())
             }
+            // A beacon's carrier: followed once well off the VFO's centre
+            // (the loop tracks the rest, and each move is a step it must
+            // take).
+            Decoder::Beacon { rx, .. } => match rx.carrier_offset_hz() {
+                Some(f) if f.abs() > 0.02 * self.ddc.bandwidth() => (f, 0.0),
+                _ => return,
+            },
             _ => return,
         };
         if f.abs() < FOLLOW_MIN_HZ.max(FOLLOW_MIN_RS * rs) {
@@ -1287,6 +1324,7 @@ impl Worker {
             Decoder::Modem { demod: Some(d), .. }
             | Decoder::Psk { demod: Some(d), .. }
             | Decoder::Is19 { demod: Some(d), .. } => d.retune_hz(f),
+            Decoder::Beacon { rx, .. } => rx.retune_hz(f),
             _ => {}
         }
         self.followed += f;
@@ -1391,6 +1429,7 @@ impl Worker {
             }
             // Closes (and flushes) the burst files.
             Decoder::Tdma(mut a) => a.set_recording(false, &self.settings.record_dir, ""),
+            Decoder::Beacon { mut files, .. } => files.finish(),
             Decoder::Is19 {
                 file:
                     Is19File {
@@ -1792,6 +1831,19 @@ impl Worker {
                 file.follow(&self.settings, self.ddc.offset_hz());
                 file.write(&packets);
             }
+            Decoder::Beacon { rx, files } => {
+                rx.push(&self.bb, self.ddc.offset_hz());
+                let tag = format!(
+                    "{}-{}",
+                    self.settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(self.settings.offset_hz)
+                );
+                files.follow(self.settings.record, &self.settings.record_dir, &tag);
+                let (frames, points) = rx.take_new();
+                if files.active() {
+                    files.write(&frames, &points, rx.carried_total());
+                }
+            }
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
                 let tag = format!(
@@ -1957,6 +2009,7 @@ impl Worker {
         st.fec = None;
         st.tdma = None;
         st.is19 = None;
+        st.beacon = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2187,6 +2240,26 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Beacon { rx, files } => {
+                let v = rx.view();
+                st.progress = if rx.progress() < 1.0 {
+                    rx.progress()
+                } else {
+                    0.0
+                };
+                st.scatter = rx.scatter();
+                st.symbol_rate = v.telemetry.as_ref().map(|t| t.bit_rate);
+                if let Some(p) = &files.path {
+                    st.recording = Some((p.clone(), files.frames));
+                }
+                st.recording_active = files.active();
+                st.message = match (&files.path, files.active(), files.open_failed) {
+                    (Some(p), _, true) => format!("{} — cannot write {}", v.message, p.display()),
+                    (_, true, _) => format!("{} — recording, {} frames", v.message, files.frames),
+                    _ => v.message.clone(),
+                };
+                st.beacon = Some(v);
+            }
             Decoder::Tdma(a) => {
                 let v = a.view();
                 st.progress = if v.progress < 1.0 { v.progress } else { 0.0 };

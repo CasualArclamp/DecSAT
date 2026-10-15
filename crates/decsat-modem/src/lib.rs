@@ -22,10 +22,16 @@
 //!   registers (selected altitude, air data) their reports carry.
 //! - [`is19`]: the 102.4 kBd outbounds of a DAMA telephony network on
 //!   Intelsat 19 — frames, descrambling, packets, call signalling.
+//! - [`pcm`]: PCM telemetry frames (a beacon's): sync words known or found
+//!   blind, every reading of the bits, the minor-frame counter.
+//! - [`ccsds`]: CCSDS TM synchronisation and channel coding (marker,
+//!   randomiser, Reed–Solomon in the dual basis, the K = 7 code) and the
+//!   TM/AOS transfer frames.
 
 pub mod aptx;
 pub mod asterix;
 pub mod bsc;
+pub mod ccsds;
 pub mod cid;
 pub mod conv;
 pub mod convblind;
@@ -44,6 +50,7 @@ pub mod mode_s;
 pub mod mpa;
 pub mod paradise;
 pub mod payload;
+pub mod pcm;
 pub mod radar;
 pub mod rs;
 pub mod slotpkt;

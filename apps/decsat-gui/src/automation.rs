@@ -190,6 +190,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "psk" => PskSymbols,
         "tdma" => Tdma,
         "is19" | "is19-outbound" | "i19" => Is19Outbound,
+        "beacon" | "tlm" | "telemetry" => Beacon,
         "rec" | "iq" => IqRecord,
         "spec" | "spectrum" => Spectrum,
         _ => return None,
