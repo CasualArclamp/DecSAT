@@ -22,33 +22,60 @@
 //!
 //! | bits | field |
 //! |------|-------|
-//! | 8 | flags: bits 0–2 the slot it starts in (8 slots of 5.025 ms), bit 5 two more bytes follow; others 0 |
+//! | 8 | flags: bits 0–2 the slot it starts in (8 slots of 5.000 ms, see below), bit 5 two more bytes follow; others 0 |
 //! | 16 | the terminal (the hub's id: 24 in use, 6–475) |
-//! | 16 | the allocation's code: its length and bandwidth (bit 0 repeats bit 5 of the flags) |
-//! | 24 | the burst's frequency, 50 Hz units from the plan's own zero (its centre, for most codes) |
-//! | 16 | with flag bit 5: a per-terminal value (11 bits, then 5 zero bits) that drifts slowly — a power or correction setting, unread |
+//! | 16 | the allocation's code: its length, symbol rate and waveform (bit 0 repeats bit 5 of the flags) |
+//! | 24 | the burst's frequency, 50 Hz units from the plan's own zero (its centre, for most terminals) |
+//! | 16 | with flag bit 5: the burst's transmit level (11 bits, then 5 zero bits), ≈ 0.11 dB a step |
 //!
-//! What the code means is the least certain part. Its range gives the
-//! length: codes below 2000h last one slot, 2xxxh two, 4xxxh–5xxxh four and
-//! 7xxxh–8xxxh the whole frame (the longer ones start only on slots that
-//! leave room: even slots, 0 and 4, slot 0) — and a burst so placed never
-//! overlaps another's frequencies. Within a range a code fixes the burst's
-//! bandwidth exactly (0104h: 130.60 kHz; 02E8h: 213.15 kHz; 0508h:
-//! 290.35 kHz; 00C4h–0114h narrowing from 167 to 123 kHz) but no formula
-//! found fits every code — and a few codes (00C4h, 00CCh, 00D4h, 02A8h,
-//! 04C8h–04D8h on 172B) put the burst 25 kHz below its frequency rather
-//! than on it. So [`PlanRx`] learns each code's extent below and above its
-//! frequency from the plan itself: the hub packs bursts edge to edge, so
-//! the commonest spacing between two neighbours in a slot is the lower
-//! one's extent above plus the upper one's below — a thousand-odd such
-//! pairs a minute, solved together by least squares (pulled weakly to a
-//! burst centred on its frequency, which the pairs cannot tell from a
-//! shift of every code at once).
+//! The code's range gives the length: codes below 2000h last one slot,
+//! 2xxxh two, 4xxxh–5xxxh four and 7xxxh–8xxxh the whole frame (the longer
+//! ones start only on slots that leave room: even slots, 0 and 4, slot 0) —
+//! and a burst so placed never overlaps another's frequencies. Within a
+//! range the code fixes the burst's bandwidth exactly (0104h: 130.60 kHz;
+//! 02E8h: 213.15 kHz; 0508h: 290.35 kHz) but no formula found fits every
+//! code: it names a symbol rate and a waveform from a table, which
+//! [`code_rate`] holds as measured on 172B. [`PlanRx`] learns each code's
+//! extent below and above its frequency from the plan itself: the hub packs
+//! bursts edge to edge, so the commonest spacing between two neighbours in
+//! a slot is the lower one's extent above plus the upper one's below — a
+//! thousand-odd such pairs a minute, solved together by least squares
+//! (pulled weakly to a burst centred on its frequency, which the pairs
+//! cannot tell from a shift of every code at once). A few codes come out
+//! off-centre (00C4h, 00CCh, 00D4h, 02A8h, 04C8h–04D8h 25 kHz below) because
+//! one terminal uses them and that terminal is off-tune: 431 sends 25.4 kHz
+//! below its plan frequency, 413 4.7 kHz and 409 7.1 kHz, and the hub packs
+//! round where they land.
 //!
-//! On 172B the plan's zero sits at about 12530.01 MHz downlink (to a few
-//! kHz, the LNB corrected by the RMT's forward frequency; where the learned
-//! burst edges best fit the bursts' own) and its bursts fill the 800 kHz
-//! above it; nothing in the tables gives that zero, so
+//! The return bursts themselves (a 172B capture, cut out burst by burst
+//! with this plan; docs/STATUS.md has the method):
+//!
+//! - **Frame**: eight slots of exactly 5.000 ms, 0.2 ms of the 40.2 ms left
+//!   over. Every terminal's burst starts within a few µs of the same point
+//!   in its slot.
+//! - **Symbol rate**: a whole number of symbol periods over the burst's
+//!   slots — 200 Bd steps for one slot, 100, 50 and 25 Bd for two, four and
+//!   eight (0104h: 584 periods, 116.8 kBd; 7CB8h: 7 090 in a frame,
+//!   177.25 kBd). The burst fills them less ≈ 45 symbols of ramps and
+//!   guard. Roll-off ≈ 0.05; the hub spaces bursts ≈ 1.066 × Rs + 5.7 kHz
+//!   apart ([`rate_from_width`]).
+//! - **Waveform** ([`Waveform`]): most codes are 16APSK 8+8 — the DVB-S2X
+//!   8+8 rings (EN 302 307-2 Table 11c: both rings at π/8 + kπ/4, ratio
+//!   ≈ 2.2 measured, 2.19 in Table 11d) — opening with a 76-symbol
+//!   preamble, then 127 data symbols, a 66-symbol known block, and data
+//!   with a pair of known outer-ring symbols every 14–21. Some codes are
+//!   8PSK with a preamble of their own; and every terminal sends, about
+//!   every 32 frames, a 16APSK burst opening with 530 known symbols (a
+//!   sync burst, for the hub's timing, frequency and level).
+//! - **Level**: each terminal's received power follows the 11-bit value at
+//!   ≈ 0.115 dB a step, and rises 1 dB for 1 dB of symbol rate: the hub
+//!   keeps a terminal's Es/N0 the same at any width.
+//!
+//! On 172B the plan's zero sits at about 12530.00 MHz downlink (26.1 kHz
+//! below the capture's 1930.05 MHz IF, ±50 Hz: where the bursts' own
+//! carriers put it, the LNB corrected by the RMT's forward frequency) and
+//! its bursts fill the 800 kHz above it; nothing in the tables gives that
+//! zero, so
 //! [`PlanView::occupancy`] is there to find it against a return VFO's
 //! spectrum. The plan for frame n is sent eight frames ahead of the bursts
 //! reaching the satellite and back down (the terminals' lead time): on
@@ -97,7 +124,8 @@ pub struct PlanBurst {
     pub code: u16,
     /// Centre, 50 Hz units from the plan's zero.
     pub freq: u32,
-    /// The per-terminal value some bursts carry (its 11 bits).
+    /// The transmit level some bursts carry (its 11 bits, ≈ 0.11 dB a
+    /// step).
     pub extra: Option<u16>,
 }
 
@@ -121,6 +149,100 @@ pub fn burst_slots(code: u16) -> u8 {
         4..=6 => 4,
         _ => 8,
     }
+}
+
+/// The slots' pitch, s: eight of them leave 0.2 ms of the 40.2 ms frame.
+pub const SLOT_S: f64 = 5e-3;
+
+/// Symbols a burst falls short of its slots' symbol periods (its ramps
+/// and guard): 42–49 measured.
+pub const BURST_SHORTFALL: u32 = 45;
+
+/// A return burst's waveform, as the 172B capture showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waveform {
+    /// 16APSK 8+8 after a 76-symbol preamble, with a 66-symbol known block
+    /// 203 symbols on.
+    Apsk8p8,
+    /// 8PSK after a preamble of its own.
+    Psk8,
+    /// 16APSK 8+8 opening with 530 known symbols: each terminal's sync
+    /// burst, about every 32 frames.
+    Sync,
+}
+
+impl Waveform {
+    pub fn name(self) -> &'static str {
+        match self {
+            Waveform::Apsk8p8 => "16APSK 8+8",
+            Waveform::Psk8 => "8PSK",
+            Waveform::Sync => "16APSK 8+8 sync",
+        }
+    }
+}
+
+/// What a code was measured to be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodeRate {
+    /// Symbol periods over the burst's slots (the burst itself is
+    /// [`BURST_SHORTFALL`] fewer symbols).
+    pub periods: u32,
+    pub symbol_rate_hz: f64,
+    pub waveform: Waveform,
+}
+
+/// The 172B hub's codes as measured on a minute of its return (2026-10-15
+/// capture): symbol periods over the burst's slots, from the band-edge
+/// cyclostationary line of up to 200 bursts a code (all within 17 Hz of a
+/// whole number of periods), and the waveform from the bursts' preambles
+/// and constellations.
+#[rustfmt::skip]
+const CODE_TABLE: &[(u16, u32, Waveform)] = {
+    use Waveform::{Apsk8p8, Psk8, Sync};
+    &[
+        (0x00C4, 754, Apsk8p8), (0x00CC, 709, Apsk8p8), (0x00D0, 1092, Sync), (0x00D4, 686, Apsk8p8),
+        (0x00D8, 1080, Sync), (0x00DC, 670, Apsk8p8), (0x00E0, 1070, Sync), (0x00E4, 656, Apsk8p8),
+        (0x00E8, 1025, Sync), (0x00EC, 638, Apsk8p8), (0x00F0, 1006, Sync), (0x00F4, 608, Apsk8p8),
+        (0x00F8, 994, Sync), (0x00FC, 595, Apsk8p8), (0x0100, 970, Sync), (0x0104, 584, Apsk8p8),
+        (0x0108, 961, Sync), (0x010C, 559, Apsk8p8), (0x0114, 550, Apsk8p8), (0x0270, 1348, Psk8),
+        (0x0278, 1307, Psk8), (0x0280, 1274, Psk8), (0x02A8, 1299, Apsk8p8), (0x02B0, 1254, Apsk8p8),
+        (0x02B8, 1213, Apsk8p8), (0x02C0, 1180, Apsk8p8), (0x02C8, 1148, Apsk8p8),
+        (0x02D0, 1121, Apsk8p8), (0x02D8, 1039, Apsk8p8), (0x02E0, 1017, Apsk8p8),
+        (0x02E4, 1374, Sync), (0x02E8, 972, Apsk8p8), (0x02EC, 1356, Sync), (0x02F0, 952, Apsk8p8),
+        (0x02F8, 933, Apsk8p8), (0x0490, 1850, Psk8), (0x04C8, 1752, Apsk8p8),
+        (0x04D0, 1688, Apsk8p8), (0x04D8, 1635, Apsk8p8), (0x0500, 1370, Apsk8p8),
+        (0x0508, 1335, Apsk8p8), (0x0510, 1311, Apsk8p8), (0x0518, 1257, Apsk8p8),
+        (0x0528, 1281, Psk8), (0x20AC, 1425, Sync), (0x2240, 1865, Apsk8p8), (0x2264, 2006, Sync),
+        (0x2278, 1415, Apsk8p8), (0x227C, 1753, Sync), (0x2284, 1724, Sync), (0x2460, 3172, Apsk8p8),
+        (0x2468, 3067, Apsk8p8), (0x2470, 2975, Apsk8p8), (0x2478, 2892, Apsk8p8),
+        (0x2490, 2550, Apsk8p8), (0x2498, 2494, Apsk8p8), (0x24A0, 2441, Apsk8p8),
+        (0x2698, 3653, Apsk8p8), (0x4CE0, 3916, Apsk8p8), (0x4CF0, 3621, Apsk8p8),
+        (0x4EE0, 4923, Apsk8p8), (0x4EE8, 4797, Apsk8p8), (0x4EF0, 4720, Apsk8p8),
+        (0x50D8, 5862, Apsk8p8), (0x50E0, 5739, Apsk8p8), (0x50F8, 5606, Psk8),
+        (0x52C8, 6758, Apsk8p8), (0x52E0, 6580, Psk8), (0x7AC0, 6312, Apsk8p8),
+        (0x7AC8, 6178, Apsk8p8), (0x7CB0, 7253, Apsk8p8), (0x7CB8, 7090, Apsk8p8),
+        (0x7E8C, 8586, Apsk8p8), (0x7E94, 8145, Apsk8p8), (0x7E9C, 7985, Apsk8p8),
+        (0x806C, 9450, Apsk8p8), (0x8074, 8987, Apsk8p8), (0x8230, 11028, Apsk8p8),
+        (0x8238, 10764, Apsk8p8), (0x8240, 10509, Apsk8p8), (0x8248, 10271, Apsk8p8),
+    ]
+};
+
+/// A code's symbol rate and waveform, if it is one measured on 172B.
+pub fn code_rate(code: u16) -> Option<CodeRate> {
+    let i = CODE_TABLE.binary_search_by_key(&code, |e| e.0).ok()?;
+    let (_, periods, waveform) = CODE_TABLE[i];
+    Some(CodeRate {
+        periods,
+        symbol_rate_hz: f64::from(periods) / (f64::from(burst_slots(code)) * SLOT_S),
+        waveform,
+    })
+}
+
+/// The symbol rate a learned bandwidth implies: the hub spaces its bursts
+/// ≈ 1.066 × Rs + 5.7 kHz apart (a fit over the 172B codes, 0.5 % for
+/// most; roll-off 0.05 and a guard).
+pub fn rate_from_width(width_hz: f64) -> f64 {
+    ((width_hz - 5.68e3) / 1.0661).max(0.0)
 }
 
 /// One frame's plan.
@@ -282,6 +404,10 @@ pub struct CodeWidth {
     pub direct: bool,
     /// Bursts of it seen.
     pub bursts: u64,
+    /// Its symbol rate: measured ([`code_rate`]) or, for a code not in
+    /// that table, from its width ([`rate_from_width`]).
+    pub symbol_rate_hz: f64,
+    pub rate: Option<CodeRate>,
 }
 
 /// A terminal in the plan.
@@ -643,6 +769,11 @@ impl PlanRx {
                 pairs,
                 direct,
                 bursts: self.code_bursts.get(&code).copied().unwrap_or(0),
+                symbol_rate_hz: code_rate(code).map_or_else(
+                    || rate_from_width((below + above) * FREQ_UNIT_HZ),
+                    |r| r.symbol_rate_hz,
+                ),
+                rate: code_rate(code),
             })
             .collect();
         let mut v = PlanView {
@@ -957,5 +1088,49 @@ mod tests {
         let mut s = plan_section(1, 0, &[burst(0, 5, 0x0104, 9000)]);
         s[8 + 12] = 0;
         assert!(parse_plan(&s).is_none());
+    }
+
+    #[test]
+    fn codes_name_a_whole_number_of_symbol_periods() {
+        // Sorted, so the lookup's binary search finds every entry.
+        assert!(CODE_TABLE.windows(2).all(|w| w[0].0 < w[1].0));
+        let r = code_rate(0x0104).expect("0104h");
+        assert_eq!(r.periods, 584);
+        assert!((r.symbol_rate_hz - 116_800.0).abs() < 1e-6);
+        assert_eq!(r.waveform, Waveform::Apsk8p8);
+        // A whole frame: 7 090 periods in 40 ms.
+        let r = code_rate(0x7CB8).expect("7CB8h");
+        assert!((r.symbol_rate_hz - 177_250.0).abs() < 1e-6);
+        assert_eq!(code_rate(0x0280).map(|r| r.waveform), Some(Waveform::Psk8));
+        assert_eq!(code_rate(0x0100).map(|r| r.waveform), Some(Waveform::Sync));
+        assert!(code_rate(0x0124).is_none());
+        // The width rule against the learned widths of 172B: 0104h's
+        // 130.62 kHz and 0508h's 289.93 kHz.
+        assert!((rate_from_width(130_620.0) - 116_800.0).abs() < 600.0);
+        assert!((rate_from_width(289_930.0) - 267_000.0).abs() < 600.0);
+    }
+
+    #[test]
+    fn learned_codes_carry_their_symbol_rate() {
+        let mut rx = PlanRx::new();
+        // Two 0104h side by side 130.6 kHz apart, and a code not in the
+        // table beside them.
+        for c in 0..10u32 {
+            let f = PlanFrame {
+                counter: c,
+                time: u64::from(c) * 69_465_600,
+                bursts: vec![
+                    burst(0, 5, 0x0104, 6000),
+                    burst(0, 6, 0x0104, 6000 + 2612),
+                    burst(0, 7, 0x0124, 6000 + 2 * 2612 + 2300),
+                ],
+                arrival_s: 0.0,
+            };
+            rx.push(f, f64::from(c) * 0.0402);
+        }
+        let v = rx.view();
+        let w = v.widths.iter().find(|w| w.code == 0x0104).expect("0104h");
+        assert!((w.symbol_rate_hz - 116_800.0).abs() < 1e-6);
+        assert_eq!(w.rate.map(|r| r.waveform), Some(Waveform::Apsk8p8));
     }
 }

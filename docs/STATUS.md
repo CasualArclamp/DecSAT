@@ -5012,3 +5012,76 @@ VFO, so bursts can be labelled live and each terminal's level measured.
   `DECSAT_172B=<capture> cargo test -p decsat-engine --release
   plan_on_a_capture -- --ignored --nocapture` runs both VFOs over a
   capture and prints all of it every 5 s of signal.
+
+## The return bursts' waveform (2026-10-16)
+
+The D1h plan names every burst's terminal, slot, code and frequency, so
+each one can be cut out of the 60 s 172B capture and studied (scratch
+Python, not kept: band-edge cyclostationary lines over up to 200 bursts a
+code, coherent averages of bursts aligned on their common symbols, an LS
+equaliser trained on the known ones).
+
+- **Timing.** The slots are exactly **5.000 ms** (start against slot
+  index: 5000.00 µs, residual 3.4 µs), so a 40.2 ms frame holds eight and
+  0.2 ms over — not 40.2/8. Every terminal's burst starts within ~1 µs of
+  the same point in its slot (no per-terminal timing offsets left).
+- **Symbol rate.** The code fixes it, and every one is a **whole number of
+  symbol periods over the burst's slots**: 200 Bd steps for one slot, 100,
+  50 and 25 Bd for two, four and eight (81 codes, all within 17 Hz of it,
+  ~5 Hz typical). 0104h: 584 periods = 116.8 kBd; 0508h: 1 335 = 267.0 kBd;
+  2278h: 1 415 in 10 ms = 141.5 kBd; 7CB8h: 7 090 in 40 ms = 177.25 kBd.
+  The burst fills them less ~45 symbols (42–49: ramps and guard), so 0104h
+  carries ≈ 539 symbols. Roll-off ≈ 0.05 (the spectra's edges). The hub
+  spaces bursts at ≈ **1.066 × Rs + 5.7 kHz** (the learned widths, 0.5 %
+  for most codes). No formula from the code's bits to the rate: within a
+  family the rate steps irregularly (00C4h–0114h: 754, 709, 686, 670, 656,
+  638, 608, 595, 584, 559, 550 periods), so it is a table.
+- **Waveform**, three kinds by their preambles:
+  - *16APSK 8+8* (most codes): the S2X 8+8 rings, both at π/8 + kπ/4,
+    ratio 2.18 measured (EN 302 307-2 Table 11d: 2.19). A 76-symbol
+    preamble (itself 8+8 symbols), 127 data symbols, a 66-symbol known
+    block 203 symbols in, then data with a pair of known outer-ring
+    symbols every 14–21 (the period by code, its first few spacings
+    shorter). One terminal's idle bursts averaged give a clean 16-point
+    constellation over the whole burst; decision-directed SNR on 8+8
+    holds over the data.
+  - *8PSK* (0270h, 0278h, 0280h, 0490h, 0528h, 50F8h, 52E0h; terminals
+    331, 429, 413 and a few others): one ring of 8, its own preamble and a
+    second known block 218 symbols in.
+  - *Sync bursts* (00D0h–0108h in 8 steps, 02E4h, 02ECh, 20ACh, 2264h,
+    227Ch, 2284h): 16APSK 8+8 opening with **530 symbols the same in every
+    such burst** of every terminal and code, then data. Every terminal
+    sends one about every 32 frames (1.3 s) — the hub's measurement burst
+    (timing, frequency, level). 413 sends none.
+  The code rate and the FEC are not known (no decode attempted).
+- **The 11-bit value is the transmit level.** Within a terminal it moves
+  with the burst's code — 475: 0104h 710, 02E8h 730, 0508h 742 — and the
+  received power follows it at **0.115 dB a step** (correlation 0.94 over
+  11 terminals and their codes); received power rises 1.02 dB per dB of
+  symbol rate, so the hub holds each terminal's Es/N0 at any width (the
+  pool's C/N 11–13 dB). Terminals differ by their link: 409 at ~577, 431
+  ~600, most 670–830, 413 ~850.
+- **Off-tune terminals, not off-centre codes.** The codes the plan learner
+  found 25 kHz off-centre are 431's: 431 transmits 25.4 kHz below its plan
+  frequency, 413 4.7 kHz and 409 7.1 kHz; all others within ±50 Hz. The
+  hub packs round where they land.
+- **The plan's zero** is the capture's centre −26.1 kHz (±50 Hz, from the
+  bursts' own carriers), ≈ 12530.00 MHz downlink — 4–9 kHz below the
+  earlier estimate from edges.
+- **D0h** (static, 4 708 records of 22 bytes keyed by even 16-bit ids
+  0040h–62E6h, in pairs id/id−2): some ids equal plan codes (010Ch, 0114h,
+  0270h–02C8h) but no field matches those codes' measured rates or
+  lengths; still unread.
+
+Built: `decsat-ts::newtec` — `code_rate` (the measured table: periods,
+rate, `Waveform`), `rate_from_width` for codes not in it, `SLOT_S`,
+`BURST_SHORTFALL`, `CodeWidth::symbol_rate_hz`/`rate`; module notes
+corrected (slot pitch, level, off-tune terminals). CLI code lines add
+"116.80 kBd 16APSK 8+8 (539 symbols)" or "≈N kBd from its width"; the
+GUI's *Codes learned* gets a symbol-rate column and the terminal table's
+"value" becomes "level". Tests: the table sorted and on its grid, the
+width rule, a learned code carrying its rate.
+
+Not done: the pool tracker and its plan boxes still use 40.2/8 ms slots;
+`PlanRx` learns offsets per code where they belong to terminals; no burst
+demodulator (Rory had not asked to demodulate the return).

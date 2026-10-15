@@ -934,12 +934,23 @@ fn print_plan(p: &decsat_ts::newtec::PlanView) {
         );
     }
     for w in p.widths.iter().filter(|w| w.bursts >= 20) {
+        // The symbol rate as measured on 172B, or estimated from the width.
+        let rate = match w.rate {
+            Some(r) => format!(
+                ", {:.2} kBd {} ({} symbols)",
+                r.symbol_rate_hz / 1e3,
+                r.waveform.name(),
+                r.periods.saturating_sub(decsat_ts::newtec::BURST_SHORTFALL)
+            ),
+            None => format!(", ≈{:.0} kBd from its width", w.symbol_rate_hz / 1e3),
+        };
         println!(
-            "    code {:04X}h: {} slot{} × {:.2} kHz{} ({} bursts, {} pairs{})",
+            "    code {:04X}h: {} slot{} × {:.2} kHz{}{} ({} bursts, {} pairs{})",
             w.code,
             w.slots,
             if w.slots == 1 { "" } else { "s" },
             w.width_hz / 1e3,
+            rate,
             if w.centre_hz.abs() >= 5e3 {
                 format!(", centred {:+.1} kHz off its frequency", w.centre_hz / 1e3)
             } else {
@@ -963,7 +974,7 @@ fn print_plan(p: &decsat_ts::newtec::PlanView) {
             if t.slots == 1 { "" } else { "s" },
             t.width_hz
                 .map_or(String::new(), |w| format!(" × {:.1} kHz", w / 1e3)),
-            t.extra.map_or(String::new(), |x| format!(", value {x}"))
+            t.extra.map_or(String::new(), |x| format!(", level {x}"))
         );
     }
 }

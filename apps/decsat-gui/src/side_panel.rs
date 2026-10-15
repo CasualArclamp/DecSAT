@@ -4074,7 +4074,7 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView, vfo: VfoId) {
             .num_columns(6)
             .striped(true)
             .show(ui, |ui| {
-                for h in ["terminal", "bursts/s", "share", "mostly", "value", "C/N"] {
+                for h in ["terminal", "bursts/s", "share", "mostly", "level", "C/N"] {
                     ui.label(RichText::new(h).small().weak());
                 }
                 ui.end_row();
@@ -4105,8 +4105,10 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView, vfo: VfoId) {
                     ));
                     ui.label(RichText::new(t.extra.map_or("–".into(), |x| x.to_string())).small())
                         .on_hover_text(
-                            "The 11-bit value some of its bursts carry: steady per terminal, \
-                         drifting a little — a power or correction setting, unread",
+                            "The transmit level the plan gives its latest burst (11 bits): \
+                             about 0.11 dB a step, the received power following it. It rises \
+                             with the burst's symbol rate, about 9 a dB, so the terminal's \
+                             Es/N0 is the same at any width; terminals differ by their link.",
                         );
                     let level = levels
                         .as_ref()
@@ -4124,10 +4126,10 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView, vfo: VfoId) {
     .id_salt("plan_codes")
     .show(ui, |ui| {
         egui::Grid::new("plan_code_rows")
-            .num_columns(4)
+            .num_columns(5)
             .striped(true)
             .show(ui, |ui| {
-                for h in ["code", "burst", "bursts", "from"] {
+                for h in ["code", "burst", "symbol rate", "bursts", "from"] {
                     ui.label(RichText::new(h).small().weak());
                 }
                 ui.end_row();
@@ -4138,6 +4140,39 @@ fn plan_section(ui: &mut Ui, p: &decsat_ts::newtec::PlanView, vfo: VfoId) {
                         b.push_str(&format!(", {:+.0} kHz off", w.centre_hz / 1e3));
                     }
                     ui.label(RichText::new(b).small());
+                    // The symbol rate as measured on 172B, or estimated from
+                    // the width (dimmed).
+                    match w.rate {
+                        Some(r) => ui
+                            .label(
+                                RichText::new(format!(
+                                    "{:.2} kBd {}",
+                                    r.symbol_rate_hz / 1e3,
+                                    r.waveform.name()
+                                ))
+                                .small(),
+                            )
+                            .on_hover_text(format!(
+                                "Measured on 172B's return: {} symbol periods over its {} \
+                                 slot{} of 5 ms, the burst {} symbols of them (the rest its \
+                                 ramps and guard).",
+                                r.periods,
+                                w.slots,
+                                if w.slots == 1 { "" } else { "s" },
+                                r.periods.saturating_sub(decsat_ts::newtec::BURST_SHORTFALL)
+                            )),
+                        None => ui
+                            .label(
+                                RichText::new(format!("≈{:.0} kBd", w.symbol_rate_hz / 1e3))
+                                    .small()
+                                    .weak(),
+                            )
+                            .on_hover_text(
+                                "Not a code measured on 172B: estimated from its width, the \
+                                 hub spacing bursts about 1.066 × the symbol rate + 5.7 kHz \
+                                 apart.",
+                            ),
+                    };
                     ui.label(RichText::new(w.bursts.to_string()).small());
                     ui.label(
                         RichText::new(format!(
