@@ -625,7 +625,9 @@ differentially, so it is found even when its pilots make the carrier read
 BPSK — it is then called QPSK, and claiming it or the survey runs the IS-19
 outbound decoder), a call channel by its pilots, one every 16 symbols in
 154-symbol frames (*"Intelsat 19 DAMA call channel … its voice is
-encrypted"*: nothing to decode, the outbounds name its calls). Call channels
+encrypted"*: nothing to decode, the outbounds name its calls), and a wide
+call channel — 25.6 or 51.2 kBd, in duplex pairs like the voice channels —
+by a pilot strictly every 16 symbols. Call channels
 sit 6.16 kHz apart, so carrier detection takes the band as one; put a VFO
 on one channel (about 6.5 kHz wide) to have it named. For the rest it
 looks for fingerprints of proprietary waveforms:

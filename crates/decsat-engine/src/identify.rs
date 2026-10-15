@@ -209,10 +209,10 @@ pub fn names_is19(hint: &str) -> bool {
     hint.contains("DAMA outbound")
 }
 
-/// Identify's hint names an Intelsat 19 DAMA call channel (no decoder: its
-/// voice is encrypted).
+/// Identify's hint names an Intelsat 19 DAMA call channel, a voice one or
+/// a wide one (no decoder: their payload is encrypted).
 pub fn names_is19_call(hint: &str) -> bool {
-    hint.contains("DAMA call channel")
+    hint.contains("DAMA call channel") || hint.contains("DAMA wide call channel")
 }
 
 /// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
@@ -1197,6 +1197,38 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
             lock = l;
         }
     }
+    // A wide call channel: QPSK at 25.6 or 51.2 kBd (a quarter or a half of
+    // the outbounds' rate), a pilot strictly every 16 symbols; timed again at
+    // that rate too when Identify's is near but the first look missed it.
+    // `find` stops at the first rate within 5 % (`Option<f64>`).
+    let wide_rs = decsat_modem::is19::WIDE_SYMBOL_RATES
+        .into_iter()
+        .find(|w| (rs / w - 1.0).abs() < 0.05);
+    let near_wide = wide_rs.is_some();
+    let wide_rs = wide_rs.unwrap_or(rs);
+    let mut is19_wide = !is_s2
+        && !tpc
+        && !fastlink
+        && !is19
+        && !is19_call
+        && near_wide
+        && cst == ConstellationGuess::Qpsk
+        && decsat_modem::is19::detect_wide_channel(&lock.symbols);
+    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && !is19_wide && near_wide {
+        let s = symbols_at(&bb, rate, wide_rs, decsat_modem::is19::ROLL_OFF);
+        let seed = weak_s4_offset(&s, wide_rs).map(|hz| hz / wide_rs);
+        let l = lock_carrier(&s, ConstellationGuess::Qpsk, seed, None);
+        if decsat_modem::is19::detect_wide_channel(&l.symbols) {
+            is19_wide = true;
+            rs = wide_rs;
+            id.symbol_rate = Some(rs);
+            cst = ConstellationGuess::Qpsk;
+            id.constellation = Some(cst);
+            id.set_lock(&l, rs);
+            lock = l;
+        }
+    }
+    let is19_call = is19_call || is19_wide;
     // A convolutional code on BPSK or QPSK: its parity checks show in the
     // hard decisions (quick: small GF(2) matrices), the K = 7 code of DVB-S
     // and IESS-308/309 or any other rate-½ one.
@@ -1252,6 +1284,12 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
                      decoder reads its packets and call signalling"
                         .into()
                 }
+                _ if is19_wide => format!(
+                    "QPSK, Intelsat 19 DAMA wide call channel ({:.1} kBd, a pilot every 16 \
+                     symbols; duplex pairs like the voice channels) — its payload is \
+                     encrypted; the outbounds' channel assignments name its calls",
+                    rs / 1e3
+                ),
                 _ if is19_call => {
                     "QPSK, Intelsat 19 DAMA call channel (30 ms frames of 154 symbols, a pilot \
                      every 16) — its voice is encrypted; the outbounds' channel assignments \
@@ -1989,6 +2027,24 @@ mod tests {
         match &id.verdict {
             Verdict::NotDvbS2 { hint } => assert!(names_is19_call(hint), "{hint}"),
             v => panic!("expected not-DVB-S2, got {v:?}"),
+        }
+
+        // The wide call channels, 25.6 and 51.2 kBd.
+        for (wide_rs, label) in is19::WIDE_SYMBOL_RATES.into_iter().zip(["25.6", "51.2"]) {
+            let wide = is19::wide_channel_symbols(4000, &mut bit);
+            let mut sh = Shaper::new(4, is19::ROLL_OFF, 16);
+            let mut v = Vec::new();
+            sh.process(&wide, &mut v);
+            let rate = 4.0 * wide_rs;
+            let id = identify(&offset(v, rate, 150.0, &mut nz), rate);
+            match &id.verdict {
+                Verdict::NotDvbS2 { hint } => assert!(
+                    names_is19_call(hint) && hint.contains("wide") && hint.contains(label),
+                    "{hint}"
+                ),
+                v => panic!("expected not-DVB-S2, got {v:?}"),
+            }
+            assert_eq!(id.constellation, Some(ConstellationGuess::Qpsk));
         }
     }
 

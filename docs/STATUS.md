@@ -4416,3 +4416,43 @@ and claiming it sent it to the Comtech CDM decoder.
   by itself. Tests: `fingerprints_find_an_outbound_and_a_call_channel`
   (unlocked carrier turning 1 % a symbol; a 90° slip; plain QPSK neither),
   `names_an_is19_outbound_and_a_call_channel` (through the shaping filter).
+
+## Intelsat 19: the wide call channels, 25.6 and 51.2 kBd (2026-10-15)
+
+Rory saw bigger carriers come up in the DAMA call band. Three recordings
+(VFO 8, 12, 19; 85 k, 2.67 M and 800 kS/s) show what they are:
+
+- **25.6 kBd** (a quarter of the outbounds' 102.4 k) and **51.2 kBd** (a
+  half) QPSK, roll-off 0.2, a BPSK pilot strictly every 16 symbols (no short
+  block, unlike the voice channels' 154-symbol frames). Rates from the
+  cyclic line of |x|² (25 599.9 / 51 199.8 Hz).
+- **Duplex pairs**, like the voice calls: 25.6 k pairs 30.8 kHz apart (five
+  call-channel slots; 12 335.462/.493 and 12 335.524/.555 GHz on Rory's
+  GUI), a 51.2 k pair 61.8 kHz apart (ten slots; ~12 335.514/.576 GHz in
+  VFO 12's frame).
+- **The voice channels' signalling**: the same 64-symbol BPSK header + 4-bit
+  field + 32-symbol sequence, in pairs 60 ms apart (3072 symbols at 51.2 k)
+  every 240 ms during set-up, before the carrier goes steady, and again at
+  hang-up; none mid-call. Payload encrypted, as on the voice channels.
+- Not yet: which assignment names them. VFO 12 (both outbounds in it)
+  starts after the wide pair's assignment (the pair was already in set-up);
+  VFO 19's ±195 kHz filter leaves the outbounds out. The 3-bit channel field
+  the outbound decoder reads cannot reach slots 12–22, so the wide calls'
+  assignments must carry the channel some other way.
+- Broadcasts seen meanwhile: on both outbounds a 146-byte 36h and a 12-byte
+  12h, byte-identical, 0.55 s before the 51.2 k pair went steady; on OB1
+  only, every 2.0 s, a ~124-byte table of 80/96-bit records split by a
+  fixed 28-bit marker (types 21/25/29/2D/35/3D: a counter, not a type) —
+  contents not worked out.
+
+Identify: `is19::WIDE_SYMBOL_RATES` = [25.6 k, 51.2 k]; `detect_wide_channel`
+folds the diagonal sign at 16 over 1024-symbol chunks (the pilot position
+≥ 0.7, the rest ≤ 0.3, in two folds and a third of them or more); near
+either rate (5 %) the symbols are timed again at it and locked as QPSK. Hint
+"QPSK, Intelsat 19 DAMA wide call channel (25.6 kBd, …)"; `names_is19_call`
+takes it, so routing (no decoder) is the voice channels'. Checked: `scan`
+names both 25.6 k carriers in VFO 19 and the 51.2 k one in VFO 12, the
+outbounds and voice channels as before. Test:
+`names_an_is19_outbound_and_a_call_channel` (both wide rates through the
+shaping filter); `fingerprints_find_an_outbound_and_a_call_channel` (a wide
+channel through noise and a slip; the detectors don't cross-fire).

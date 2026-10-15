@@ -1390,6 +1390,71 @@ pub fn detect_call_channel(sym: &[Iq]) -> bool {
     found >= 1 && found * 3 >= folds
 }
 
+/// The wide call channels' symbol rates: a quarter and a half of the
+/// outbounds'. Seen 2026-10-15 in duplex pairs, the same set-up and hang-up
+/// signalling as the voice channels: 25.6 kBd pairs 30.8 kHz apart (five
+/// call-channel slots; 12 335.462/.493 and .524/.555 GHz), a 51.2 kBd pair
+/// 61.8 kHz apart (ten slots).
+pub const WIDE_SYMBOL_RATES: [f64; 2] = [SYMBOL_RATE / 4.0, SYMBOL_RATE / 2.0];
+/// Blocks folded together when looking for a wide channel's pilots.
+const WIDE_FOLD_BLOCKS: usize = 64;
+/// How little the data positions may hold a diagonal over a fold (random
+/// data over 64 blocks: about 0.1).
+const WIDE_DATA_SHARE: f32 = 0.3;
+
+/// A wide call channel in carrier-locked symbols (either rate): a BPSK
+/// pilot every 16 symbols, on one diagonal — strictly every 16 (no short block, unlike the
+/// voice channels' 154-symbol frames). Folded 64 blocks at a time; the
+/// pilot position must stand out in a third of the folds or more, and in
+/// two at least.
+pub fn detect_wide_channel(sym: &[Iq]) -> bool {
+    let chunk = WIDE_FOLD_BLOCKS * PILOT_SPACING;
+    let mut folds = 0;
+    let mut found = 0;
+    for c in sym.chunks_exact(chunk) {
+        folds += 1;
+        let mut m = [0f32; PILOT_SPACING];
+        for (k, s) in c.iter().enumerate() {
+            m[k % PILOT_SPACING] += (s.re * s.im).signum();
+        }
+        let a = m.map(|v| v.abs() / WIDE_FOLD_BLOCKS as f32);
+        let (at, best) = a
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|x, y| x.1.total_cmp(&y.1))
+            .unwrap_or((0, 0.0));
+        let others = a
+            .iter()
+            .enumerate()
+            .filter(|&(k, _)| k != at)
+            .map(|(_, v)| v)
+            .sum::<f32>()
+            / (PILOT_SPACING - 1) as f32;
+        if best >= CALL_PILOT_SHARE && others <= WIDE_DATA_SHARE {
+            found += 1;
+        }
+    }
+    found >= 2 && found * 3 >= folds
+}
+
+/// A wide channel's symbols, for tests: `blocks` blocks of a pilot (random
+/// sign, −45°/135° diagonal) and 15 random QPSK data symbols.
+pub fn wide_channel_symbols(blocks: usize, bit: &mut impl FnMut() -> u8) -> Vec<Iq> {
+    let h = std::f32::consts::FRAC_1_SQRT_2;
+    let mut out = Vec::with_capacity(blocks * PILOT_SPACING);
+    for _ in 0..blocks {
+        out.push(Iq::new(h, -h) * (1.0 - 2.0 * f32::from(bit())));
+        for _ in 1..PILOT_SPACING {
+            out.push(Iq::new(
+                h * (1.0 - 2.0 * f32::from(bit())),
+                h * (1.0 - 2.0 * f32::from(bit())),
+            ));
+        }
+    }
+    out
+}
+
 /// A call channel's symbols, for tests: `frames` frames of random QPSK
 /// data with their pilots (random signs on the −45°/135° diagonal).
 pub fn call_channel_symbols(frames: usize, bit: &mut impl FnMut() -> u8) -> Vec<Iq> {
@@ -1783,6 +1848,23 @@ mod tests {
             .collect();
         assert!(!detect(&qpsk));
         assert!(!detect_call_channel(&qpsk));
+        assert!(!detect_wide_channel(&qpsk));
+
+        // A wide channel: pilots strictly every 16, through noise and a slip;
+        // a voice channel's frames (a short block each) are not one.
+        let mut wide = wide_channel_symbols(3000, &mut r);
+        let half = wide.len() / 2;
+        for (k, s) in wide.iter_mut().enumerate() {
+            let slip = if k >= half {
+                Iq::new(0.0, -1.0)
+            } else {
+                Iq::new(1.0, 0.0)
+            };
+            *s = *s * slip + Iq::new(gauss(), gauss()) * 0.2;
+        }
+        assert!(detect_wide_channel(&wide));
+        assert!(!detect_call_channel(&wide));
+        assert!(!detect_wide_channel(&call));
     }
 
     #[test]
