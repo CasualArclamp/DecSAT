@@ -992,4 +992,147 @@ mod tests {
         let res = dm.demod(&x, &scheduled(Waveform::Apsk8p8, 116_800.0, 1, 0.0, 1000));
         assert!(res.is_none_or(|r| !r.ok));
     }
+
+    /// By hand, on a capture: `DECSAT_172B=<cs8 at 8 MS/s> DECSAT_172B_BURSTS=<csv>
+    /// cargo test -p decsat-engine --release burst_demod_on_a_capture -- --ignored
+    /// --nocapture`. The CSV, a line a planned burst: first sample, samples,
+    /// planned start within them, centre Hz from the capture's centre, code,
+    /// terminal, slots, symbol rate (0: not measured, skipped), exact (0/1),
+    /// waveform (A 8+8, B sync, C 8PSK, U unread), frame, slot. With
+    /// `DECSAT_172B_DUMP=<file>` every burst's symbols are written out for
+    /// the FEC work: per burst code u16, terminal u16, frame u32, slot u8,
+    /// MER f32, fit f32, header count u8 and bytes, symbol count u32, then
+    /// (re, im) f32 pairs, all little-endian.
+    #[test]
+    #[ignore]
+    fn burst_demod_on_a_capture() {
+        use std::collections::BTreeMap;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let (Ok(cap), Ok(csv)) = (
+            std::env::var("DECSAT_172B"),
+            std::env::var("DECSAT_172B_BURSTS"),
+        ) else {
+            eprintln!("set DECSAT_172B and DECSAT_172B_BURSTS");
+            return;
+        };
+        let max: usize = std::env::var("DECSAT_172B_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX);
+        let mut dump = std::env::var("DECSAT_172B_DUMP")
+            .ok()
+            .map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
+        let mut f = std::fs::File::open(cap).unwrap();
+        let mut dm = BurstDemod::new(8e6);
+        // terminal -> (bursts, ok, MERs, offsets, fits); code -> MERs
+        let mut per: BTreeMap<u16, (u32, u32, Vec<f32>, Vec<f64>, Vec<f32>)> = BTreeMap::new();
+        let mut codes: BTreeMap<u16, Vec<f32>> = BTreeMap::new();
+        let mut headers: BTreeMap<u16, BTreeMap<Vec<u8>, u32>> = BTreeMap::new();
+        let mut buf = Vec::new();
+        let t0 = std::time::Instant::now();
+        let mut done = 0usize;
+        for line in std::fs::read_to_string(csv).unwrap().lines() {
+            let v: Vec<&str> = line.split(',').collect();
+            let num = |i: usize| -> f64 { v[i].parse().unwrap() };
+            let (rate, w) = (num(7), v[9]);
+            let waveform = match w {
+                "A" => Waveform::Apsk8p8,
+                "B" => Waveform::Sync,
+                "C" => Waveform::Psk8,
+                _ => continue,
+            };
+            if rate <= 0.0 {
+                continue;
+            }
+            let (first, n) = (num(0) as u64, num(1) as usize);
+            buf.resize(2 * n, 0u8);
+            f.seek(SeekFrom::Start(2 * first)).unwrap();
+            f.read_exact(&mut buf).unwrap();
+            let iq: Vec<Iq> = buf
+                .chunks(2)
+                .map(|c| Iq::new(f32::from(c[0] as i8), f32::from(c[1] as i8)))
+                .collect();
+            let b = ScheduledBurst {
+                terminal: num(5) as u16,
+                code: num(4) as u16,
+                slots: num(6) as u8,
+                centre_hz: num(3),
+                symbol_rate: rate,
+                rate_exact: num(8) > 0.0,
+                waveform,
+                start: num(2) as usize,
+            };
+            let e = per.entry(b.terminal).or_default();
+            e.0 += 1;
+            if let Some(r) = dm.demod(&iq, &b) {
+                if r.ok {
+                    e.1 += 1;
+                    e.2.push(r.mer_db);
+                    e.3.push(r.freq_offset_hz);
+                    e.4.push(r.preamble_fit);
+                    codes.entry(b.code).or_default().push(r.mer_db);
+                    if !r.header.is_empty() {
+                        *headers
+                            .entry(b.code)
+                            .or_default()
+                            .entry(r.header.clone())
+                            .or_default() += 1;
+                    }
+                }
+                if let Some(d) = dump.as_mut() {
+                    d.write_all(&b.code.to_le_bytes()).unwrap();
+                    d.write_all(&b.terminal.to_le_bytes()).unwrap();
+                    d.write_all(&(num(10) as u32).to_le_bytes()).unwrap();
+                    d.write_all(&[num(11) as u8]).unwrap();
+                    d.write_all(&r.mer_db.to_le_bytes()).unwrap();
+                    d.write_all(&r.preamble_fit.to_le_bytes()).unwrap();
+                    d.write_all(&[r.header.len() as u8]).unwrap();
+                    d.write_all(&r.header).unwrap();
+                    d.write_all(&(r.symbols.len() as u32).to_le_bytes())
+                        .unwrap();
+                    for s in &r.symbols {
+                        d.write_all(&s.re.to_le_bytes()).unwrap();
+                        d.write_all(&s.im.to_le_bytes()).unwrap();
+                    }
+                }
+            }
+            done += 1;
+            if done >= max {
+                break;
+            }
+        }
+        let med = |v: &mut Vec<f32>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
+        };
+        eprintln!("{done} bursts in {:.1} s", t0.elapsed().as_secs_f64());
+        for (t, (n, ok, mer, off, fit)) in &mut per {
+            let mut offs: Vec<f32> = off.iter().map(|&x| x as f32).collect();
+            eprintln!(
+                "terminal {t:3}: {ok:4}/{n:4} ok, MER {:5.1} dB, offset {:+8.0} Hz, fit {:.2}",
+                med(mer),
+                med(&mut offs),
+                med(fit)
+            );
+        }
+        for (c, m) in &mut codes {
+            let top: Vec<String> = headers
+                .get(c)
+                .map(|h| {
+                    let mut v: Vec<_> = h.iter().collect();
+                    v.sort_by(|a, b| b.1.cmp(a.1));
+                    v.iter()
+                        .take(2)
+                        .map(|(k, n)| format!("{k:?}x{n}"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "code {c:04X}h: {:4} ok, MER {:5.1} dB, header {}",
+                m.len(),
+                med(m),
+                top.join(" ")
+            );
+        }
+    }
 }
