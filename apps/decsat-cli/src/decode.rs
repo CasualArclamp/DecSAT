@@ -54,8 +54,8 @@ pub struct DecodeArgs {
     pub bbframes: Option<PathBuf>,
     /// Feed the IP live to a Wireshark started for it.
     pub wireshark: bool,
-    /// pool: an outbound VFO (offset:bandwidth, Hz) whose burst plan times
-    /// the pool's bursts.
+    /// pool: an outbound VFO (offset:bandwidth, Hz, and `:ip` for a hub
+    /// that signals in GSE) whose burst plan times the pool's bursts.
     pub plan_from: Option<String>,
 }
 
@@ -208,13 +208,29 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
             if kind != DecoderKind::ReturnPool {
                 bail!("--plan-from goes with --decoder pool");
             }
-            let (off, bw) = spec
-                .split_once(':')
-                .and_then(|(o, b)| {
-                    Some((o.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))
-                })
-                .with_context(|| format!("--plan-from `{spec}`: want OFFSET_HZ:BW_HZ"))?;
-            let mut o = VfoSettings::new("outbound", off, bw, DecoderKind::Dvbs2Ts);
+            let parts: Vec<&str> = spec.split(':').map(str::trim).collect();
+            let (off, bw, outbound) = match parts[..] {
+                [o, b] => (
+                    o.parse::<f64>().ok(),
+                    b.parse::<f64>().ok(),
+                    DecoderKind::Dvbs2Ts,
+                ),
+                [o, b, "ip"] => (
+                    o.parse::<f64>().ok(),
+                    b.parse::<f64>().ok(),
+                    DecoderKind::Dvbs2Ip,
+                ),
+                [o, b, "ts"] => (
+                    o.parse::<f64>().ok(),
+                    b.parse::<f64>().ok(),
+                    DecoderKind::Dvbs2Ts,
+                ),
+                _ => (None, None, DecoderKind::Dvbs2Ts),
+            };
+            let (Some(off), Some(bw)) = (off, bw) else {
+                bail!("--plan-from `{spec}`: want OFFSET_HZ:BW_HZ, or OFFSET_HZ:BW_HZ:ip");
+            };
+            let mut o = VfoSettings::new("outbound", off, bw, outbound);
             o.voice_auto = false;
             Some(eng.add_vfo(o))
         }
@@ -276,6 +292,9 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 if let Some(b) = st.pool.as_ref().and_then(|p| p.bursts.as_deref()) {
                     println!("        {}", bursts_line(b));
                 }
+                if let Some(b) = st.pool.as_ref().and_then(|p| p.inroutes.as_deref()) {
+                    println!("        {}", inroutes_line(b));
+                }
             }
             if let Some(o) = plan_vfo.and_then(|o| eng.vfo_status(o))
                 && !live
@@ -309,6 +328,14 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                     .and_then(|r| r.plan.as_ref())
                 {
                     print_plan(p);
+                }
+                if let Some(h) = o
+                    .fec
+                    .as_ref()
+                    .and_then(|f| f.gse.as_ref())
+                    .and_then(|g| g.hub.as_deref())
+                {
+                    print_hub(h);
                 }
             }
             match eng.vfo_status(id) {
@@ -582,6 +609,9 @@ pub(crate) fn report(st: &VfoStatus) {
                         }
                     );
                 }
+            }
+            if let Some(h) = &g.hub {
+                print_hub(h);
             }
         }
     }
@@ -875,6 +905,155 @@ fn print_bursts(b: &decsat_engine::tdma::pool_bursts::BurstsView) {
     }
 }
 
+/// A hub's inroute signalling in GSE: its clock, inroutes, plans and the
+/// terminals they name.
+pub(crate) fn print_hub(h: &decsat_gse::inroute::HubView) {
+    println!(
+        "hub signalling (GSE 0001h/0004h): {} plans ({:.1} a second), {} clock PDUs{}",
+        h.plans,
+        h.plans_per_s,
+        h.clocks,
+        h.clock_ppm.map_or(String::new(), |p| format!(
+            ", hub clock {p:+.1} ppm against the receiver"
+        ))
+    );
+    for i in &h.inroutes {
+        let table = i.table.map_or("not in the table yet".to_string(), |t| {
+            format!(
+                "uplink {:.4} MHz, {} slot words",
+                t.uplink_hz / 1e6,
+                t.slots
+            )
+        });
+        let cfg = i.config.map_or(String::new(), |c| {
+            format!(
+                ", {} {:.1} kBd ({:.3} on the air), {} symbols a slot of {:.4} ms",
+                c.modulation.name(),
+                c.symbol_rate / 1e3,
+                c.air_rate() / 1e3,
+                c.slot_symbols(),
+                c.slot_s() * 1e3
+            )
+        });
+        println!(
+            "  inroute {:02X}h: {table}{cfg}; {} plans, {} missed, {} slots, {} terminals",
+            i.id, i.plans, i.missed, i.slots, i.terminals
+        );
+    }
+    if let Some(l) = h.line {
+        println!(
+            "  plans arrive on a line to {:.2} ms ({} frames)",
+            l.jitter_s * 1e3,
+            l.frames
+        );
+    }
+    let busiest: Vec<String> = h
+        .terminals
+        .iter()
+        .take(12)
+        .map(|t| format!("{:03X}h {:.1}", t.id, t.per_frame))
+        .collect();
+    println!(
+        "  {} terminals with slots; the busiest (slots a frame): {}",
+        h.terminals.len(),
+        busiest.join(", ")
+    );
+}
+
+/// The inroute burst demodulator, in a line.
+fn inroutes_line(b: &decsat_engine::tdma::inroute_bursts::InrouteBurstsView) -> String {
+    match (b.fit, b.tried) {
+        (Some(f), _) => format!(
+            "inroutes: {} on the VFO, lead {} frames (owners explain {:.0} % of slot power), {:.0} bursts/s, {} of {} demodulated, {} failed, {} dropped",
+            b.carriers.len(),
+            f.lead,
+            100.0 * f.r2,
+            b.per_s,
+            b.demodulated,
+            b.planned,
+            b.failed,
+            b.dropped
+        ),
+        (None, Some(t)) => format!(
+            "inroutes: not lined up yet (best lead {} explains {:.0} %, next {:.0} %; {} frame starts)",
+            t.lead,
+            100.0 * t.r2,
+            100.0 * t.next_r2,
+            b.silences
+        ),
+        (None, None) => format!(
+            "inroutes: plans heard, lining up ({} frame starts)",
+            b.silences
+        ),
+    }
+}
+
+fn print_inroutes(b: &decsat_engine::tdma::inroute_bursts::InrouteBurstsView) {
+    println!("  {}", inroutes_line(b));
+    if let Some(f) = b.frame_s {
+        println!(
+            "  frame {:.6} ms on the receiver's clock ({:+.1} ppm), comb fit {:.2}, start trim {:+.1} µs, zero trim {:+.0} Hz, workers {} at {:.0} % of a core",
+            f * 1e3,
+            (f / decsat_gse::inroute::FRAME_S - 1.0) * 1e6,
+            b.map_corr,
+            b.start_trim_s * 1e6,
+            b.zero_trim_hz,
+            b.workers,
+            100.0 * b.load
+        );
+    }
+    if let Some(f) = b.fit {
+        println!("  a plan applies {:.1} ms after it arrives", f.lead_s * 1e3);
+    }
+    for c in &b.carriers {
+        println!(
+            "  inroute {:02X}h at {:+.1} kHz: {} {:.3} kBd, {} slots of {} symbols ({} a burst){}",
+            c.inroute,
+            c.centre_hz / 1e3,
+            c.modulation.name(),
+            c.symbol_rate / 1e3,
+            c.slots,
+            c.slot_symbols,
+            c.burst_symbols,
+            c.level_db
+                .map_or(String::new(), |l| format!(", {l:.1} dB over the noise"))
+        );
+    }
+    println!(
+        "  bursts: {} planned, {} cut, {} demodulated, {} failed, {} late, {} dropped, {} of an unread waveform",
+        b.planned, b.cut, b.demodulated, b.failed, b.late, b.dropped, b.unknown
+    );
+    let mut ts: Vec<&decsat_engine::tdma::inroute_bursts::InrouteTerminal> =
+        b.terminals.iter().collect();
+    ts.sort_by(|a, b| b.demodulated.cmp(&a.demodulated).then(a.id.cmp(&b.id)));
+    for t in ts.iter().take(24) {
+        println!(
+            "    {:03X}h  {:4.1} slots/frame on {:<12} {:6} ok {:5} failed  MER {:5.1} dB  {:+7.0} Hz  {:+6.2} µs  tag {}  {}",
+            t.id,
+            t.slots_per_frame,
+            t.inroutes
+                .iter()
+                .map(|i| format!("{i:02X}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            t.demodulated,
+            t.failed,
+            t.mer_db,
+            t.freq_hz,
+            t.timing_us,
+            t.tag.map_or("-".to_string(), |g| format!(
+                "{}{}{} ({:.0} %)",
+                g[0],
+                g[1],
+                g[2],
+                100.0 * t.tag_share
+            )),
+            t.level_db
+                .map_or(String::new(), |l| format!("{l:.1} dB C/N"))
+        );
+    }
+}
+
 pub(crate) fn print_pool(p: &decsat_engine::tdma::pool::PoolView) {
     println!(
         "pool: {} carriers now{}, {} layout changes ({:.1} a minute) over {:.0} s",
@@ -913,6 +1092,9 @@ pub(crate) fn print_pool(p: &decsat_engine::tdma::pool::PoolView) {
     }
     if let Some(b) = &p.bursts {
         print_bursts(b);
+    }
+    if let Some(b) = &p.inroutes {
+        print_inroutes(b);
     }
     let show = |cs: &[decsat_engine::tdma::pool::PoolCarrier]| -> String {
         cs.iter()

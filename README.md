@@ -86,6 +86,7 @@ real carriers stay put.
 | **DVB-RCS signalling** in a hub's outbound (EN 301 790 / 545-2): the forward and return links of the RCS map, the network clock (NCR), the terminal information, superframe/frame/timeslot plans, burst time plan and corrections when sent — and every signalling table's rate, the vendor's own included | ✅ live (RCS2 over GSE: its PDU types named only) |
 | **Return pools** (TDMA mode's *Return pool* decoder): the pool's layout over time — a hub resizing and moving its terminals' carriers — and the slot and frame grid of its bursts, tied to an outbound VFO whose signalling keeps the same time | ✅ live: 5.025 ms slots in a 40.200 ms frame, matching the outbound's 40.2 ms table |
 | **A Newtec hub's burst plan** (its private table D1h, worked out from a capture — no public spec): every burst each terminal may send, frame by frame — slot, length, frequency, bandwidth (learned from how the hub packs them) — the terminals' shares, and the plan lined up on a Return pool VFO's band | ✅ live: 24 terminals, 16.7 bursts a 40.2 ms frame; fits the pool's spectrum at 0.97 |
+| **A hub's inroute signalling in GSE** (non-IP PDUs, worked out from a capture — no public spec): its clock, its inroutes (uplink frequency, symbol rate, slot length, modulation) and a burst time plan per inroute every 125 ms; on a Return pool VFO every slot's burst demodulated by it — 8PSK, MER, carrier and timing per terminal | ✅ on a 172B capture: 4 inroutes on the pool, ~3300 bursts a second, 97 % demodulated, 184 terminals |
 | **GSE → IP → PCAP** + live IP stats, flows encrypted in transit marked as such; GSE variant detected from the data | ✅ |
 | **MPEG-TS**: services, PIDs, errors; `.ts` file, UDP, TCP/HTTP to VLC or PotPlayer | ✅ |
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
@@ -263,6 +264,29 @@ two-slot bursts of 123–400 kHz.
 ```bash
 decsat decode outbound_8Msps.cs8 --decoder ip --offset -881700 --bandwidth 1300000
 decsat decode outbound_8Msps.cs8 --decoder pool --offset 580000 --bandwidth 900000
+```
+
+Another hub on 172B signals in GSE instead: a 2 MS/s DVB-S2 ACM outbound
+whose stream 0 carries, besides its terminals' IP, PDUs of the hub's own —
+a 46.08 MHz clock, an **inroute table** (each return carrier's uplink
+frequency, symbol rate, slot length in 27 MHz ticks and modulation) and a
+**burst time plan** for every inroute every 125 ms frame: a terminal and a
+kind for each slot. The IP card shows it as **Hub signalling**: the
+inroutes, plans a second, the terminals and their slots. A **Return pool**
+VFO over the inroutes takes the plans up by itself: it slides the
+inroutes' frequencies along its spectrum, finds the frames on the
+inroutes' guard silences (every carrier quiet ~3 ms at each frame's end)
+and how many frames after it arrives a plan applies (five — the count
+under which the plans' owners best explain the slots' powers), then cuts
+out and demodulates every slot's burst (8PSK, a 34-symbol preamble, four
+known symbols every 30): per terminal its slots, MER, carrier and timing
+offsets, its tag (three preamble symbols of its own) and C/N, and a
+constellation. On a 90 s capture: four 665.8 kBd inroutes, ~3300 bursts a
+second, 97 % demodulated at MER 8–11 dB. ● Record writes the bursts'
+symbols and soft bits to an `.ibursts` file.
+
+```bash
+decsat decode cap_10Msps.cs8 --decoder pool --offset 1415000 --bandwidth 3194000 --plan-from=-1290000:2500000:ip
 ```
 
 ### DVB-S2 → MPEG-TS → VLC / PotPlayer

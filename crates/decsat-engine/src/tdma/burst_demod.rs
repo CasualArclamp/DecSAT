@@ -41,12 +41,21 @@
 //! 4. a least-squares equaliser (9 taps at T/2) trained on the known
 //!    symbols, then decision-directed phase tracking through the data;
 //! 5. max-log LLRs, the noise from the known symbols' residual.
+//!
+//! The same receiver takes the bursts of a hub that signals in GSE
+//! ([`decsat_gse::inroute`]), told so by [`ScheduledBurst::inroute`]: 8PSK
+//! at roll-off 0.2, a 34-symbol preamble (two fields in it change: the
+//! terminal's 3-symbol tag at 12–14, and 24–29), four known symbols every
+//! 30, a 14-symbol word 506 symbols in (docs/STATUS.md, "A DVB-S2 outbound
+//! and its 125 ms TDMA inroutes"); slots are back to back, so the preamble
+//! is looked for only ±25 symbols round the planned start.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use decsat_core::{CodeRate, FecFrame, Iq, Modulation};
 use decsat_fec::Constellation;
+use decsat_gse::inroute::Modulation as InrouteModulation;
 use decsat_ts::newtec::{BURST_SHORTFALL, Waveform};
 use rustfft::{Fft, FftPlanner};
 
@@ -69,6 +78,88 @@ const MIN_MER_DB: f32 = 6.0;
 
 /// Equaliser taps (at T/2) and their reach either side, symbols.
 const EQ_TAPS: usize = 9;
+
+/// Inroute bursts (a GSE-signalling hub): the roll-off (its carriers sit
+/// (1 + α)·666 kBd = 800 kHz apart); the band's margin round the carrier,
+/// Hz (the terminals sit within ~100 Hz of each other, and the next carrier
+/// is a roll-off's width away); the preamble search either side of the
+/// planned start, symbols.
+const INROUTE_ROLL_OFF: f64 = 0.2;
+const INROUTE_MARGIN_HZ: f64 = 6e3;
+const INROUTE_SEARCH_SYMBOLS: f64 = 25.0;
+
+/// The inroute bursts' known symbols, 8PSK phase indices (k·45°): the
+/// preamble's fixed ones (position, index), the four-symbol group that
+/// starts every 30 symbols from 30 (groups 1–23 read; 23 reach symbol
+/// 693, the 701-symbol burst's last group), and the word at 506 (515 left
+/// out: it read 6 on one carrier, between 5 and 6 on the other). Read
+/// from 3000 bursts on each of two carriers, which agree.
+const INROUTE_PREAMBLE: [(usize, u8); 19] = [
+    (0, 7),
+    (1, 3),
+    (2, 7),
+    (3, 3),
+    (5, 1),
+    (7, 1),
+    (8, 1),
+    (9, 2),
+    (10, 3),
+    (11, 3),
+    (15, 2),
+    (16, 2),
+    (17, 2),
+    (18, 1),
+    (19, 1),
+    (20, 1),
+    (21, 1),
+    (22, 1),
+    (23, 4),
+];
+const INROUTE_PREAMBLE_LEN: usize = 34;
+const INROUTE_PILOTS: [[u8; 4]; 23] = [
+    [7, 3, 7, 3],
+    [3, 3, 7, 3],
+    [3, 7, 7, 7],
+    [7, 7, 3, 7],
+    [3, 3, 3, 7],
+    [7, 7, 7, 3],
+    [3, 3, 7, 7],
+    [3, 7, 3, 3],
+    [7, 7, 7, 7],
+    [7, 3, 7, 7],
+    [7, 7, 3, 7],
+    [7, 7, 3, 3],
+    [7, 3, 3, 7],
+    [3, 7, 7, 3],
+    [7, 7, 7, 7],
+    [3, 7, 7, 7],
+    [7, 3, 7, 3],
+    [3, 7, 3, 7],
+    [3, 3, 7, 7],
+    [3, 3, 3, 3],
+    [3, 3, 7, 3],
+    [7, 3, 3, 3],
+    [3, 7, 3, 3],
+];
+const INROUTE_WORD_AT: usize = 506;
+const INROUTE_WORD: [Option<u8>; 14] = [
+    Some(0),
+    Some(1),
+    Some(0),
+    Some(7),
+    Some(7),
+    Some(3),
+    Some(7),
+    Some(3),
+    Some(7),
+    None,
+    Some(4),
+    Some(5),
+    Some(7),
+    Some(7),
+];
+/// The terminal's tag in the preamble.
+const INROUTE_TAG: std::ops::Range<usize> = 12..15;
 
 /// A symbol string: `A`–`H` the outer ring at phase 0–7, `a`–`h` the
 /// inner; the phase index counts π/4 steps from the constellation's first
@@ -108,6 +199,17 @@ pub struct ScheduledBurst {
     pub waveform: Waveform,
     /// Sample index, in the slice, of the burst's slot start as planned.
     pub start: usize,
+    /// A GSE-signalling hub's burst, not a Newtec one: its length and
+    /// modulation (the layout is that hub's; `slots`, `code` and `waveform`
+    /// are then not used).
+    pub inroute: Option<InrouteShape>,
+}
+
+/// An inroute burst's length and modulation ([`decsat_gse::inroute`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InrouteShape {
+    pub symbols: usize,
+    pub modulation: InrouteModulation,
 }
 
 /// One burst demodulated.
@@ -127,7 +229,8 @@ pub struct BurstResult {
     pub llrs: Vec<f32>,
     pub bits_per_symbol: u8,
     /// The 8+8 header's phase indices (0–7, on the preamble's reference),
-    /// 11 of them; empty for the other waveforms.
+    /// 11 of them; an inroute burst's tag (its preamble's symbols 12–14,
+    /// fixed for a terminal); empty for the other waveforms.
     pub header: Vec<u8>,
     /// MER over every symbol (data by their decisions), dB.
     pub mer_db: f32,
@@ -153,6 +256,8 @@ struct Layout {
     detect: Vec<Iq>,
     /// Where the header is, if any (8+8: positions 0–10).
     header: usize,
+    /// The fewest symbols a burst may have (the known ones it must hold).
+    min_len: usize,
     cst: Constellation,
     /// The constellation's points by (ring, phase index).
     grid: Vec<Iq>,
@@ -192,13 +297,14 @@ impl Layout {
                 let grid = apsk_grid(&cst);
                 let pre = parse(APSK_PREAMBLE, &grid);
                 let k2 = parse(APSK_KNOWN, &grid);
-                let known = (pre
+                let known: Vec<(usize, Iq)> = (pre
                     .iter()
                     .enumerate()
                     .map(|(i, &p)| (APSK_PREAMBLE_AT + i, p)))
                 .chain(k2.iter().enumerate().map(|(i, &p)| (APSK_KNOWN_AT + i, p)))
                 .collect();
                 Layout {
+                    min_len: last_known(&known),
                     known,
                     detect_at: APSK_PREAMBLE_AT,
                     detect: pre,
@@ -211,12 +317,13 @@ impl Layout {
                 let cst = s2x_88();
                 let grid = apsk_grid(&cst);
                 let seq = parse(&SYNC_KNOWN.concat(), &grid);
-                let known = seq
+                let known: Vec<(usize, Iq)> = seq
                     .iter()
                     .enumerate()
                     .map(|(i, &p)| (SYNC_KNOWN_AT + i, p))
                     .collect();
                 Layout {
+                    min_len: last_known(&known),
                     known,
                     detect_at: SYNC_KNOWN_AT,
                     detect: seq[..96].to_vec(),
@@ -233,12 +340,13 @@ impl Layout {
                     .collect();
                 let grid: Vec<Iq> = ring.iter().chain(&ring).copied().collect();
                 let seq = parse(PSK_KNOWN, &grid);
-                let known = seq
+                let known: Vec<(usize, Iq)> = seq
                     .iter()
                     .enumerate()
                     .map(|(i, &p)| (PSK_KNOWN_AT + i, p))
                     .collect();
                 Layout {
+                    min_len: last_known(&known),
                     known,
                     detect_at: PSK_KNOWN_AT,
                     detect: seq,
@@ -249,6 +357,67 @@ impl Layout {
             }),
             Waveform::Unknown => return None,
         })
+    }
+
+    /// A GSE-signalling hub's inroute burst: 8PSK only (its QPSK carriers'
+    /// known symbols are not read yet).
+    fn inroute(m: InrouteModulation) -> Option<&'static Layout> {
+        static PSK8: OnceLock<Layout> = OnceLock::new();
+        if m != InrouteModulation::Psk8 {
+            return None;
+        }
+        Some(PSK8.get_or_init(|| {
+            let grid: Vec<Iq> = (0..8)
+                .map(|k| Iq::from_polar(1.0, k as f32 * std::f32::consts::FRAC_PI_4))
+                .collect();
+            let pt = |k: u8| grid[usize::from(k)];
+            let mut known: Vec<(usize, Iq)> =
+                INROUTE_PREAMBLE.iter().map(|&(n, k)| (n, pt(k))).collect();
+            for (g, grp) in INROUTE_PILOTS.iter().enumerate() {
+                for (j, &k) in grp.iter().enumerate() {
+                    known.push((30 * (g + 1) + j, pt(k)));
+                }
+            }
+            for (j, k) in INROUTE_WORD.iter().enumerate() {
+                if let Some(k) = k {
+                    known.push((INROUTE_WORD_AT + j, pt(*k)));
+                }
+            }
+            known.sort_by_key(|k| k.0);
+            known.dedup_by_key(|k| k.0);
+            // The detector's run: the preamble and the first group, the
+            // unknown symbols between as 0 (left out of the correlation).
+            let mut detect = vec![Iq::new(0.0, 0.0); INROUTE_PREAMBLE_LEN];
+            for &(n, k) in &INROUTE_PREAMBLE {
+                detect[n] = pt(k);
+            }
+            for (j, &k) in INROUTE_PILOTS[0].iter().enumerate() {
+                detect[30 + j] = pt(k);
+            }
+            Layout {
+                known,
+                detect_at: 0,
+                detect,
+                header: 0,
+                min_len: INROUTE_PREAMBLE_LEN,
+                cst: Constellation::psk8(),
+                grid: grid.iter().chain(&grid).copied().collect(),
+            }
+        }))
+    }
+}
+
+/// One past the last known symbol.
+fn last_known(known: &[(usize, Iq)]) -> usize {
+    known.last().map_or(0, |k| k.0 + 1)
+}
+
+/// A burst's roll-off.
+fn roll_off(b: &ScheduledBurst) -> f64 {
+    if b.inroute.is_some() {
+        INROUTE_ROLL_OFF
+    } else {
+        ROLL_OFF
     }
 }
 
@@ -308,12 +477,15 @@ impl BurstDemod {
     /// The burst `b` in `iq` (its slots and some margin either side), or
     /// `None` when its waveform is not known or no preamble is found.
     pub fn demod(&mut self, iq: &[Iq], b: &ScheduledBurst) -> Option<BurstResult> {
-        let layout = Layout::get(b.waveform)?;
+        let layout = match b.inroute {
+            Some(shape) => Layout::inroute(shape.modulation)?,
+            None => Layout::get(b.waveform)?,
+        };
         if iq.len() < 64 || b.symbol_rate <= 0.0 {
             return None;
         }
         // The rates to try: the code's own, or its grid round an estimate.
-        let rates: Vec<f64> = if b.rate_exact {
+        let rates: Vec<f64> = if b.rate_exact || b.inroute.is_some() {
             vec![b.symbol_rate]
         } else {
             let step = 200.0 / f64::from(b.slots.max(1));
@@ -436,8 +608,13 @@ impl BurstDemod {
         let fs2 = self.fs / d as f64;
         let sps = fs2 / rs;
         let centre = b.centre_hz + prior.unwrap_or(0.0);
-        let margin = if prior.is_some() { NARROW_HZ } else { WIDE_HZ };
-        let half = rs * (1.0 + ROLL_OFF) / 2.0 + margin;
+        let margin = match (b.inroute, prior) {
+            (Some(_), _) => INROUTE_MARGIN_HZ,
+            (None, Some(_)) => NARROW_HZ,
+            (None, None) => WIDE_HZ,
+        };
+        let ro = roll_off(b);
+        let half = rs * (1.0 + ro) / 2.0 + margin;
         let y = self.band(spectrum, n_fft, d, centre, |f| {
             if f.abs() <= half { 1.0 } else { 0.0 }
         });
@@ -445,15 +622,29 @@ impl BurstDemod {
         // start, plus the run's offset in the burst.
         let start2 = b.start as f64 / d as f64;
         let det_off = layout.detect_at as f64 * sps;
-        let lo = ((start2 - SEARCH_BEFORE_S * fs2).max(0.0) as usize).max((det_off + 1.0) as usize);
-        let hi = (start2 + SEARCH_AFTER_S * fs2 + det_off) as usize;
+        let (before, after) = match b.inroute {
+            Some(_) => (INROUTE_SEARCH_SYMBOLS / rs, INROUTE_SEARCH_SYMBOLS / rs),
+            None => (SEARCH_BEFORE_S, SEARCH_AFTER_S),
+        };
+        let lo = ((start2 - before * fs2).max(0.0) as usize).max((det_off + 1.0) as usize);
+        let hi = (start2 + after * fs2 + det_off) as usize;
         let (fit1, n1, c1) = detect(&y, sps, &layout.detect, lo, hi)?;
         if fit1 < 0.25 {
             return None;
         }
-        // Carrier: the differential product's phase over one symbol.
+        // Carrier: the differential product's phase over one symbol — an
+        // inroute burst's from every pair of known symbols running, there
+        // (its preamble alone, 18 pairs at ~10 dB, scatters the estimate by
+        // ~8 kHz, as far as the fine search reaches).
+        let c1 = match b.inroute {
+            Some(_) => {
+                let first = n1 as f64 - layout.detect_at as f64 * sps;
+                known_pairs(&y, sps, first, &layout.known).unwrap_or(c1)
+            }
+            None => c1,
+        };
         let f1 = f64::from(c1.arg()) / (2.0 * std::f64::consts::PI) * rs;
-        let y = self.band(spectrum, n_fft, d, centre + f1, |f| rrc_gain(f, rs));
+        let y = self.band(spectrum, n_fft, d, centre + f1, |f| rrc_gain(f, rs, ro));
         let (fit2, n2, _) = detect(&y, sps, &layout.detect, n1.saturating_sub(4), n1 + 5)?;
         Some(Coarse {
             fit: fit2,
@@ -482,7 +673,8 @@ impl BurstDemod {
         let p = &layout.detect;
         let fit_at = |t0: f64| -> (f32, Iq) {
             let (mut acc, mut e) = (Iq::new(0.0, 0.0), 0f32);
-            for (k, q) in p.iter().enumerate() {
+            // (A run's unknown symbols, 0, are left out.)
+            for (k, q) in p.iter().enumerate().filter(|(_, q)| q.norm_sqr() > 0.0) {
                 let v = interp(&y, t0 + k as f64 * sps);
                 acc += v * q.conj();
                 e += v.norm_sqr();
@@ -505,11 +697,16 @@ impl BurstDemod {
         if t_first < 0.0 {
             return None;
         }
-        let periods = rs * f64::from(b.slots) * decsat_ts::newtec::SLOT_S;
-        let len = (periods.round() as usize).saturating_sub(BURST_SHORTFALL as usize);
+        let len = match b.inroute {
+            Some(shape) => shape.symbols,
+            None => {
+                let periods = rs * f64::from(b.slots) * decsat_ts::newtec::SLOT_S;
+                (periods.round() as usize).saturating_sub(BURST_SHORTFALL as usize)
+            }
+        };
         let avail = ((y.len() as f64 - 3.0 - t_first) / sps).floor().max(0.0) as usize;
         let len = len.min(avail);
-        if len <= layout.known.last().map_or(0, |k| k.0) {
+        if len < layout.min_len {
             return None;
         }
         let at = |k: usize, off: f64| interp(&y, t_first + (k as f64 + off) * sps);
@@ -535,10 +732,13 @@ impl BurstDemod {
         // The grid by recurrence: each term turned a step at a time (its
         // phasors renormalised every 20 steps against rounding).
         const STEP: f64 = 0.0002;
+        // ±1.2 % of the rate; ±2 % for an inroute burst (its pilots, 30
+        // symbols apart, alias at 3.3 %).
+        let reach: i32 = if b.inroute.is_some() { 100 } else { 60 };
         let mut rot: Vec<Iq> = z
             .iter()
             .map(|&(k, v)| {
-                let p = 2.0 * std::f64::consts::PI * 60.0 * STEP * k;
+                let p = 2.0 * std::f64::consts::PI * f64::from(reach) * STEP * k;
                 v * Iq::new(p.cos() as f32, p.sin() as f32)
             })
             .collect();
@@ -550,7 +750,7 @@ impl BurstDemod {
             })
             .collect();
         let mut fb = (0f32, 0f64);
-        for i in -60..=60 {
+        for i in -reach..=reach {
             let v = rot.iter().fold(Iq::new(0.0, 0.0), |a, r| a + r).norm();
             if v > fb.0 {
                 fb = (v, f64::from(i) * STEP);
@@ -641,7 +841,17 @@ impl BurstDemod {
         }
         // Symbols before the detection run (the header): the phase as at
         // the run's start.
-        let header = if layout.header > 0 {
+        let header = if b.inroute.is_some() {
+            // The terminal's tag, on the k·45° grid.
+            INROUTE_TAG
+                .filter(|&k| k < len)
+                .map(|k| {
+                    (out[k].arg() / std::f32::consts::FRAC_PI_4)
+                        .round()
+                        .rem_euclid(8.0) as u8
+                })
+                .collect()
+        } else if layout.header > 0 {
             (0..layout.header.min(len))
                 .map(|k| {
                     let a =
@@ -691,15 +901,15 @@ impl BurstDemod {
 /// The root-raised-cosine matched filter's gain at `f` Hz from the
 /// carrier (EN 302 307-1 §5.5: flat to (1 − α) Rs/2, a quarter-cosine to
 /// (1 + α) Rs/2).
-fn rrc_gain(f: f64, rs: f64) -> f32 {
-    let (lo, hi) = (rs * (1.0 - ROLL_OFF) / 2.0, rs * (1.0 + ROLL_OFF) / 2.0);
+fn rrc_gain(f: f64, rs: f64, ro: f64) -> f32 {
+    let (lo, hi) = (rs * (1.0 - ro) / 2.0, rs * (1.0 + ro) / 2.0);
     let a = f.abs();
     if a <= lo {
         1.0
     } else if a >= hi {
         0.0
     } else {
-        (std::f64::consts::PI / (2.0 * ROLL_OFF * rs) * (a - lo)).cos() as f32
+        (std::f64::consts::PI / (2.0 * ro * rs) * (a - lo)).cos() as f32
     }
 }
 
@@ -721,9 +931,12 @@ fn detect(y: &[Iq], sps: f64, p: &[Iq], lo: usize, hi: usize) -> Option<(f32, us
         let mut prev = y[n + off[0]];
         for (k, q) in dp.iter().enumerate() {
             let cur = y[n + off[k + 1]];
-            let x = cur * prev.conj();
-            c += x * q.conj();
-            e += x.norm_sqr();
+            // (A product with an unknown symbol, 0, is left out.)
+            if q.norm_sqr() > 0.0 {
+                let x = cur * prev.conj();
+                c += x * q.conj();
+                e += x.norm_sqr();
+            }
             prev = cur;
         }
         let v = c.norm() / (e * ep).sqrt().max(1e-20);
@@ -732,6 +945,29 @@ fn detect(y: &[Iq], sps: f64, p: &[Iq], lo: usize, hi: usize) -> Option<(f32, us
         }
     }
     best
+}
+
+/// The sum, over every pair of known symbols running (k, k + 1), of the
+/// received pair's differential product against the known one's, with
+/// the burst's first symbol at sample `first` of `y` (`sps` a symbol): its
+/// phase is the carrier's turn a symbol.
+fn known_pairs(y: &[Iq], sps: f64, first: f64, known: &[(usize, Iq)]) -> Option<Iq> {
+    let mut c = Iq::new(0.0, 0.0);
+    let mut n = 0;
+    for w in known.windows(2) {
+        let ((k0, q0), (k1, q1)) = (w[0], w[1]);
+        if k1 != k0 + 1 {
+            continue;
+        }
+        let (t0, t1) = (first + k0 as f64 * sps, first + k1 as f64 * sps);
+        if t1 + 2.0 >= y.len() as f64 {
+            break;
+        }
+        let x = interp(y, t1) * interp(y, t0).conj();
+        c += x * (q1 * q0.conj()).conj();
+        n += 1;
+    }
+    (n > 0).then_some(c)
 }
 
 /// `f(n, e^{j w n})` for n in 0..len: the phasor by recurrence in f64,
@@ -960,6 +1196,7 @@ mod tests {
             rate_exact: true,
             waveform: w,
             start,
+            inroute: None,
         }
     }
 
@@ -1107,6 +1344,139 @@ mod tests {
         assert!(res.ok, "fit {} MER {}", res.preamble_fit, res.mer_db);
     }
 
+    /// An inroute burst (a GSE-signalling hub's, 8PSK, roll-off 0.2) of
+    /// `symbols` at `rs`, on a slice at `fs`, `delay` s after `start` and
+    /// `freq` Hz off, between two neighbours in the slots either side (the
+    /// same preamble, the guard between); the burst's own symbols back.
+    #[allow(clippy::too_many_arguments)]
+    fn synth_inroute(
+        symbols: usize,
+        rs: f64,
+        fs: f64,
+        start: usize,
+        delay: f64,
+        freq: f64,
+        esn0_db: f64,
+        r: &mut Lcg,
+    ) -> (Vec<Iq>, Vec<Iq>) {
+        let layout = Layout::inroute(InrouteModulation::Psk8).unwrap();
+        let slot = symbols + decsat_gse::inroute::GUARD_SYMBOLS;
+        let burst = |r: &mut Lcg| -> Vec<Iq> {
+            let mut s: Vec<Iq> = (0..symbols)
+                .map(|_| layout.grid[(r.next() % 8) as usize])
+                .collect();
+            for &(k, q) in &layout.known {
+                if k < symbols {
+                    s[k] = q;
+                }
+            }
+            for k in INROUTE_TAG {
+                s[k] = layout.grid[k % 8];
+            }
+            s
+        };
+        let (before, mine, after) = (burst(r), burst(r), burst(r));
+        let sps = fs / rs;
+        let taps = decsat_dsp::rrc::rrc_taps(sps, INROUTE_ROLL_OFF, 24);
+        let half = taps.len() / 2;
+        let n = start + ((2 * slot) as f64 * sps) as usize + taps.len();
+        let mut x = vec![Iq::new(0.0, 0.0); n];
+        let t_mine = start as f64 + delay * fs;
+        let place = |x: &mut Vec<Iq>, t0: f64, syms: &[Iq]| {
+            for (k, &s) in syms.iter().enumerate() {
+                let tk = t0 + k as f64 * sps;
+                let c = tk.round() as isize;
+                for j in (c - half as isize)..=(c + half as isize) {
+                    let i = (j as f64 - tk).round() as isize + half as isize;
+                    if j >= 0 && (j as usize) < n && i >= 0 && (i as usize) < taps.len() {
+                        x[j as usize] += s * taps[i as usize];
+                    }
+                }
+            }
+        };
+        place(&mut x, t_mine - slot as f64 * sps, &before);
+        place(&mut x, t_mine, &mine);
+        place(&mut x, t_mine + slot as f64 * sps, &after);
+        let amp = (sps as f32).sqrt();
+        let sigma = (sps / 10f64.powf(esn0_db / 10.0) / 2.0).sqrt() as f32;
+        for (i, v) in x.iter_mut().enumerate() {
+            let p = 2.0 * std::f64::consts::PI * freq * i as f64 / fs;
+            *v = *v * amp * Iq::new(p.cos() as f32, p.sin() as f32)
+                + Iq::new(r.gauss() * sigma, r.gauss() * sigma);
+        }
+        (x, mine)
+    }
+
+    #[test]
+    fn an_inroute_burst_between_its_neighbours() {
+        // 717-symbol slots at 665.78 kBd (172B's inroutes 2Eh/30h), the
+        // slice at 8 samples a symbol; 120 Hz off, 4 symbols late.
+        let mut r = Lcg(21);
+        let rs = 665_780.0;
+        let fs = 8.0 * rs;
+        let start = 8 * 800;
+        let (x, sym) = synth_inroute(701, rs, fs, start, 4.0 / rs, 120.0, 16.0, &mut r);
+        let mut dm = BurstDemod::new(fs);
+        let b = ScheduledBurst {
+            terminal: 0x0f4,
+            code: 0,
+            slots: 1,
+            centre_hz: 0.0,
+            symbol_rate: rs,
+            rate_exact: true,
+            waveform: Waveform::Unknown,
+            start,
+            inroute: Some(InrouteShape {
+                symbols: 701,
+                modulation: InrouteModulation::Psk8,
+            }),
+        };
+        let res = dm.demod(&x, &b).expect("burst");
+        assert!(res.ok, "fit {} MER {}", res.preamble_fit, res.mer_db);
+        assert!(res.mer_db > 13.0, "MER {}", res.mer_db);
+        assert!(
+            (res.freq_offset_hz - 120.0).abs() < 20.0,
+            "{}",
+            res.freq_offset_hz
+        );
+        assert!(
+            (res.timing_offset_s - 4.0 / rs).abs() < 0.1 / rs,
+            "{} symbols",
+            res.timing_offset_s * rs
+        );
+        // The tag, and every data symbol as sent.
+        assert_eq!(res.header, [4, 5, 6]);
+        let layout = Layout::inroute(InrouteModulation::Psk8).unwrap();
+        let sent: Vec<Iq> = (0..701)
+            .filter(|k| !layout.known.iter().any(|q| q.0 == *k))
+            .map(|k| sym[k])
+            .collect();
+        assert_eq!(res.symbols.len(), sent.len());
+        let bad = res
+            .symbols
+            .iter()
+            .zip(&sent)
+            .filter(|(a, b)| layout.cst.nearest(**a) != layout.cst.nearest(**b))
+            .count();
+        // (8PSK at 16 dB: an error in a couple of thousand symbols.)
+        assert!(bad <= 3, "{bad} symbol errors");
+        // A 629-symbol burst (inroutes 32h/33h) comes back too.
+        let (x, _) = synth_inroute(613, rs, fs, start, -3.0 / rs, -60.0, 12.0, &mut r);
+        let b = ScheduledBurst {
+            inroute: Some(InrouteShape {
+                symbols: 613,
+                modulation: InrouteModulation::Psk8,
+            }),
+            ..b
+        };
+        let res = dm.demod(&x, &b).expect("short burst");
+        assert!(res.ok, "fit {} MER {}", res.preamble_fit, res.mer_db);
+        assert_eq!(
+            res.symbols.len() + layout.known.iter().filter(|k| k.0 < 613).count(),
+            613
+        );
+    }
+
     #[test]
     fn noise_alone_is_not_a_burst() {
         let mut r = Lcg(3);
@@ -1186,6 +1556,7 @@ mod tests {
                 rate_exact: num(8) > 0.0,
                 waveform,
                 start: num(2) as usize,
+                inroute: None,
             };
             let e = per.entry(b.terminal).or_default();
             e.0 += 1;

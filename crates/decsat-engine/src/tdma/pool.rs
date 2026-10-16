@@ -488,6 +488,9 @@ pub struct PoolView {
     /// Its bursts demodulated by an outbound's plan (filled in by the VFO,
     /// not the tracker).
     pub bursts: Option<Arc<super::pool_bursts::BurstsView>>,
+    /// …or by a GSE-signalling hub's inroute plans, once any outbound
+    /// posts them (also the VFO's).
+    pub inroutes: Option<Arc<super::inroute_bursts::InrouteBurstsView>>,
 }
 
 /// Follows a return pool's carriers and finds its frame grid.
@@ -892,11 +895,16 @@ impl PoolTracker {
     /// from it for `HOLD_COLUMNS` in a row (a guard dip missed for a column
     /// is not a change).
     fn take_layout(&mut self, segs: Vec<(usize, usize)>) {
+        // An edge moved: by MOVE_BINS, or a fortieth of the carrier's width
+        // if more (a wide carrier's gentle skirts cross the threshold a few
+        // kHz this way or that from one column to the next: 800 kHz
+        // inroutes at roll-off 0.2 were never taken up at 3 bins).
         let differs = |a: &[(usize, usize)], b: &[(usize, usize)]| {
             a.len() != b.len()
-                || a.iter()
-                    .zip(b)
-                    .any(|(x, y)| x.0.abs_diff(y.0) >= MOVE_BINS || x.1.abs_diff(y.1) >= MOVE_BINS)
+                || a.iter().zip(b).any(|(x, y)| {
+                    let tol = MOVE_BINS.max((y.1 - y.0) / 40);
+                    x.0.abs_diff(y.0) >= tol || x.1.abs_diff(y.1) >= tol
+                })
         };
         if !differs(&segs, &self.layout) {
             self.candidate = None;

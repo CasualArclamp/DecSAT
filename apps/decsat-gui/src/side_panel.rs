@@ -4870,6 +4870,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
     if let Some(r) = &g.radio {
         radio_section(ui, r);
     }
+    if let Some(h) = &g.hub {
+        hub_section(ui, h, id);
+    }
     if g.labels >= 2 {
         terminals_section(ui, g);
     }
@@ -6304,6 +6307,10 @@ fn pool_section(
             }
         }
     }
+    // A GSE-signalling hub's inroutes, put on this VFO by its own demodulator.
+    if let Some(ib) = p.inroutes.as_deref() {
+        inroute_section(ui, ib, &freq, id);
+    }
     // An outbound's burst plan, lined up with the pool's mean spectrum (a
     // second's worth of new plan or signal between tries), then in time.
     let mut drawn = false;
@@ -6642,6 +6649,369 @@ fn burst_section(
             .small(),
         );
         ui.push_id(("pool_constellation", id), |ui| {
+            constellation(ui, &t.symbols, 200.0);
+        });
+    }
+}
+
+/// What the hub's inroute signalling section shows.
+const HUB_TIP: &str = "A VSAT hub's own signalling in this outbound's GSE (non-IP PDUs, \
+     types 0001h and 0004h, not registered uses of those values): a 46.08 MHz hub clock; the \
+     inroute table (each return carrier's uplink frequency and burst configuration: symbol \
+     rate, slot length in 27 MHz ticks, modulation), every ~5 s; and a burst time plan for \
+     every inroute every 125 ms frame — each slot a 12-bit terminal id and a 4-bit kind. A \
+     plan applies about five frames after it arrives. A Return pool VFO over the inroutes \
+     takes the plans up and demodulates every burst by them.";
+
+/// A hub's inroute signalling, from the outbound's GSE.
+fn hub_section(ui: &mut Ui, h: &decsat_gse::inroute::HubView, id: VfoId) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Hub signalling (inroutes)").strong())
+        .on_hover_text(HUB_TIP);
+    let mut line = format!(
+        "{} plans ({:.1} a second) · {} clock PDUs",
+        h.plans, h.plans_per_s, h.clocks
+    );
+    if let Some(ppm) = h.clock_ppm {
+        line.push_str(&format!(" · hub clock {ppm:+.1} ppm"));
+    }
+    ui.label(line).on_hover_text(
+        "The hub clock against the receiver's, from the 0001h PDUs' counts over their \
+         BBFRAMEs' arrival times",
+    );
+    egui::Grid::new(("hub_inroutes", id))
+        .num_columns(6)
+        .striped(true)
+        .show(ui, |ui| {
+            for c in ["inroute", "uplink", "burst", "slots", "plans", "terminals"] {
+                ui.label(RichText::new(c).small().weak());
+            }
+            ui.end_row();
+            for i in &h.inroutes {
+                ui.label(RichText::new(format!("{:02X}h", i.id)).small());
+                ui.label(
+                    RichText::new(
+                        i.table
+                            .map_or("–".into(), |t| format!("{:.4} MHz", t.uplink_hz / 1e6)),
+                    )
+                    .small(),
+                );
+                match i.config {
+                    Some(c) => {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {:.3} kBd",
+                                c.modulation.name(),
+                                c.air_rate() / 1e3
+                            ))
+                            .small(),
+                        )
+                        .on_hover_text(format!(
+                            "Configured {:.1} kBd; {} whole symbols fill the slot's {} ticks \
+                             of 27 MHz ({:.4} ms), {} of them the burst",
+                            c.symbol_rate / 1e3,
+                            c.slot_symbols(),
+                            c.slot_ticks,
+                            c.slot_s() * 1e3,
+                            c.burst_symbols()
+                        ));
+                        ui.label(
+                            RichText::new(format!("{} × {}", i.slots, c.slot_symbols())).small(),
+                        );
+                    }
+                    None => {
+                        ui.label(RichText::new("–").small());
+                        ui.label(RichText::new(i.slots.to_string()).small());
+                    }
+                }
+                ui.label(
+                    RichText::new(if i.missed > 0 {
+                        format!("{} ({} missed)", i.plans, i.missed)
+                    } else {
+                        i.plans.to_string()
+                    })
+                    .small(),
+                );
+                ui.label(RichText::new(i.terminals.to_string()).small());
+                ui.end_row();
+            }
+        });
+    let busiest: Vec<String> = h
+        .terminals
+        .iter()
+        .take(8)
+        .map(|t| format!("{:03X}h {:.1}", t.id, t.per_frame))
+        .collect();
+    ui.label(
+        RichText::new(format!(
+            "{} terminals with slots · busiest (slots a frame): {}",
+            h.terminals.len(),
+            busiest.join(", ")
+        ))
+        .small(),
+    );
+}
+
+/// What the inroute burst section shows.
+const INROUTES_TIP: &str = "The hub's inroutes on this VFO: the inroute table's uplink \
+     frequencies slid along the pool's mean spectrum as a comb of carriers; the frames from \
+     the inroutes' guard silences (~3 ms at each 125 ms frame's end); the lead — how many \
+     frames after its arrival a plan applies — the one under which whose slot it is best \
+     explains each slot's power. Then every slot of every plan is cut out as it comes and \
+     demodulated (8PSK, a 34-symbol preamble, four known symbols every 30): MER, the \
+     terminal's carrier against the inroute's centre (Δf), its first symbol against the \
+     planned start (Δt), and its tag — three preamble symbols of its own. C/N: its slots' \
+     power over the guard silence's. Click a terminal for its constellation.";
+
+/// A GSE-signalling hub's bursts on this pool VFO.
+fn inroute_section(
+    ui: &mut Ui,
+    b: &decsat_engine::tdma::inroute_bursts::InrouteBurstsView,
+    freq: &impl Fn(f64) -> String,
+    id: VfoId,
+) {
+    ui.add_space(6.0);
+    ui.label(RichText::new("Inroutes (hub's burst plans)").strong())
+        .on_hover_text(INROUTES_TIP);
+    match (b.fit, b.tried) {
+        (Some(f), _) => {
+            ui.colored_label(
+                Color32::from_rgb(110, 220, 110),
+                format!(
+                    "{} inroutes on this VFO · plans apply {} frames ({:.1} ms) after they arrive \
+                     · owners explain {:.0} % of slot power",
+                    b.carriers.len(),
+                    f.lead,
+                    f.lead_s * 1e3,
+                    100.0 * f.r2
+                ),
+            )
+            .on_hover_text(format!(
+                "The next best lead explains {:.0} %, over {} slots; the comb fits the \
+                 spectrum to {:.2}",
+                100.0 * f.next_r2,
+                f.slots,
+                b.map_corr
+            ));
+        }
+        (None, Some(t)) => {
+            ui.label(
+                RichText::new(format!(
+                    "lining up: no lead stands out yet (best {} frames, {:.0} %; next {:.0} %)",
+                    t.lead,
+                    100.0 * t.r2,
+                    100.0 * t.next_r2
+                ))
+                .weak(),
+            );
+        }
+        (None, None) => {
+            ui.label(
+                RichText::new(format!(
+                    "lining up: the hub's plans are heard; {} frame starts found",
+                    b.silences
+                ))
+                .weak(),
+            );
+        }
+    }
+    if let Some(f) = b.frame_s {
+        ui.label(
+            RichText::new(format!(
+                "frame {:.4} ms on the receiver's clock ({:+.1} ppm) from {} guard silences",
+                f * 1e3,
+                (f / decsat_gse::inroute::FRAME_S - 1.0) * 1e6,
+                b.silences
+            ))
+            .small(),
+        );
+    }
+    if !b.carriers.is_empty() {
+        egui::Grid::new(("inroute_carriers", id))
+            .num_columns(5)
+            .striped(true)
+            .show(ui, |ui| {
+                for c in ["inroute", "centre", "burst", "slots", "C/N"] {
+                    ui.label(RichText::new(c).small().weak());
+                }
+                ui.end_row();
+                for c in &b.carriers {
+                    ui.label(RichText::new(format!("{:02X}h", c.inroute)).small());
+                    ui.label(RichText::new(freq(c.centre_hz)).small());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {:.3} kBd",
+                            c.modulation.name(),
+                            c.symbol_rate / 1e3
+                        ))
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} × {} ({} a burst)",
+                            c.slots, c.slot_symbols, c.burst_symbols
+                        ))
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(c.level_db.map_or("–".into(), |l| format!("{l:.1} dB")))
+                            .small(),
+                    );
+                    ui.end_row();
+                }
+            });
+    }
+    if b.planned == 0 {
+        return;
+    }
+    let share = 100.0 * b.demodulated as f64 / b.cut.max(1) as f64;
+    ui.label(format!(
+        "{:.0} bursts a second · {} of {} cut demodulated ({share:.1} %), {} failed",
+        b.per_s, b.demodulated, b.cut, b.failed
+    ));
+    let mut extra = format!(
+        "{} planned · {} late · {} let go · {} workers at {:.0} % ({:.1} s a second)",
+        b.planned,
+        b.late,
+        b.dropped,
+        b.workers,
+        100.0 * b.load / b.workers.max(1) as f64,
+        b.load
+    );
+    if b.unknown > 0 {
+        extra.push_str(&format!(
+            " · {} on inroutes of an unread waveform",
+            b.unknown
+        ));
+    }
+    ui.label(RichText::new(extra).small());
+    ui.label(
+        RichText::new(format!(
+            "start moved {:+.1} µs and the zero {:+.2} kHz by the bursts",
+            b.start_trim_s * 1e6,
+            b.zero_trim_hz / 1e3
+        ))
+        .small()
+        .weak(),
+    );
+    if let Some((path, n)) = &b.recording {
+        ui.label(
+            RichText::new(format!(
+                "● recording the bursts to {} ({n} so far)",
+                path.display()
+            ))
+            .small()
+            .color(Color32::from_rgb(230, 110, 110)),
+        );
+    }
+    let pick_id = egui::Id::new(("inroute_terminal_pick", id));
+    let mut pick: Option<u16> = ui.data(|d| d.get_temp(pick_id));
+    if pick.is_none_or(|t| !b.terminals.iter().any(|x| x.id == t && x.demodulated > 0)) {
+        pick = b
+            .terminals
+            .iter()
+            .max_by_key(|t| t.demodulated)
+            .map(|t| t.id);
+    }
+    let mut order: Vec<&decsat_engine::tdma::inroute_bursts::InrouteTerminal> =
+        b.terminals.iter().filter(|t| t.cut > 0).collect();
+    order.sort_by(|a, b| {
+        b.slots_per_frame
+            .total_cmp(&a.slots_per_frame)
+            .then(a.id.cmp(&b.id))
+    });
+    egui::ScrollArea::vertical()
+        .id_salt(("inroute_terminals", id))
+        .max_height(320.0)
+        .show(ui, |ui| {
+            egui::Grid::new(("inroute_rows", id))
+                .num_columns(8)
+                .striped(true)
+                .show(ui, |ui| {
+                    for h in ["terminal", "slots", "ok", "MER", "C/N", "Δf", "Δt", "tag"] {
+                        ui.label(RichText::new(h).small().weak());
+                    }
+                    ui.end_row();
+                    for t in order {
+                        let r = ui.selectable_label(
+                            pick == Some(t.id),
+                            RichText::new(format!("{:03X}h", t.id))
+                                .small()
+                                .color(terminal_color(t.id)),
+                        );
+                        if r.clicked() {
+                            pick = Some(t.id);
+                        }
+                        r.on_hover_text(format!(
+                            "On inroutes {}",
+                            t.inroutes
+                                .iter()
+                                .map(|i| format!("{i:02X}h"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        ui.label(RichText::new(format!("{:.1}", t.slots_per_frame)).small())
+                            .on_hover_text("Slots a frame in the recent plans");
+                        let ok = 100.0 * t.demodulated as f64 / t.cut.max(1) as f64;
+                        let mut okt = RichText::new(format!("{ok:.0} %")).small();
+                        if ok < 90.0 {
+                            okt = okt.color(Color32::from_rgb(230, 170, 90));
+                        }
+                        ui.label(okt).on_hover_text(format!(
+                            "{} of its {} bursts cut demodulated, {} not",
+                            t.demodulated, t.cut, t.failed
+                        ));
+                        ui.label(
+                            RichText::new(if t.demodulated > 0 {
+                                format!("{:.1} dB", t.mer_db)
+                            } else {
+                                "–".into()
+                            })
+                            .small(),
+                        );
+                        ui.label(
+                            RichText::new(t.level_db.map_or("–".into(), |l| format!("{l:.1} dB")))
+                                .small(),
+                        );
+                        let mut df = RichText::new(format!("{:+.2} kHz", t.freq_hz / 1e3)).small();
+                        if t.freq_hz.abs() > 2e3 {
+                            df = df.color(Color32::from_rgb(230, 170, 90));
+                        }
+                        ui.label(df);
+                        ui.label(RichText::new(format!("{:+.2} µs", t.timing_us)).small());
+                        ui.label(
+                            RichText::new(
+                                t.tag
+                                    .map_or("–".into(), |g| format!("{}{}{}", g[0], g[1], g[2])),
+                            )
+                            .small()
+                            .monospace(),
+                        )
+                        .on_hover_text(format!(
+                            "The preamble's symbols 12–14 (8PSK phase indices on the known \
+                             symbols' reference), the commonest: on {:.0} % of its bursts. \
+                             Most terminals keep one",
+                            100.0 * t.tag_share
+                        ));
+                        ui.end_row();
+                    }
+                });
+        });
+    ui.data_mut(|d| d.insert_temp(pick_id, pick));
+    if let Some(t) = pick.and_then(|p| b.terminals.iter().find(|t| t.id == p))
+        && !t.symbols.is_empty()
+    {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "Terminal {:03X}h: MER {:.1} dB — its latest {} data symbols",
+                t.id,
+                t.mer_db,
+                t.symbols.len()
+            ))
+            .small(),
+        );
+        ui.push_id(("inroute_constellation", id), |ui| {
             constellation(ui, &t.symbols, 200.0);
         });
     }

@@ -191,6 +191,24 @@ the network's outbound to name the vendor, comes first. Weak carriers
 (≤ 7 dB) still fragment; detecting bursts on their preamble once the layout
 is known is the fix.
 
+**Plans from the hub (added 2026-10-15/16).** A Return pool VFO
+(`DecoderKind::ReturnPool`) demodulates every burst by the hub's own burst
+time plan, read by another VFO on the outbound and passed between VFOs in
+the engine's `plan_feed`. Two hubs so far:
+
+- a **Newtec** hub's table D1h in MPEG-TS (`decsat_ts::newtec`,
+  `tdma::pool_bursts`): Mx-DMA, a plan every 40.2 ms;
+- a hub that **signals in GSE** (`decsat_gse::inroute`,
+  `tdma::inroute_bursts`, 2026-10-16): non-IP PDUs 0001h (a 46.08 MHz
+  clock) and 0004h (an inroute table with uplink frequencies, burst
+  configurations with slot lengths in 27 MHz ticks, and a plan an inroute
+  every 125 ms frame: a 12-bit terminal and 4-bit kind a slot). The pool
+  puts the inroutes on its spectrum (the table's frequencies as a comb),
+  its frames on the inroutes' guard silences, and the plans on the frames
+  by the lead under which the plans' owners best explain the slots'
+  powers; the bursts (8PSK, a 34-symbol preamble, four known symbols every
+  30) go to the same `BurstDemod` as Newtec's, told their layout.
+
 ## 3d. Satellite beacons
 
 Asked for 2026-10-15 with a recording of the Intelsat 19 beacon at

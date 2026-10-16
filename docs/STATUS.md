@@ -5675,3 +5675,112 @@ box a burst.
 Checked on a synthetic 2 MS/s pool (five lanes, 8 × 5.025 ms slots, 0.3 ms
 guards, ±3 dB levels): five columns under the waterfall's five carriers,
 cut slot by slot, the weaker bursts dimmer.
+
+## A DVB-S2 outbound and its 125 ms TDMA inroutes (172B, 2026-10-16)
+
+Rory's screenshot: VFO 20 on 12677.608 MHz (2 MS/s S2 ACM, GSE/IP behind
+the vendor CRC-32, ISI 0 and ISI 254) beside VFO 22, a Return pool over
+four ~670 kS/s carriers at 12679.1–12681.5 MHz that read "0 carriers ·
+repeats every 125.000 ms" — "add it to the decoder; the radio is yours".
+Recorded 90 s (HackRF 2078.92 MHz, 10 MS/s, LNA 40 VGA 14, −17.8 dBFS).
+
+**The outbound**: 42 527 of 42 799 frames good, Es/N0 15.5 dB; the same
+vendor framing as the 1 MS/s outbounds of 2026-10-13 (length counting its
+header, split fragment ids, CRC-32 trailer). ISI 254 is 32APSK 3/4 only,
+each field `f0 00 ff fe`, a frame counter, then random bytes: encrypted
+bulk. ISI 0 (ACM, QPSK 1/2 to 16APSK 8/9) carries the terminals' own
+type-0002h PDUs (IP behind a short header: the blind IPv4 search finds it)
+and the hub's signalling:
+
+- **0001h**, no label, 8 bytes: a 46.08 MHz clock count (23.04 a symbol).
+- **0004h to 00:ff:ff:7f:fc:00**, QPSK 1/2. Bytes 0–3 zero: a **burst
+  time plan**, one an inroute every 125 ms frame (48 a second): [4 zero
+  bytes][frame, 24 bits][kind 1/5][flags E1h/80h][records][1B 1B 1B][00
+  03][inroute, 16 bits][3 zero bytes][traffic slots], the 16-byte records
+  (not understood: terminal ids going round the inroutes a frame at a
+  time), with flag 40h twelve bytes more, then a 16-bit word a slot — a
+  12-bit terminal and a 4-bit kind (2 the busy runs, Fh the slots that go
+  round every terminal, 0/1 at some runs' edges) — then the table's extra
+  slots, padded to an even count.
+- Bytes 2–3 `01 01` / `00 01`, every ~5 s: byte 4 = 11h **the inroute
+  table** (id, uplink in 100 Hz units, a constant 3 375 000, slot words,
+  configurations), 1Ah/12h **burst configurations** (symbol rate, slot in
+  27 MHz ticks, modulation 04h = 8PSK as measured, 02h = QPSK), 10h the
+  group (2E 30 32 33 34 35).
+
+| inroute | uplink, MHz | here, MHz | burst | slots | slot |
+|---|---|---|---|---|---|
+| 2Eh, 30h | 14427.1, 14427.9 | 12679.107, 12679.907 | 8PSK 666 kBd | 113 | 29 077 ticks: 717 symbols, 665.784 kBd on the air |
+| 32h, 33h | 14428.7, 14429.5 | 12680.707, 12681.507 | 8PSK 666 kBd | 129 | 25 510 ticks: 629 symbols, 665.739 kBd |
+| 34h | 14446.8 | 12698.8 | QPSK 666 kBd | 82 | 40 104 ticks: 989 symbols |
+| 35h | 14447.4 | 12699.4 | QPSK 333 kBd | 41 | 79 550 ticks: 981 symbols |
+
+(Uplink − 1747.993 MHz with this LO trim; 34h/35h were outside the
+capture.) The carriers' cyclic lines, 665 784 and 665 736 Hz, are the slot
+ticks' whole symbols, not the configured 666 000.
+
+**The return**: every inroute falls silent 3.1–3.3 ms at each frame's end
+(113 × 1076.93 µs or 129 × 944.82 µs leave that of 125 ms); slots run back
+to back, each ending in a 16-symbol guard; every slot holds a burst (the
+kinds look alike on the air). **A plan applies five frames after it
+arrives** (618 ms after the arrival line): grouped by the plan's owners at
+lead 5, the slot powers' variance is 0.89–0.91 explained on 2Eh/30h and
+0.68 on 32h/33h, ≤ 0.13 at any other lead — the same test pairs carriers
+with inroutes. Each burst: 701 symbols (613 on 629-symbol slots), 8PSK,
+roll-off 0.2 (the carriers sit (1 + α)·666 kBd = 800 kHz apart); a
+34-symbol preamble, fixed but for symbols 4, 6, 12–14 (a tag of the
+terminal's, mostly the same on all its bursts) and 24–29; four known
+symbols every 30 (30 to 693, BPSK on the 135°/315° diagonal, a fixed
+pattern); a 14-symbol word at 506–519. Read from 3000 bursts on each of
+two carriers, which agree. The data is 8PSK at ~9 dB effective SNR
+(known-symbol fit 0.9; a burst's |E u⁸| 0.06, what 8PSK gives there). The
+configurations' bytes 60h/54h/42h scale with the slot (96/84/66: payload
+bytes?) — unproven; the FEC not looked at. 125 ms frames, 8PSK/QPSK
+inroutes with BPSK pilots and a plan a frame are what iDirect does — a
+hint, not an identification (the Intelsat 19 inroutes of 2026-10-14 had
+pilots every 30 and 125 ms frames too).
+
+**Built**:
+
+- `decsat_gse::inroute`: the messages and `HubRx` (clock, tables, plans,
+  the arrival line, terminals by slots). The hub clock's rate is taken
+  from the least arrival delays (the lower envelope): a straight fit
+  wandered ±10 ppm with the ACM queueing.
+- `GseIp::keep_others`/`take_others`; the IP stage feeds them on with
+  their arrival times (`GseView::hub`) and posts the plans on the plan
+  feed's new hub channel (`post_hub_plans`, `read_hubs`); IP VFOs now get
+  a plan link.
+- `tdma::inroute_bursts`, the Pool decoder's third part: inroutes put on
+  the pool's mean spectrum by a raised-cosine comb (a flat top fits
+  anywhere along a wider plateau); frames from the guard silences in the
+  inroutes' own band power (the whole VFO's envelope missed them: the
+  outbound's skirt leaks in at the VFO's edge); the lead by the owners'
+  explained variance; every slot scheduled and handed to `BurstDemod`
+  with an `InrouteShape`; start and zero trimmed by the bursts; per
+  terminal MER, Δf, Δt, tag (the commonest) and C/N; Record writes
+  `.ibursts` (symbols and LLRs).
+- `BurstDemod`: the inroute layout; the preamble looked for ±25 symbols
+  only (neighbouring slots share it); an inroute burst's coarse carrier
+  from every pair of known symbols running, not the preamble's 18 — at
+  ~10 dB those scattered it ~8 kHz, the fine search's whole reach, and
+  14 % of bursts failed (now 2–3 %); the fine search ±2 % of the rate
+  (the pilots alias at 3.3 %).
+- Pool tracker: a layout's edges may move a fortieth of the carrier's
+  width between columns (was 3 bins): 800 kHz carriers with gentle skirts
+  were never taken up — the "0 carriers".
+- CLI `--plan-from OFF:BW:ip`, the hub's signalling in the IP report, the
+  inroutes in the pool's; GUI "Hub signalling (inroutes)" on the IP card,
+  "Inroutes" in the pool section (carriers, lead, bursts, terminals, a
+  constellation), and the VFO's tag "4 inroutes · N bursts/s".
+
+**On the capture**: comb fit 0.96; frame 125.000000 ms on the receiver's
+clock, hub clock +0.6 ppm; lead 5 frames (618.5 ms); ~3300 bursts a
+second scheduled, 97–98 % of those cut demodulated, MER 8–11 dB, terminal
+C/N 9–12 dB; 184 terminals in the plans (0CEh and 02Dh ~17 slots a frame).
+`decsat decode cap.cs8 --decoder pool --offset 1415000 --bandwidth 3194000
+--plan-from=-1290000:2500000:ip`.
+
+**Not done**: the QPSK inroutes 34h/35h (not captured; their known
+symbols unread, so their slots are counted, not demodulated); the FEC; the
+16-byte records and what the slot kinds mean; the pool tracker still splits
+a carrier at the HackRF's DC notch.

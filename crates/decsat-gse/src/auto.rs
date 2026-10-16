@@ -81,6 +81,8 @@ pub fn ip_of(pdu: &Pdu) -> Option<(&[u8], IpInfo)> {
 const MAX_LABELS: usize = 4096;
 /// Destination addresses kept per label.
 const MAX_ADDRS: usize = 4;
+/// Non-IP PDUs kept for a caller between takes.
+const MAX_KEPT: usize = 4096;
 
 /// What one GSE label — a terminal's address on an outbound: a MAC (6
 /// bytes), 3 bytes, or none for broadcast — has been sent.
@@ -129,6 +131,9 @@ pub struct GseIp {
     labels: std::collections::HashMap<crate::decode::Label, LabelStats>,
     /// The MODCOD of the frames being decoded ([`Self::set_modcod`]).
     modcod: u8,
+    /// Non-IP PDUs kept for the caller ([`Self::keep_others`]), until taken.
+    keep_others: bool,
+    others: Vec<Pdu>,
 }
 
 impl Default for GseIp {
@@ -153,7 +158,23 @@ impl GseIp {
             trailers: 0,
             labels: Default::default(),
             modcod: 0,
+            keep_others: false,
+            others: Vec::new(),
         }
+    }
+
+    /// Keep the non-IP PDUs for [`Self::take_others`] (a hub's signalling
+    /// rides in them: [`crate::inroute`]).
+    pub fn keep_others(&mut self, on: bool) {
+        self.keep_others = on;
+        if !on {
+            self.others.clear();
+        }
+    }
+
+    /// The non-IP PDUs kept since the last call, oldest first.
+    pub fn take_others(&mut self) -> Vec<Pdu> {
+        std::mem::take(&mut self.others)
     }
 
     /// The MODCOD (DVB-S2 number, or S2X PLS code) of the frames that
@@ -235,6 +256,13 @@ impl GseIp {
         *self.other_protocols.entry(p.protocol).or_default() += 1;
         for &b in &p.data {
             self.other_bytes[usize::from(b)] += 1;
+        }
+        // (Bounded: a caller that stops taking them loses the oldest.)
+        if self.keep_others {
+            if self.others.len() >= MAX_KEPT {
+                self.others.remove(0);
+            }
+            self.others.push(p.clone());
         }
     }
 

@@ -1236,6 +1236,9 @@ pub struct GseView {
     pub other_encrypted: bool,
     /// Data fields that ended in a vendor's CRC-32 over the BBFRAME.
     pub trailers: u64,
+    /// A hub's inroute signalling in the non-IP PDUs (its burst plans for a
+    /// return pool), once any is read; refreshed twice a second of signal.
+    pub hub: Option<Arc<decsat_gse::inroute::HubView>>,
     pub packets: u64,
     pub bytes: u64,
     pub ipv4: u64,
@@ -1666,6 +1669,13 @@ struct IpStage {
     udp_ts_want: Option<SocketAddr>,
     udp_ts_auto: Option<SocketAddr>,
     watch: Option<(SocketAddr, TsStage)>,
+    /// A hub's inroute signalling (`decsat_gse::inroute`), its view as of
+    /// the last half second, whether that is still to be posted to the
+    /// plan feed, and signal since it was taken.
+    hub: decsat_gse::inroute::HubRx,
+    hub_view: Option<Arc<decsat_gse::inroute::HubView>>,
+    hub_view_new: bool,
+    hub_since: f64,
 }
 
 impl IpStage {
@@ -1701,6 +1711,10 @@ impl IpStage {
             udp_ts_want: None,
             udp_ts_auto: None,
             watch: None,
+            hub: decsat_gse::inroute::HubRx::new(),
+            hub_view: None,
+            hub_view_new: false,
+            hub_since: 0.0,
             gse: BTreeMap::new(),
             hem: BTreeMap::new(),
             hem_buf: Vec::new(),
@@ -1848,6 +1862,7 @@ impl IpStage {
         let g = self.gse.entry(isi).or_insert_with(|| {
             let mut g = GseIp::new();
             g.forced = forced;
+            g.keep_others(true);
             g
         });
         g.set_modcod(modcod);
@@ -1864,6 +1879,35 @@ impl IpStage {
             self.ip(&p.data, &p.info);
         }
         self.packets = packets;
+        self.hub_pdus(isi);
+    }
+
+    /// Stream `isi`'s non-IP PDUs to the hub signalling reader.
+    fn hub_pdus(&mut self, isi: u8) {
+        let Some(g) = self.gse.get_mut(&isi) else {
+            return;
+        };
+        for p in g.take_others() {
+            self.hub.pdu(p.protocol, &p.data);
+        }
+    }
+
+    /// The frame coming next arrived at `t` on the receiver's source clock
+    /// (for the hub's plans' arrival times).
+    fn at_source(&mut self, t: f64) {
+        self.hub.at_source(t);
+    }
+
+    /// The hub's plans read here, to `link` for the other VFOs (a return
+    /// pool): as they come, and the view when it is new.
+    fn post_plan(&mut self, link: &crate::plan_feed::PlanLink) {
+        link.feed.post_hub_plans(link.id, self.hub.take_fresh());
+        if self.hub_view_new
+            && let Some(v) = &self.hub_view
+        {
+            self.hub_view_new = false;
+            link.feed.post_hub_view(link.id, (**v).clone());
+        }
     }
 
     /// One good GSE-HEM frame's data field: the sliced GSE packets put back
@@ -1883,6 +1927,7 @@ impl IpStage {
         }
         self.packets = packets;
         self.hem_buf = whole;
+        self.hub_pdus(isi);
     }
 
     /// A frame was lost: GSE-HEM packets cut across it are gone.
@@ -2033,6 +2078,12 @@ impl IpStage {
     fn tick(&mut self, secs: f64) {
         self.mcast.tick(secs);
         self.clock += secs;
+        self.hub_since += secs;
+        if self.hub_since >= 0.5 && self.hub.active() {
+            self.hub_since = 0.0;
+            self.hub_view = Some(Arc::new(self.hub.view()));
+            self.hub_view_new = true;
+        }
         self.udp_ts.tick(secs);
         if let Some((_, stage)) = &mut self.watch {
             stage.tick(secs);
@@ -2110,6 +2161,7 @@ impl IpStage {
             other_entropy: main.and_then(GseIp::other_entropy),
             other_encrypted: main.is_some_and(GseIp::other_encrypted),
             trailers: self.gse.values().map(GseIp::trailers).sum(),
+            hub: self.hub_view.clone(),
             terminals: self.terminals.clone(),
             labels: self.labels,
             hem,
@@ -3330,10 +3382,16 @@ fn run(
                 // field covers it.
                 let stage = ip.get_or_insert_with(IpStage::new);
                 stage.follow(&o);
+                if let Some(t) = src_end {
+                    stage.at_source(t);
+                }
                 stage.bbframe(isi, b.pls.modcod, &b.bytes[..end]);
             } else if content == StreamContent::GseHem {
                 let stage = ip.get_or_insert_with(IpStage::new);
                 stage.follow(&o);
+                if let Some(t) = src_end {
+                    stage.at_source(t);
+                }
                 stage.hem_field(isi, b.pls.modcod, h.syncd, &b.bytes[BBHEADER_LEN..end]);
             }
         }
@@ -3357,6 +3415,9 @@ fn run(
             stage.follow(&o);
             stage.follow_udp_ts(&o, udp_shown);
             stage.tick(secs);
+            if let Some(link) = &o.plan_link {
+                stage.post_plan(link);
+            }
         }
 
         let used = t0.elapsed().as_secs_f64() + pre_secs;

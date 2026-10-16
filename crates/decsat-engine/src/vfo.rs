@@ -924,6 +924,7 @@ enum Decoder {
     Pool(
         Box<crate::tdma::pool::PoolTracker>,
         Box<crate::tdma::pool_bursts::PoolBursts>,
+        Box<crate::tdma::inroute_bursts::InrouteBursts>,
     ),
     /// The Intelsat 19 DAMA outbound: Identify's first look centres the
     /// carrier, then QPSK at the measured rate into the framer.
@@ -1270,6 +1271,10 @@ impl Worker {
                     s.bandwidth_hz.min(ddc.out_rate()),
                 )),
                 Box::new(crate::tdma::pool_bursts::PoolBursts::new(
+                    ddc.out_rate(),
+                    crate::tdma::pool_bursts::PoolBursts::default_workers(),
+                )),
+                Box::new(crate::tdma::inroute_bursts::InrouteBursts::new(
                     ddc.out_rate(),
                     crate::tdma::pool_bursts::PoolBursts::default_workers(),
                 )),
@@ -1940,7 +1945,7 @@ impl Worker {
                     files.write(&frames, &points, rx.carried_total());
                 }
             }
-            Decoder::Pool(p, b) => {
+            Decoder::Pool(p, b, i) => {
                 p.push_at(&self.bb, self.block_s.0);
                 let tag = format!(
                     "{}-{}",
@@ -1960,6 +1965,16 @@ impl Worker {
                     record,
                 );
                 p.set_plan_hint(b.plan_hint());
+                // A GSE-signalling hub's plans (decsat_gse::inroute), from
+                // an IP VFO on its outbound.
+                i.set_lossless(self.lossless);
+                i.push(
+                    &self.bb,
+                    self.block_s.0,
+                    p.view(),
+                    self.plans.as_ref(),
+                    record,
+                );
             }
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);
@@ -2378,11 +2393,20 @@ impl Worker {
                 };
                 st.beacon = Some(v);
             }
-            Decoder::Pool(p, b) => {
+            Decoder::Pool(p, b, i) => {
                 let mut v = p.view().clone();
                 let bursts = b.view();
+                let inroutes = i.has_plans().then(|| i.view());
                 st.message = match (v.slot_s, v.frame_s) {
                     _ if v.seconds < 1.0 => "listening…".into(),
+                    _ if let Some(ib) = inroutes.as_ref().filter(|ib| ib.fit.is_some()) => format!(
+                        "{} inroutes · {:.0} bursts/s demodulated ({} of {} planned) · {} terminals",
+                        ib.carriers.len(),
+                        ib.per_s,
+                        ib.demodulated,
+                        ib.planned,
+                        ib.terminals.len()
+                    ),
                     _ if bursts.timing.is_some() => format!(
                         "{} carriers · {:.0} bursts/s demodulated ({} of {} planned)",
                         v.carriers.len(),
@@ -2410,8 +2434,13 @@ impl Worker {
                 if let Some((p, n)) = &bursts.recording {
                     st.recording = Some((p.clone(), *n));
                 }
-                st.recording_active = bursts.recording.is_some();
+                if let Some((p, n)) = inroutes.as_ref().and_then(|ib| ib.recording.as_ref()) {
+                    st.recording = Some((p.clone(), *n));
+                }
+                st.recording_active = bursts.recording.is_some()
+                    || inroutes.as_ref().is_some_and(|ib| ib.recording.is_some());
                 v.bursts = Some(Arc::new(bursts));
+                v.inroutes = inroutes.map(Arc::new);
                 st.pool = Some(v);
             }
             Decoder::Tdma(a) => {
@@ -2860,7 +2889,7 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
 
 fn fec_output(s: &VfoSettings, ddc: &Ddc, plans: &Option<crate::plan_feed::PlanLink>) -> FecOutput {
     FecOutput {
-        plan_link: plans.clone().filter(|_| s.decoder.outputs_ts()),
+        plan_link: plans.clone().filter(|_| s.decoder.carries_ip()),
         record: s.record
             && matches!(
                 s.decoder.chain(),

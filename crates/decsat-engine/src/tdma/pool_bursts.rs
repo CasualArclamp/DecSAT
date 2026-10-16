@@ -113,15 +113,15 @@ fn sure(t: &PlanTiming) -> bool {
 
 /// The pool's baseband for the last [`RING_S`], with the source-clock time
 /// of its first sample.
-struct Ring {
+pub(super) struct Ring {
     rate: f64,
-    start_s: f64,
+    pub(super) start_s: f64,
     buf: VecDeque<Iq>,
     cap: usize,
 }
 
 impl Ring {
-    fn new(rate: f64) -> Self {
+    pub(super) fn new(rate: f64) -> Self {
         Ring {
             rate,
             start_s: 0.0,
@@ -130,13 +130,13 @@ impl Ring {
         }
     }
 
-    fn end_s(&self) -> f64 {
+    pub(super) fn end_s(&self) -> f64 {
         self.start_s + self.buf.len() as f64 / self.rate
     }
 
     /// Signal whose first sample came at `src_s`; a jump (blocks dropped,
     /// a file played round) starts the ring again.
-    fn push(&mut self, x: &[Iq], src_s: f64) {
+    pub(super) fn push(&mut self, x: &[Iq], src_s: f64) {
         if self.buf.is_empty() || (src_s - self.end_s()).abs() > 2.0 / self.rate {
             self.buf.clear();
             self.start_s = src_s;
@@ -149,9 +149,14 @@ impl Ring {
         }
     }
 
+    /// The samples held, oldest first.
+    pub(super) fn samples(&self) -> &VecDeque<Iq> {
+        &self.buf
+    }
+
     /// The samples from `t0` to `t1`, and the index of `at` among them;
     /// `None` unless the ring holds them all.
-    fn slice(&self, t0: f64, t1: f64, at: f64) -> Option<(Vec<Iq>, usize)> {
+    pub(super) fn slice(&self, t0: f64, t1: f64, at: f64) -> Option<(Vec<Iq>, usize)> {
         let i0 = ((t0 - self.start_s) * self.rate).round();
         let i1 = ((t1 - self.start_s) * self.rate).round();
         if i0 < 0.0 || i1 > self.buf.len() as f64 || i1 <= i0 {
@@ -445,7 +450,7 @@ struct Followed {
 }
 
 /// The median of `v` (reordered); 0 when empty.
-fn median(v: &mut [f64]) -> f64 {
+pub(super) fn median(v: &mut [f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
@@ -791,6 +796,7 @@ impl PoolBursts {
                         rate_exact: exact,
                         waveform,
                         start: 0,
+                        inroute: None,
                     },
                 });
             }

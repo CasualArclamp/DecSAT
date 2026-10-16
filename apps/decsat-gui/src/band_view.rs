@@ -462,6 +462,15 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             _ => format!("{:.0} %", st.progress * 100.0),
         },
         DecoderKind::ReturnPool => match &st.pool {
+            // A hub's inroutes followed: those, and their bursts.
+            Some(p) if let Some(ib) = p.inroutes.as_deref().filter(|ib| ib.fit.is_some()) => {
+                let rec = if st.recording_active { " ● REC" } else { "" };
+                format!(
+                    "{} inroutes · {:.0} bursts/s{rec}",
+                    ib.carriers.len(),
+                    ib.per_s
+                )
+            }
             Some(p) => match p.frame_s.or(p.slot_s) {
                 Some(f) => format!("{}× · {:.3} ms frame", p.carriers.len(), f * 1e3),
                 None => format!("{}× carriers", p.carriers.len()),

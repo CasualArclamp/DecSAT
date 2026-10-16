@@ -10,10 +10,14 @@
 //! read, and the plan's view (learned widths, arrival line) every half
 //! second. A reader takes what came from every other VFO since it last
 //! looked.
+//!
+//! A hub that signals in GSE instead ([`decsat_gse::inroute`]: a plan per
+//! inroute a 125 ms frame) posts on a channel of its own, read the same way.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use decsat_gse::inroute::{HubView, InroutePlan};
 use decsat_ts::newtec::{PlanFrame, PlanView};
 
 use crate::vfo::VfoId;
@@ -21,6 +25,9 @@ use crate::vfo::VfoId;
 /// Frames kept per outbound for readers that have not looked: five seconds
 /// of 40 ms frames.
 const KEEP_FRAMES: usize = 128;
+
+/// Inroute plans kept per outbound: five seconds of six inroutes.
+const KEEP_HUB_PLANS: usize = 256;
 
 #[derive(Default)]
 struct Feed {
@@ -30,10 +37,27 @@ struct Feed {
     next: u64,
 }
 
+#[derive(Default)]
+struct HubFeed {
+    view: Option<Arc<HubView>>,
+    plans: VecDeque<(u64, InroutePlan)>,
+    next: u64,
+}
+
 /// The engine's plans, by the VFO they come from.
 #[derive(Default)]
 pub struct PlanFeed {
     feeds: Mutex<BTreeMap<VfoId, Feed>>,
+    hubs: Mutex<BTreeMap<VfoId, HubFeed>>,
+}
+
+/// What one GSE-signalling outbound posted since a reader last looked.
+#[derive(Debug, Clone)]
+pub struct HubNews {
+    pub from: VfoId,
+    pub view: Option<Arc<HubView>>,
+    /// Plans new to the reader, oldest first.
+    pub plans: Vec<InroutePlan>,
 }
 
 /// What one outbound posted since a reader last looked.
@@ -71,6 +95,53 @@ impl PlanFeed {
     /// VFO `from` is gone.
     pub fn forget(&self, from: VfoId) {
         self.feeds.lock().unwrap().remove(&from);
+        self.hubs.lock().unwrap().remove(&from);
+    }
+
+    /// Inroute plans read on VFO `from`'s outbound.
+    pub fn post_hub_plans(&self, from: VfoId, plans: Vec<InroutePlan>) {
+        if plans.is_empty() {
+            return;
+        }
+        let mut hubs = self.hubs.lock().unwrap();
+        let f = hubs.entry(from).or_default();
+        for p in plans {
+            f.plans.push_back((f.next, p));
+            f.next += 1;
+        }
+        while f.plans.len() > KEEP_HUB_PLANS {
+            f.plans.pop_front();
+        }
+    }
+
+    /// VFO `from`'s hub signalling as it now stands.
+    pub fn post_hub_view(&self, from: VfoId, view: HubView) {
+        self.hubs.lock().unwrap().entry(from).or_default().view = Some(Arc::new(view));
+    }
+
+    /// What every VFO but `reader` posted of its hub's signalling since
+    /// `cursor` (updated here).
+    pub fn read_hubs(&self, reader: VfoId, cursor: &mut BTreeMap<VfoId, u64>) -> Vec<HubNews> {
+        let hubs = self.hubs.lock().unwrap();
+        cursor.retain(|id, _| hubs.contains_key(id));
+        hubs.iter()
+            .filter(|(id, _)| **id != reader)
+            .map(|(&id, f)| {
+                let from = cursor.entry(id).or_insert(0);
+                let plans = f
+                    .plans
+                    .iter()
+                    .filter(|(n, _)| *n >= *from)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                *from = f.next;
+                HubNews {
+                    from: id,
+                    view: f.view.clone(),
+                    plans,
+                }
+            })
+            .collect()
     }
 
     /// What every VFO but `reader` posted since `cursor` (the next frame
@@ -157,5 +228,28 @@ mod tests {
         feed.forget(1);
         assert!(feed.read(2, &mut b).is_empty());
         assert!(b.is_empty());
+    }
+
+    #[test]
+    fn hub_plans_reach_other_vfos_once() {
+        let feed = PlanFeed::default();
+        let mut c = BTreeMap::new();
+        let plan = |frame| InroutePlan {
+            frame,
+            inroute: 0x2e,
+            owners: Vec::new(),
+            extra: Vec::new(),
+            arrival_s: None,
+        };
+        feed.post_hub_plans(3, vec![plan(1), plan(2)]);
+        feed.post_hub_view(3, HubView::default());
+        assert!(feed.read_hubs(3, &mut BTreeMap::new()).is_empty());
+        let news = feed.read_hubs(4, &mut c);
+        assert_eq!(news.len(), 1);
+        assert_eq!(news[0].plans.len(), 2);
+        assert!(news[0].view.is_some());
+        assert!(feed.read_hubs(4, &mut c)[0].plans.is_empty());
+        feed.forget(3);
+        assert!(feed.read_hubs(4, &mut c).is_empty());
     }
 }

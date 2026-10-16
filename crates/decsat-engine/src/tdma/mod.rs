@@ -21,6 +21,8 @@
 //! scheduled (its terminal, code, frequency and slot known);
 //! [`pool_bursts`] does it live in a Return pool VFO, the plan fed from an
 //! outbound VFO through the engine's [`crate::plan_feed`].
+//! [`inroute_bursts`] does the same for a hub that signals in GSE
+//! ([`decsat_gse::inroute`]: a plan an inroute every 125 ms frame).
 //!
 //! Recording writes every burst's data symbols to a `.bursts` file (and a
 //! line per burst to a `.csv`, with its header fields' values — the short
@@ -50,6 +52,7 @@
 pub mod burst;
 pub mod burst_demod;
 pub mod demod;
+pub mod inroute_bursts;
 pub mod layout;
 pub mod pool;
 pub mod pool_bursts;
