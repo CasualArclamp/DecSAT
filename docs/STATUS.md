@@ -5318,3 +5318,41 @@ changing only a header and the tail). Stopped: the code is not found.
   hashing) written in Rust, fed by a longer recording at the best MER —
   plausible, several days, and the payload may be encrypted when done.
   Not started.
+
+### A second pass: searching for the checks themselves (2026-10-16)
+
+The plan session asked again for the check search on 0104h, naming
+low-weight dual-codeword methods. Done with what the capture holds; not
+found.
+
+- **Rank**: of no use with noise — stacked bursts are full rank — and not
+  needed: the dimension is known exactly from the systematic split (712
+  of 1 424).
+- **Method**: if the code is IRA-like (as the co-moving clusters
+  suggest), the check between two accumulator-adjacent parity bits a, b
+  is p_a + p_b + (a few information bits). For the 12 most strongly
+  co-moving pairs, the information set was searched over the 647 diverse
+  0104h bursts (information bits ~50/50), keeping the ~360 where a and b
+  are reliable: every single, pair and triple exhaustively (bit-packed,
+  ~180 million sets a pair), every 4-set by meet-in-the-middle with
+  locality-sensitive hashing (16-bit keys, 300 tables, ~150 million
+  candidates verified a pair). A planted weight-6 check (four
+  information bits, 22 % noise) is found exactly by the same search
+  (agreement 0.741 against a random best of ~0.66).
+- **Result**: every pair's best set is at the random maximum — singles
+  0.58–0.61, pairs 0.62–0.64, triples 0.64–0.66, 4-sets 0.65–0.68 —
+  exactly what two unrelated control pairs score. So no check of weight
+  ≤ 6 (two parity bits + up to four information bits) runs through any
+  of these pairs.
+- **Why it can stop here**: either the co-moving pairs are not accumulator
+  neighbours (they share a run but with untouched checks between them —
+  the order within a run is not recoverable from the near-idle bursts),
+  or the checks are heavier, or the parity is not an accumulator. Each
+  widening is out of reach in Python: all 253 000 parity pairs at ~45 s,
+  or 5-sets (pair against triple, 60 million keys a table).
+- **What would help**: more data mainly sharpens detection (it would let
+  weaker or heavier checks stand out) but does not shrink the search; the
+  missing piece is the accumulator order inside the runs, or a compiled
+  (Rust) dual-codeword search over all parity pairs. No HackRF recording
+  made: with no candidate structure to confirm, a longer capture alone
+  would not change the outcome.
