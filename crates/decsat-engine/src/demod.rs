@@ -734,8 +734,9 @@ impl Demod {
         }
         self.raw.clear();
         self.raw.extend_from_slice(payload);
-        // Where the current stretch of data began, and the phase there.
-        let mut seg = (0usize, self.pll.phase());
+        // Where the current stretch of data began, and the loop's phase and
+        // frequency there.
+        let mut seg = (0usize, self.pll.phase(), self.pll.freq_rad());
         let mut in_block = false;
         for i in 0..payload.len() {
             let pilot = match layout {
@@ -755,11 +756,17 @@ impl Demod {
                 };
                 let corr = self.pll.anchor(&payload[i..end], |_| PILOT);
                 if corr.abs() > slip && i > seg.0 {
-                    let (i0, ph0) = seg;
+                    let (i0, ph0, f0) = seg;
                     let span = (i - i0) as f64;
                     // Unwrap the block's phase against where the frequency
-                    // says it should be, then interpolate linearly.
-                    let want = ph0 + self.pll.freq_rad() * span;
+                    // at the stretch's start says it should be, then
+                    // interpolate linearly. Not the loop's frequency now:
+                    // the slip being repaired can have kicked that by more
+                    // than half a turn over the stretch (> 2.3 kHz at
+                    // 6.75 MBd), and the wrong turn then lays a whole turn
+                    // of ramp across data that were fine — on 172B's ACM
+                    // outbound, 3 % of QPSK 2/3 frames at 13 dB (0.3 % so).
+                    let want = ph0 + f0 * span;
                     let d = self.pll.phase() - want;
                     let ph1 = want + (d + PI).rem_euclid(TAU) - PI;
                     for (t, (y, &x)) in payload[i0..i].iter_mut().zip(&self.raw[i0..i]).enumerate()
@@ -780,7 +787,7 @@ impl Demod {
                 in_block = true;
             } else if in_block && !pilot {
                 // The first symbol after a known block starts a stretch.
-                seg = (i, self.pll.phase());
+                seg = (i, self.pll.phase(), self.pll.freq_rad());
                 in_block = false;
             }
             let x = payload[i];

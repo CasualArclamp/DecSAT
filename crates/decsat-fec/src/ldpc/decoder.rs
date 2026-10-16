@@ -42,6 +42,19 @@ const NORM_SHIFT: u32 = 3;
 const STALL_CHECKS: usize = 4;
 const STALL_ITERATIONS: usize = 5;
 
+/// A frame that will not decode (its MODCOD under threshold) mostly leaves
+/// its unsatisfied checks on a plateau, while one that converges keeps
+/// finding fewer. With [`LdpcDecoder::decode_hurried`], past
+/// `HOPELESS_AFTER` iterations a decode that has not reached a new low
+/// for `HOPELESS_PATIENCE` is given up. Only for a receiver that is falling
+/// behind: near threshold a frame can wander on a plateau for 25
+/// iterations and still converge (154/180 at 3.25 dB, iteration 44), so it
+/// costs a little sensitivity — less than the frames dropped otherwise
+/// (172B's ACM outbound live, every 16APSK 8/9 frame below threshold and
+/// spending the full budget: 72 % of frames dropped).
+const HOPELESS_AFTER: usize = 10;
+const HOPELESS_PATIENCE: usize = 8;
+
 /// What a decode achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeOutcome {
@@ -89,6 +102,28 @@ impl LdpcDecoder {
     /// order (information bits, then parity bits); the hard-decided K
     /// information bits go to `info` as bytes, MSB first.
     pub fn decode(&mut self, llr: &[i8], info: &mut [u8], max_iterations: usize) -> DecodeOutcome {
+        self.decode_budget(llr, info, max_iterations, false)
+    }
+
+    /// [`Self::decode`], but giving a frame up once its unsatisfied checks
+    /// sit on a plateau (see `HOPELESS_PATIENCE`): for a receiver behind
+    /// its input, where the iterations saved keep later frames.
+    pub fn decode_hurried(
+        &mut self,
+        llr: &[i8],
+        info: &mut [u8],
+        max_iterations: usize,
+    ) -> DecodeOutcome {
+        self.decode_budget(llr, info, max_iterations, true)
+    }
+
+    fn decode_budget(
+        &mut self,
+        llr: &[i8],
+        info: &mut [u8],
+        max_iterations: usize,
+        hurried: bool,
+    ) -> DecodeOutcome {
         let (n, k, q) = (self.code.n, self.code.k, self.code.q);
         assert_eq!(llr.len(), n);
         assert_eq!(info.len() * 8, k);
@@ -110,6 +145,8 @@ impl LdpcDecoder {
             unsatisfied,
         };
         let mut stalled = 0;
+        // The fewest unsatisfied checks so far, and iterations since.
+        let (mut best, mut since_best) = (unsatisfied, 0);
         while !outcome.converged && outcome.iterations < max_iterations {
             for layer in 0..q {
                 self.layer(layer);
@@ -121,9 +158,18 @@ impl LdpcDecoder {
             } else {
                 0
             };
+            if now < best {
+                (best, since_best) = (now, 0);
+            } else {
+                since_best += 1;
+            }
             outcome.unsatisfied = now;
             outcome.converged = now == 0;
-            if stalled >= STALL_ITERATIONS {
+            if stalled >= STALL_ITERATIONS
+                || (hurried
+                    && outcome.iterations >= HOPELESS_AFTER
+                    && since_best >= HOPELESS_PATIENCE)
+            {
                 break;
             }
         }
@@ -270,6 +316,17 @@ mod tests {
     /// quantize at `scale` steps per LLR unit, decode. Returns the outcome,
     /// the information bit errors, and whether the parity decisions match.
     fn run(p: FecParams, ebn0_db: f64, scale: f64, seed: u64) -> (DecodeOutcome, usize, bool) {
+        run_with(p, ebn0_db, scale, seed, false)
+    }
+
+    /// [`run`], hurried or not.
+    fn run_with(
+        p: FecParams,
+        ebn0_db: f64,
+        scale: f64,
+        seed: u64,
+        hurried: bool,
+    ) -> (DecodeOutcome, usize, bool) {
         let mut next = rng(seed);
         let code = LdpcCode::new(p.ldpc_table());
         let (n, k) = (code.n, code.k);
@@ -300,7 +357,11 @@ mod tests {
 
         let mut dec = LdpcDecoder::new(code);
         let mut out = vec![0u8; k / 8];
-        let o = dec.decode(&llr, &mut out, 50);
+        let o = if hurried {
+            dec.decode_hurried(&llr, &mut out, 50)
+        } else {
+            dec.decode(&llr, &mut out, 50)
+        };
         let errors = out
             .iter()
             .zip(&info)
@@ -357,6 +418,25 @@ mod tests {
                     "{p:?} ×{scale}: {o:?}"
                 );
             }
+        }
+    }
+
+    /// Hurried, a frame far under its code's waterfall is given up within
+    /// a couple of dozen iterations instead of 50, and frames above it
+    /// decode as they do unhurried.
+    #[test]
+    fn a_hurried_decode_gives_up_hopeless_frames_only() {
+        let p = all_s2()
+            .find(|p| (p.rate.num, p.rate.den) == (3, 4) && p.frame == decsat_core::FecFrame::Short)
+            .unwrap();
+        for seed in 0..4 {
+            let (slow, _, _) = run_with(p, 0.5, 4.0, 300 + seed, false);
+            let (fast, _, _) = run_with(p, 0.5, 4.0, 300 + seed, true);
+            assert!(!slow.converged && slow.iterations == 50, "{slow:?}");
+            assert!(!fast.converged && fast.iterations < 30, "{fast:?}");
+            let good = run_with(p, 3.5, 4.0, 400 + seed, true);
+            assert_eq!(good, run_with(p, 3.5, 4.0, 400 + seed, false));
+            assert_eq!(good.1, 0, "{good:?}");
         }
     }
 

@@ -5387,3 +5387,51 @@ The player's own ffmpeg command on the 36 s live capture's TS (3
 keyframes, 47 % of datagrams lost) gave 324 pictures and the sound. ffmpeg
 writes nothing, sound included, until the first keyframe has set up the
 video: a long-GOP feed is silent for up to a GOP after ▶.
+
+## 172B's ACM outbound live: a slip repair's wrong turn, and an FEC thread that fell behind (2026-10-16)
+
+Rory let me use the HackRF on Eutelsat 172B 12 705 MHz (HackRF 2104.43 MHz,
+VFO +750 kHz, 20 MS/s, LNA 24 VGA 20). Today the hub sends the multicast
+TV (BBC News 238.1.1.10:1234, and now Film4 239.255.67.91:8888 behind a
+22-byte header) mostly in S2X 16APSK 3/5 short frames; QPSK 2/3, 8PSK 3/4,
+16APSK 8/9 too. A 90 s live decode kept 27 % of frames: the FEC thread
+dropped 72 % (LDPC averaging 15 iterations) and 22 % of those it decoded
+failed, QPSK 2/3 included, at Es/N0 12.6 dB.
+
+**Slip repair's unwrap (demod.rs).** A failed QPSK frame had one stretch
+of exactly 16 slots (between two pilot blocks) with the data phase swinging
+±20–25° slot to slot: a ramp of 22.5°/slot folded by the decisions, i.e.
+one whole turn over the 1476 symbols. The repair unwrapped the pilot
+block's phase against the loop's frequency *after* the slip it repairs,
+which the slip can kick by more than half a turn per pilot period
+(2.3 kHz at 6.75 MBd); now against the frequency at the stretch's start.
+4 s of the recording: QPSK 2/3 failures 63 → 6, all good frames 3905 →
+3973. (Choosing the turn by the data's MER instead was worse on APSK.)
+
+**Hurry (LDPC, FEC thread).** `LdpcDecoder::decode_hurried` gives a
+frame up after 10 iterations once its unsatisfied checks have not reached
+a new low for 8; used only when the thread is live and ≥ 16 inputs are
+queued. Not always: near threshold a frame can sit on a plateau for 25
+iterations and converge at 44 (154/180 at 3.25 dB), so unconditionally it
+cost that code 0.25 dB on `ldpc_waterfalls`; unhurried the waterfalls are
+unchanged.
+
+**Lanes (FEC thread).** One short-frame decode is ~1 ms and the carrier
+sends ~1040 frames/s. A backlog is now taken up to 2 frames a lane and
+decoded on up to 4 lanes (a quarter of the machine's threads) with
+`thread::scope`, then taken through GSE/TS/IP one by one in order; a
+thread keeping up decodes inline as before. Offline results identical.
+
+Live-paced decode of the 12 s recording (BBC datagrams by sequence
+number): original 35 % (7378 frames dropped), slip fix 38 %, + hurry 61 %
+(3547), + lanes 78 % (59 dropped); lossless ceiling 85 %. What is left is
+the dish: 16APSK 8/9 never decodes (data SNR ~12 dB vs ~13+ needed), and
+6.7 % of 16APSK 3/5 frames fail. Measured on the decoded frames
+(re-encoded, re-mapped): no ISI (11-tap LS fit gains nothing), no ring
+compression (inner/outer gains 1.02/0.98), data SNR ~12 dB vs pilots
+13.7 dB; ~8° rms common-phase jitter with 70 % of it at 30–100 kHz
+(peaks 33–56 kHz, 8PSK and 16APSK alike): LNB/HackRF phase noise faster
+than the loop. A wider carrier loop is worse, half as wide slightly
+better (16APSK 3/5 failures 115 → 95) — not changed, as BnT is per symbol
+rate and other carriers were tuned on it. No sample drops in the HackRF
+stream (symbol-clock phase continuous over the second checked).

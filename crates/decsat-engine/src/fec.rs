@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -130,6 +130,9 @@ struct VlCode {
 /// Decodes PLFRAMEs; holds a decoder per code met so far.
 #[derive(Default)]
 pub struct FecDecoder {
+    /// Give up frames whose decoding stalls (the thread is behind: see
+    /// `LdpcDecoder::decode_hurried`).
+    pub(crate) hurry: bool,
     codes: HashMap<(bool, u8), Option<Code>>,
     vl_codes: HashMap<u8, Option<VlCode>>,
     sent: Vec<f32>,
@@ -154,6 +157,7 @@ impl FecDecoder {
             return self.decode_vlsnr(f, set, k);
         }
         let FecDecoder {
+            hurry,
             codes,
             data,
             llr,
@@ -187,7 +191,11 @@ impl FecDecoder {
 
         code.mapper.demap_llr(data, f.noise_var * inv * inv, llr);
         quantize(llr, LLR_SCALE, quantized);
-        let ldpc = code.ldpc.decode(quantized, info, MAX_ITERATIONS);
+        let ldpc = if *hurry {
+            code.ldpc.decode_hurried(quantized, info, MAX_ITERATIONS)
+        } else {
+            code.ldpc.decode(quantized, info, MAX_ITERATIONS)
+        };
 
         let mut bytes = info.clone();
         let bch = code.bch.decode(&mut bytes);
@@ -1439,7 +1447,12 @@ pub(crate) struct FecWorker {
     /// Set to stop without working through the queue.
     quit: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    /// Waiting for the thread rather than dropping (also told the thread,
+    /// which then never hurries).
     lossless: bool,
+    lossless_shared: Arc<AtomicBool>,
+    /// Inputs queued and not yet taken by the thread.
+    queued: Arc<AtomicUsize>,
     /// Frames queued and not yet decoded (the VFO's count).
     pending: Pending,
 }
@@ -1453,6 +1466,8 @@ impl FecWorker {
         let output = Arc::new(Mutex::new(output));
         let gap = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
+        let lossless_shared = Arc::new(AtomicBool::new(false));
+        let queued = Arc::new(AtomicUsize::new(0));
         let (s, o, g, q, p) = (
             stats.clone(),
             output.clone(),
@@ -1460,9 +1475,13 @@ impl FecWorker {
             quit.clone(),
             pending.clone(),
         );
+        let backlog = Backlog {
+            queued: queued.clone(),
+            lossless: lossless_shared.clone(),
+        };
         let join = std::thread::Builder::new()
             .name("decsat-fec".into())
-            .spawn(move || run(rx, s, o, g, q, p, symbol_rate))
+            .spawn(move || run(rx, s, o, g, q, p, backlog, symbol_rate))
             .expect("spawn FEC thread");
         FecWorker {
             tx: Some(tx),
@@ -1472,6 +1491,8 @@ impl FecWorker {
             quit,
             join: Some(join),
             lossless: false,
+            lossless_shared,
+            queued,
             pending,
         }
     }
@@ -1486,6 +1507,7 @@ impl FecWorker {
     /// file played as fast as possible).
     pub fn lossless(mut self, on: bool) -> Self {
         self.lossless = on;
+        self.lossless_shared.store(on, Ordering::Relaxed);
         self
     }
 
@@ -1525,9 +1547,12 @@ impl FecWorker {
     fn send(&self, input: FecInput) {
         let Some(tx) = &self.tx else { return };
         self.pending.add();
+        // Counted before it is sent, so the thread never takes it first.
+        self.queued.fetch_add(1, Ordering::Relaxed);
         if self.lossless {
             if tx.send(input).is_err() {
                 self.pending.done();
+                self.queued.fetch_sub(1, Ordering::Relaxed);
             }
             return;
         }
@@ -1535,10 +1560,14 @@ impl FecWorker {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.pending.done();
+                self.queued.fetch_sub(1, Ordering::Relaxed);
                 self.stats.lock().unwrap().dropped += 1;
                 self.gap.store(true, Ordering::Relaxed);
             }
-            Err(TrySendError::Disconnected(_)) => self.pending.done(),
+            Err(TrySendError::Disconnected(_)) => {
+                self.pending.done();
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -2682,6 +2711,89 @@ impl SourceClock {
     }
 }
 
+/// How far behind the FEC thread is: what is queued for it, and whether
+/// its input waits for it (lossless) rather than being dropped.
+struct Backlog {
+    queued: Arc<AtomicUsize>,
+    lossless: Arc<AtomicBool>,
+}
+
+/// Queued inputs from which a live FEC thread hurries: a quarter of the
+/// queue, about 15 ms of a 6.75 MBd ACM carrier's frames.
+const HURRY_AT: usize = QUEUE / 4;
+
+/// Decoding lanes at most (a quarter of the machine's threads, so several
+/// VFOs and the demodulators keep theirs): one short-frame LDPC decode is
+/// ~1 ms, and a 6.75 MBd ACM carrier sends ~1000 frames a second.
+const LANES: usize = 4;
+
+/// A frame decoded ahead, and its share of its batch's time (s).
+struct Decoded {
+    out: Option<BbFrame>,
+    secs: f64,
+}
+
+/// The frames among `inputs` decoded at once, on `dec` and the `extra`
+/// lanes — when there are two or more of them and lanes to share; else
+/// `None` throughout and the loop decodes them as it comes to them.
+fn decode_ahead(
+    dec: &mut FecDecoder,
+    extra: &mut [FecDecoder],
+    inputs: &[FecInput],
+    hurry: bool,
+) -> Vec<Option<Decoded>> {
+    let frames: Vec<(usize, &PlFrame)> = inputs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, x)| match x {
+            FecInput::Frame(f) => Some((i, f)),
+            _ => None,
+        })
+        .collect();
+    let mut out: Vec<Option<Decoded>> = inputs.iter().map(|_| None).collect();
+    if frames.len() < 2 || extra.is_empty() {
+        return out;
+    }
+    let lanes = (1 + extra.len()).min(frames.len());
+    let t0 = Instant::now();
+    // Rust note: `thread::scope` lets the lanes borrow the frames and their
+    // decoders; every lane is joined before it returns. Lane 0 is this
+    // thread; lane j takes frames j, j + lanes, …
+    let results: Vec<(usize, Option<BbFrame>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = extra
+            .iter_mut()
+            .take(lanes - 1)
+            .enumerate()
+            .map(|(j, d)| {
+                let mine: Vec<(usize, &PlFrame)> =
+                    frames.iter().skip(j + 1).step_by(lanes).copied().collect();
+                scope.spawn(move || {
+                    d.hurry = hurry;
+                    mine.into_iter()
+                        .map(|(i, f)| (i, d.decode(f)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        dec.hurry = hurry;
+        let mut all: Vec<(usize, Option<BbFrame>)> = frames
+            .iter()
+            .step_by(lanes)
+            .map(|&(i, f)| (i, dec.decode(f)))
+            .collect();
+        for h in handles {
+            all.extend(h.join().expect("an FEC lane panicked"));
+        }
+        all
+    });
+    let secs = t0.elapsed().as_secs_f64() / frames.len() as f64;
+    for (i, b) in results {
+        out[i] = Some(Decoded { out: b, secs });
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run(
     rx: Receiver<FecInput>,
     stats: Arc<Mutex<FecStats>>,
@@ -2689,6 +2801,7 @@ fn run(
     gap: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
     pending: Pending,
+    backlog: Backlog,
     symbol_rate: f64,
 ) {
     let mut dec = FecDecoder::new();
@@ -2721,11 +2834,45 @@ fn run(
     let mut programme: Option<crate::programme::ProgrammeStage> = None;
     let mut radar: Option<crate::radar::RadarStage> = None;
     let mut src_clock = SourceClock::default();
-    while let Ok(input) = rx.recv() {
+    // A backlog of frames is decoded on several lanes at once (`dec` and
+    // these), then taken through the rest one by one, in order.
+    let lanes = std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, LANES));
+    let mut extra: Vec<FecDecoder> = (1..lanes).map(|_| FecDecoder::new()).collect();
+    let mut ready: VecDeque<(FecInput, Option<Decoded>)> = VecDeque::new();
+    loop {
+        let (input, pre) = match ready.pop_front() {
+            Some(next) => next,
+            None => {
+                let Ok(first) = rx.recv() else { break };
+                backlog.queued.fetch_sub(1, Ordering::Relaxed);
+                // What else is waiting, up to two frames a lane.
+                let mut batch = vec![first];
+                while lanes > 1 && batch.len() < 2 * lanes {
+                    match rx.try_recv() {
+                        Ok(next) => {
+                            backlog.queued.fetch_sub(1, Ordering::Relaxed);
+                            batch.push(next);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Live and behind: frames that stall are given up rather
+                // than spending the budget the frames behind them need.
+                let hurry = !backlog.lossless.load(Ordering::Relaxed)
+                    && backlog.queued.load(Ordering::Relaxed) + batch.len() > HURRY_AT;
+                dec.hurry = hurry;
+                let decoded = decode_ahead(&mut dec, &mut extra, &batch, hurry);
+                ready.extend(batch.into_iter().zip(decoded));
+                ready.pop_front().expect("a batch holds one input at least")
+            }
+        };
         let _done = pending.guard();
         if quit.load(Ordering::Relaxed) {
             break;
         }
+        // Decoding done ahead counts toward the load as its share of the
+        // batch's time.
+        let pre_secs = pre.as_ref().map_or(0.0, |d| d.secs);
         let t0 = Instant::now();
         let f = match input {
             FecInput::Frame(f) => f,
@@ -3095,7 +3242,10 @@ fn run(
             }
         };
         let secs = f.pls.plframe_len as f64 / symbol_rate;
-        let out = dec.decode(&f);
+        let out = match pre {
+            Some(d) => d.out,
+            None => dec.decode(&f),
+        };
         let o = output.lock().unwrap().clone();
 
         // A stream reassembled across frames breaks at any frame missing in
@@ -3199,7 +3349,7 @@ fn run(
             stage.tick(secs);
         }
 
-        let used = t0.elapsed().as_secs_f64();
+        let used = t0.elapsed().as_secs_f64() + pre_secs;
         busy = 0.95 * busy + 0.05 * (used / secs.max(1e-9));
 
         let mut s = stats.lock().unwrap();
@@ -4021,6 +4171,46 @@ mod tests {
         let stats = Arc::clone(&w.stats);
         drop(w); // works through the queue, then ends
         stats.lock().unwrap().clone()
+    }
+
+    /// A backlog decoded on several lanes at once gives each frame exactly
+    /// what one decoder gives it, in its place; other inputs, and a lone
+    /// frame, are left to the loop.
+    #[test]
+    fn frames_decoded_ahead_on_lanes_match_one_decoder() {
+        let schedule = [
+            FrameSpec::new(6, true, true),
+            FrameSpec::new(14, true, true),
+            FrameSpec::new(18, true, true),
+        ];
+        let x = signal(&schedule, 120_000, 0.001, 14.0, 21);
+        let mut d = Demod::new(4.0, 1.0, 0.25, 0);
+        let mut frames = Vec::new();
+        d.process(&x, &mut frames);
+        assert!(frames.len() >= 8, "{} frames", frames.len());
+        let mut one = FecDecoder::new();
+        let want: Vec<_> = frames
+            .iter()
+            .map(|f| one.decode(f).map(|b| b.bytes))
+            .collect();
+        assert!(want.iter().filter(|b| b.is_some()).count() >= 8);
+
+        let mut inputs: Vec<FecInput> = frames.into_iter().map(FecInput::Frame).collect();
+        inputs.insert(3, FecInput::Dvbs(Vec::new()));
+        let mut dec = FecDecoder::new();
+        let mut extra = vec![FecDecoder::new(), FecDecoder::new()];
+        let got = decode_ahead(&mut dec, &mut extra, &inputs, false);
+        assert!(got[3].is_none(), "not a frame: left to the loop");
+        let got: Vec<_> = got
+            .into_iter()
+            .enumerate()
+            .filter(|&(i, _)| i != 3)
+            .map(|(_, d)| d.expect("decoded ahead").out.map(|b| b.bytes))
+            .collect();
+        assert_eq!(got, want);
+        // One frame alone: nothing to share.
+        let lone = decode_ahead(&mut dec, &mut extra, &inputs[..1], false);
+        assert!(lone[0].is_none());
     }
 
     #[test]
