@@ -5212,3 +5212,75 @@ receive only, 90–180 s runs): 340–430 bursts a second demodulated, 94–97 %
 of those cut, MER 11.0–12.5 dB (431 ~10.0), 1.0–1.5 s of demodulator a
 second of signal; the GUI showed 366 a second, 96.6 % ok, 8 workers at 20 %.
 A terminal 380 not on the capture appears live (MER 12.3 dB).
+
+## The return FEC: what the bursts give away (2026-10-16)
+
+Rory: "Go on and do it" — the return FEC. Worked from the demodulator's
+dump of the 172B capture (24 024 bursts; scratch Python, not kept). Not
+identified yet; what is known now:
+
+- **Newtec's own words**: the hub is NxtGen Mx-DMA MRC — "transmission
+  length and code length assigned in real time", a 5 ms minimum
+  transmission at 100 kBd and 5 % roll-off (these bursts exactly),
+  modulations to 64APSK, 34 MODCODs ([Newtec TechBrief, 2021](https://satellitemarkets.com/pdf/pdf2021/TechBrief-Mx-DMA-MRC.pdf)).
+  No public description of the code.
+- **Pilots**, from bursts that carry data (idle ones agree everywhere):
+  pairs on the outer ring from ~9–10 data symbols after the 66-symbol
+  block, the gaps growing by about one symbol a pilot to a cap per code
+  (00FCh 11, 12, 13, 14, then 15; 010Ch 13 … 18; 2278h 12 … 21; 52C8h
+  12 … 26); 4-symbol blocks on 431's codes (caps 29–41). Data symbols
+  (pilots out) and bits a burst: 0104h 356 / 1 424, 00FCh 370 / 1 480,
+  010Ch 344 / 1 376, 0114h 333 / 1 332, 00F4h 384, 2278h 1 119, 02E8h
+  719, 0508h 1 037, 0510h 1 020, 02C8h 846.
+- **Code blocks**: a long burst is several near-equal blocks — positions
+  whose content is idle (or not) together, burst by burst: 7AC8h five of
+  1 076–1 080 data symbols, 7E94h seven of 1 040, 8074h eight of
+  1 004–1 008, 4EE8h four of ~1 040; 1- and short 2-slot bursts one
+  block (2278h 1 119, 0508h 1 037). So the block grows with the burst to
+  a cap of ~4 000–4 500 coded bits, then splits.
+- **Systematic, rate ½, info on the quadrant bits.** With the S2X 8+8
+  label (ring, two quadrant bits, a within-quadrant bit), bursts whose
+  payload differs from idle only a little differ in the two quadrant bits
+  at a few places and in the ring and within-quadrant bits at ~40 % of
+  symbols: two information bits a symbol (consecutive, in order — a
+  header change shows in both at the start), two parity bits a symbol.
+  77–97 % of symbol changes are single bit flips under that labelling
+  (27 % if random). Holds for 0104h, 00FCh, 010Ch, 0114h, 00F4h, 00ECh,
+  00E4h, 2278h, 0508h, 0510h, 02F0h; the sync bursts differ. 0104h: 712
+  information bits (89 bytes) + 712 parity.
+- **The information block** (0104h): a header whose first ~35 bits change
+  burst to burst (13 bits vary: a counter or similar), a padding region
+  identical to the idle burst's, and a **52-bit tail** that changes
+  completely whenever anything else does (a CRC, BCH(t=4, m=13)'s 52
+  parity bits, or a keyed tag).
+- **The parity is not local and not natural-order**: no biased linear
+  function over 3–5 consecutive symbols under any of the 30 labellings
+  of the 8 phases (Walsh–Hadamard over a million windows; a convolutional
+  or turbo constituent in natural order, or an accumulator, would show
+  0.3+, the best was 0.04); no accumulator in ring/lsb orders; the parity
+  differences repeat weakly every 5 symbols but are not periodic, so not
+  a natural-order RSC (DVB-RCS2's duo-binary turbo, feedback 1+D³+D⁴,
+  would repeat every 15 couples). The parity bits are permuted relative
+  to the information — a bit-interleaved LDPC or turbo code.
+- **No linearity confirmed**: four near-idle bursts whose varying header
+  bits XOR to zero do not XOR to zero in their parity (0.38 of bits
+  against 0.15 noise) nor in the 52-bit tail — either their payloads
+  differ elsewhere too (some middle bits vary beyond noise) or the tail
+  is not affine in the header (a keyed tag would do that).
+- **Payload not in clear**: busy bursts' information XOR the idle word's
+  (which cancels any fixed scrambler) holds no checksum-valid IPv4 header
+  under any bit reading (pair order, complement, bit order, offset)
+  across 1 700 busy bursts of three codes. Idle padding not a short LFSR
+  sequence (linear complexity n/2). Encrypted (Newtec offers return-link
+  encryption), compressed, or a framing not yet seen.
+- Ruled out: DVB-S2/S2X LDPC frames (too long; and these blocks adapt);
+  DVB-RCS2's reference waveforms and its turbo code as-is; a plain
+  convolutional code; repetition of coded bits (no pairwise bit
+  correlation off the header); RCS2's energy-dispersal PRBS over the
+  padding.
+
+What would crack it: a blind parity-check search over many bursts of one
+code with the information bits known (they are read off the quadrant
+bits at ~3 % error) — sparse checks if LDPC, found by combining reliable
+bursts — then the permutation. Days of work, and the payload may well be
+encrypted when done.
