@@ -13,7 +13,13 @@
 //!    best kept;
 //! 2. each plan frame that comes is scheduled: every burst's slots on the
 //!    receiver's source clock, its centre on the VFO, its symbol rate and
-//!    waveform from its code ([`decsat_ts::newtec::code_rate`]);
+//!    waveform from its code ([`decsat_ts::newtec::code_rate`]). A code not
+//!    in that table (a live hub uses more than a minute showed) gets the
+//!    rate its learned width implies, which the demodulator searches round
+//!    — dear: hundreds of rates for a long burst — so one burst of such a
+//!    code is searched at a time, and the rate it finds is kept for the
+//!    code's later bursts; a code that never demodulates (twenty tries) is
+//!    let be;
 //! 3. the pool's baseband is kept in a ring of [`RING_S`] (the lead, and
 //!    the outbound's own delays, with room); once a burst's slots and a
 //!    margin are in it, they are cut out and handed to [`BurstDemod`] on
@@ -75,6 +81,9 @@ pub const RING_S: f64 = 1.5;
 const BEFORE_S: f64 = 0.7e-3;
 const AFTER_S: f64 = 0.5e-3;
 
+/// Signal before now whose bursts are cut when a plan is taken up, s.
+const CATCH_UP_S: f64 = 0.4;
+
 /// How often the plan is lined up with the pool again, s of signal.
 const ALIGN_EVERY_S: f64 = 2.0;
 
@@ -83,6 +92,9 @@ const QUEUE: usize = 256;
 
 /// Data symbols kept per terminal for its constellation.
 const KEEP_SYMBOLS: usize = 800;
+
+/// Bursts of a code that never demodulates before it is let be.
+const GIVE_UP: u32 = 20;
 
 /// Good bursts the trims of the zero and the start wait for, and the most
 /// either moves at a time (Hz, s).
@@ -229,7 +241,8 @@ pub struct BurstsView {
     pub frames: Option<FrameClock>,
     /// Bursts scheduled; cut and handed on; demodulated; failed; too old
     /// for the ring by the time their plan came; let go with the workers
-    /// behind; of codes with no known rate or waveform.
+    /// behind; of codes with neither a rate nor a width; not tried (a code
+    /// whose rate is being searched, or one that never demodulates).
     pub planned: u64,
     pub cut: u64,
     pub demodulated: u64,
@@ -237,6 +250,15 @@ pub struct BurstsView {
     pub late: u64,
     pub dropped: u64,
     pub unknown: u64,
+    pub skipped: u64,
+    /// Codes not in the table whose rate a search found, and codes let be.
+    pub rates_found: usize,
+    /// Times a plan was taken up, or its timing found moved.
+    pub links: u32,
+    /// The best timing the last look found, sure or not (how close a plan
+    /// not yet taken up is).
+    pub tried: Option<PlanTiming>,
+    pub codes_given_up: usize,
     /// Bursts demodulated a second, lately; and the workers' time a second
     /// of signal (1.0 = one core flat out), and how many.
     pub per_s: f64,
@@ -335,6 +357,20 @@ struct Shared {
     /// offsets (Hz, s) scheduled with them.
     trims: u32,
     offsets: Vec<(f64, f64)>,
+    /// What each code has done.
+    codes: BTreeMap<u16, CodeState>,
+}
+
+/// A code's bursts so far.
+#[derive(Default)]
+struct CodeState {
+    ok: u64,
+    /// Failures since the last success.
+    failing: u32,
+    /// The rate a search found, for a code not in the table.
+    rate: Option<f64>,
+    /// A burst of it searching for its rate now.
+    searching: bool,
 }
 
 impl Shared {
@@ -348,11 +384,21 @@ impl Shared {
                 ..Default::default()
             });
         t.cut += 1;
+        let code = self.codes.entry(job.burst.code).or_default();
+        if !job.burst.rate_exact {
+            code.searching = false;
+        }
         let Some(r) = r.filter(|r| r.ok) else {
+            code.failing += 1;
             t.failed += 1;
             self.failed += 1;
             return;
         };
+        code.ok += 1;
+        code.failing = 0;
+        if !job.burst.rate_exact {
+            code.rate = Some(r.symbol_rate);
+        }
         let first = t.demodulated == 0;
         t.demodulated += 1;
         self.demodulated += 1;
@@ -423,6 +469,15 @@ pub struct PoolBursts {
     late: u64,
     dropped: u64,
     unknown: u64,
+    skipped: u64,
+    /// Times a plan was taken up (or its timing moved).
+    links: u32,
+    /// The newest frame scheduled when the trims last moved.
+    trimmed_at: Option<u32>,
+    /// The best-matching plan's frame and slots.
+    hint: Option<(f64, usize)>,
+    /// The best timing the last alignment found, sure or not.
+    tried: Option<PlanTiming>,
     tx: Option<SyncSender<Job>>,
     workers: Vec<JoinHandle<()>>,
     shared: Arc<Mutex<Shared>>,
@@ -470,6 +525,11 @@ impl PoolBursts {
             late: 0,
             dropped: 0,
             unknown: 0,
+            skipped: 0,
+            links: 0,
+            trimmed_at: None,
+            hint: None,
+            tried: None,
             tx: Some(tx),
             workers,
             shared,
@@ -546,7 +606,17 @@ impl PoolBursts {
 
     /// Line every outbound's plan up with the pool; follow the best timed.
     fn align(&mut self, pool: &PoolView) {
+        // The plan that lines up best in frequency tells the pool its
+        // frame and slots, before (and whether or not) it is timed.
+        self.hint = self
+            .views
+            .values()
+            .filter_map(|v| Some((match_plan(pool, v)?.corr, v.period_s?, v.slots)))
+            .filter(|h| h.0 >= 0.5 && h.2 > 0)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|h| (h.1, usize::from(h.2)));
         let mut best: Option<Followed> = None;
+        self.tried = None;
         for (&from, view) in &self.views {
             let Some(clock) = view.clock else { continue };
             let Some(m) = match_plan(pool, view).filter(|m| m.corr >= 0.5) else {
@@ -557,9 +627,15 @@ impl PoolBursts {
                 .as_ref()
                 .filter(|f| f.from == from)
                 .map(|f| f.timing);
-            let Some(t) = align_plan(pool, view, m.offset_hz, prior.as_ref()).filter(sure) else {
+            let Some(t) = align_plan(pool, view, m.offset_hz, prior.as_ref()) else {
                 continue;
             };
+            if self.tried.is_none_or(|b| t.corr > b.corr) {
+                self.tried = Some(t);
+            }
+            if !sure(&t) {
+                continue;
+            }
             let offset_hz = refine_offset(pool, view, &t, m.offset_hz).map_or(m.offset_hz, |o| o.0);
             if best.as_ref().is_none_or(|b| t.corr > b.timing.corr) {
                 best = Some(Followed {
@@ -583,9 +659,12 @@ impl PoolBursts {
         if let Some(f) = &mut self.followed
             && f.from == new.from
         {
+            // (Against where the bursts are cut: the start's trim in.)
             let c = new.clock.counter;
-            let moved =
-                (new.timing.frame_start(&new.clock, c) - f.timing.frame_start(&f.clock, c)).abs();
+            let moved = (new.timing.frame_start(&new.clock, c)
+                - f.timing.frame_start(&f.clock, c)
+                - self.start_trim_s)
+                .abs();
             if moved < f.timing.slot_s / 4.0 && (new.offset_hz - f.offset_hz).abs() < 10e3 {
                 f.view = new.view;
                 f.timing.corr = new.timing.corr;
@@ -599,6 +678,8 @@ impl PoolBursts {
         // plan's recent frames whose bursts the ring still holds are
         // scheduled now.
         self.followed = Some(new);
+        self.links += 1;
+        self.trimmed_at = None;
         self.zero_trim_hz = 0.0;
         self.start_trim_s = 0.0;
         self.trims += 1;
@@ -610,7 +691,9 @@ impl PoolBursts {
         self.last_counter = None;
         self.pending.clear();
         let Some(f) = &self.followed else { return };
-        let keep_from = self.ring.start_s + BEFORE_S;
+        // (Only the last few frames': all the ring holds at once would
+        // overflow the workers' queue.)
+        let keep_from = (self.ring.start_s + BEFORE_S).max(self.ring.end_s() - CATCH_UP_S);
         let fresh: Vec<PlanFrame> = f
             .view
             .recent
@@ -623,6 +706,14 @@ impl PoolBursts {
 
     /// The zero and the start moved by the median offsets of the good
     /// bursts scheduled with the trims now in use, once there are enough.
+    ///
+    /// The frame's length too: the pool measures it on the receiver's
+    /// clock to only a few parts in 10⁶ (a HackRF is 6 ppm off the hub's),
+    /// which over minutes walks the bursts' start by hundreds of µs. The
+    /// start's drift since the last trim, over the frames since, says how
+    /// far: half of it a frame goes into the frame's length (the line
+    /// rebased on the newest frame first, so no start jumps) — with the
+    /// start's own trim, a second-order loop.
     fn trim(&mut self) {
         let mut s = self.shared.lock().unwrap();
         if s.offsets.len() < TRIM_BURSTS {
@@ -630,11 +721,25 @@ impl PoolBursts {
         }
         let mut f: Vec<f64> = s.offsets.iter().map(|o| o.0).collect();
         let mut t: Vec<f64> = s.offsets.iter().map(|o| o.1).collect();
+        let late = median(&mut t).clamp(-TRIM_MAX_S, TRIM_MAX_S);
         self.zero_trim_hz += median(&mut f).clamp(-TRIM_MAX_HZ, TRIM_MAX_HZ);
-        self.start_trim_s += median(&mut t).clamp(-TRIM_MAX_S, TRIM_MAX_S);
+        self.start_trim_s += late;
         self.trims += 1;
         s.trims = self.trims;
         s.offsets.clear();
+        drop(s);
+        if let (Some(fl), Some(c)) = (&mut self.followed, self.last_counter) {
+            if let Some(c0) = self.trimmed_at {
+                let n = c.wrapping_sub(c0) as i32;
+                if n >= 10 {
+                    let start = fl.timing.frame_start(&fl.clock, c);
+                    fl.clock.counter = c;
+                    fl.clock.at_s = start - fl.timing.lead_s;
+                    fl.timing.frame_s += 0.5 * late / f64::from(n);
+                }
+            }
+            self.trimmed_at = Some(c);
+        }
     }
 
     /// Each burst of `frames` (newer than any scheduled) waiting for its
@@ -658,6 +763,8 @@ impl PoolBursts {
                     Some(c) if c.waveform != Waveform::Unknown => {
                         (c.symbol_rate_hz, true, c.waveform)
                     }
+                    // The rate known, the waveform not: the commonest.
+                    Some(c) => (c.symbol_rate_hz, true, Waveform::Apsk8p8),
                     _ => match f.view.width_of(b.code) {
                         // Not in the table: the rate its width implies,
                         // searched round, as the commonest waveform.
@@ -699,21 +806,53 @@ impl PoolBursts {
                 keep.push_back(p);
                 continue;
             }
+            // A code that never demodulates is let be; one whose rate is
+            // being searched waits for the search; a rate found is used.
+            let mut burst = p.burst;
+            {
+                let mut s = self.shared.lock().unwrap();
+                let c = s.codes.entry(burst.code).or_default();
+                if c.ok == 0 && c.failing >= GIVE_UP {
+                    self.skipped += 1;
+                    continue;
+                }
+                if !burst.rate_exact {
+                    if let Some(r) = c.rate {
+                        burst.symbol_rate = r;
+                        burst.rate_exact = true;
+                    } else if c.searching {
+                        self.skipped += 1;
+                        continue;
+                    } else {
+                        c.searching = true;
+                    }
+                }
+            }
             let Some((iq, start)) =
                 self.ring
                     .slice(p.start_s - BEFORE_S, p.end_s + AFTER_S, p.start_s)
             else {
                 self.late += 1;
+                if !burst.rate_exact {
+                    self.shared
+                        .lock()
+                        .unwrap()
+                        .codes
+                        .entry(burst.code)
+                        .or_default()
+                        .searching = false;
+                }
                 continue;
             };
             let job = Job {
                 iq,
-                burst: ScheduledBurst { start, ..p.burst },
+                burst: ScheduledBurst { start, ..burst },
                 counter: p.counter,
                 slot: p.slot,
                 start_s: p.start_s,
                 trims: self.trims,
             };
+            let (burst_code, burst_exact) = (job.burst.code, job.burst.rate_exact);
             let Some(tx) = &self.tx else {
                 self.dropped += 1;
                 continue;
@@ -730,6 +869,15 @@ impl PoolBursts {
                 self.cut += 1;
             } else {
                 self.dropped += 1;
+                if !burst_exact {
+                    self.shared
+                        .lock()
+                        .unwrap()
+                        .codes
+                        .entry(burst_code)
+                        .or_default()
+                        .searching = false;
+                }
             }
         }
         self.pending = keep;
@@ -763,6 +911,13 @@ impl PoolBursts {
         }
     }
 
+    /// The frame and its slots by the plan that best lines up with the
+    /// pool in frequency (for the pool's own grid: see
+    /// [`super::pool::PoolTracker::set_plan_hint`]).
+    pub fn plan_hint(&self) -> Option<(f64, usize)> {
+        self.hint
+    }
+
     pub fn view(&self) -> BurstsView {
         let s = self.shared.lock().unwrap();
         let span = match (s.recent.front(), s.recent.back()) {
@@ -791,6 +946,15 @@ impl PoolBursts {
             late: self.late,
             dropped: self.dropped,
             unknown: self.unknown,
+            skipped: self.skipped,
+            links: self.links,
+            tried: self.tried,
+            rates_found: s.codes.values().filter(|c| c.rate.is_some()).count(),
+            codes_given_up: s
+                .codes
+                .values()
+                .filter(|c| c.ok == 0 && c.failing >= GIVE_UP)
+                .count(),
             per_s: if span > 0.5 {
                 s.recent.len() as f64 / span
             } else {

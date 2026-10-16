@@ -1953,6 +1953,7 @@ impl Worker {
                     self.plans.as_ref(),
                     record,
                 );
+                p.set_plan_hint(b.plan_hint());
             }
             Decoder::Tdma(a) => {
                 a.push(&self.bb, self.settings.psk_modulation);

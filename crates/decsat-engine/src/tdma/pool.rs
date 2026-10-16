@@ -334,6 +334,8 @@ pub struct PoolTracker {
     /// When the view's fine and slot rows were last taken, source clock.
     fine_taken: f64,
     slots_taken: f64,
+    /// The frame and its slots, as a plan says.
+    plan_hint: Option<(f64, usize)>,
 }
 
 impl PoolTracker {
@@ -391,7 +393,15 @@ impl PoolTracker {
             next_slot: None,
             fine_taken: f64::MIN,
             slots_taken: f64::MIN,
+            plan_hint: None,
         }
+    }
+
+    /// The frame (s, the hub's clock) and the slots in it, as an
+    /// outbound's burst plan that lines up with this pool says (`None` to
+    /// find them from the signal alone).
+    pub fn set_plan_hint(&mut self, hint: Option<(f64, usize)>) {
+        self.plan_hint = hint.filter(|h| h.0 > 0.0 && h.1 > 0);
     }
 
     pub fn view(&self) -> &PoolView {
@@ -755,10 +765,18 @@ impl PoolTracker {
             .map(|k| (k, fold_explained(&e, dt, slot * k as f64)))
             .collect();
         let best = ks.iter().map(|e| e.1).fold(f64::MIN, f64::max);
-        let frame = (best > base * 1.2 + 0.002)
+        let mut frame = (best > base * 1.2 + 0.002)
             .then(|| ks.iter().find(|e| e.1 >= 0.9 * best))
             .flatten()
             .map(|&(k, _)| slot * k as f64);
+        // An outbound's plan says the frame: the multiple of the repeat
+        // (itself, often, on a pool busy with long bursts) nearest it.
+        if let Some((hint, _)) = self.plan_hint {
+            let k = (hint / slot).round().max(1.0);
+            if (k * slot / hint - 1.0).abs() < 0.003 {
+                frame = Some(k * slot);
+            }
+        }
         self.view.slot_s = Some(slot);
         // The frame refined on the dips too (its own fold is flat across a
         // slot's width of error), within a sample step of k slots.
@@ -769,7 +787,13 @@ impl PoolTracker {
         let Some(frame) = self.view.frame_s else {
             return;
         };
-        let n = ((frame / slot).round() as usize).max(1);
+        // Slots in the frame: as an outbound's plan says, when one does (a
+        // pool busy with longer bursts shows mostly their starts, every
+        // second or fourth slot); else from the repeat.
+        let n = self
+            .plan_hint
+            .map(|h| h.1)
+            .unwrap_or(((frame / slot).round() as usize).max(1));
         let (pitch, start) = frame_grid(&e, dt, self.env_t0, frame, n);
         let grid = SlotGrid {
             frame_s: frame,
@@ -1362,20 +1386,34 @@ fn correlate(
 /// µs): the pool's own, from the rises of a busy envelope, wanders by
 /// 5–10 µs. The start moves with it about the middle of the frame's slots,
 /// where the pool's line through them is surest.
-fn shared_grid(pool: &PoolView, clock: &decsat_ts::newtec::PlanClock) -> Option<SlotGrid> {
+fn shared_grid(
+    pool: &PoolView,
+    clock: &decsat_ts::newtec::PlanClock,
+    slots: usize,
+) -> Option<SlotGrid> {
     let g = pool
         .grid
         .filter(|g| (g.frame_s / clock.period_s - 1.0).abs() <= 0.003)?;
     let hub = decsat_ts::newtec::SLOT_S * g.frame_s / clock.period_s;
-    let fits = g.slots as f64 * hub <= g.frame_s && (g.pitch_s / hub - 1.0).abs() < 0.01;
-    Some(if fits {
-        SlotGrid {
-            pitch_s: hub,
-            start_s: g.start_s + (g.slots - 1) as f64 / 2.0 * (g.pitch_s - hub),
-            ..g
-        }
+    if slots as f64 * hub > g.frame_s {
+        // The hub's slots do not fit this frame: the pool's own grid.
+        return Some(g);
+    }
+    // The pool's slots are the hub's, or whole runs of them (a pool busy
+    // with longer bursts may show only their starts): either way its start
+    // is one of the hub's slot starts — moved about the middle of the
+    // frame's slots where the pitches differ a little.
+    let k = (g.pitch_s / hub).round().max(1.0);
+    let start = if (g.pitch_s / (k * hub) - 1.0).abs() < 0.01 {
+        g.start_s + (g.slots - 1) as f64 / 2.0 * (g.pitch_s - k * hub)
     } else {
-        g
+        g.start_s
+    };
+    Some(SlotGrid {
+        pitch_s: hub,
+        slots,
+        start_s: start,
+        ..g
     })
 }
 
@@ -1393,7 +1431,7 @@ pub fn lead_scores(
     if rows.len() < 4 * slots || plan.recent.len() < 25 {
         return None;
     }
-    let grid = shared_grid(pool, clock)?;
+    let grid = shared_grid(pool, clock, slots)?;
     let (frame, pitch) = (grid.frame_s, grid.pitch_s);
     let (lo, hi) = plan.span?;
     let span = rows.bins_in(lo + offset_hz, hi + offset_hz);

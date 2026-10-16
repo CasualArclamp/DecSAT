@@ -6442,6 +6442,12 @@ fn burst_section(
     if b.unknown > 0 {
         extra.push_str(&format!(" · {} of unread codes", b.unknown));
     }
+    if b.skipped > 0 || b.rates_found > 0 {
+        extra.push_str(&format!(
+            " · {} not tried ({} codes' rates found by search, {} codes let be)",
+            b.skipped, b.rates_found, b.codes_given_up
+        ));
+    }
     ui.label(RichText::new(extra).small());
     ui.label(
         RichText::new(format!(

@@ -802,7 +802,9 @@ fn bursts_line(b: &decsat_engine::tdma::pool_bursts::BurstsView) -> String {
     match (b.from, b.timing) {
         (Some(from), Some(t)) => format!(
             "bursts by VFO {from}'s plan (lead {:.1} ms, zero {:+.1} kHz): {:.0}/s, {} of {} \
-             cut ok ({:.1} %), {} late, {} let go; demodulator {:.2} s a second on {} workers",
+             cut ok ({:.1} %), {} late, {} let go, {} not tried ({} rates searched out, {} \
+             codes let be); demodulator {:.2} s a second on {} workers; taken up {}×, \
+             zero trimmed {:+.0} Hz, start {:+.1} µs",
             t.lead_s * 1e3,
             b.offset_hz / 1e3,
             b.per_s,
@@ -811,10 +813,25 @@ fn bursts_line(b: &decsat_engine::tdma::pool_bursts::BurstsView) -> String {
             100.0 * b.demodulated as f64 / b.cut.max(1) as f64,
             b.late,
             b.dropped,
+            b.skipped,
+            b.rates_found,
+            b.codes_given_up,
             b.load,
-            b.workers
+            b.workers,
+            b.links,
+            b.zero_trim_hz,
+            b.start_trim_s * 1e6
         ),
-        _ => "bursts: no outbound's plan timed on the pool yet".into(),
+        _ => match b.tried {
+            Some(t) => format!(
+                "bursts: no plan timed yet (best fit {:.2} at a lead of {:.1} ms, {:.2} at any \
+                 other)",
+                t.corr,
+                t.lead_s * 1e3,
+                t.next_corr
+            ),
+            None => "bursts: no outbound's plan lines up with the pool yet".into(),
+        },
     }
 }
 

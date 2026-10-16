@@ -5156,3 +5156,59 @@ session wires it to the live pool; this is the core.
 - Next, if wanted: table the pilots per code (exact data bit counts per
   code), then test candidate codes against the idle words with their
   labels and interleaver as unknowns — a bigger job.
+
+## Return bursts demodulated live (2026-10-16)
+
+Rory asked for a live return-burst demodulator; the waveform session built
+the demodulator core (`tdma::burst_demod`, the section above), this one the
+live plumbing, the slot pitch and the GUI.
+
+- **The plan between VFOs** (`plan_feed`): the outbound VFO's FEC thread
+  posts each D1h frame as it is read (`RcsRx::take_plan_frames`) and the
+  plan's view every half second; the pool VFO reads them on its own thread
+  (each VFO gets a `PlanLink`, its id on the engine's feed).
+- **Slots of 5.000 ms**: the pool's grid is a `SlotGrid` — a pitch and a
+  frame start from the envelope's rises (every burst starts at the same
+  point in its slot, so they fold to sharp peaks; the guard dips, flat and
+  shoved about by traffic, gave pitches 15–20 µs off), the frame's leftover
+  after the last slot. Its pitch still wanders 5–10 µs live, so lining a
+  plan up uses the hub's own (`newtec::SLOT_S`, scaled to the receiver's
+  clock), every slot tried as the first. Live the pool was often too busy
+  with long bursts for its own repeat to find the 5 ms slot (it found 10,
+  20 or 40.2 ms): the plan that lines up in frequency now tells the
+  tracker the frame and its slots (`PoolTracker::set_plan_hint`).
+- **Scheduling** (`tdma::pool_bursts`): each plan frame's bursts on the
+  source clock; the pool's baseband in a 1.5 s ring; a burst cut once its
+  slots are in, 0.7 ms before and 0.5 ms after, and handed to worker
+  threads (half the machine's threads, at most eight). The zero from
+  `refine_offset` (each code's band at its symbol rate, slot by slot), then
+  — with the start — trimmed every 2 s by the median carrier and timing
+  offsets of the bursts lately demodulated; the timing and zero frozen
+  while the plan holds (the pool's own look wanders by tens of µs and
+  hundreds of Hz). The frame's length is corrected from the start's drift
+  (a second-order loop): the HackRF runs 6 ppm off the hub, 6 µs a second.
+- **Codes not in the table** (the live hub used ~30 more than the capture):
+  the rate the learned width implies, searched by the demodulator — one
+  burst of such a code at a time, the rate found kept for its later bursts;
+  a code that never demodulates is let be after 20. Before this the
+  searches (hundreds of rates for a long burst) filled the queue and the
+  workers fell behind.
+- **GUI**: the Return pool card's lead, waterfall boxes (each the code's band
+  on the terminal's own carrier) and C/N come from the VFO's own timing;
+  *Bursts demodulated*: rate, ok/cut, late, let go, not tried, the workers'
+  load, the start trim; per terminal ok %, MER, C/N, Δf, Δt, latest code;
+  click a terminal for its constellation; Record writes each terminal's
+  `.rbursts` (format in `tdma::pool_bursts`). `--lna`/`--vga` for
+  unattended GUI runs on the HackRF.
+- **CLI**: `decsat decode --decoder pool --offset 580000 --bandwidth 900000
+  --plan-from=-881700:1300000` (file or `--hackrf`) runs the outbound
+  beside the pool and reports the bursts per terminal.
+
+Results. The 172B capture (`--fast`): 22 248 of 22 893 bursts ok
+(97.2 %), MER 11.1–12.2 dB (431: 9.9), the zero at −26.1 kHz from the
+capture centre, 431 −25.4 kHz, 409 −7.1, 413 −4.7 — as the waveform
+session found offline. **Live** (HackRF at 1930.05 MHz, LNA 24, VGA 20,
+receive only, 90–180 s runs): 340–430 bursts a second demodulated, 94–97 %
+of those cut, MER 11.0–12.5 dB (431 ~10.0), 1.0–1.5 s of demodulator a
+second of signal; the GUI showed 366 a second, 96.6 % ok, 8 workers at 20 %.
+A terminal 380 not on the capture appears live (MER 12.3 dB).

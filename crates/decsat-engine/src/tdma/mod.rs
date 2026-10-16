@@ -17,7 +17,9 @@
 //! [`pool`] is a decoder of its own (*Return pool*): the whole VFO as a
 //! return pool, its layout over time and the frame grid of its bursts.
 //! [`burst_demod`] demodulates a Newtec return burst the hub's plan has
-//! scheduled (its terminal, code, frequency and slot known).
+//! scheduled (its terminal, code, frequency and slot known);
+//! [`pool_bursts`] does it live in a Return pool VFO, the plan fed from an
+//! outbound VFO through the engine's [`crate::plan_feed`].
 //!
 //! Recording writes every burst's data symbols to a `.bursts` file (and a
 //! line per burst to a `.csv`, with its header fields' values — the short

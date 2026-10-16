@@ -62,7 +62,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--wireshark] [--biss-key KEY] [--watch]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch]"
             );
             std::process::exit(2);
         }
@@ -125,6 +125,15 @@ fn main() -> eframe::Result {
                 }
                 app.radio.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
                 app.radio.settings.gains.amp |= opts.amp;
+                if let Some(g) = opts.lna_db {
+                    app.radio.settings.gains.lna_db = g;
+                }
+                if let Some(g) = opts.vga_db {
+                    app.radio.settings.gains.vga_db = g;
+                }
+                // Rust note: `snapped` rounds the gains to the HackRF's own
+                // steps (8 dB for the LNA, 2 for the VGA).
+                app.radio.settings.gains = app.radio.settings.gains.snapped();
                 app.start_hackrf();
             }
             Ok(Box::new(app))

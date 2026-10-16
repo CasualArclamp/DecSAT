@@ -27,6 +27,10 @@ pub struct Options {
     pub rate_msps: Option<f64>,
     /// HackRF RF amplifier on (+14 dB).
     pub amp: bool,
+    /// HackRF IF (LNA) and baseband (VGA) gains, dB, for this run (the
+    /// saved ones otherwise).
+    pub lna_db: Option<u16>,
+    pub vga_db: Option<u16>,
     /// LNB LO for the axis, MHz.
     pub lo_mhz: Option<f64>,
     /// Decoder for claimed carriers (default Identify).
@@ -135,6 +139,22 @@ impl Options {
                 }
                 Some("--wireshark") => o.wireshark = true,
                 Some("--amp") => o.amp = true,
+                Some("--lna") => {
+                    let v = args.next().ok_or("--lna needs dB")?;
+                    o.lna_db = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("--lna takes 0–40 dB")?,
+                    );
+                }
+                Some("--vga") => {
+                    let v = args.next().ok_or("--vga needs dB")?;
+                    o.vga_db = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("--vga takes 0–62 dB")?,
+                    );
+                }
                 Some("--decoder") => {
                     let v = args.next().ok_or("--decoder needs a name")?;
                     let v = v.to_str().unwrap_or_default().to_ascii_lowercase();
