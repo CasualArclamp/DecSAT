@@ -5247,18 +5247,22 @@ identified yet; what is known now:
   77–97 % of symbol changes are single bit flips under that labelling
   (27 % if random). Holds for 0104h, 00FCh, 010Ch, 0114h, 00F4h, 00ECh,
   00E4h, 2278h, 0508h, 0510h, 02F0h; the sync bursts differ. 0104h: 712
-  information bits (89 bytes) + 712 parity.
+  information bits (89 bytes) + 712 parity. **Corrected in the third
+  pass below: rate 0.70** — ring and lsb carry information too wherever
+  the symbol index is 0 or 3 mod 5 (998 + 426 for 0104h).
 - **The information block** (0104h): a header whose first ~35 bits change
   burst to burst (13 bits vary: a counter or similar), a padding region
   identical to the idle burst's, and a **52-bit tail** that changes
   completely whenever anything else does (a CRC, BCH(t=4, m=13)'s 52
-  parity bits, or a keyed tag).
+  parity bits, or a keyed tag). (Third pass: linear in the rest of the
+  word — a CRC/BCH-type check, not a keyed tag.)
 - **The parity is not local and not natural-order**: no biased linear
   function over 3–5 consecutive symbols under any of the 30 labellings
   of the 8 phases (Walsh–Hadamard over a million windows; a convolutional
   or turbo constituent in natural order, or an accumulator, would show
   0.3+, the best was 0.04); no accumulator in ring/lsb orders; the parity
-  differences repeat weakly every 5 symbols but are not periodic, so not
+  differences repeat weakly every 5 symbols (that was the information/
+  parity split, found in the third pass) but are not periodic, so not
   a natural-order RSC (DVB-RCS2's duo-binary turbo, feedback 1+D³+D⁴,
   would repeat every 15 couples). The parity bits are permuted relative
   to the information — a bit-interleaved LDPC or turbo code.
@@ -5266,7 +5270,8 @@ identified yet; what is known now:
   bits XOR to zero do not XOR to zero in their parity (0.38 of bits
   against 0.15 noise) nor in the 52-bit tail — either their payloads
   differ elsewhere too (some middle bits vary beyond noise) or the tail
-  is not affine in the header (a keyed tag would do that).
+  is not affine in the header (a keyed tag would do that). (Linearity was
+  confirmed exactly in the third pass, on error-free words.)
 - **Payload not in clear**: busy bursts' information XOR the idle word's
   (which cancels any fixed scrambler) holds no checksum-valid IPv4 header
   under any bit reading (pair order, complement, bit order, offset)
@@ -5312,7 +5317,9 @@ changing only a header and the tail). Stopped: the code is not found.
   But seriating them gives no clean chain (neighbour correlation 0.21),
   and no cluster boundary matches one or two varying information bits
   (best 0.3 of a possible ~0.6, the chance maximum): the checks between
-  runs touch several varying bits at once, or the model is wrong.
+  runs touch several varying bits at once, or the model is wrong. (Third
+  pass: the strongest of these pairs are information bits under the
+  corrected split — payload structure, not an accumulator.)
 - What remains: a proper dual-codeword search (sparse learning-parity-
   with-noise over the 1 424 bits, soft-weighted, meet-in-the-middle with
   hashing) written in Rust, fed by a longer recording at the best MER —
@@ -5356,6 +5363,194 @@ found.
   (Rust) dual-codeword search over all parity pairs. No HackRF recording
   made: with no candidate structure to confirm, a longer capture alone
   would not change the outcome.
+
+### A third pass: a compiled search, and the split corrected (2026-10-16)
+
+Rory: "Go further: … a compiled Rust dual-codeword search over all 0104h
+parity pairs, fed by a longer HackRF recording." Searched; nothing found up
+to the stop rule (weight ≤ 8), and the information/parity split above is
+wrong — corrected here.
+
+- **Data**: the 60 s capture (**4 419 bursts of 0104h**, MER 11.0–13.3 dB,
+  median 12.2; 858 busy — "diverse", ≥ 300 information bits off idle)
+  and, once Rory had closed his GUI, a live recording through the Return
+  pool decoder's Record (`.rbursts`, scratchpad only). Gains checked first
+  (40 s each, burst-weighted MER over 25 terminals): LNA 16/VGA 30 11.12 dB,
+  24/20 11.40, 32/12 11.33, 24/30 11.72, 32/20 11.78, 32/26 11.99,
+  **40/14 12.05 (97.8 % of bursts)**, 40/20 12.05 — LNA 40 / VGA 14 used.
+  Another session started its own GUI on the HackRF two minutes in, so
+  the recording stopped there: 45 772 bursts (98.0 % demodulated, 1.2 GB),
+  9 304 of them 0104h — capture + these: **13 723 bursts of 0104h, 2 869
+  diverse** (the "larger set" below). With the radio handed back, a
+  second recording ran 21:16–21:33 (17.5 min, stopped when a GUI started
+  again): ~400 000 bursts at 96–98 % demodulated, 9.9 GB. **Full set:
+  97 987 bursts of 0104h (median MER 12.2 dB), 20 210 diverse** — 24×
+  the capture's busy bursts.
+- **Bit errors live in the weakest cells.** Calibrated on the idle bursts'
+  padding (bit error against |soft| × SNR): the 30 % least reliable cells
+  carry 11.5 % errors, the rest ~3·10⁻⁴ — weak cells are the quadrant
+  bits of inner-ring symbols. So a single burst is nearly error-free
+  wherever it reads reliably; this is what made the structure tests below
+  possible.
+- **Correction — rate 0.70, not ½.** Per data symbol s (pilots out), qa
+  and qb are information; **ring and lsb are information when s mod 5 is
+  0 or 3, parity when it is 1, 2 or 4**: 14 information + 6 parity bits
+  per 5 symbols, **998 information + 426 parity** a burst (356 = 71 × 5 + 1;
+  the last symbol is information). Evidence: change against idle by
+  residue — few-change bursts 0.27 vs 0.50, a misfit of 0.007 on a
+  two-level fit — and every co-moving pair below is information–information
+  or parity–parity, never mixed. 998 = 499 couples, 6 parity per 7 couples:
+  the shape of a duo-binary turbo code punctured to 7/10, though nothing
+  below confirms a turbo code. **2278h** follows the same rule with its
+  own rate: ring/lsb information at s mod 20 ∈ {0, 3, 6, 9, 12, 15, 18},
+  7 of every 20 symbols — 3 022 information + 1 454 parity, rate 0.675.
+  So the mapper fills the quadrant bits with information first and
+  spreads the remaining information bits evenly over the ring/lsb slots
+  (0104h: spacing 3, 2, 3, 2…; 2278h: 3 × 6 then 2); the rate is the
+  code's (MODCOD's) own.
+- **Correction — the "accumulator clusters".** The idle (dis < 0.3) bursts
+  are the idle word itself (median 0 reliable information changes); the
+  co-moving pairs came from the partly filled bursts, and the strongest of
+  them were information bits (payload structure: half of the top 200 pairs
+  are information–information), not an accumulator. The parity–parity
+  pairs were searched below.
+- **The search** (standalone Rust, scratchpad only, ~1 300 lines, no
+  dependencies, idle priority, 12 threads): columns = the 1 424 bit
+  positions over the diverse bursts, relative to idle; items = small
+  column sets (S: ≤ 1 parity + ≤ 2 information; B: ≤ 1 parity + 3
+  information; T2: 2 parity + ≤ 2 information); items whose XORs agree on K
+  key bursts collide in 4 096 partitions (sorted, or probed against a
+  cache-resident bitmap); each collision's union is a candidate check,
+  verified by a 64-burst prefilter, a hard z and a soft z (reliability-
+  weighted) on held-out bursts, then on all diverse bursts. Key bursts are
+  drawn from the cleanest 160–200. **Planted checks run in every run**
+  (synthetic parity columns whose noise is drawn cell by cell from the
+  members' calibrated error rates); every fourth table is a control that
+  forces one planted check to survive, and every surviving planted check
+  must be found.
+- **Searched** (corrected split):
+  - **joins S×S and S×B on the full set** — every check of ≤ 2 parity +
+    ≤ 5 information bits (weight ≤ 7) through all ~90 000 parity pairs:
+    20 tables (K 28 / 32, key bursts from the cleanest 160 of 20 210 —
+    2.6 % information / 3.5 % parity bit error), 22 min. A code with 426
+    checks of one shape would have shown **~187 finds at weight 5, 69 at
+    weight 6, 16 at weight 7** (1 parity + 5 information: 39). None: of
+    62 446 candidates kept, the best with a parity bit agrees 0.556 on
+    busy bursts and the best information-only one 0.578 — the payload's
+    faint correlations, significant only because of the volume; a true
+    check agrees 0.75–0.80. No machinery misses.
+  - the same on the capture alone, 30 tables: expected 74 / 13 / 4.3,
+    none (best unplanted candidate z 6.9 where a true check scores 13–18).
+  - T2×S — 3 parity + ≤ 4 information (larger set, 10 tables, K 32):
+    none; expected finds for 426 such checks 5.1 at weight 6, 1.0 at 7 —
+    weak, but 3-parity checks are not what IRA/turbo-like codes make.
+  - B×B — weight 8 (2 parity + 6 information) everywhere (larger set,
+    K 36): 3 tables (18 min), nothing but the confounded p70/p80 pair
+    again (z 8.6). A token run: a weight-8 check survives a K = 36 table
+    with ~2·10⁻⁴, so ~0.2 finds were expected even for 426 checks. The
+    weight-8 joins with 3–4 parity (T2×T2, T2×B) were built but not run.
+  - **pair mode**, the targeted weight-8 search: the top 400 parity–parity
+    pairs by co-movement in the partly filled bursts (phi 0.84 down to
+    0.66), each searched for T = a ⊕ b + up to 6 information bits among
+    the 250 information positions that change least there, on the bursts
+    where both parity bits read reliably, 80 tables a pair (50 min): none.
+    Its 40 planted pair checks: forced control tables 40/40 found; the
+    ordinary tables found 27 (30.9 expected) — so a pair carrying a real
+    weight ≤ 8 check of that kind would have been found ~3 times in 4.
+    Repeated on the larger set (top 300 pairs, 1 008 partly filled bursts
+    for the ranking, 2 869 busy for the keys; 45 min): none — the best
+    unplanted sets agree 0.58 on busy bursts (a true check 0.75–0.80) and
+    0.83–0.86 on partly filled ones, the fill-level confound again.
+    Planted pairs: forced 40/40, ordinary tables 36 (35.3 expected).
+  - On the larger set (capture + recording), joins S×S and S×B, 20 tables:
+    expected finds for 426 checks of one shape 52 (weight 5), 31 (6),
+    4.8 (7) — found only **information-only relations, the data, not the
+    code**: three header bits that XOR to zero in 82–86 % of busy bursts
+    (u0 ⊕ u4 ⊕ u8, u5 ⊕ u7 ⊕ u8; z 35–41 — a structured header field) and
+    a few weak weight-4 relations in the payload (58–60 %, z ≈ 10).
+    Nothing with a parity bit beyond z 8.4, where a true check on 2 869
+    bursts would score ~25. The parity pairs that recur among those
+    near-misses (p70/p80, p121/p130, p90/p100: neighbours 9–10 apart in a
+    cluster) correlate with single information bits at 0.59–0.60 against
+    ≤ 0.536 for random pairs, but no completion holds (all ≤ 0.60): busy
+    bursts are still partly padding, so co-moving pairs track how full a
+    burst is, and with it many information bits at once — a confound, not
+    a check. Pair mode on the full set was started and stopped: with
+    ~11 000 bursts a pair, the payload's faint correlations pass its
+    gates by the million (33 s a pair) — it would need an agreement gate
+    instead of a z gate first.
+  - Earlier labelling (712 + 712), joins 1–2, 60 tables: nothing.
+- **Linear, exactly.** Bursts that repeat (21 groups; 13 words soft-
+  combined to ≤ 15 % erased cells — idle-type bursts that differ from idle
+  only in the header and the tail) give error-free codewords: four of them
+  whose information XORs to zero on all 984 cells read XOR to zero on all
+  417 parity cells read, and so do four more sets off by 1–2 information
+  cells (residual word errors). Same information, same parity — the split
+  is right and the code is linear. The tail (symbols 330–355) changes
+  whole whenever anything does, so no combination isolates fewer than 21
+  information bits; those 21–28 bits (tail + header bits at symbols 3, 6,
+  16) move 65–80 parity bits spread evenly over the word and both planes
+  (~3.5 a bit if independent), while anything touching symbol 0 moves
+  about half the parity. With the full recording: 108 repeated words
+  (groups of 3 to 1 342 bursts), 54 read in full, whose information parts
+  span 23 dimensions over 191 varying positions — and adding all 418
+  readable parity bits leaves the rank at 23: **31 independent linear
+  dependencies hold in every parity bit**. **The tail is a CRC-type check,
+  not a keyed tag**: from symbol 320 on it adds no rank either — the same
+  31 dependencies hold in it (a nonlinear tag would break each with
+  probability ~1 − 2⁻⁷⁰); the region 300–319 adds one dimension, so the
+  check field starts between symbols 300 and 320.
+  **Most information bits feed few parity bits**
+  — if that holds, single parity bits sit in checks of ~1 + 8 bits,
+  just past the weight-8 rule: the obvious next search.
+- **Structure tests** (reliable cells and 11 error-free words from
+  repeated bursts, soft-combined):
+  - no time-invariant linear relation within 6 symbols (all four bits,
+    any labelling — thousands of clean rows), nor within 8 symbols on
+    (qa, qb, lsb); no period-5 relation within 4 symbols;
+  - on the error-free words, windows up to 13 symbols give kernels, but
+    every candidate scores 0.50–0.76 on independent bursts — relations of
+    the repeated messages, not of the code;
+  - no feedback polynomial up to degree 6 makes the parity change sparse;
+  - the parity change is not runs along any natural order (an accumulator
+    would be);
+  - tail-only changes move only lsb parity, from the change onward; ring
+    parity does not move; header changes move both. A clean cut-off
+    (ring parity ignoring the late information) is not confirmed;
+  - the earliest parity bits depend only on the earliest information: in
+    partly filled bursts p5 (symbol 4) flips 9 %, p4 18 %, p1 24 %
+    against ~50 % for the rest, and p0 (symbol 1 ring) equals symbol 0's
+    qb in all 270 bursts that read those cells reliably. Further along,
+    too few bursts read every cell of a growing window to follow it.
+  - **the parity is quasi-cyclic with the 5-symbol period** (larger set,
+    1 008 partly filled bursts): 128 parity bits fall into 15 clusters
+    that change together (phi ≥ 0.7, 7–11 bits each). Each cluster is a
+    pair of ring bits 25 symbols apart near the start (2/26, 6/31, 7/32,
+    9/34, 11/36, 12/37, 14/39, 16/41, 17/42, 19/44, 21/46, 22/47) plus
+    late members at symbol offsets {0, 9, 47, 55, 74, 82, 120, 129} from
+    ~200 — and those late patterns are the same pattern shifted by whole
+    5-symbol periods (from 212, 217, 222, 227, 232 …). These are the
+    "recurring index gaps 24–25, 8, 9, 38" of the second pass, now as a
+    shift-invariant structure: whatever the code is, it is built in
+    blocks of 7 couples / 6 parity bits;
+  So the encoder is causal at the start of the word, but no convolutional
+  or turbo constituent runs in transmission order: a bit interleaver (or
+  a non-convolutional code) sits between the encoder and the symbols.
+- **Payload**: with the 998 information bits, busy bursts are 49.5 % ones
+  with no byte structure under four bit orders — scrambled or encrypted.
+
+**Stopped** at Rory's rule. What is known now: the split (rate 0.70 for
+0104h, 0.675 for 2278h, the extra information spread evenly over ring/lsb),
+the error structure, linearity, a CRC-type tail, and that low-weight
+checks do not exist (≤ 7 everywhere, 8 through the co-moving pairs) — so
+not an LDPC with check degree ≤ 7 — while the encoder's order is hidden
+behind an interleaver. What would move it: the rest of the planned
+recording (~40 min, when the radio is free) for many more repeated words —
+words differing in a few known bits give generator rows directly, though
+the CRC tail means every difference drags ~70 tail bits along; a search
+for single-parity checks of weight ~9 (needs an item family of four
+information bits, ~4·10¹⁰ items, or a restriction like pair mode's); or
+the code's family from Newtec documentation.
 
 ## Multicast television in UDP plays in the app (2026-10-16)
 
