@@ -65,8 +65,11 @@ pub struct Options {
     pub beacons: bool,
     /// The BISS key every claimed VFO is given.
     pub biss_key: Option<String>,
-    /// Play the selected VFO's first service in the app once its PMT is in.
+    /// Play the selected VFO's first service in the app once its PMT is in
+    /// (and, with `--watch-after S`, S seconds into the run: mid-GOP, so a
+    /// player starting from the last keyframe can be seen to).
     pub watch: bool,
+    pub watch_after: f64,
 }
 
 impl Options {
@@ -133,6 +136,14 @@ impl Options {
                 }
                 Some("--play-audio") => o.play_audio = true,
                 Some("--watch") => o.watch = true,
+                Some("--watch-after") => {
+                    let v = args.next().ok_or("--watch-after needs seconds")?;
+                    o.watch = true;
+                    o.watch_after = v
+                        .to_str()
+                        .and_then(|s| s.parse().ok())
+                        .ok_or("--watch-after needs seconds")?;
+                }
                 Some("--biss-key") => {
                     let v = args.next().ok_or("--biss-key needs a key")?;
                     o.biss_key = Some(v.to_string_lossy().into_owned());
@@ -252,6 +263,7 @@ pub struct Automation {
     pub audio_started: bool,
     pub biss_key: Option<String>,
     pub watch: bool,
+    pub watch_after: f64,
     pub watch_started: bool,
     pub wireshark: bool,
     /// Each claimed carrier's decoder (`--decoder a,b,…`).
@@ -280,6 +292,7 @@ impl Automation {
             audio_started: false,
             biss_key: o.biss_key.clone(),
             watch: o.watch,
+            watch_after: o.watch_after,
             watch_started: false,
             wireshark: o.wireshark,
             decoders: o.decoders.clone(),
@@ -288,6 +301,11 @@ impl Automation {
 
     pub fn active(&self) -> bool {
         self.after.is_some()
+    }
+
+    /// Seconds since the run started.
+    pub fn elapsed(&self) -> f64 {
+        self.start.elapsed().as_secs_f64()
     }
 
     pub fn tick(&mut self, ctx: &egui::Context) {

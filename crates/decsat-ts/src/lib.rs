@@ -5,12 +5,15 @@
 //! - [`psi`]: per-PID counts and continuity; PAT, PMT and SDT for the
 //!   programmes and service names.
 //! - [`sink`]: a `.ts` file, UDP, or a TCP/HTTP server for VLC and PotPlayer.
+//! - [`backlog`]: the stream since its last keyframe, for a player that
+//!   starts now.
 //! - [`csa`] and [`biss`]: DVB-CSA descrambling with a BISS key.
 //! - [`rcs`]: a VSAT hub's DVB-RCS signalling — the return link it runs.
 //! - [`newtec`]: a Newtec hub's private burst plan (table D1h).
 //! - [`udp`]: transport packets carried in UDP (bare, RTP, a sender's own
 //!   header), found in an IP stream.
 
+pub mod backlog;
 pub mod biss;
 pub mod csa;
 pub mod deframe;

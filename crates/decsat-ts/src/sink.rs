@@ -143,6 +143,9 @@ impl TcpSink {
 pub struct TsTap {
     tx: SyncSender<Vec<[u8; TS_LEN]>>,
     dropped: Arc<AtomicU64>,
+    /// The video PID the taker decodes: it is handed the stream from that
+    /// PID's last keyframe first (`crate::backlog`).
+    video: Option<u16>,
 }
 
 impl TsTap {
@@ -153,6 +156,7 @@ impl TsTap {
             TsTap {
                 tx,
                 dropped: Arc::new(AtomicU64::new(0)),
+                video: None,
             },
             rx,
         )
@@ -172,6 +176,17 @@ impl TsTap {
             }
             Err(TrySendError::Disconnected(_)) => false,
         }
+    }
+
+    /// The taker decodes this video PID (its keyframes start the backlog
+    /// it is handed).
+    pub fn for_video(mut self, pid: Option<u16>) -> Self {
+        self.video = pid;
+        self
+    }
+
+    pub fn video(&self) -> Option<u16> {
+        self.video
     }
 
     /// Packets dropped because the taker was behind.

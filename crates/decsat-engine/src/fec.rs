@@ -2275,8 +2275,10 @@ struct TsStage {
     text: decsat_modem::text::ByteText,
     /// BISS descrambling, ahead of everything else.
     descrambler: Descrambler,
-    /// The in-app player's copy.
+    /// The in-app player's copy, and the stream since its last keyframe
+    /// for a player that starts.
     tap: Option<TsTap>,
+    backlog: decsat_ts::backlog::Backlog,
     /// DVB-RCS signalling, and its view as of the last report.
     rcs: decsat_ts::rcs::RcsRx,
     rcs_view: Option<decsat_ts::rcs::RcsView>,
@@ -2314,6 +2316,7 @@ impl TsStage {
             text: decsat_modem::text::ByteText::new(),
             descrambler: Descrambler::new(),
             tap: None,
+            backlog: decsat_ts::backlog::Backlog::new(),
             rcs: decsat_ts::rcs::RcsRx::new(),
             rcs_view: None,
             since_plan: 0.0,
@@ -2325,6 +2328,11 @@ impl TsStage {
         self.descrambler.set_cw(o.biss);
         if self.tap != o.ts_tap {
             self.tap = o.ts_tap.clone();
+            // A player starting: the stream from its last keyframe first,
+            // so its picture (and sound) need not wait for the next.
+            if let Some(t) = &self.tap {
+                t.send(&self.backlog.since_keyframe(t.video()));
+            }
         }
         match (o.ts_record, self.file.is_some()) {
             (true, false) if self.file_path.is_none() || self.error.is_none() => {
@@ -2418,6 +2426,7 @@ impl TsStage {
         for p in &mut self.packets {
             let descrambled = self.descrambler.packet(p) == Outcome::Descrambled;
             self.analyser.packet(p);
+            self.backlog.push(p);
             self.rcs.packet(p);
             if descrambled {
                 self.analyser

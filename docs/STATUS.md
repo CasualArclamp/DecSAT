@@ -5435,3 +5435,19 @@ than the loop. A wider carrier loop is worse, half as wide slightly
 better (16APSK 3/5 failures 115 → 95) — not changed, as BnT is per symbol
 rate and other carriers were tuned on it. No sample drops in the HackRF
 stream (symbol-clock phase continuous over the second checked).
+
+## The player starts from the last keyframe (2026-10-16)
+
+The 172B multicast feeds send a keyframe every ~12 s, and ffmpeg writes
+nothing (sound included) until the first picture has set up its output:
+▶ could be black and silent for a GOP. `decsat_ts::backlog` keeps, in
+every TS stage, the packets since each video PID's last random access
+point (RAI on a video PES start: E0h–EFh; audio encoders set RAI on every
+frame, so audio PIDs are left out) and the latest PAT/PMT packets, up to
+48 000 packets (~9 MB); `TsTap::for_video` names the player's video PID
+and a tap that attaches is sent that backlog first. The player decodes the
+burst; the audio player cuts its start-up backlog to 400 ms and the
+picture queue keeps the newest, so it shows the newest picture at live
+latency. Live check (HackRF, GUI `--watch-after 25`, a new automation flag
+that opens the player mid-GOP): BBC News on screen 3 s after ▶, "28
+pictures shown, 30 dropped" (the burst skipped), timed by the sound.

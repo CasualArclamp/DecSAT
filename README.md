@@ -317,9 +317,13 @@ sender's own (Eutelsat 172B's BBC News multicast puts a sequence number
 ahead of its seven packets). The IP card lists them under **MPEG-TS in
 UDP**; the busiest (or the one you **Take**) becomes the VFO's MPEG-TS —
 services, the analyser, **▶ In app**, a BISS key — and is written to a
-`.ts` beside the PCAP while that records. The picture starts at the
-stream's first keyframe, which on a low-rate feed can be ten seconds or
-more away.
+`.ts` beside the PCAP while that records.
+
+The player starts at once even on a low-rate feed whose keyframes are ten
+seconds or more apart: every transport stream keeps the packets since each
+picture's last keyframe (marked by the encoder's random access indicator),
+and a player that opens is handed those first, with the latest PAT and
+PMT; it decodes them in a burst and shows the newest picture.
 
 ### Multicast audio
 

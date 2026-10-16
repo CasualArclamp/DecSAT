@@ -62,7 +62,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -932,8 +932,10 @@ impl App {
             );
             return;
         };
-        // About a second of a busy stream's BBFRAMEs.
+        // About a second of a busy stream's BBFRAMEs; its video's last
+        // keyframe on is handed over first.
         let (tap, rx) = decsat_ts::TsTap::new(256);
+        let tap = tap.for_video(tv::selection(&p, audio).video);
         let mut s = v.settings.clone();
         s.ts_tap = Some(tap);
         self.apply(Action::Update(id, s));
@@ -1409,6 +1411,7 @@ impl eframe::App for App {
         }
         if self.automation.watch
             && !self.automation.watch_started
+            && self.automation.elapsed() >= self.automation.watch_after
             && let Some(id) = self.selected
             && self
                 .statuses
