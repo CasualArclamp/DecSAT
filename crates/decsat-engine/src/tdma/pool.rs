@@ -8,7 +8,7 @@
 //! - **the layout**: a 200 ms-averaged spectrum split at the occupied runs
 //!   and, within them, at the guard dips between neighbours — the carriers
 //!   there are now; a new layout is taken once it has held two columns, and
-//!   the layouts are kept with their times (a map of the hub's choices).
+//!   the layouts are kept with their times (the hub's choices).
 //!   Carriers are not given identities: on a live pool a carrier's edge and
 //!   its neighbour's guard move together, and a tracker split one carrier
 //!   into several;
@@ -23,7 +23,9 @@
 //!   times fold), and each slot's spectrum — the FFTs inside it, its guard
 //!   times left out — a row a slot for the last half minute
 //!   ([`SpectrumRows`]), with the latest FFTs themselves for a waterfall
-//!   fine enough to show the slots.
+//!   fine enough to show the slots, and their burst lanes
+//!   ([`SpectrumRows::lanes`]: bands whose bins burst together, and their
+//!   bursts).
 //!
 //! Seen live (Eutelsat 172B, a Newtec outbound's return): a 770 kHz pool of
 //! roll-off-0.05 carriers resized every 1–3 s, the top of it bursting into
@@ -61,7 +63,7 @@ const MIN_WIDTH_HZ: f64 = 10_000.0;
 /// columns.
 const MOVE_BINS: usize = 3;
 const HOLD_COLUMNS: u32 = 2;
-/// Layouts kept for the map, s.
+/// Layouts kept (the hub's choices over time), s.
 const HISTORY_S: f64 = 120.0;
 /// Each bin's running minimum rises this much a column, so the floor
 /// follows a slow drift (5 dB in 10 s) while a gap anywhere still sets it.
@@ -89,8 +91,10 @@ const ROW_BIN_HZ: f64 = 4_000.0;
 const FINE_KEEP_S: f64 = 0.6;
 const FINE_VIEW_S: f64 = 0.25;
 /// The view's fine rows and slot rows are taken this often, s of signal
-/// (the slot rows are megabytes: once a second is plenty).
-const FINE_EVERY_S: f64 = 0.1;
+/// (the slot rows are megabytes: once a second is plenty). The fine rows
+/// often enough for the burst rows, a quarter second wide, to scroll
+/// rather than jump (a tenth of a second moved them 40 % at a time).
+const FINE_EVERY_S: f64 = 0.04;
 const SLOTS_EVERY_S: f64 = 1.0;
 /// Slot rows kept, s.
 const SLOTS_KEEP_S: f64 = 30.0;
@@ -99,6 +103,26 @@ const SLOTS_KEEP_S: f64 = 30.0;
 const SLOT_MARGIN: f64 = 0.04;
 /// A bin occupied in a slot row: this far over the floor, dB.
 const SLOT_OCCUPIED_DB: f32 = 4.0;
+/// Burst lanes in the fine rows ([`SpectrumRows::lanes`]): a bin is on
+/// this far over the floor, dB; in a lane at all when on in this share of
+/// the rows; split from its neighbour when the two disagree (one on, the
+/// other off) in more than this share; a lane at least this wide, Hz (a
+/// narrower one — a carrier's roll-off, or the guard between two, lit by
+/// either side — joins the neighbour it is most like), and at most this
+/// many lanes (the most alike neighbours joined first).
+const LANE_ON_DB: f32 = 6.0;
+const LANE_ACTIVE: f32 = 0.02;
+const LANE_SPLIT: f32 = 0.2;
+const LANE_MIN_HZ: f64 = 20e3;
+pub const MAX_LANES: usize = 8;
+/// A lane on only while the wider lane it touches is on (in this share of
+/// the rows it is on at all) is that lane's edge — its roll-off, flickering
+/// about [`LANE_ON_DB`] — and joins it.
+const LANE_INSIDE: f32 = 0.9;
+/// A lane's burst is cut where its level dips this far under the rows
+/// either side, dB: an FFT (about a millisecond) straddling the guard
+/// between two bursts back to back (0.2–0.4 ms) is that much weaker.
+const LANE_DIP_DB: f32 = 1.5;
 /// The source clock jumping by more than this between blocks is a gap
 /// (blocks dropped, a file played round again), s.
 const GAP_S: f64 = 5e-4;
@@ -183,6 +207,197 @@ impl SpectrumRows {
             .count() as f64
             * self.bin_hz
     }
+
+    /// The burst lanes: bands whose bins switch on and off together, row
+    /// after row — neighbouring bins split where one is on and the other
+    /// off in more than [`LANE_SPLIT`] of the rows, the slivers left joined
+    /// to the neighbour most like them, at most [`MAX_LANES`] — and each
+    /// lane's bursts, runs of rows with most of its bins on, cut where an
+    /// FFT straddles a guard. Without a burst plan, the pool's own view of
+    /// who transmits when.
+    pub fn lanes(&self) -> Vec<FineLane> {
+        let (n, nb) = (self.len(), self.bins);
+        let min_bins = ((LANE_MIN_HZ / self.bin_hz).ceil() as usize).max(2);
+        if n < 4 || nb < min_bins {
+            return Vec::new();
+        }
+        let on = |i: usize, b: usize| self.levels[i * nb + b] >= LANE_ON_DB;
+        let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut start = None;
+        for b in 0..nb {
+            let active = (0..n).filter(|&i| on(i, b)).count() as f32 >= LANE_ACTIVE * n as f32;
+            let split = active
+                && start.is_some()
+                && (0..n).filter(|&i| on(i, b) != on(i, b - 1)).count() as f32
+                    > LANE_SPLIT * n as f32;
+            match (start, active) {
+                (Some(s), false) => {
+                    runs.push(s..b);
+                    start = None;
+                }
+                (Some(s), true) if split => {
+                    runs.push(s..b);
+                    start = Some(b);
+                }
+                (None, true) => start = Some(b),
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            runs.push(s..nb);
+        }
+        // Each lane's share of bins on, row by row; two lanes' unlikeness,
+        // the mean gap between those shares.
+        let share = |r: &std::ops::Range<usize>| -> Vec<f32> {
+            (0..n)
+                .map(|i| r.clone().filter(|&b| on(i, b)).count() as f32 / r.len() as f32)
+                .collect()
+        };
+        let unlike = |a: &[f32], b: &[f32]| {
+            a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() / n as f32
+        };
+        let mut lanes: Vec<(std::ops::Range<usize>, Vec<f32>)> = runs
+            .into_iter()
+            .map(|r| {
+                let s = share(&r);
+                (r, s)
+            })
+            .collect();
+        // The narrower of touching lanes `j` and `j + 1` is on only while
+        // the wider is.
+        let edge_of = |lanes: &[(std::ops::Range<usize>, Vec<f32>)], j: usize| {
+            let (a, b) = (&lanes[j], &lanes[j + 1]);
+            let (narrow, wide) = if a.0.len() <= b.0.len() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let lit = narrow.1.iter().filter(|&&s| s > 0.0).count();
+            let inside = narrow
+                .1
+                .iter()
+                .zip(&wide.1)
+                .filter(|&(&s, &w)| s > 0.0 && w >= 0.5)
+                .count();
+            a.0.end == b.0.start && lit > 0 && inside as f32 >= LANE_INSIDE * lit as f32
+        };
+        loop {
+            // A sliver joins the neighbour it touches and is most like (or
+            // goes, touching none); then a lane's edge joins it; over the
+            // cap, the most alike pair join.
+            let pair = if let Some(k) = lanes.iter().position(|l| l.0.len() < min_bins) {
+                let touches = |j: usize| lanes[j].0.end == lanes[j + 1].0.start;
+                let left = (k > 0 && touches(k - 1)).then(|| unlike(&lanes[k - 1].1, &lanes[k].1));
+                let right = (k + 1 < lanes.len() && touches(k))
+                    .then(|| unlike(&lanes[k].1, &lanes[k + 1].1));
+                match (left, right) {
+                    (Some(l), Some(r)) if l <= r => Some(k - 1),
+                    (Some(_), None) => Some(k - 1),
+                    (_, Some(_)) => Some(k),
+                    (None, None) => {
+                        lanes.remove(k);
+                        continue;
+                    }
+                }
+            } else if let Some(j) = (0..lanes.len().saturating_sub(1)).find(|&j| edge_of(&lanes, j))
+            {
+                Some(j)
+            } else if lanes.len() > MAX_LANES {
+                (0..lanes.len() - 1).min_by(|&a, &b| {
+                    unlike(&lanes[a].1, &lanes[a + 1].1)
+                        .total_cmp(&unlike(&lanes[b].1, &lanes[b + 1].1))
+                })
+            } else {
+                None
+            };
+            let Some(j) = pair else { break };
+            // Rust note: `remove` shifts the rest down, so `lanes[j]` is
+            // still the left one; its share becomes the two's, by width.
+            let (rb, sb) = lanes.remove(j + 1);
+            let (ra, sa) = &mut lanes[j];
+            let (wa, wb) = (ra.len() as f32, rb.len() as f32);
+            sa.iter_mut()
+                .zip(&sb)
+                .for_each(|(a, b)| *a = (*a * wa + b * wb) / (wa + wb));
+            ra.end = rb.end;
+        }
+        lanes
+            .into_iter()
+            .map(|(r, s)| {
+                // The lane's level a row: its bins' mean power, dB.
+                let level: Vec<f32> = (0..n)
+                    .map(|i| {
+                        let row = &self.row(i)[r.clone()];
+                        let p = row.iter().map(|v| 10f32.powf(v / 10.0)).sum::<f32>()
+                            / row.len() as f32;
+                        10.0 * p.max(1e-3).log10()
+                    })
+                    .collect();
+                // Rows `a..b` as a burst from `t0_s` to `t1_s`.
+                let burst = |a: usize, b: usize, t0_s: f64, t1_s: f64| {
+                    let rows = &level[a..b.max(a + 1)];
+                    FineBurst {
+                        t0_s,
+                        t1_s,
+                        level_db: rows.iter().sum::<f32>() / rows.len() as f32,
+                    }
+                };
+                let mut bursts = Vec::new();
+                // The burst open: its first row (for its level) and start.
+                let mut from: Option<(usize, f64)> = None;
+                for i in 0..n {
+                    let lit = s[i] >= 0.5;
+                    // Rows apart by more than half a row: blocks dropped.
+                    let gap =
+                        i > 0 && self.t_s[i] - (self.t_s[i - 1] + self.dur_s) > self.dur_s / 2.0;
+                    if let Some((a, t0)) = from {
+                        if !lit || gap {
+                            bursts.push(burst(a, i, t0, self.t_s[i - 1] + self.dur_s));
+                            from = None;
+                        } else if i + 1 < n
+                            && s[i + 1] >= 0.5
+                            && level[i] < level[i - 1] - LANE_DIP_DB
+                            && level[i] < level[i + 1] - LANE_DIP_DB
+                        {
+                            // A guard inside row `i`: each side gets half.
+                            let cut = self.t_s[i] + self.dur_s / 2.0;
+                            bursts.push(burst(a, i, t0, cut));
+                            from = Some((i + 1, cut));
+                        }
+                    }
+                    if lit && from.is_none() {
+                        from = Some((i, self.t_s[i]));
+                    }
+                }
+                if let Some((a, t0)) = from {
+                    bursts.push(burst(a, n, t0, self.t_s[n - 1] + self.dur_s));
+                }
+                FineLane {
+                    lo_hz: self.start_hz + (r.start as f64 - 0.5) * self.bin_hz,
+                    hi_hz: self.start_hz + (r.end as f64 - 0.5) * self.bin_hz,
+                    bursts,
+                }
+            })
+            .collect()
+    }
+}
+
+/// A band of the pool whose bins burst together ([`SpectrumRows::lanes`]):
+/// its edges, Hz from the VFO's centre, and its bursts, oldest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FineLane {
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    pub bursts: Vec<FineBurst>,
+}
+
+/// A burst in a lane: its start and end on the receiver's source clock, s,
+/// and its level, dB over the floor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FineBurst {
+    pub t0_s: f64,
+    pub t1_s: f64,
+    pub level_db: f32,
 }
 
 /// A pool's slots on the receiver's source clock: frames `frame_s` long,
@@ -268,6 +483,8 @@ pub struct PoolView {
     /// The latest FFTs, about a millisecond each: the pool's own
     /// waterfall, fine enough to show the slots.
     pub fine: Arc<SpectrumRows>,
+    /// Those FFTs' burst lanes ([`SpectrumRows::lanes`]), taken with them.
+    pub lanes: Arc<Vec<FineLane>>,
     /// Its bursts demodulated by an outbound's plan (filled in by the VFO,
     /// not the tracker).
     pub bursts: Option<Arc<super::pool_bursts::BurstsView>>,
@@ -605,6 +822,7 @@ impl PoolTracker {
                     })
                     .collect(),
             });
+            self.view.lanes = Arc::new(self.view.fine.lanes());
         }
         if now - self.slots_taken >= SLOTS_EVERY_S
             && let Some(grid) = self.grid
@@ -1609,6 +1827,59 @@ pub fn terminal_levels(
 mod tests {
     use super::*;
     use decsat_mod::Shaper;
+
+    #[test]
+    fn lanes_split_where_bins_burst_apart() {
+        // A quarter second of 1 ms rows, 4 kHz bins, 0 dB but for: bins
+        // 10–39 bursting 5 rows on, 5 off, their roll-off (bins 8–9)
+        // flickering about the threshold while they are on; bins 40–49
+        // beside them on when they are off; bins 50–69 on 3 rows in 10;
+        // bins 80–94 on always, 20 dB, but for a 17 dB row every 5
+        // (back-to-back bursts, the FFTs straddling their guards).
+        let (n, nb) = (250, 100);
+        let mut levels = vec![0f32; n * nb];
+        for i in 0..n {
+            let row = &mut levels[i * nb..(i + 1) * nb];
+            let a = (i / 5) % 2 == 0;
+            row[8..10].fill(if a && i % 2 == 0 { 7.0 } else { 0.0 });
+            row[10..40].fill(if a { 15.0 } else { 0.0 });
+            row[40..50].fill(if a { 0.0 } else { 15.0 });
+            row[50..70].fill(if i % 10 < 3 { 12.0 } else { 0.0 });
+            row[80..95].fill(if i % 5 == 4 { 17.0 } else { 20.0 });
+        }
+        let rows = SpectrumRows {
+            t_s: (0..n).map(|i| i as f64 * 1e-3).collect(),
+            dur_s: 1e-3,
+            bins: nb,
+            start_hz: 0.0,
+            bin_hz: 4e3,
+            levels,
+        };
+        let lanes = rows.lanes();
+        let edges: Vec<(f64, f64)> = lanes.iter().map(|l| (l.lo_hz, l.hi_hz)).collect();
+        assert_eq!(
+            edges,
+            vec![
+                (30e3, 158e3),
+                (158e3, 198e3),
+                (198e3, 278e3),
+                (318e3, 378e3)
+            ]
+        );
+        // 25 bursts of 5 ms, the first from the start.
+        let a = &lanes[0].bursts;
+        assert_eq!(a.len(), 25, "{a:?}");
+        assert!((a[0].t0_s - 0.0).abs() < 1e-9 && (a[0].t1_s - 5e-3).abs() < 1e-9);
+        // (Its level: the roll-off's bins in it, weaker.)
+        assert!(a[0].level_db > 13.0 && a[0].level_db < 15.0, "{a:?}");
+        assert_eq!(lanes[1].bursts.len(), 25);
+        assert_eq!(lanes[2].bursts.len(), 25);
+        // The carrier always on: cut at each weak row but the last, half a
+        // row into it.
+        let c = &lanes[3].bursts;
+        assert_eq!(c.len(), 50, "{c:?}");
+        assert!((c[0].t1_s - 4.5e-3).abs() < 1e-9 && (c[1].t0_s - 4.5e-3).abs() < 1e-9);
+    }
 
     #[test]
     fn a_plan_lines_up_with_its_pool() {

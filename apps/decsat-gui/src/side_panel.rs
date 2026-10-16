@@ -6169,10 +6169,9 @@ fn tdma_card(ui: &mut Ui, t: &decsat_engine::TdmaView, rf_center: f64, id: VfoId
 
 /// What the return pool section is about.
 const POOL_TIP: &str = "The VFO as a return pool: a block of spectrum a VSAT network's \
-     terminals share. The map is its layout over the last two minutes (time down, newest at \
-     the bottom): the carriers as a 200 ms average shows them, split at guards 3 dB or more \
-     deep — a hub resizing and moving carriers (Mx-DMA) shows as the layout changing; a \
-     block of bursting carriers averages into one. The grid is the repeat of the pool's \
+     terminals share. Its carriers are as a 200 ms average shows them, split at guards 3 dB \
+     or more deep — a hub resizing and moving carriers (Mx-DMA) shows as the layout changes \
+     counted; a block of bursting carriers averages into one. The grid is the repeat of the pool's \
      short power dips (the bursts' guard times): the slot, and the frame the envelope's fold \
      explains best. A frame that an outbound's own timing matches — its NCR, or one of its \
      signalling tables — ties the pool to that outbound.";
@@ -6180,7 +6179,7 @@ const POOL_TIP: &str = "The VFO as a return pool: a block of spectrum a VSAT net
 /// Another VFO's DVB-RCS signalling, for a pool: its id, name and view.
 type Outbound<'a> = (VfoId, String, &'a decsat_ts::rcs::RcsView);
 
-/// The VFO as a return pool: a map of its layout, its grid, and whether an
+/// The VFO as a return pool: its layout, its grid, and whether an
 /// outbound's timing matches it.
 fn pool_section(
     ui: &mut Ui,
@@ -6340,7 +6339,9 @@ fn pool_section(
                 let timed = timed.unwrap_or_default();
                 if let (Some(t), Some(clock)) = (timed.timing.filter(sure), &plan.clock) {
                     lead_line(ui, &t, clock);
-                    pool_waterfall(ui, p, Some((plan, clock, &t, m.offset_hz)), bursts, &freq);
+                    let on = Some((plan, clock, &t, m.offset_hz));
+                    pool_waterfall(ui, p, on, bursts, &freq);
+                    pool_burst_lanes(ui, p, on, bursts, &freq, id);
                     match bursts {
                         Some(b) => burst_section(ui, b, plan, &timed.levels, id),
                         None => heard_table(ui, plan, &timed.levels),
@@ -6383,8 +6384,8 @@ fn pool_section(
     }
     if !drawn {
         pool_waterfall(ui, p, None, None, &freq);
+        pool_burst_lanes(ui, p, None, None, &freq, id);
     }
-    pool_map(ui, p);
 }
 
 /// A pool's view of outbound VFO `vfo`'s burst plan: where the plan's
@@ -6830,6 +6831,34 @@ fn heard_table(
 /// Frames of the pool shown in its waterfall.
 const WATERFALL_FRAMES: f64 = 3.0;
 
+/// The first of the fine rows the pool's waterfall shows (and its burst
+/// lanes, on the same time axis): the latest [`WATERFALL_FRAMES`] frames,
+/// timed from a frame's start.
+#[allow(clippy::type_complexity)]
+fn waterfall_first(
+    p: &decsat_engine::tdma::pool::PoolView,
+    timed: Option<(
+        &decsat_ts::newtec::PlanView,
+        &decsat_ts::newtec::PlanClock,
+        &decsat_engine::tdma::pool::PlanTiming,
+        f64,
+    )>,
+) -> usize {
+    let rows = &*p.fine;
+    let Some(&last) = rows.t_s.last() else {
+        return 0;
+    };
+    let window = WATERFALL_FRAMES * p.frame_s.unwrap_or(0.04);
+    let mut from = last + rows.dur_s - window;
+    if let Some((plan, clock, t, _)) = timed
+        && let Some(f) = plan.recent.last()
+    {
+        let s0 = t.frame_start(clock, f.counter);
+        from = s0 + ((from - s0) / t.frame_s).ceil() * t.frame_s - rows.dur_s / 2.0;
+    }
+    rows.t_s.partition_point(|&t| t < from)
+}
+
 /// The fine waterfall's texture, kept until the pool's rows change.
 #[derive(Clone)]
 struct FineTexture {
@@ -6861,17 +6890,8 @@ fn pool_waterfall(
     if rows.is_empty() || rows.bins == 0 {
         return;
     }
-    let window = WATERFALL_FRAMES * p.frame_s.unwrap_or(0.04);
     let t_end = rows.t_s[rows.len() - 1] + rows.dur_s;
-    // Timed, the top is a frame's start.
-    let mut from = t_end - window;
-    if let Some((plan, clock, t, _)) = timed
-        && let Some(f) = plan.recent.last()
-    {
-        let s0 = t.frame_start(clock, f.counter);
-        from = s0 + ((from - s0) / t.frame_s).ceil() * t.frame_s - rows.dur_s / 2.0;
-    }
-    let first = rows.t_s.partition_point(|&t| t < from);
+    let first = waterfall_first(p, timed);
     let n = rows.len() - first;
     if n < 2 {
         return;
@@ -6943,22 +6963,7 @@ fn pool_waterfall(
                 );
             }
             for b in &f.bursts {
-                // The terminal as demodulated: its carrier, and the code's
-                // band at its rate; else the plan's learned extents.
-                let heard = bursts.and_then(|v| {
-                    v.terminals
-                        .iter()
-                        .find(|x| x.id == b.terminal && x.demodulated > 0)
-                });
-                let edges = match (heard, decsat_ts::newtec::code_rate(b.code)) {
-                    (Some(h), Some(r)) => {
-                        let half = r.symbol_rate_hz * 1.05 / 2.0;
-                        let c = b.freq_hz() + h.freq_hz;
-                        Some((c - half, c + half))
-                    }
-                    _ => plan.edges(b),
-                };
-                let Some((a, c)) = edges else {
+                let Some(((a, c), heard)) = burst_edges(plan, b, bursts) else {
                     continue;
                 };
                 let t0 = start + f64::from(b.slot) * t.slot_s;
@@ -7051,41 +7056,474 @@ fn fine_cn(
     (n > 0).then(|| (10.0 * (sum / n as f64 - 1.0).max(1e-3).log10()) as f32)
 }
 
-/// The pool's layouts over time: each layout's carriers as bars across the
-/// VFO's band, oldest at the top.
-fn pool_map(ui: &mut Ui, p: &decsat_engine::tdma::pool::PoolView) {
-    const H: f32 = 90.0;
-    const WINDOW_S: f64 = 120.0;
+/// A planned burst's edges, Hz from the plan's zero, and its terminal as
+/// demodulated: once heard, that terminal's carrier and the code's band at
+/// its symbol rate; else the plan's learned extents.
+#[allow(clippy::type_complexity)]
+fn burst_edges<'a>(
+    plan: &decsat_ts::newtec::PlanView,
+    b: &decsat_ts::newtec::PlanBurst,
+    bursts: Option<&'a decsat_engine::tdma::pool_bursts::BurstsView>,
+) -> Option<(
+    (f64, f64),
+    Option<&'a decsat_engine::tdma::pool_bursts::TerminalBursts>,
+)> {
+    let heard = bursts.and_then(|v| {
+        v.terminals
+            .iter()
+            .find(|x| x.id == b.terminal && x.demodulated > 0)
+    });
+    // Rust note: `?` on an `Option` returns `None` from the function when
+    // there is nothing — here, a code with neither a rate nor a width.
+    let edges = match (heard, decsat_ts::newtec::code_rate(b.code)) {
+        (Some(h), Some(r)) => {
+            let half = r.symbol_rate_hz * 1.05 / 2.0;
+            let c = b.freq_hz() + h.freq_hz;
+            (c - half, c + half)
+        }
+        _ => plan.edges(b)?,
+    };
+    Some((edges, heard))
+}
+
+/// A burst in the burst lanes: its start and end (the receiver's source
+/// clock, s), its column, its colour, filled (heard) or an outline
+/// (planned, nothing there), and what its hover says.
+#[derive(Clone)]
+struct LaneBar {
+    t0: f64,
+    t1: f64,
+    col: usize,
+    color: Color32,
+    heard: bool,
+    tip: String,
+}
+
+/// A column of the burst lanes: its edges, Hz from the VFO's centre, and
+/// its hover.
+#[derive(Clone)]
+struct LaneColumn {
+    lo_hz: f64,
+    hi_hz: f64,
+    label: String,
+}
+
+/// The burst lanes, kept until the pool's fine rows (or the plan, or its
+/// timing) change: the columns, the bursts, and the frames' starts.
+#[derive(Clone)]
+struct BurstLanes {
+    key: (usize, usize, u64),
+    cols: Vec<LaneColumn>,
+    bars: Vec<LaneBar>,
+    frames: Vec<f64>,
+}
+
+/// Columns a band of the plan's bursts is split into at most: bursts at
+/// once in it take a column each.
+const BAND_COLUMNS: usize = 4;
+
+/// `c` darkened to `k` (0..1) of itself.
+fn dim(c: Color32, k: f32) -> Color32 {
+    Color32::from_rgb(
+        (c.r() as f32 * k) as u8,
+        (c.g() as f32 * k) as u8,
+        (c.b() as f32 * k) as u8,
+    )
+}
+
+/// The burst lanes from a timed plan: its bursts from `t_top` to the fine
+/// rows' end, a column a band its bursts use (overlapping bursts' frequencies
+/// joined), split side by side for bursts at once in it; each burst in its
+/// terminal's colour, as bright as its C/N in the fine rows, an outline
+/// where nothing came.
+#[allow(clippy::too_many_arguments)]
+fn plan_lanes(
+    rows: &decsat_engine::tdma::pool::SpectrumRows,
+    t_top: f64,
+    plan: &decsat_ts::newtec::PlanView,
+    clock: &decsat_ts::newtec::PlanClock,
+    t: &decsat_engine::tdma::pool::PlanTiming,
+    offset: f64,
+    bursts: Option<&decsat_engine::tdma::pool_bursts::BurstsView>,
+    freq: &dyn Fn(f64) -> String,
+    key: (usize, usize, u64),
+) -> BurstLanes {
+    let t_end = rows.t_s[rows.len() - 1] + rows.dur_s;
+    // (start, end, low edge, high edge, burst, frame, the terminal heard),
+    // edges Hz from the VFO's centre.
+    let mut found = Vec::new();
+    let mut frames = Vec::new();
+    for f in plan.recent.iter().rev().take(24) {
+        let start = t.frame_start(clock, f.counter);
+        if start > t_end || start + t.frame_s < t_top {
+            continue;
+        }
+        if start >= t_top {
+            frames.push(start);
+        }
+        for b in &f.bursts {
+            let Some(((a, c), heard)) = burst_edges(plan, b, bursts) else {
+                continue;
+            };
+            let t0 = start + f64::from(b.slot) * t.slot_s;
+            let t1 = t0 + f64::from(b.slots()) * t.slot_s;
+            if t1 > t_top && t0 < t_end {
+                found.push((t0, t1, a + offset, c + offset, b, f.counter, heard));
+            }
+        }
+    }
+    // The bands: the bursts' frequencies, overlapping ones (by more than a
+    // kHz: neighbours packed edge to edge stay apart) joined.
+    found.sort_by(|x, y| x.2.total_cmp(&y.2));
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    for &(_, _, lo, hi, ..) in &found {
+        match bands.last_mut() {
+            Some(b) if lo < b.1 - 1e3 => b.1 = b.1.max(hi),
+            _ => bands.push((lo, hi)),
+        }
+    }
+    // Each band's bursts in time order, a column each: the first free.
+    found.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.2.total_cmp(&y.2)));
+    let mut ends: Vec<Vec<f64>> = vec![Vec::new(); bands.len()];
+    let mut placed = Vec::with_capacity(found.len());
+    for (k, &(t0, t1, lo, hi, ..)) in found.iter().enumerate() {
+        let centre = (lo + hi) / 2.0;
+        let band = bands
+            .iter()
+            .position(|b| centre <= b.1)
+            .unwrap_or(bands.len() - 1);
+        let e = &mut ends[band];
+        let sub = match e.iter().position(|&end| end <= t0 + 1e-5) {
+            Some(s) => s,
+            None if e.len() < BAND_COLUMNS => {
+                e.push(f64::MIN);
+                e.len() - 1
+            }
+            // Full: over the one that ends first.
+            None => (0..e.len())
+                .min_by(|&a, &b| e[a].total_cmp(&e[b]))
+                .unwrap_or(0),
+        };
+        e[sub] = e[sub].max(t1);
+        placed.push((k, band, sub));
+    }
+    let base: Vec<usize> = ends
+        .iter()
+        .scan(0, |acc, e| {
+            let at = *acc;
+            *acc += e.len();
+            Some(at)
+        })
+        .collect();
+    let mut cols = Vec::new();
+    for (b, e) in bands.iter().zip(&ends) {
+        let w = (b.1 - b.0) / e.len() as f64;
+        for s in 0..e.len() {
+            cols.push(LaneColumn {
+                lo_hz: b.0 + s as f64 * w,
+                hi_hz: b.0 + (s + 1) as f64 * w,
+                label: format!(
+                    "{} – {} ({:.0} kHz){}",
+                    freq(b.0),
+                    freq(b.1),
+                    (b.1 - b.0) / 1e3,
+                    if e.len() > 1 {
+                        format!(
+                            " · column {} of {}: bursts at once take a column each",
+                            s + 1,
+                            e.len()
+                        )
+                    } else {
+                        String::new()
+                    }
+                ),
+            });
+        }
+    }
+    let bars = placed
+        .into_iter()
+        .map(|(k, band, sub)| {
+            let (t0, t1, lo, hi, b, counter, heard) = found[k];
+            let cn = fine_cn(rows, t0, t1, lo, hi);
+            // No FFT wholly inside it yet (just begun, or cut off at the
+            // top): shown as heard, half bright.
+            let lit = cn.is_none_or(|v| v >= 3.0);
+            let k = cn.map_or(0.6, |v| 0.45 + 0.55 * ((v - 3.0) / 17.0).clamp(0.0, 1.0));
+            let mut tip = format!(
+                "terminal {} · frame {counter} · slot {}{} · {:.1} kHz at {}",
+                b.terminal,
+                b.slot,
+                if b.slots() > 1 {
+                    format!("–{}", b.slot + b.slots() - 1)
+                } else {
+                    String::new()
+                },
+                (hi - lo) / 1e3,
+                freq((lo + hi) / 2.0)
+            );
+            if let Some(v) = cn {
+                tip.push_str(&format!(" · C/N {v:.1} dB"));
+            }
+            if !lit {
+                tip.push_str(" · nothing there: given in the plan, not sent");
+            } else if let Some(h) = heard {
+                tip.push_str(&format!(" · its bursts lately: MER {:.1} dB", h.mer_db));
+            }
+            LaneBar {
+                t0,
+                t1,
+                col: base[band] + sub,
+                color: dim(terminal_color(b.terminal), k),
+                heard: lit,
+                tip,
+            }
+        })
+        .collect();
+    BurstLanes {
+        key,
+        cols,
+        bars,
+        frames,
+    }
+}
+
+/// The burst lanes from the pool's own ([`SpectrumRows::lanes`]), in a
+/// colour a lane, as bright as each burst is strong against the lane's
+/// others; the frames' starts from `t_top` on, from the pool's grid.
+///
+/// [`SpectrumRows::lanes`]: decsat_engine::tdma::pool::SpectrumRows::lanes
+fn pool_lanes(
+    p: &decsat_engine::tdma::pool::PoolView,
+    t_top: f64,
+    freq: &dyn Fn(f64) -> String,
+    key: (usize, usize, u64),
+) -> BurstLanes {
+    let rows = &*p.fine;
+    let t_end = rows.t_s[rows.len() - 1] + rows.dur_s;
+    let mut cols = Vec::new();
+    let mut bars = Vec::new();
+    for (i, l) in p.lanes.iter().enumerate() {
+        let label = format!(
+            "{} – {} ({:.0} kHz)",
+            freq(l.lo_hz),
+            freq(l.hi_hz),
+            (l.hi_hz - l.lo_hz) / 1e3
+        );
+        let (lo, hi) = l.bursts.iter().fold((f32::MAX, f32::MIN), |(a, b), x| {
+            (a.min(x.level_db), b.max(x.level_db))
+        });
+        for b in &l.bursts {
+            let k = 0.45 + 0.55 * ((b.level_db - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0);
+            bars.push(LaneBar {
+                t0: b.t0_s,
+                t1: b.t1_s,
+                col: i,
+                color: dim(channel_color(i), k),
+                heard: true,
+                tip: format!(
+                    "{label} · {:.2} ms · {:.1} dB over the floor",
+                    (b.t1_s - b.t0_s) * 1e3,
+                    b.level_db
+                ),
+            });
+        }
+        cols.push(LaneColumn {
+            lo_hz: l.lo_hz,
+            hi_hz: l.hi_hz,
+            label,
+        });
+    }
+    let mut frames = Vec::new();
+    if let Some(g) = p.grid {
+        let mut s = g.start_s + ((t_top - g.start_s) / g.frame_s).ceil() * g.frame_s;
+        while s <= t_end {
+            frames.push(s);
+            s += g.frame_s;
+        }
+    }
+    BurstLanes {
+        key,
+        cols,
+        bars,
+        frames,
+    }
+}
+
+/// The pool's last quarter second as burst lanes, like the TDMA decoder's
+/// burst map stood on end: a column a band the timed plan's bursts use
+/// (`timed`) — else a lane of the pool's own — under its frequencies in
+/// the pool's waterfall, and a box a burst down it, newest at the bottom.
+#[allow(clippy::type_complexity)]
+fn pool_burst_lanes(
+    ui: &mut Ui,
+    p: &decsat_engine::tdma::pool::PoolView,
+    timed: Option<(
+        &decsat_ts::newtec::PlanView,
+        &decsat_ts::newtec::PlanClock,
+        &decsat_engine::tdma::pool::PlanTiming,
+        f64,
+    )>,
+    bursts: Option<&decsat_engine::tdma::pool_bursts::BurstsView>,
+    freq: &dyn Fn(f64) -> String,
+    id: VfoId,
+) {
+    // As tall as the pool's waterfall, over the same frames.
+    const H: f32 = 200.0;
+    let rows = &*p.fine;
+    let first = waterfall_first(p, timed);
+    if rows.len() < first + 2 {
+        return;
+    }
+    let t_top = rows.t_s[first];
+    // Rust note: `Arc::as_ptr` is the shared value's address — a new one
+    // each time the engine takes new rows, so it keys the cache.
+    let fine = std::sync::Arc::as_ptr(&p.fine) as usize;
+    let key = match timed {
+        Some((plan, _, t, offset)) => (
+            fine,
+            std::sync::Arc::as_ptr(&plan.recent) as usize,
+            t.lead_s.to_bits() ^ offset.to_bits(),
+        ),
+        None => (fine, std::sync::Arc::as_ptr(&p.lanes) as usize, 0),
+    };
+    let cache = egui::Id::new(("pool_burst_lanes", id));
+    let lanes = match ui.data(|d| d.get_temp::<BurstLanes>(cache)) {
+        Some(l) if l.key == key => l,
+        _ => {
+            let l = match timed {
+                Some((plan, clock, t, offset)) => {
+                    plan_lanes(rows, t_top, plan, clock, t, offset, bursts, freq, key)
+                }
+                None => pool_lanes(p, t_top, freq, key),
+            };
+            ui.data_mut(|d| d.insert_temp(cache, l.clone()));
+            l
+        }
+    };
+    if lanes.cols.is_empty() {
+        ui.label(RichText::new("burst lanes: no bursts in the last quarter second").weak());
+        return;
+    }
     let (rect, resp) =
         ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, H), Sense::hover());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
-    let half = p.half_band_hz.max(1.0);
-    let x_of = |hz: f64| rect.left() + rect.width() * (((hz + half) / (2.0 * half)) as f32);
-    let now = p.seconds;
-    let t0 = (now - WINDOW_S).max(0.0);
-    let span = (now - t0).max(1.0);
-    let y_of = |t: f64| rect.top() + rect.height() * (((t - t0) / span) as f32).clamp(0.0, 1.0);
-    for (k, (start, cs)) in p.history.iter().enumerate() {
-        let end = p.history.get(k + 1).map_or(now, |n| n.0);
-        if end < t0 {
+    painter.rect_filled(rect, CornerRadius::same(2), Color32::from_gray(18));
+    // Across, the fine rows' band, as the pool's waterfall above has it;
+    // down, their time.
+    let (lo_hz, hi_hz) = (
+        rows.start_hz - rows.bin_hz / 2.0,
+        rows.start_hz + (rows.bins as f64 - 0.5) * rows.bin_hz,
+    );
+    let x_of = |hz: f64| rect.left() + rect.width() * (((hz - lo_hz) / (hi_hz - lo_hz)) as f32);
+    let t_end = rows.t_s[rows.len() - 1] + rows.dur_s;
+    let span = (t_end - t_top).max(1e-3);
+    let y_of = |t: f64| rect.top() + rect.height() * (((t - t_top) / span) as f32);
+    // A column's edges on screen, a pixel in from each side.
+    let edges = |c: &LaneColumn| {
+        let (a, b) = (x_of(c.lo_hz) + 1.0, x_of(c.hi_hz) - 1.0);
+        (a, b.max(a + 1.0))
+    };
+    for c in &lanes.cols {
+        let (a, b) = edges(c);
+        painter.rect_filled(
+            egui::Rect::from_min_max(pos2(a, rect.top()), pos2(b, rect.bottom())),
+            CornerRadius::ZERO,
+            Color32::from_white_alpha(6),
+        );
+    }
+    for &f in &lanes.frames {
+        painter.hline(
+            rect.x_range(),
+            y_of(f),
+            (1.0, Color32::from_white_alpha(45)),
+        );
+    }
+    let pointer = resp.hover_pos();
+    let mut tip = None;
+    for b in &lanes.bars {
+        if b.t1 < t_top || b.t0 > t_end {
             continue;
         }
-        let (y0, y1) = (y_of(*start), y_of(end));
-        for (i, c) in cs.iter().enumerate() {
-            let r = egui::Rect::from_min_max(
-                pos2(x_of(c.lo_hz), y0),
-                pos2(x_of(c.hi_hz), y1.max(y0 + 1.0)),
+        let Some(c) = lanes.cols.get(b.col) else {
+            continue;
+        };
+        let (x0, x1) = edges(c);
+        // A pixel off the end: bursts back to back stay apart.
+        let y0 = y_of(b.t0.max(t_top));
+        let y1 = (y_of(b.t1.min(t_end)) - 1.0).max(y0 + 1.0);
+        let r = egui::Rect::from_min_max(pos2(x0, y0), pos2(x1, y1));
+        if b.heard {
+            painter.rect_filled(r, CornerRadius::ZERO, b.color);
+        } else {
+            painter.rect_stroke(
+                r,
+                CornerRadius::ZERO,
+                (1.0, b.color),
+                egui::StrokeKind::Inside,
             );
-            painter.rect_filled(r, CornerRadius::ZERO, channel_color(i).gamma_multiply(0.6));
+        }
+        if pointer.is_some_and(|q| r.contains(q)) {
+            tip = Some(b.tip.clone());
         }
     }
-    resp.on_hover_text(format!(
-        "The pool's layout over the last {:.0} s, newest at the bottom; across, the VFO's \
-         band ({:.0} kHz)",
-        span,
-        2.0 * half / 1e3
-    ));
+    // A 10 ms scale bar, upright, at the bottom right, on a dark patch:
+    // a column may run under it.
+    let x = rect.right() - 5.0;
+    let y1 = rect.bottom() - 4.0;
+    let y0 = y1 - (0.01 / span) as f32 * rect.height();
+    let font = egui::FontId::proportional(10.0);
+    let label = painter.layout_no_wrap("10 ms".into(), font, Color32::from_gray(160));
+    let at = pos2(x - 4.0 - label.size().x, (y0 + y1 - label.size().y) / 2.0);
+    painter.rect_filled(
+        egui::Rect::from_min_max(pos2(at.x - 3.0, y0 - 2.0), pos2(x + 3.0, y1 + 2.0)),
+        CornerRadius::same(2),
+        Color32::from_black_alpha(200),
+    );
+    painter.line_segment([pos2(x, y0), pos2(x, y1)], (1.0, Color32::from_gray(160)));
+    painter.galley(at, label, Color32::from_gray(160));
+    let about = format!(
+        "The pool's last {:.0} ms, newest at the bottom; across, the VFO's band as in the \
+         waterfall above. {}",
+        span * 1e3,
+        if timed.is_some() {
+            "A column a band the burst plan's bursts use (bursts at once in a band take a \
+             column each), a box a burst in its terminal's colour, brighter for a higher C/N; \
+             an outline where the plan gives a burst but nothing came (C/N under 3 dB). \
+             Lines: the plan's frame starts."
+        } else {
+            "A column a lane — bins that burst on and off together in the pool's latest FFTs \
+             — a box a burst, brighter for stronger. Bursts back to back are cut where the \
+             FFT straddling their guard dips; a guard too short for that runs them into one \
+             box. Lines: the grid's frame starts. Once an outbound's burst plan is timed on \
+             the pool, the columns follow its bursts."
+        }
+    );
+    let col = pointer.and_then(|q| {
+        lanes.cols.iter().find(|c| {
+            let (a, b) = edges(c);
+            (a..=b).contains(&q.x)
+        })
+    });
+    resp.on_hover_text(match (tip, col) {
+        (Some(t), _) => t,
+        (None, Some(c)) => format!("{}\n\n{about}", c.label),
+        (None, None) => about,
+    });
+}
+
+/// A 10 ms scale bar at the bottom right of a strip `window_s` wide.
+fn scale_bar(painter: &egui::Painter, rect: egui::Rect, window_s: f64) {
+    let y = rect.bottom() - 6.0;
+    let x1 = rect.right() - 6.0;
+    let x0 = x1 - (0.01 / window_s) as f32 * rect.width();
+    painter.line_segment([pos2(x0, y), pos2(x1, y)], (1.0, Color32::from_gray(160)));
+    painter.text(
+        pos2(x0 - 4.0, y),
+        egui::Align2::RIGHT_CENTER,
+        "10 ms",
+        egui::FontId::proportional(10.0),
+        Color32::from_gray(160),
+    );
 }
 
 /// A carrier's colour in the burst map and its header.
@@ -7131,31 +7569,14 @@ fn burst_map(ui: &mut Ui, t: &decsat_engine::TdmaView) {
         let x1 = x_of(m.t_s + m.dur_s).max(x0 + 1.0);
         let span = (hi[r] - lo[r]).max(1.0);
         let level = 0.45 + 0.55 * ((m.power_db - lo[r]) / span).clamp(0.0, 1.0);
-        let base = channel_color(r);
         let k = if m.idle { level * 0.35 } else { level };
-        let c = Color32::from_rgb(
-            (base.r() as f32 * k) as u8,
-            (base.g() as f32 * k) as u8,
-            (base.b() as f32 * k) as u8,
-        );
         painter.rect_filled(
             egui::Rect::from_min_max(pos2(x0, top), pos2(x1, top + row_h - 4.0)),
             CornerRadius::ZERO,
-            c,
+            dim(channel_color(r), k),
         );
     }
-    // A 10 ms scale bar.
-    let y = rect.bottom() - 6.0;
-    let x1 = rect.right() - 6.0;
-    let x0 = x1 - (0.01 / BURST_MAP_S) as f32 * w;
-    painter.line_segment([pos2(x0, y), pos2(x1, y)], (1.0, Color32::from_gray(160)));
-    painter.text(
-        pos2(x0 - 4.0, y),
-        egui::Align2::RIGHT_CENTER,
-        "10 ms",
-        egui::FontId::proportional(10.0),
-        Color32::from_gray(160),
-    );
+    scale_bar(&painter, rect, BURST_MAP_S);
     resp.on_hover_text(
         "The last quarter second of bursts, a row a carrier (newest at the right). Brighter is \
          stronger; idle fill is dimmed. A frame's closing silence shows as a gap down a row.",

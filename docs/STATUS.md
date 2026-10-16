@@ -5647,3 +5647,31 @@ picture queue keeps the newest, so it shows the newest picture at live
 latency. Live check (HackRF, GUI `--watch-after 25`, a new automation flag
 that opens the player mid-GOP): BBC News on screen 3 s after ▶, "28
 pictures shown, 30 dropped" (the burst skipped), timed by the sound.
+
+## Return pool: burst lanes in place of the layout map (2026-10-16)
+
+The layout map (two minutes of the pool's carriers, a bar each) was one
+blue slab on 172B: the pool averages to one carrier, split now and then
+at a guard. In its place, under the pool's fast waterfall and on its
+axes (the VFO's band across, the latest three frames down), the **burst
+lanes** — the TDMA decoder's burst map stood on end, a column a lane, a
+box a burst.
+
+- **No plan:** `SpectrumRows::lanes` (`tdma::pool`) splits the fine rows'
+  band where neighbouring bins disagree (one on at 6 dB, the other off) in
+  over 20 % of the rows; lanes under 20 kHz (a roll-off, or a guard lit
+  from both sides) join the touching neighbour most like them, a lane on
+  only while the wider one it touches is joins it, at most 8. A lane's
+  bursts are runs of rows with half its bins on, cut where the FFT
+  straddling a guard dips 1.5 dB under both neighbours (0.5–0.9 ms FFTs
+  against 0.2–0.4 ms guards). Taken with the fine rows, now every 40 ms of
+  signal (was 100 ms: the strip moved 40 % at a time).
+- **Timed plan:** a column a band the plan's bursts use (overlapping
+  frequencies joined; bursts at once split it side by side, up to 4), a box
+  a planned burst in its terminal's colour, as bright as its C/N in the
+  fine rows — an outline under 3 dB, given in the plan and not sent.
+  Untested live yet.
+
+Checked on a synthetic 2 MS/s pool (five lanes, 8 × 5.025 ms slots, 0.3 ms
+guards, ±3 dB levels): five columns under the waterfall's five carriers,
+cut slot by slot, the weaker bursts dimmer.

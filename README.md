@@ -216,11 +216,19 @@ with tables of its own still shows its timing in their rates.
 
 The **Return pool** decoder (TDMA mode, beside the burst analyser) over
 the return shows the carriers now (a 200 ms average split at the guards
-between them), how often the layout changes, a map of the layouts over
-two minutes (a hub resizing and moving its terminals' carriers, Mx-DMA
-style), and the grid —
+between them), how often the layout changes (a hub resizing and moving
+its terminals' carriers, Mx-DMA style), and the grid —
 the slot, from the repeat of the bursts' guard times, and the frame, the
-multiple of it the envelope repeats over. When another VFO is decoding an
+multiple of it the envelope repeats over. Under the pool's own fast
+waterfall (an FFT about a millisecond, the latest three frames), its
+**burst lanes** — the TDMA decoder's burst map stood on end: a column a
+lane under its frequencies, a box a burst down it, newest at the bottom.
+The lanes are the bins that burst on and off together; bursts back to
+back are cut where the FFT straddling their guard dips. Once an
+outbound's burst plan is timed on the pool, the columns are the bands
+its bursts use and each box is a planned burst in its terminal's colour,
+as bright as its C/N — an outline where the plan gives a burst and
+nothing comes. When another VFO is decoding an
 outbound whose NCR or a signalling table keeps the same period, the card
 says so: the pool runs on that outbound's clock.
 
