@@ -1,3 +1,4 @@
+<!-- made by CasualArclamp -->
 # Status
 
 > **Renamed DecSAT on 2026-10-10** (it does far more than DVB). Entries
