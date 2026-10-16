@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Blind frame-structure finder, for waveforms DecSAT has no decoder for
 //! (proprietary modems among them). A waveform that sends the same known
 //! symbols every frame — a header, a unique word, pilot blocks under a

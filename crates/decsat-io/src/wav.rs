@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Two-channel WAV files as IQ captures: I on the left channel, Q on the
 //! right, as SDR#, HDSDR, SDRuno, SDR++ and others record them.
 //!

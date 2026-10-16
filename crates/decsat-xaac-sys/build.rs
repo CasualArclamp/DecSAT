@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Builds the *decoder* half of the vendored libxaac (`third_party/libxaac`, tag v0.1.13,
 //! Apache-2.0) as a static C library.
 //!

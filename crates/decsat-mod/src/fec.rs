@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The transmit FEC chain: BBFRAME → BCH → LDPC → FECFRAME
 //! (EN 302 307-1 §5.3), and BBFRAME sources for test signals: TS packets
 //! (TS mode) or IP over GSE (generic continuous mode).

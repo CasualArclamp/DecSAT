@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The LDPC inner code (EN 302 307-1 §5.3.2): encoder and layered decoder.
 //!
 //! **Structure.** The address tables (Annex B/C) give, for each group of 360

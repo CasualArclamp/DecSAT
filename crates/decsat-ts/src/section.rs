@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Section reassembly from TS packets (ISO/IEC 13818-1 §2.4.4): a packet
 //! starting a section (PUSI) carries a pointer to where it starts, the bytes
 //! before it finishing the previous one; several sections may follow back to

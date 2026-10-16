@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Build and raw FFI bindings for the vendored libopus.
 //!
 //! `build.rs` compiles `third_party/opus` (tag v1.6.1) with Opus' CMake project into a

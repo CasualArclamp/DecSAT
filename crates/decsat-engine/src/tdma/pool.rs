@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A return pool: a block of spectrum a VSAT network's terminals share,
 //! each on a carrier the hub sizes and places as its traffic needs —
 //! continuous carriers that widen, narrow and move every few seconds

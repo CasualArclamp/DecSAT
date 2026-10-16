@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The voice floor: with many carriers and channels playing their voice by
 //! themselves (the CDM-600 voice preset), one talker is heard at a time, as
 //! on a scanner with a hang time. Whoever starts speaking first holds the

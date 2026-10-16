@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DVB-S2 modulator.
 //!
 //! Builds real DVB-S2 signals for tests and test captures: TS-mode BBFRAMEs

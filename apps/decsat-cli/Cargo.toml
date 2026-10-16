@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-cli"
 description = "DecSAT command line: analyse, decode and modulate DVB-S2/S2X"

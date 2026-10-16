@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat tx`: a DVB-S2/S2X carrier carrying an MPEG-TS, to an IQ file —
 //! a file paced by its own PCRs, a UDP stream, or the built-in test stream;
 //! null packets fill the rest of the channel (`decsat_mod::datv`).

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The HackRF panel: frequency, sample rate, gains and LNB LO, applied live
 //! while running.
 

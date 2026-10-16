@@ -1,3 +1,4 @@
+# made by CasualArclamp
 # Portable Windows release of a tag. Pushing a tag v* (or Actions → Release → Run
 # workflow with an existing tag) builds decsat-gui.exe and decsat.exe with the static
 # C runtime and the HackRF front end (pure Rust over USB: no DLLs), checks that their

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The DVB Common Scrambling Algorithm (CSA, version 1): the cipher BISS
 //! scrambles a transport stream with.
 //!

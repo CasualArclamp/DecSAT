@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A Newtec Dialog hub's private return-link burst plan (table D1h).
 //!
 //! No public spec: the layout below was worked out from a minute of a hub's

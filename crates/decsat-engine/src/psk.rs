@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Generic PSK/APSK demodulator: baseband in, carrier-locked symbols and hard
 //! decisions out, with no framing assumed.
 //!

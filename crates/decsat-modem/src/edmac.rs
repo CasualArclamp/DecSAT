@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Comtech EDMAC framing (the modem pair's in-band management channel, its
 //! "Embedded Distant-end M&C"), as a live 238.96 kS/s TPC 2964 8PSK carrier
 //! sends it: the data rate grown by 21/20, in 1008-bit frames.

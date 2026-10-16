@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The stream since its last keyframe, for a player that starts now.
 //!
 //! A decoder can only start at a random access point: a keyframe with its

@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-core"
 description = "DecSAT shared types: MODCOD/FECFRAME tables, framing params, config, metrics"

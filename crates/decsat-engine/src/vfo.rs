@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! VFOs: a centre, a bandwidth and a decoder, each on its own worker thread.
 //!
 //! The wideband front end hands every VFO the same blocks (shared through an

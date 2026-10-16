@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! AAC through libxaac (`decsat-xaac-sys`): AAC-LC, and HE-AAC v1 and v2 with
 //! their SBR and parametric stereo decoded — the full bandwidth, not just the
 //! core. Access units go in one ADTS frame at a time, so SBR and PS are found

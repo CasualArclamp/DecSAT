@@ -1,4 +1,5 @@
 position_e,satellite,aliases,mhz,pol,kind,confirmed,source,note
+# made by CasualArclamp
 # Ku-band (10.7-12.75 GHz) beacons of the satellites 110-180 E, researched 2026-10-15.
 # confirmed = 1: frequencies from the operator or a regulator (FCC grant); 0: community lists (satbeams, frequencyplansatellites.altervista.org, reception reports).
 # A satellite with no frequency row: its Ku beacons are not published anywhere that was checked.

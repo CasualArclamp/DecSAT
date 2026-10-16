@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Modulation and coding definitions.
 //!
 //! The 28 DVB-S2 MODCODs (ETSI EN 302 307-1 Table 12) and the DVB-S2X ones

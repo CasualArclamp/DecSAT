@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Transmitting through a HackRF One, for the GUI's transmit panel.
 //!
 //! **Only when asked, and gently.** Nothing here runs unless the user arms

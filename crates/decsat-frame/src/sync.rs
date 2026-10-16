@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! PLHEADER frame synchronisation by differential correlation.
 //!
 //! Approach follows `gr-dvbs2rx`'s `lib/pl_frame_sync.cc` (GPL-3), which is

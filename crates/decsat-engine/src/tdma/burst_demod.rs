@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A Newtec return burst demodulated with what the hub's plan says of it.
 //!
 //! The plan (table D1h, [`decsat_ts::newtec`]) names each burst's terminal,

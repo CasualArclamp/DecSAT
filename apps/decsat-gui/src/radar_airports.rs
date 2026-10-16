@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Airports and runways on the radar scope, from OurAirports' open data
 //! (public domain: <https://ourairports.com/data/>), fetched once with the
 //! system's `curl` into `<settings>/DecSAT/airports/` and refreshed after a

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The band view: spectrum on top, waterfall below, VFOs over both — the
 //! SDR++-style centrepiece.
 //!

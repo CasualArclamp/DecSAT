@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat pcap`: a PCAP of IP (the one a VFO writes on Record, or any
 //! classic PCAP of raw IP or Ethernet) read again for what the receiver
 //! understands in it: a radar station's monitoring traffic

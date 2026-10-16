@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Intelsat IBS at n × 64 kbit/s (IESS-309), as found on a 256 kbit/s
 //! Comtech SCPC carrying programme audio: G.704-shaped frames and the IBS
 //! synchronous scrambler.

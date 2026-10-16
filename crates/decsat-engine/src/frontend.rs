@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The wideband front end: the source, the waterfall, carrier detection, and
 //! the fan-out to every VFO.
 //!

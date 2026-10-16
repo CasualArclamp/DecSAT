@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! "What is this?" — blind identification of a carrier in a VFO.
 //!
 //! Given a block of VFO baseband, measure what can be measured without

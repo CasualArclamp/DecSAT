@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Build and raw FFI bindings for the vendored libxaac AAC decoder.
 //!
 //! `build.rs` compiles the decoder of `third_party/libxaac` (tag v0.1.13, Apache-2.0):

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Builds the vendored libopus (`third_party/opus`, tag v1.6.1) as a static library with
 //! Opus' own CMake project: float API, no programs, no tests, no DNN extensions (DRED,
 //! OSCE and deep PLC need downloaded model weights and are not needed to play radio).

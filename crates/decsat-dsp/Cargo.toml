@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-dsp"
 description = "DSP: AGC, resampling, RRC filter, timing & carrier recovery"

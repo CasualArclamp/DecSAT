@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-ts"
 description = "TS-mode BBFRAME to MPEG-TS extraction"

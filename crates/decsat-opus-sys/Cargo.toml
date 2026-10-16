@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-opus-sys"
 description = "Build and raw FFI bindings for the vendored libopus"

@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-video"
 description = "DecSAT in-app TV player: a transport stream programme decoded by ffmpeg, shown in sync with its sound"

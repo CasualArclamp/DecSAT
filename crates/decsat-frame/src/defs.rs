@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! PLFRAME geometry constants.
 //!
 //! All from ETSI EN 302 307-1 §5.5 (and §5.5.2.4 for the PLS code). The values

@@ -1,3 +1,4 @@
+<!-- made by CasualArclamp -->
 # DecSAT — Design
 
 A Rust **DVB-S2 / DVB-S2X** receiver with **ACM** (Adaptive Coding & Modulation), **GSE** de-encapsulation to **IP (PCAP)**, **TS** extraction, and a matching **modulator** for loopback and ACM test-signal generation. HackRF One based, with IQ-file replay.

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Streaming DVB-S2 physical-layer demodulator: VFO baseband in, PLFRAMEs out.
 //!
 //! matched filter → AGC → Gardner timing → PLHEADER correlation → frame lock →

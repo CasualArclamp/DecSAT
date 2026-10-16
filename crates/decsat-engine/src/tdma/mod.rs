@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! TDMA: carriers that terminals take turns on, in bursts.
 //!
 //! A TDMA VFO may span one carrier or a whole group of them (an MF-TDMA

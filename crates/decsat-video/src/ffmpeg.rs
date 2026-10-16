@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! ffmpeg as the player's decoder: where it is, how it is asked, and what
 //! its log says.
 //!

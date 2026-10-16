@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! MSB-first bit reading and writing, for the AAC configuration structures
 //! (AudioSpecificConfig, LATM's StreamMuxConfig, RFC 3640 AU headers), none
 //! of which keep to byte boundaries.

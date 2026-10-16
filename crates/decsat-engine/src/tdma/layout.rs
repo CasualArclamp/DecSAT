@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A burst's layout found blind: which symbols are the same in every burst
 //! (preamble, pilots, unique words, fixed fields) and which carry data.
 //!

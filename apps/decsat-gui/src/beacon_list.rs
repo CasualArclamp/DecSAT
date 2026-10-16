@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Ku-band beacons of the satellites from 110°E to 180°E: a list to tune
 //! to, and marks on the waterfall for the satellite the dish is on.
 //!

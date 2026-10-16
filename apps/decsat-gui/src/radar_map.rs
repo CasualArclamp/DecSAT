@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A map under the radar scope: OpenStreetMap's raster tiles, drawn in the
 //! scope's own frame — north up, NM east and north of the radar — so the
 //! targets sit on the ground they fly over. "Dark" is the same tiles with

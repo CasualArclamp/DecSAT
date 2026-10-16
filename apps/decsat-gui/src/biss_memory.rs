@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! BISS keys remembered by carrier: a key seen to fit is kept for its
 //! carrier's RF (per satellite, in the user's settings), and a scrambled
 //! carrier with no key typed is given the one kept for it — once, so a key

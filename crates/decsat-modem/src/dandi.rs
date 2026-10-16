@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Comtech Drop & Insert++ (D&I++): n × 64 kbit/s timeslots taken from an
 //! E1 and carried in frames of 2944 bits — 64 overhead bits and 2880 data
 //! bits, so the satellite rate is 46/45 of the data rate (CDM-625 manual

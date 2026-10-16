@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Mode S Comm-B registers ("BDS n,m"): what a Mode S radar reads out of
 //! an aircraft's transponder beyond its address and level, as ASTERIX
 //! I048/250 hands them on (56 bits of register, then the register's number

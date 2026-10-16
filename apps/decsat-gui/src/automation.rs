@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Unattended runs, for documentation screenshots and smoke tests (the same
 //! idea as DecDRM's): `decsat-gui capture.cs8 --claim-carriers --after 8
 //! --screenshot shot.png` opens the capture, drops a VFO on every detected

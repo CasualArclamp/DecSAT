@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Layered normalized min-sum LDPC decoding: 8-bit messages, 16-bit
 //! posteriors.
 //!

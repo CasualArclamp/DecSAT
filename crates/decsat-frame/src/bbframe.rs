@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! BBFRAMEs: the baseband header, its CRC-8, and BB scrambling
 //! (EN 302 307-1 §5.1.4, §5.1.6, §5.2.2).
 //!

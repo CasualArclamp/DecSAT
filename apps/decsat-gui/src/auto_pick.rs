@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Auto: a carrier claimed from its bracket on the waterfall gets the
 //! survey's treatment (Rory: "make it the auto mode like the survey doing a
 //! scan then choosing the right mode") — Identify first, then the decoder

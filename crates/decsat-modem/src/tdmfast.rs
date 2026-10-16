@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The faster Q-Flex links' payload: k × 128.5 kbit/s inside Paradise
 //! framing (k = 2, 3, 4 seen, on the plan's "CAP" sites). It frames like
 //! the 128.5 kbit/s links' multiplex — 257-bit frames, the alignment word

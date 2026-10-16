@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! What a beacon's phase modulation carries: a subcarrier (PCM/PSK/PM) or
 //! data on the carrier's phase itself (PCM/PM), and at what bit rate, in
 //! which code — all read blind from the phase the carrier loop hands on.

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! VL-SNR header tables, EN 302 307-2 §5.5.2.5 (generated from the
 //! standard's text; all 16 sequences agree with gr-dtv's `ph_vlsnr_seq`).
 //! Do not edit by hand.

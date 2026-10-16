@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! GSE encapsulation: PDUs in, BBFRAME data fields out — the transmit side,
 //! for test signals now and the modulator in M6. Any [`Variant`] can be
 //! produced, so the decoders' variant detection can be tested.

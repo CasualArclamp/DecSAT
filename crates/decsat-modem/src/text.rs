@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Live text search in a demodulated bit stream: the `strings` of a carrier
 //! nothing else here can decode. Text — callsigns, telemetry, NMEA, idle
 //! messages, headers — stands out even in an unknown format, but where the

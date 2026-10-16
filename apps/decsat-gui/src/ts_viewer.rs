@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The MPEG-TS analyser window, in the spirit of EBSPro's TS view: every PID
 //! with what it is, which service it belongs to and its share of the
 //! bitrate; the service tree with what is on now and next; the network's

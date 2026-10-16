@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `tpc_2964`: the rate-3/4 turbo product code of Intelsat IESS-315 turbo
 //! modems, as the CTCOM RCV-20x manual describes it (Table 3.2): frames of
 //! 2964 bits — a 20-bit unique word F50B8h and a 2944-bit (64,57) × (46,39)

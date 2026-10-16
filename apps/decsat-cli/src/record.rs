@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat record`: capture raw IQ from the HackRF to `.cs8` files — one
 //! centre frequency, or a list of them for a sweep across the IF band (the
 //! radio retunes between captures rather than reopening). Each file is

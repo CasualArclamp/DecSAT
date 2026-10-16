@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Block automatic gain control.
 //!
 //! Normalises a VFO's output to unit average power, which the timing loop's

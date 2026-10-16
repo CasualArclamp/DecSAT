@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The beacon decoder's card: the carrier (frequency, drift, C/N0) with
 //! its charts, the telemetry's physical layer and frames, the major frame
 //! as a map of which words change (click one to plot it), the latest frame

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! TS-mode BBFRAMEs back to MPEG-TS (EN 302 307-1 §5.1).
 //!
 //! In TS mode the data fields carry 188-byte user packets back to back, across

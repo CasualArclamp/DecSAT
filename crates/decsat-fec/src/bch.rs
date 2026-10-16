@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The BCH outer code (EN 302 307-1 §5.3.1).
 //!
 //! A t-error-correcting binary BCH code, shortened, over GF(2^16) for normal

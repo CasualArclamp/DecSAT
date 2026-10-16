@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! ITU-T G.728 LD-CELP at 16 kbit/s: the decoder, and the voice channel it
 //! decodes on a 16 kbit/s sub-channel of a 64 kbit/s timeslot.
 //!

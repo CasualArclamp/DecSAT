@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! CCSDS telemetry (TM) synchronisation and channel coding, CCSDS 131.0-B-4,
 //! and the transfer frames it carries (TM, CCSDS 132.0-B-3; AOS, CCSDS
 //! 732.0-B-4) — what science and amateur spacecraft send, on a residual

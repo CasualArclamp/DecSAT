@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! AAC configuration and the containers multicast radio puts AAC in.
 //!
 //! - **AudioSpecificConfig** (ISO/IEC 14496-3 §1.6.2.1): object type,

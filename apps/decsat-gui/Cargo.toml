@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-gui"
 description = "DecSAT desktop GUI (egui): DVB-S2/S2X receiver"

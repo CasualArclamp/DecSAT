@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DecSAT command line.
 //!
 //! M0 provides `modcods` (print the coding tables) and `analyse` (read an IQ

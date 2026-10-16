@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A frequency plan: named carriers at RF frequencies, read from an SDR++
 //! frequency-manager bookmark list —
 //! `{"bookmarks": {"name": {"frequency": Hz, "bandwidth": Hz, "mode": n}}}`.

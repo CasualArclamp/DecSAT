@@ -1,3 +1,4 @@
+<!-- made by CasualArclamp -->
 # Test signals
 
 Synthetic IQ captures for trying DecSAT without a dish. The captures

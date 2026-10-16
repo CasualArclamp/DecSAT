@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The beacon's carrier: found as the strongest narrow line, tracked by a
 //! phase-locked loop, measured (frequency, level, C/N0), and its phase
 //! handed on — for a phase-modulated beacon, the telemetry itself.

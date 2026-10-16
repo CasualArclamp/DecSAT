@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! MPEG audio (ISO/IEC 11172-3, 13818-3) in a link's data: whole frames
 //! found in a bit stream at any bit offset, as a studio link or programme
 //! feed sends them straight over a modem (a 256 kbit/s Comtech TPC carrier

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The side bar: the VFO list, and the selected VFO's settings and results.
 
 use std::collections::BTreeMap;

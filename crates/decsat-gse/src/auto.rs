@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! GSE to IP with the variant chosen by the data: every variant decodes every
 //! data field, each is scored by the valid IP packets it yields, and the
 //! packets of the best one are passed on — dontlookup's approach of trying

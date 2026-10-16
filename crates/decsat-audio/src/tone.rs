@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A tone whose pitch is set live: the beacon decoder's pointing aid — its
 //! pitch follows the beacon's level, so a dish can be peaked by ear.
 //!

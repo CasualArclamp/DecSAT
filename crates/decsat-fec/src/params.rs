@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! FEC code parameters per frame length and code rate (EN 302 307-1 §5.3,
 //! Tables 5a and 5b), and the LDPC address table that goes with each.
 

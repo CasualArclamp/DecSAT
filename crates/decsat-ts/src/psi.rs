@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! What a transport stream carries — the analyser behind the TS viewer.
 //!
 //! Per PID: packets, rate, continuity, errors, scrambling, PCRs, and for PIDs

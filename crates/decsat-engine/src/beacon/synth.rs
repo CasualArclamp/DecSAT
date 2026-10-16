@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Beacon test signals: a carrier with drift and noise, phase-modulated by
 //! telemetry on a subcarrier or directly, or a suppressed-carrier BPSK —
 //! for the tests, and as test signals for anyone checking a receiver.

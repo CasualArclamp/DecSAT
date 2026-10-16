@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Shared types for DecSAT: modulation/coding tables, frame parameters,
 //! configuration, metrics and error types. No DSP or I/O lives here — this crate
 //! is the vocabulary every other crate speaks.

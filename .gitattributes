@@ -1,3 +1,4 @@
+# made by CasualArclamp
 # Normalise text in the repository to LF; Git checks it out native on Windows.
 * text=auto
 

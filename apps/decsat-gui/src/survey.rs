@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Survey: every carrier the receiver sees, tried in turn (Rory: "a survey
 //! button that tests all carriers sequentially on a satellite that it sees
 //! … a time out for bad decode and don't do too many at once"). A few at a

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The top of the window: a menu bar (File, View, Satellite, Tools, Audio,
 //! with the source on its right) over a row of the play button, the input
 //! level, the frequency readout, and the satellite, LO trim, volume and

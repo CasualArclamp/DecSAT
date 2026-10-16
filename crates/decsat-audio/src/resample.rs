@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Stereo sample-rate conversion: whatever the stream is (48, 44.1, 32 kHz,
 //! an HE-AAC core at 24 kHz, G.711 at 8 kHz) to the sound card's rate.
 //!

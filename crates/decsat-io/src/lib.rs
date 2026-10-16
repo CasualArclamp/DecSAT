@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! IQ input and output for DecSAT.
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file

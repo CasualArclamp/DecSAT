@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Receiver orchestration.
 //!
 //! M0 wires an [`IqSource`] to the signal analyser that feeds the GUI's

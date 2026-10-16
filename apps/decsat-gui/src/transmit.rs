@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The transmit panel: a DVB-S2/S2X carrier carrying an MPEG-TS — a file,
 //! a UDP stream (ffmpeg, OBS) or the test stream — to the HackRF or an IQ
 //! file (`decsat_engine::tx`).

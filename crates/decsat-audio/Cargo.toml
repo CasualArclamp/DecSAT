@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-audio"
 description = "DecSAT in-app audio: depacketise, decode and play multicast radio streams"

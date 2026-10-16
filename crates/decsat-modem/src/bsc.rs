@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! IBM Binary Synchronous Communications (BSC, "bisync") blocks on a
 //! synchronous line: character-oriented framing, older than HDLC. Found on
 //! the PH-ML radar feed (a 9.6 kbit/s Comtech carrier, K = 7 rate ½, V.35

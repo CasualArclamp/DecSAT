@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Turbo product codes: two-dimensional products of extended Hamming codes,
 //! decoded iteratively with Chase–Pyndiah soft-in/soft-out row and column
 //! decoders (R. Pyndiah, "Near-optimum decoding of product codes: block

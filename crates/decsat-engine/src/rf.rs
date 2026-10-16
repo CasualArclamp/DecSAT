@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The RF frequency of the band's centre — the radio's tuning plus the LNB's
 //! LO and trim, or a recording's own centre — app-wide, so that recordings
 //! are named by the frequency they hold (`12346.0340MHz`) rather than by an

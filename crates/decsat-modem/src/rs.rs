@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Reed–Solomon codes over GF(256), shortened: DVB-S's RS(204,188, t = 8)
 //! (EN 300 421 §4.4.2) and the Intelsat family (126/112, 219/201, …) that
 //! satellite modems pair with Viterbi decoding.

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The K = 7 convolutional code of DVB-S and Intelsat modems, its punctured
 //! rates, and a soft-decision Viterbi decoder.
 //!

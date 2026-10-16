@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Playing a stream in the app: depacketise → decode → resample → sound card.
 //!
 //! The receiver hands each UDP payload of the stream to [`AudioPlayer::packet`]

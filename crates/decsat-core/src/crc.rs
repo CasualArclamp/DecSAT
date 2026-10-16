@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! CRC-32/MPEG-2 (EN 300 468 Annex A / ISO 13818-1 Annex A): used by GSE on
 //! fragmented PDUs and by MPEG-TS PSI sections. g(x) = 0x04C11DB7, MSB first,
 //! register starting at all ones, no final XOR. Run over a whole section

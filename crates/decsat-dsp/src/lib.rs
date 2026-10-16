@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DSP building blocks for DecSAT.
 //!
 //! - [`rrc`] / [`fir`]: pulse shaping and the matched filter.

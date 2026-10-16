@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! What a modem's data bits carry: a synchronous serial stream with no
 //! framing of its own, typically HDLC frames (IP over a VSAT link) or an
 //! MPEG transport stream, often scrambled for energy dispersal. Neither the

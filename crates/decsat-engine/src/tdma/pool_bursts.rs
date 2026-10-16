@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Return bursts demodulated live, by the hub's own plan.
 //!
 //! A Return pool VFO ([`super::pool`]) and an outbound VFO reading a

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The transmitter's engine side: a DVB-S2/S2X modulator for an MPEG-TS
 //! (`decsat_mod::datv`) turned into a pump of 8-bit IQ, which the HackRF's
 //! transmit thread pulls from — or written to an IQ file in real time.

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The inner loop of every FIR here: a complex-by-real dot product.
 //!
 //! Written with eight independent partial sums because the compiler will not

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Guess a capture's sample rate, centre frequency and format from its name
 //! — or, for a two-channel WAV file, read them from its header.
 //!

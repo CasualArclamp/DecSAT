@@ -1,3 +1,4 @@
+<!-- made by CasualArclamp -->
 # DecSAT — working notes
 
 Read [`docs/DESIGN.md`](docs/DESIGN.md) first: it holds the agreed scope,

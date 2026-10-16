@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! TS-mode BBFRAMEs to MPEG-TS, what the stream carries, and where it goes.
 //!
 //! - [`deframe`]: data fields back to 188-byte packets (CRC-8 chain lock,

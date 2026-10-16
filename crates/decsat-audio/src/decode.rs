@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Decoding [`Unit`]s to stereo PCM.
 //!
 //! MPEG audio layers I–III are decoded by Symphonia (pure Rust, MPL-2.0); AAC

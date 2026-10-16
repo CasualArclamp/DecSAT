@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-fec"
 description = "FEC: LDPC + BCH (DVB-S2/S2X), interleaver, constellation mapping/LLR"

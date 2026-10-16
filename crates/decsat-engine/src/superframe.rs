@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! S2X super-frames on the receive side (EN 302 307-2 Annex E): finding
 //! them, reading their format, and taking their own symbols out of the
 //! stream so the PL demodulator sees plain PLFRAMEs.

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Teledyne Paradise "closed network plus ESC" framing, as found in the
 //! data of a live Q-Flex FastLink carrier (128.5 kbit/s, ESC on). Nothing
 //! here is published; it was measured:

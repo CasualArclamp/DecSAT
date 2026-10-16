@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DVB-CID: the carrier identification signal of ETSI TS 103 129 V1.1.1 —
 //! a low-level spread-spectrum BPSK signal an uplink adds under its own
 //! carrier, carrying the modulator's 64-bit unique identifier and,

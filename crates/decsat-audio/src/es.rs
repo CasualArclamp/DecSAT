@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Cutting an audio elementary stream into whole frames.
 //!
 //! UDP and RTP packets need not hold whole frames — RFC 2250 lets an MPEG

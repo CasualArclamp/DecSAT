@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Intelsat IBS/SMS framing (IESS-309), as found on a live 10.24 kBd SCPC
 //! carrier: the data rate grown by 16/15 with one overhead octet in every
 //! 16, so 128-bit frames of 8 overhead bits and 120 data bits. The overhead

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Forward error correction and constellation mapping for DVB-S2/S2X.
 //!
 //! - [`params`]: code sizes per frame length and rate (Tables 5a/5b).

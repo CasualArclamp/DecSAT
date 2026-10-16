@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! ASTERIX radar data — EUROCONTROL's "All-purpose Structured Eurocontrol
 //! Surveillance Information Exchange" — as the band's CDM-570 radar feeds
 //! send it: HDLC UI frames (address `02h`/`03h`, control `03h`), each one

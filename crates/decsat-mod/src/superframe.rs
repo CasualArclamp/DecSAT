@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Super-framed S2X signals (EN 302 307-2 Annex E, formats 0 and 1), for
 //! test signals: PLFRAMEs built without pilot blocks of their own
 //! ([`crate::PlFramer::superframed`]) laid into super-frames of 612 540

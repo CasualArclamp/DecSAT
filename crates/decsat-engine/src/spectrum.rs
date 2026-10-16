@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Averaged power spectrum for the GUI.
 
 use decsat_core::Iq;

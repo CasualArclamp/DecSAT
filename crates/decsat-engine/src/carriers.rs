@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Carrier detection across the whole wideband span.
 //!
 //! Finds every signal standing above the noise floor in an averaged spectrum

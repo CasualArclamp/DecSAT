@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! E1 (2.048 Mbit/s) primary-rate framing, ITU-T G.704 §2.3, and G.711
 //! A-law: what an E1 carried transparently over a satellite modem looks like
 //! once the FEC is undone — 8000 frames a second of 32 eight-bit timeslots.

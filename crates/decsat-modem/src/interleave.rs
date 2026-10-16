@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Forney convolutional byte interleaving (EN 300 421 §4.4.2, Figure 2):
 //! I branches, branch j delaying by j·M bytes, a commutator stepping one
 //! branch per byte. DVB-S uses I = 12, M = 17, so a 204-byte packet's sync

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Root-raised-cosine pulse shaping.
 //!
 //! DVB-S2 specifies square-root raised-cosine filtering at both ends of the

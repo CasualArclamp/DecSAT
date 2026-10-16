@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Physical-layer scrambling (ETSI EN 302 307-1 §5.5.4).
 //!
 //! The PLFRAME **payload** is randomised by rotating each symbol by a multiple

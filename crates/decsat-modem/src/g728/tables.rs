@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! G.728's constant tables, as printed in the Recommendation (ITU-T G.728
 //! (06/2012), Annexes A, B and C), in their 16-bit integer forms; the
 //! decoder scales them (Q15, Q11, Q14). Generated from the Recommendation's

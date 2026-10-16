@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The radar scope window: a VFO's radar track feed (the PH-ML carrier's
 //! BSC blocks) drawn as a PPI — north up, the radar at the centre, range
 //! rings, the beam turning, each track with its trail, a one-minute leader

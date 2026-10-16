@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Waterfall history, colour map and GPU ring texture.
 //!
 //! The ring-texture technique is adapted from DecDRM's `ring_image.rs` (same

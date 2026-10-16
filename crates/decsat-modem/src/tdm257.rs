@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A 128.5 kbit/s TDM multiplex found inside a Q-Flex FastLink carrier's
 //! Paradise framing (what feeds the modem's data port; its make is not yet
 //! known): 257-bit frames every 2 ms — one alignment bit, then 256 payload

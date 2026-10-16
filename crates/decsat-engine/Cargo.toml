@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-engine"
 description = "DecSAT receive/transmit orchestration: ACM state, chain wiring, metrics"

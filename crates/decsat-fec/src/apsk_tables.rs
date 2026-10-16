@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DVB-S2X constellation tables, EN 302 307-2 §5.4: labels, rings and
 //! angles (Tables 10a, 11c, 12c, 12d, 13a, 13c, 13e, 14b, 15b, 15c) and the
 //! constellations given point by point (Tables 11e and 15d).

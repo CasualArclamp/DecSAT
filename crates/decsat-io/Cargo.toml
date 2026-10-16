@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-io"
 description = "DecSAT I/O: IQ file replay/record and the HackRF front end"

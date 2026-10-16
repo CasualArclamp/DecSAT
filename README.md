@@ -1,3 +1,4 @@
+<!-- made by CasualArclamp -->
 # DecSAT
 
 A **satellite receiver** in Rust, for a **HackRF One** or recorded IQ, built

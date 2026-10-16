@@ -1,3 +1,4 @@
+// made by CasualArclamp
 // FFmpeg aptX encoder output (codewords, left then right) and its
 // decoder's samples (16-bit, interleaved) for them; see the test.
 static FFMPEG_WORDS: [u16; 400] = [

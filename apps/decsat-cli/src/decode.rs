@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat decode`: run one decoder over a capture and report what it finds
 //! — the same VFO the GUI runs, fed from the file, with a status line every
 //! couple of seconds and a full report at the end (structure found, payload,

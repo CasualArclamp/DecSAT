@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Teledyne Paradise Q-Flex **FastLink**: Paradise's own low-latency LDPC
 //! family, unpublished. Everything here was measured on a live Q-Flex
 //! carrier (FastLink, QPSK, rate 0.710, 95 017 sym/s, closed network plus

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The in-app TV player: one programme of a VFO's transport stream, decoded
 //! by ffmpeg in a child process, its pictures shown in step with its sound.
 //!

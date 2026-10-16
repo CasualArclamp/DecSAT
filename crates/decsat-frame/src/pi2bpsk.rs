@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! pi/2-BPSK mapping, as used by the PLHEADER (ETSI EN 302 307-1 §5.5.2).
 //!
 //! In pi/2-BPSK the constellation rotates by 90° every symbol, so the mapping

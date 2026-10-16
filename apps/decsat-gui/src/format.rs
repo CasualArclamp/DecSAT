@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Number formatting for frequencies and rates.
 
 /// A frequency in Hz as `1 234.567 MHz` / `567.8 kHz` / `12 Hz`, choosing the

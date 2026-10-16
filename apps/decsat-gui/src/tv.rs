@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The in-app player window: one service of a VFO's transport stream,
 //! decoded by ffmpeg (`decsat_video`), its sound through the app's audio
 //! output (volume, mute and device as set in the toolbar) with a volume

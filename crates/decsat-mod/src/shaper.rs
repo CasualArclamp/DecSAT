@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Root-raised-cosine pulse shaping at an integer number of samples per symbol.
 //!
 //! Zero-stuffs each symbol by `sps` and filters with RRC taps scaled so the

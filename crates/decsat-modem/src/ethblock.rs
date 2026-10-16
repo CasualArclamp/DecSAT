@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Bridged Ethernet in 258-byte packet blocks, as found inside the EDMAC
 //! framing of a live Comtech TPC 2964 carrier (512 kbit/s). Comtech's name
 //! for it and any specification are not to hand: all of this was read off

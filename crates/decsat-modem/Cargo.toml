@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-modem"
 description = "DecSAT satellite modem formats: DVB-S (EN 300 421) and the Intelsat / turbo-code family"

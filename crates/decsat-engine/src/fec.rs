@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The FEC stage of a DVB-S2 VFO: demodulated PLFRAMEs in, BBFRAMEs out.
 //!
 //! pilots out → scale by the measured gain → max-log LLRs, de-interleaved →

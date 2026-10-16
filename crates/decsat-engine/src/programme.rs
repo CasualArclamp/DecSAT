@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Programme audio in a link's data, played and recorded through the
 //! multicast-audio player and recorder:
 //! - apt-X in an IBS carrier's descrambled data (a studio link's stereo

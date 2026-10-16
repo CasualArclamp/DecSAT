@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Bit interleaving and (de)mapping between FECFRAME bits and symbols
 //! (EN 302 307-1 §5.3.3 and §5.4; EN 302 307-2 §5.3.3 and §5.4).
 //!

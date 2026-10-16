@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! A radar track feed in BSC blocks (see [`crate::bsc`]): what the PH-ML
 //! carrier (Rory's "PH-ML 570 radar feed", 12328.083 MHz, 9.6 kbit/s)
 //! sends. Its format is not named anywhere we have; everything below was

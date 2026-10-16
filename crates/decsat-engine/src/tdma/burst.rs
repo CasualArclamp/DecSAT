@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Finding bursts in one channel's matched-filtered samples, as they stream
 //! in: the power envelope over a few symbols against two levels — the noise
 //! floor and the bursts' own — kept as a slowly forgetting histogram, with

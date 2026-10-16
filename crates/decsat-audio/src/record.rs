@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Recording a stream to a file, as broadcast — no decoding, no re-encoding.
 //!
 //! The file type follows what the stream carries, and is chosen on the first

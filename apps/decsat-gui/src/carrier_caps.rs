@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! What carriers have been heard to carry — ADS-B, radar — and what modem
 //! sends them (the Comtech CDM model, a Q-Flex), kept by RF, so that the
 //! waterfall can say so of a carrier with or without a VFO on it (Rory:

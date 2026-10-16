@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! From the carrier's phase to soft bits: the subcarrier taken to
 //! baseband by a Costas loop, the bit synchroniser, and bi-phase chips
 //! paired into bits.

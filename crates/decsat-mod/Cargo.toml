@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-mod"
 description = "Modulator (TX): PLFRAMEs to IQ, for loopback and ACM test signals"

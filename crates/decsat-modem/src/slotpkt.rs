@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! 64 kbit/s timeslots carried in HDLC packets: how the multi-radio
 //! Comtech sites send their voice (seen on 320 kbit/s TPC carriers, two
 //! timeslots each). Not published anywhere; worked out from recordings:

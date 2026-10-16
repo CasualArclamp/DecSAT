@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! One burst demodulated on its own. A TDMA burst is too short for tracking
 //! loops to settle in, and each comes from a different terminal with its own
 //! clock and oscillator, so every estimate here is made from the burst's own

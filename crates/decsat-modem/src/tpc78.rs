@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Comtech's rate-7/8 turbo product code (its "TPC 7/8", 16K block), as a
 //! live Comtech carrier sends it: 171.43 kS/s QPSK at 11 664.53 MHz
 //! (Rory's VFO_29 capture, 2026-10-14), every part of it found from the

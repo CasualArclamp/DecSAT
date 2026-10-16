@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DVB-S2 constellations (ETSI EN 302 307-1 §5.4).
 //!
 //! Each constellation is a table indexed by the symbol's bits, MSB first, so

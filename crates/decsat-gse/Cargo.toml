@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-gse"
 description = "GSE de-encapsulation and reassembly to IP (standard + proprietary variants)"

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Coarse signal estimates read off the power spectrum.
 //!
 //! These answer "where is the carrier and how wide is it?" without any

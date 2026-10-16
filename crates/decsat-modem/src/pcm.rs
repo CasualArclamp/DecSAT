@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! PCM telemetry frames: frame synchronisation and the frames' structure.
 //!
 //! A beacon's telemetry is a bit stream cut into fixed-length minor frames,

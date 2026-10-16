@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Live HackRF One front end, in pure Rust over USB.
 //!
 //! Uses `seify-hackrfone` (MIT; FutureSDR's driver), which speaks the HackRF's

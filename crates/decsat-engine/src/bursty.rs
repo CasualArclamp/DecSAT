@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Bursty bands across the wideband span: TDMA channels, where terminals
 //! take turns and the spectrum comes and goes, found apart from the
 //! continuous (SCPC) carriers the averaged spectrum shows.

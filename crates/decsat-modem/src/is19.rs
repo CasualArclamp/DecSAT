@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The **outbounds of a DAMA telephony network on Intelsat 19** (166° E):
 //! the hub's 102.4 kBd carriers that the network's terminals listen to.
 //! Nothing about this network is published — the vendor is not known —

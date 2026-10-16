@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The time plan behind the bursts: the slots they keep, the frame that
 //! repeats them, and the terminals sending them, told apart by what each
 //! one's hardware puts on its bursts — power, the carrier offset of its

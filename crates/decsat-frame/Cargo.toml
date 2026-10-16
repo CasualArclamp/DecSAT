@@ -1,3 +1,4 @@
+# made by CasualArclamp
 [package]
 name = "decsat-frame"
 description = "PL framing: PLHEADER/PLS, pilots, scrambler, BBFRAME/BBHEADER, superframe"

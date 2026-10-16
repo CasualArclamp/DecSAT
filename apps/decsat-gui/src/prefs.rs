@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The few settings that outlive a session: one `key=value` per line in
 //! `%APPDATA%\DecSAT\prefs.txt` (`~/.config/DecSAT/prefs.txt` elsewhere).
 //! Unknown keys are kept as they are, so an older build does not drop what a

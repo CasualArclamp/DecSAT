@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! What is remembered between runs: the HackRF panel, the file source's
 //! format, rate and centre, and the VFOs — kept in `prefs.txt` as
 //! `radio.*`, `source.*` and `vfo.N` keys (see `prefs`). A VFO is one line

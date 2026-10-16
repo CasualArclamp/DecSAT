@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! The FEC of DVB-S2X VL-SNR frames (EN 302 307-2 §5.5.2.6, Tables 18a,
 //! 19a–19d).
 //!

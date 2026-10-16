@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Convolutional codes found blind: any rate-½ code of constraint length up
 //! to [`MAX_K`], recovered from the received bits' own parity checks, with a
 //! soft-decision Viterbi decoder for it and a receiver that finds the

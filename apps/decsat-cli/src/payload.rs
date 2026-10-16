@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat payload`: a modem data recording (the `.bin` a FastLink, TPC or
 //! Viterbi VFO writes: its descrambled data, MSB first) run through the
 //! payload stage again — the format found, Paradise framing, and the 257-bit

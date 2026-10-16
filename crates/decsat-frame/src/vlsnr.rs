@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! DVB-S2X VL-SNR frames: the VL-SNR header and the frame layout.
 //!
 //! EN 302 307-2 §5.5.2.0 and §5.5.2.5, Figures 17 and 18. A VL-SNR frame's

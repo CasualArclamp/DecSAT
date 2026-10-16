@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! SDR++-style frequency display: big digits you tune one at a time.
 //!
 //! - **scroll** over a digit steps it (carrying into the next);

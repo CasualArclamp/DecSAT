@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Digital down-converter: the front of every VFO.
 //!
 //! Takes the wideband stream, shifts the VFO's centre frequency to DC with a

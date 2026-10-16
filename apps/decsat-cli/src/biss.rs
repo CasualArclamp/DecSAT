@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! `decsat biss`: descramble a recorded transport stream with its BISS key
 //! (or, with `--scramble`, scramble a clear one — a test stream for a
 //! receiver), reporting whether the key fits.

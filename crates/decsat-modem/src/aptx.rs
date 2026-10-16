@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! apt-X: four-band sub-band ADPCM, one 16-bit codeword for every four
 //! samples of a channel — 4:1 on 16-bit audio. Broadcasters' "Standard
 //! apt-X" (apt-X 100) feeds studio links and programme distribution: stereo

@@ -1,3 +1,4 @@
+// made by CasualArclamp
 //! Burst plans passed between VFOs, inside the engine.
 //!
 //! A hub's outbound carries the plan for its return (a Newtec hub's table
