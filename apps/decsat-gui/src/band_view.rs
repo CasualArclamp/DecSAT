@@ -59,6 +59,9 @@ pub enum Action {
     StopAudio(VfoId),
     /// Record a VFO's multicast audio stream to a file, or stop (`None`).
     RecordAudio(VfoId, Option<std::net::SocketAddr>),
+    /// Take the transport stream in this UDP flow (group:port) as an IP
+    /// VFO's MPEG-TS: its analyser and the in-app player.
+    TakeUdpTs(VfoId, std::net::SocketAddr),
 }
 
 /// Everything the view draws from.

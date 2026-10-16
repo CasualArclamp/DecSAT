@@ -90,6 +90,7 @@ real carriers stay put.
 | **TS analyser** (EBSPro-style): PIDs, services, now/next, network, tables | ✅ |
 | **BISS descrambling** (DVB-CSA, BISS mode 1): the key typed in the analyser or the VFO panel, checked against the stream, remembered for its carrier; every output then clear | ✅ on a live BISS contribution feed (Ericsson, 8PSK 3/4); bit-exact against VLC's CSA both ways |
 | **In-app TV player**: a service of the TS decoded by ffmpeg (H.264 incl. interlaced, MPEG-2, HEVC; MP2/AAC/AC-3…), deinterlaced, its sound through the app's audio, pictures timed by the sound | ✅ on the same live feed: 1080i25 H.264, three MP2 tracks |
+| **Multicast TV in IP**: an MPEG-TS carried in UDP inside GSE (bare, RTP, or behind a sender's own header) found, analysed and played like a carrier's TS | ✅ on a recording of Eutelsat 172B's BBC News multicast (6-byte header) |
 | **Multicast audio** from GSE or MPE: SAP/SDP names, codecs; unannounced RTP AAC and Opus described from their packets; IPv4 fragments reassembled; now-playing messages; play in the app (volume, pause) or VLC/PotPlayer; record to file | ✅ checked on a recording of a live MPE radio multiplex |
 | Modulator (HackRF TX / IQ file) | M6 |
 
@@ -308,6 +309,17 @@ found on the PATH, beside DecSAT, or where you point it; it runs as a
 child process, below normal priority, decoding whatever it can — H.264
 (interlaced and 4:2:2 too), MPEG-2, HEVC, MPEG audio, AAC, AC-3, SMPTE 302M.
 A stream still scrambled shows the key field in the player too.
+
+**Television in IP.** A DVB-S2 → GSE/IP VFO looks for transport streams
+carried in UDP: datagrams that end in whole 188-byte packets, bare (as
+VLC or ffmpeg send `udp://`), behind RTP, or behind a header of the
+sender's own (Eutelsat 172B's BBC News multicast puts a sequence number
+ahead of its seven packets). The IP card lists them under **MPEG-TS in
+UDP**; the busiest (or the one you **Take**) becomes the VFO's MPEG-TS —
+services, the analyser, **▶ In app**, a BISS key — and is written to a
+`.ts` beside the PCAP while that records. The picture starts at the
+stream's first keyframe, which on a low-rate feed can be ten seconds or
+more away.
 
 ### Multicast audio
 

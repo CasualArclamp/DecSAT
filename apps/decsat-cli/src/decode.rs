@@ -771,6 +771,21 @@ pub(crate) fn report(st: &VfoStatus) {
         for a in &g.audio {
             println!("  audio: {} ({:?})", a.name(), a.codec);
         }
+        for u in &g.udp_ts {
+            println!(
+                "  mpeg-ts in udp: {} from {}, {}, {} packets, {:.1} kbit/s{}",
+                u.dst,
+                u.src,
+                u.header.describe(),
+                u.packets,
+                u.bps / 1e3,
+                if g.udp_ts_taken == Some(u.dst) {
+                    " (taken)"
+                } else {
+                    ""
+                }
+            );
+        }
         for st in &g.radar_stations {
             crate::pcap::print_station(st, false);
         }
@@ -781,8 +796,9 @@ pub(crate) fn report(st: &VfoStatus) {
         print_byte_text("ip text", &g.text);
     }
     if let Some(t) = &f.ts {
-        let isi = match f.ts_isi {
-            Some(i) if f.streams.len() > 1 => format!(" (ISI {i})"),
+        let isi = match (f.ts_isi, &t.from_udp) {
+            (_, Some(u)) => format!(" (UDP {})", u.dst),
+            (Some(i), None) if f.streams.len() > 1 => format!(" (ISI {i})"),
             _ => String::new(),
         };
         println!("ts{isi}: {} packets, {} CC errors", t.packets, t.cc_errors);

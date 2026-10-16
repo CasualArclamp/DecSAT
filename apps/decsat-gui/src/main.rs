@@ -877,6 +877,17 @@ impl App {
                 }
                 self.pending_audio = None;
             }
+            Action::TakeUdpTs(id, dst) => {
+                // The player is on the other flow's services: it stops.
+                if self.tv.vfo == Some(id) {
+                    self.stop_tv();
+                }
+                if let Some(v) = self.vfos.iter().find(|v| v.id == id) {
+                    let mut s = v.settings.clone();
+                    s.udp_ts = Some(dst);
+                    self.apply(Action::Update(id, s));
+                }
+            }
             Action::Play(id, p) => {
                 // The server starts with the VFO's next TS frame; the player
                 // is launched once it is up (see `launch_pending_player`).

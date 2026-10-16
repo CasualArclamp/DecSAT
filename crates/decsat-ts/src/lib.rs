@@ -8,6 +8,8 @@
 //! - [`csa`] and [`biss`]: DVB-CSA descrambling with a BISS key.
 //! - [`rcs`]: a VSAT hub's DVB-RCS signalling — the return link it runs.
 //! - [`newtec`]: a Newtec hub's private burst plan (table D1h).
+//! - [`udp`]: transport packets carried in UDP (bare, RTP, a sender's own
+//!   header), found in an IP stream.
 
 pub mod biss;
 pub mod csa;
@@ -18,6 +20,7 @@ pub mod psi;
 pub mod rcs;
 pub mod section;
 pub mod sink;
+pub mod udp;
 
 pub use biss::{BissKey, DescrambleStats, Descrambler, KeyError, Outcome, Verdict};
 pub use deframe::{DeframeStats, TS_LEN, TsDeframer, null_packet};
@@ -27,3 +30,4 @@ pub use psi::{
     ca_system_name, service_type_name, stream_type_name,
 };
 pub use sink::{TcpSink, TsFile, TsTap, UdpSink};
+pub use udp::{UdpTs, UdpTsFinder};

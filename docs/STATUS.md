@@ -5356,3 +5356,34 @@ found.
   (Rust) dual-codeword search over all parity pairs. No HackRF recording
   made: with no candidate structure to confirm, a longer capture alone
   would not change the outcome.
+
+## Multicast television in UDP plays in the app (2026-10-16)
+
+Rory asked for the in-app player to play the BBC News multicast on
+Eutelsat 172B 12 705 MHz (238.1.1.10:1234 in GSE: a 32-bit sequence
+number and 0010h, then 7 × 188; H.264 1024×576p25 + AAC, ~1 Mbit/s, a
+keyframe every ~12 s). The player took only a TS carrier's packets.
+
+`decsat_ts::udp`: `ts_offset` finds the packets by where the sync bytes
+fall — the remainder `len mod 188` (≤ 64 bytes) is the header, every
+188 bytes after it starts with 47h — so bare UDP, RTP and a sender's own
+header all work without knowing the header; `UdpTsFinder` follows each
+destination from its first datagram of packets and counts it as TS after
+8 such datagrams with ≥ 90 % of its datagrams holding packets. The IP
+stage (an IP decoder only; a TS decoder's MPE is left alone) feeds the
+chosen flow (`udp_ts` in the VFO's settings, else the busiest, kept while
+it lasts) to a TS stage of its own: analyser, BISS, the player's tap, and
+a `.ts` (`-udp<group>_<port>`) while the PCAP records. It is the VFO's
+`ts` when chosen or when the carrier carries no TS of its own (a
+multistream carrier's signalling TS stays shown otherwise). GUI: IP card
+"MPEG-TS in UDP" (header, rate, Take), the TS card titled with the flow
+and its own ▶ In app. CLI `decode` lists the flows.
+
+Checked on the 6 s recording: the engine's `.ts` is byte-identical to a
+hand extraction (from the 9th datagram, once the flow counts); unattended
+GUI run shows BBC NEWS, and ▶ opens the player with ffmpeg naming H.264
+on 100h and AAC on 101h — no picture there, as the 6 s hold no keyframe.
+The player's own ffmpeg command on the 36 s live capture's TS (3
+keyframes, 47 % of datagrams lost) gave 324 pictures and the sound. ffmpeg
+writes nothing, sound included, until the first keyframe has set up the
+video: a long-GOP feed is silent for up to a GOP after ▶.

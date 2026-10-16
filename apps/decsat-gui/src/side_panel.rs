@@ -3630,7 +3630,10 @@ fn udp_hint(addr: &str) -> String {
 /// The transport stream: what it carries, its health, and where it goes.
 fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
     ui.add_space(6.0);
-    ui.label(RichText::new("MPEG-TS").strong());
+    match &t.from_udp {
+        Some(u) => ui.label(RichText::new(format!("MPEG-TS in UDP {}", u.dst)).strong()),
+        None => ui.label(RichText::new("MPEG-TS").strong()),
+    };
     egui::Grid::new("ts").num_columns(2).show(ui, |ui| {
         ui.label("Packets");
         ui.label(format!("{} · {}", t.packets, format::bitrate(t.ts_bps)));
@@ -3722,13 +3725,30 @@ fn ts_card(ui: &mut Ui, t: &TsView, id: VfoId, actions: &mut Vec<Action>) {
         }
     }
     ui.add_space(4.0);
-    if ui
-        .button(format!("🔍 TS analyser ({} PIDs)", r.pids.len()))
-        .on_hover_text("Every PID with its type, service and bitrate; services, network and tables")
-        .clicked()
-    {
-        actions.push(Action::OpenTsViewer(id));
-    }
+    ui.horizontal_wrapped(|ui| {
+        // An IP VFO's TS has no output settings above: play it from here.
+        if t.from_udp.is_some()
+            && !r.programmes.is_empty()
+            && ui
+                .button("▶ In app")
+                .on_hover_text(
+                    "Play the first service with pictures in a window here (decoded by \
+                     ffmpeg); the analyser's Services tab plays others",
+                )
+                .clicked()
+        {
+            actions.push(Action::Watch(id, None));
+        }
+        if ui
+            .button(format!("🔍 TS analyser ({} PIDs)", r.pids.len()))
+            .on_hover_text(
+                "Every PID with its type, service and bitrate; services, network and tables",
+            )
+            .clicked()
+        {
+            actions.push(Action::OpenTsViewer(id));
+        }
+    });
     if let Some(rcs) = &t.rcs {
         rcs_card(ui, rcs, id);
     }
@@ -4611,6 +4631,48 @@ const PDU_ENTROPY_TIP: &str = "Byte entropy of the PDUs that are not IP. Random 
 
 /// IP out of GSE: where it comes from, how much, who is talking, and the
 /// PCAP.
+/// UDP flows carrying transport packets (multicast television): each with
+/// its header and rate; the one taken shows as the MPEG-TS below, and a
+/// click takes another.
+fn udp_ts_section(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("MPEG-TS in UDP").small().strong())
+        .on_hover_text(
+            "UDP datagrams that end in whole 188-byte transport packets: bare, behind RTP, \
+             or behind a sender's own header (a sequence number). The one taken is this \
+             VFO's MPEG-TS below — services, the analyser, the in-app player — and is \
+             written to a .ts beside the PCAP while that records.",
+        );
+    egui::Grid::new("udp_ts")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for u in &g.udp_ts {
+                ui.label(
+                    RichText::new(format!(
+                        "{} ← {} · {} · {}",
+                        u.dst,
+                        u.src.ip(),
+                        u.header.describe(),
+                        format::bitrate(u.bps)
+                    ))
+                    .monospace()
+                    .small(),
+                );
+                if g.udp_ts_taken == Some(u.dst) {
+                    ui.label(RichText::new("shown below").small());
+                } else if ui
+                    .small_button("Take")
+                    .on_hover_text("Make this flow's transport stream the VFO's MPEG-TS")
+                    .clicked()
+                {
+                    actions.push(Action::TakeUdpTs(id, u.dst));
+                }
+                ui.end_row();
+            }
+        });
+}
+
 fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
     for st in &g.radar_stations {
         radar_station_card(ui, st);
@@ -4800,6 +4862,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                     ui.end_row();
                 }
             });
+    }
+    if !g.udp_ts.is_empty() {
+        udp_ts_section(ui, g, id, actions);
     }
     if let Some(r) = &g.radio {
         radio_section(ui, r);

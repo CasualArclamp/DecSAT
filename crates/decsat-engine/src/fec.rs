@@ -43,7 +43,7 @@ use decsat_ip::{
 };
 use decsat_ts::{
     DescrambleStats, Descrambler, MpeExtractor, MpeStats, Outcome, TS_LEN, TcpSink, TsAnalyser,
-    TsDeframer, TsFile, TsReport, TsTap, UdpSink,
+    TsDeframer, TsFile, TsReport, TsTap, UdpSink, UdpTs, UdpTsFinder,
 };
 
 use crate::demod::{PILOT_AFTER, PILOT_PERIOD, PlFrame};
@@ -1207,6 +1207,9 @@ pub struct TsView {
     /// A VSAT hub's DVB-RCS signalling in the stream: the return link it
     /// describes and runs.
     pub rcs: Option<decsat_ts::rcs::RcsView>,
+    /// The UDP flow the packets were taken from (an IP decoder's
+    /// multicast television), rather than the carrier.
+    pub from_udp: Option<UdpTs>,
 }
 
 /// IP out of GSE, for display.
@@ -1290,6 +1293,10 @@ pub struct GseView {
     pub labels: usize,
     /// GSE-HEM: slices put back together, all streams.
     pub hem: Option<HemStats>,
+    /// UDP flows carrying transport packets (multicast television),
+    /// busiest first, and the one taken as the VFO's MPEG-TS.
+    pub udp_ts: Vec<UdpTs>,
+    pub udp_ts_taken: Option<SocketAddr>,
 }
 
 /// Terminals listed at most (the busiest).
@@ -1350,6 +1357,10 @@ pub struct FecOutput {
     /// A multistream carrier: the input stream whose transport stream the
     /// TS outputs, the player and the analyser take; `None` for the first.
     pub ts_isi: Option<u8>,
+    /// IP decoders: the UDP flow (destination) whose transport packets
+    /// are the VFO's MPEG-TS, ahead of the carrier's own; `None` for the
+    /// busiest found, shown when the carrier carries no TS of its own.
+    pub udp_ts: Option<SocketAddr>,
     /// Play this multicast audio stream (group:port): in the app, or
     /// relayed to an external player when `audio_external`.
     pub audio_play: Option<SocketAddr>,
@@ -1614,6 +1625,17 @@ struct IpStage {
     /// ASTERIX found in UDP datagrams (the ML–PH trunk's ADS-B), for the
     /// radar stage to take.
     asterix: Vec<decsat_modem::radar::Message>,
+    /// Transport packets in UDP (multicast television): looked for when
+    /// the decoder is not a TS one; the flows found (refreshed twice a
+    /// second of signal), the flow asked for and the one taken when none
+    /// is, and the taken flow's TS stage.
+    udp_ts: UdpTsFinder,
+    udp_ts_on: bool,
+    udp_ts_found: Vec<UdpTs>,
+    udp_ts_since: f64,
+    udp_ts_want: Option<SocketAddr>,
+    udp_ts_auto: Option<SocketAddr>,
+    watch: Option<(SocketAddr, TsStage)>,
 }
 
 impl IpStage {
@@ -1642,6 +1664,13 @@ impl IpStage {
             radio_talk_until: f64::NEG_INFINITY,
             clock: 0.0,
             asterix: Vec::new(),
+            udp_ts: UdpTsFinder::new(),
+            udp_ts_on: false,
+            udp_ts_found: Vec::new(),
+            udp_ts_since: 0.0,
+            udp_ts_want: None,
+            udp_ts_auto: None,
+            watch: None,
             gse: BTreeMap::new(),
             hem: BTreeMap::new(),
             hem_buf: Vec::new(),
@@ -1668,6 +1697,8 @@ impl IpStage {
     /// `o.wireshark`, and start or stop playing audio to match
     /// `o.audio_play`.
     fn follow(&mut self, o: &FecOutput) {
+        self.udp_ts_on = !o.ts;
+        self.udp_ts_want = o.udp_ts;
         self.forced = o.gse_variant;
         for g in self.gse.values_mut() {
             g.forced = o.gse_variant;
@@ -1908,6 +1939,17 @@ impl IpStage {
         // A radar station's monitoring messages: tried on every UDP
         // datagram (a length check turns nearly all others away at once).
         if let Some((payload, sport, dport)) = udp_payload(data, info) {
+            // Transport packets in UDP: every flow's found, and the taken
+            // one's go to its TS stage.
+            if self.udp_ts_on {
+                let src = SocketAddr::new(info.src, sport);
+                let dst = SocketAddr::new(info.dst, dport);
+                if let Some(ts) = self.udp_ts.datagram(src, dst, payload)
+                    && self.udp_ts_want.or(self.udp_ts_auto) == Some(dst)
+                {
+                    self.watch_packets(dst, ts);
+                }
+            }
             // ED-137 radio over IP: its RTP's signalling, its SIP.
             self.radio
                 .udp((info.src, sport), (info.dst, dport), payload, self.clock);
@@ -1961,6 +2003,26 @@ impl IpStage {
     fn tick(&mut self, secs: f64) {
         self.mcast.tick(secs);
         self.clock += secs;
+        self.udp_ts.tick(secs);
+        if let Some((_, stage)) = &mut self.watch {
+            stage.tick(secs);
+        }
+        self.udp_ts_since += secs;
+        // Twice a second, or at once while none is taken yet (only flows
+        // that held packets are followed: few, cheap to list).
+        if self.udp_ts_since >= 0.5 || self.udp_ts_auto.is_none() {
+            self.udp_ts_since = 0.0;
+            self.udp_ts_found = self.udp_ts.found();
+            // The busiest flow, kept while it is still there (so the TS
+            // stage is not rebuilt as two flows' counts cross).
+            let found = &self.udp_ts_found;
+            if self
+                .udp_ts_auto
+                .is_none_or(|a| !found.iter().any(|f| f.dst == a))
+            {
+                self.udp_ts_auto = found.first().map(|f| f.dst);
+            }
+        }
         // The radio's voice to its player and recorder, silence between
         // talk spurts, on the signal's clock (8 kHz).
         if let Some(v) = &mut self.radio_voice {
@@ -2079,7 +2141,51 @@ impl IpStage {
             radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
             radio: self.radio.active().then(|| self.radio.view()),
             radio_voice: self.radio_voice.as_ref().map(|v| v.view()),
+            udp_ts: self.udp_ts_found.clone(),
+            udp_ts_taken: self.watch.as_ref().map(|(a, _)| *a),
         }
+    }
+
+    /// Transport packets `ts` from the UDP flow to `dst` (the one taken),
+    /// to its TS stage — a new stage when the flow taken changes.
+    fn watch_packets(&mut self, dst: SocketAddr, ts: &[u8]) {
+        if self.watch.as_ref().is_none_or(|(a, _)| *a != dst) {
+            // In file names: `-udp238.1.1.10_1234` (IPv6's colons too).
+            let tag = format!("-udp{}_{}", dst.ip(), dst.port()).replace(':', "_");
+            self.watch = Some((dst, TsStage::tagged(tag)));
+        }
+        // Rust note: `as_chunks` views the bytes as 188-byte arrays in
+        // place (no copy); `ts` is whole packets, so nothing is left over.
+        let (packets, _) = ts.as_chunks::<TS_LEN>();
+        if let Some((_, stage)) = &mut self.watch {
+            stage.packets_in(packets);
+        }
+    }
+
+    /// The taken flow's TS stage follows the VFO's outputs while it is the
+    /// TS shown: the player's tap, the BISS key, and a `.ts` beside the
+    /// PCAP while that records.
+    fn follow_udp_ts(&mut self, o: &FecOutput, shown: bool) {
+        if let Some((_, stage)) = &mut self.watch {
+            stage.follow(&FecOutput {
+                ts: true,
+                ts_record: o.pcap,
+                biss: o.biss.filter(|_| shown),
+                ts_tap: o.ts_tap.clone().filter(|_| shown),
+                dir: o.dir.clone(),
+                name: o.name.clone(),
+                carrier_hz: o.carrier_hz,
+                ..FecOutput::default()
+            });
+        }
+    }
+
+    /// The taken flow's transport stream, for display.
+    fn watch_view(&mut self) -> Option<TsView> {
+        let (dst, stage) = self.watch.as_mut()?;
+        let mut v = stage.view();
+        v.from_udp = self.udp_ts_found.iter().find(|f| f.dst == *dst).cloned();
+        Some(v)
     }
 
     /// The stream at `want`, once it has been heard enough to know how it
@@ -2363,6 +2469,7 @@ impl TsStage {
             biss: self.descrambler.stats,
             tap_dropped: self.tap.as_ref().map_or(0, TsTap::dropped),
             rcs: self.rcs_view.clone(),
+            from_udp: None,
         }
     }
 }
@@ -3083,8 +3190,12 @@ fn run(
         for st in streams.values_mut() {
             st.tick(secs);
         }
+        // A UDP flow's transport stream is the VFO's when it was chosen,
+        // or when the carrier carries none of its own.
+        let udp_shown = o.udp_ts.is_some() || primary.is_none();
         if let Some(stage) = &mut ip {
             stage.follow(&o);
+            stage.follow_udp_ts(&o, udp_shown);
             stage.tick(secs);
         }
 
@@ -3140,7 +3251,14 @@ fn run(
         if let Some(stage) = &mut ip {
             s.gse = Some(stage.view());
         }
-        if let Some(p) = primary
+        if let Some(v) = ip
+            .as_mut()
+            .filter(|_| udp_shown)
+            .and_then(IpStage::watch_view)
+        {
+            s.ts = Some(v);
+            s.ts_isi = None;
+        } else if let Some(p) = primary
             && let Some(t) = ts.get_mut(&p)
         {
             s.ts = Some(t.view());
@@ -3267,6 +3385,95 @@ mod tests {
         assert_eq!((row.scrambled, row.descrambled), (10, 40));
         assert!(!row.scrambled_now && row.descrambled_now);
         assert_eq!(row.pes_stream_id, Some(0xE0));
+    }
+
+    /// An IP decoder's multicast television: datagrams of a sequence number,
+    /// 0010h and seven transport packets (the Eutelsat 172B BBC feed's form)
+    /// become the VFO's MPEG-TS — its service listed, its packets handed to
+    /// the player's tap — and a TS decoder's IP stage leaves them alone.
+    #[test]
+    fn transport_packets_in_udp_become_the_ts_and_reach_the_tap() {
+        // A PSI section in a packet of its own (ISO/IEC 13818-1 §2.4.4):
+        // the length set, the CRC added, the rest stuffed.
+        let psi = |pid: u16, mut sec: Vec<u8>| {
+            let len = sec.len() - 3 + 4;
+            sec[1] = 0xB0 | (len >> 8) as u8;
+            sec[2] = len as u8;
+            let crc = decsat_core::crc::crc32_mpeg2(&sec);
+            sec.extend_from_slice(&crc.to_be_bytes());
+            let mut p = [0xFFu8; TS_LEN];
+            p[..5].copy_from_slice(&[0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10, 0]);
+            p[5..5 + sec.len()].copy_from_slice(&sec);
+            p
+        };
+        // PAT: programme 1's PMT on 1000h. PMT: H.264 on 100h (the PCR's
+        // too), AAC on 101h.
+        let pat = psi(
+            0,
+            vec![0x00, 0, 0, 0x00, 0x01, 0xC1, 0, 0, 0x00, 0x01, 0xF0, 0x00],
+        );
+        let pmt = psi(
+            0x1000,
+            vec![
+                0x02, 0, 0, 0x00, 0x01, 0xC1, 0, 0, 0xE1, 0x00, 0xF0, 0x00, 0x1B, 0xE1, 0x00, 0xF0,
+                0x00, 0x0F, 0xE1, 0x01, 0xF0, 0x00,
+            ],
+        );
+        let video = |cc: u8| {
+            let mut p = [0x5Au8; TS_LEN];
+            p[..4].copy_from_slice(&[0x47, 0x01, 0x00, 0x10 | (cc & 15)]);
+            p
+        };
+        let datagram = |seq: u32| {
+            let mut d = seq.to_be_bytes().to_vec();
+            d.extend_from_slice(&[0x00, 0x10]);
+            d.extend_from_slice(&pat);
+            d.extend_from_slice(&pmt);
+            for k in 0..5 {
+                d.extend_from_slice(&video((seq * 5 + k) as u8));
+            }
+            decsat_ip::packet::udp_v4([10, 10, 13, 227], [238, 1, 1, 10], 37359, 1234, &d)
+        };
+        let (tap, rx) = TsTap::new(64);
+        let o = FecOutput {
+            ts_tap: Some(tap),
+            ..FecOutput::default()
+        };
+        let mut ip = IpStage::new();
+        for seq in 0..40 {
+            let d = datagram(seq);
+            ip.ip(&d, &decsat_ip::parse(&d).unwrap());
+            ip.follow(&o);
+            ip.follow_udp_ts(&o, true);
+            ip.tick(0.01);
+        }
+        let g = ip.view();
+        let group: SocketAddr = "238.1.1.10:1234".parse().unwrap();
+        assert_eq!(g.udp_ts.len(), 1);
+        assert_eq!(g.udp_ts[0].header, decsat_ts::udp::Header::Other(6));
+        assert_eq!(g.udp_ts_taken, Some(group));
+        let ts = ip.watch_view().expect("the flow's TS");
+        assert_eq!(ts.from_udp.as_ref().map(|u| u.dst), Some(group));
+        assert_eq!(ts.cc_errors, 0);
+        let p = &ts.report.programmes;
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].streams.iter().any(|e| e.pid == 0x100 && e.is_video()));
+        // The tap has the packets as they came, header gone.
+        let tapped: Vec<[u8; TS_LEN]> = rx.try_iter().flatten().collect();
+        assert!(tapped.len() >= 7 * 30, "{}", tapped.len());
+        assert!(tapped.chunks(7).all(|c| c[0] == pat && c[1] == pmt));
+        // A TS decoder (MPE's IP) looks for none.
+        let mut mpe = IpStage::new();
+        mpe.follow(&FecOutput {
+            ts: true,
+            ..FecOutput::default()
+        });
+        for seq in 0..40 {
+            let d = datagram(seq);
+            mpe.ip(&d, &decsat_ip::parse(&d).unwrap());
+            mpe.tick(0.01);
+        }
+        assert!(mpe.view().udp_ts.is_empty() && mpe.watch_view().is_none());
     }
 
     /// IP over Frame Relay in HDLC (the 12335.13 MHz TPC carrier's: DLCI

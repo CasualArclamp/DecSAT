@@ -444,6 +444,10 @@ pub struct VfoSettings {
     /// A multistream carrier: the input stream (ISI) whose transport stream
     /// is shown and output; `None` for the first that carries one.
     pub ts_isi: Option<u8>,
+    /// DVB-S2 → IP: the UDP flow (destination) whose transport packets
+    /// are the VFO's MPEG-TS, for the analyser and the player; `None` for
+    /// the busiest one found.
+    pub udp_ts: Option<std::net::SocketAddr>,
     /// DVB-S2 → IP or TS: play this multicast audio stream (group:port), in
     /// the app or (`audio_external`) relayed to a media player.
     pub audio_play: Option<std::net::SocketAddr>,
@@ -513,6 +517,7 @@ impl VfoSettings {
             biss_key: String::new(),
             ts_tap: None,
             ts_isi: None,
+            udp_ts: None,
             audio_play: None,
             audio_external: false,
             audio_record: None,
@@ -2876,12 +2881,16 @@ fn fec_output(s: &VfoSettings, ddc: &Ddc, plans: &Option<crate::plan_feed::PlanL
         ts_record: s.record && s.decoder.outputs_ts(),
         ts_udp: s.ts_udp_on.then(|| s.ts_udp.trim().parse().ok()).flatten(),
         ts_tcp: s.ts_tcp_on.then(|| s.ts_tcp.trim().parse().ok()).flatten(),
+        // An IP decoder's transport stream is one carried in UDP.
         biss: decsat_ts::BissKey::parse(&s.biss_key)
             .ok()
             .map(|k| k.cw)
-            .filter(|_| s.decoder.outputs_ts()),
-        ts_tap: s.ts_tap.clone().filter(|_| s.decoder.outputs_ts()),
+            .filter(|_| s.decoder.carries_ip()),
+        ts_tap: s.ts_tap.clone().filter(|_| s.decoder.carries_ip()),
         ts_isi: s.ts_isi,
+        udp_ts: s
+            .udp_ts
+            .filter(|_| s.decoder.chain() == DecoderKind::Dvbs2Ip),
         audio_play: s.audio_play,
         audio_external: s.audio_external,
         audio_record: s.audio_record,
