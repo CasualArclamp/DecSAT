@@ -5284,3 +5284,37 @@ code with the information bits known (they are read off the quadrant
 bits at ~3 % error) — sparse checks if LDPC, found by combining reliable
 bursts — then the permutation. Days of work, and the payload may well be
 encrypted when done.
+
+### The blind parity-check search (2026-10-16)
+
+Rory: run the search on one code and stop if no structure after a solid
+attempt. Done on 0104h (712 information + 712 parity bits a burst; 938
+bursts whose information bits vary at every position, 420 near-idle ones
+changing only a header and the tail). Stopped: the code is not found.
+
+- **Dense regression is hopeless at this noise**: with ~3.5 % of the
+  information bits wrong per burst, any parity bit that depends on
+  hundreds of them is predicted at chance — the parity map can only be
+  reached through sparse checks.
+- **No convolutional or turbo structure in natural order**: on the four
+  error-free idle codewords, no linear recursion of memory ≤ 4
+  (f(D)·y = a(D)·A + b(D)·B + c, all 2¹⁵ coefficient sets) produces any
+  parity plane or stream half from the information couples — best fit
+  0.37–0.39 violations, chance level. Rules out every 16-state duo-binary
+  RSC (DVB-RCS2's included) with its parity in the same or a simply
+  ordered position.
+- **Accumulator signature, but not a simple one**: over near-idle bursts
+  the parity bits fall into clusters that change together (18 of 3+
+  bits, ~10 of 7–13; correlation 0.6–0.76, noise 0.05; same-symbol pairs
+  excluded), the sizes an accumulator gives between checks touched by
+  the varying header/tail bits — and members sit at recurring index gaps
+  (24–25 symbols, then 8, 9, 38), i.e. a structured parity permutation.
+  But seriating them gives no clean chain (neighbour correlation 0.21),
+  and no cluster boundary matches one or two varying information bits
+  (best 0.3 of a possible ~0.6, the chance maximum): the checks between
+  runs touch several varying bits at once, or the model is wrong.
+- What remains: a proper dual-codeword search (sparse learning-parity-
+  with-noise over the 1 424 bits, soft-weighted, meet-in-the-middle with
+  hashing) written in Rust, fed by a longer recording at the best MER —
+  plausible, several days, and the payload may be encrypted when done.
+  Not started.
