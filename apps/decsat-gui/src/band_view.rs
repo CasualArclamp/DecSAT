@@ -89,9 +89,9 @@ pub struct BandInput<'a> {
     /// Where Bluetooth would leak in, were the source a HackRF tuned as it
     /// is (offsets, Hz): bursty bands there are marked as such.
     pub bluetooth: &'a [f64],
-    /// Beacons of the dish's satellite (RF Hz, label), marked where they
-    /// fall.
-    pub beacons: &'a [(f64, String)],
+    /// Beacons marked where they fall (the dish's satellite's, or every
+    /// satellite's), and which have a line under them.
+    pub beacons: &'a crate::beacon_list::Scene,
 }
 
 /// The decoder for a VFO made over offsets `lo..hi` (Hz from the band's
@@ -657,6 +657,8 @@ impl BandView {
         // under the pointer named in full.
         let pointer = resp.hover_pos().or(resp.interact_pointer_pos());
         let mut plan_boxes: Vec<(usize, Rect)> = Vec::new();
+        // A plan carrier is named under the pointer (beacons then are not).
+        let mut plan_hover = false;
         if inp.rf_center > 0.0 && !inp.plan.is_empty() {
             let font = FontId::proportional(10.5);
             let mut free_from = f32::NEG_INFINITY;
@@ -691,6 +693,7 @@ impl BandView {
                     .filter(|b| (b.freq_hz - rf).abs() <= (b.bandwidth_hz / 2.0).max(4.0 * px_hz))
                     .min_by(|a, b| (a.freq_hz - rf).abs().total_cmp(&(b.freq_hz - rf).abs()));
                 if let Some(b) = near {
+                    plan_hover = true;
                     let text = format!(
                         "{}\n{} · {}",
                         b.name,
@@ -1071,32 +1074,116 @@ impl BandView {
             }
         }
 
-        // ---- the satellite's beacons: an amber tick and a label
-        if inp.rf_center > 0.0 {
+        // ---- beacons: an amber tick each, bright with a line under it and
+        // dim without (once the spectrum is known; near the span's edges,
+        // where none is looked for, dim too); labels stack in rows clear of
+        // the other ticks, the ones with a line placed first, and those
+        // under the pointer are named in full.
+        if inp.rf_center > 0.0 && !inp.beacons.marks.is_empty() {
+            let scene = inp.beacons;
             let amber = Color32::from_rgb(255, 196, 80);
-            for (rf, label) in inp.beacons {
-                let off = rf - inp.rf_center;
-                if off < lo || off > hi {
-                    continue;
-                }
-                let x = x_of(off);
-                let y = spec.top() + 50.0;
+            let font = FontId::proportional(10.5);
+            let tip_y = spec.top() + 50.0;
+            let row_h = 12.0;
+            // Rows down to the plan names along the foot, six at most.
+            let rows = (((spec.bottom() - 30.0 - tip_y) / row_h) as usize).clamp(1, 6);
+            let mut taken: Vec<Vec<(f32, f32)>> = vec![Vec::new(); rows];
+            let mut shown: Vec<(usize, f32)> = scene
+                .marks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    let off = m.rf_hz - inp.rf_center;
+                    (lo..=hi).contains(&off).then(|| (i, x_of(off)))
+                })
+                .collect();
+            let ticks: Vec<f32> = shown.iter().map(|&(_, x)| x).collect();
+            // `false` sorts before `true`: the heard ones, then left to right.
+            shown.sort_by(|a, b| {
+                (scene.heard[a.0] != Some(true))
+                    .cmp(&(scene.heard[b.0] != Some(true)))
+                    .then(a.1.total_cmp(&b.1))
+            });
+            for &(i, x) in &shown {
+                let dark = match scene.heard[i] {
+                    Some(heard) => !heard,
+                    None => have_signal,
+                };
+                let colour = if dark {
+                    amber.gamma_multiply(0.45)
+                } else {
+                    amber
+                };
                 painter.line_segment(
-                    [pos2(x, y), pos2(x, spec.bottom())],
-                    Stroke::new(1.0, amber.gamma_multiply(0.35)),
+                    [pos2(x, tip_y), pos2(x, spec.bottom())],
+                    Stroke::new(1.0, colour.gamma_multiply(0.35)),
                 );
-                painter.add(egui::Shape::convex_polygon(
-                    vec![pos2(x - 4.0, y - 6.0), pos2(x + 4.0, y - 6.0), pos2(x, y)],
-                    amber,
-                    Stroke::NONE,
-                ));
-                painter.text(
-                    pos2(x + 6.0, y - 6.0),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(10.5),
-                    amber,
-                );
+                let tri = vec![
+                    pos2(x - 4.0, tip_y - 6.0),
+                    pos2(x + 4.0, tip_y - 6.0),
+                    pos2(x, tip_y),
+                ];
+                if dark {
+                    painter.add(egui::Shape::closed_line(tri, Stroke::new(1.0, colour)));
+                } else {
+                    painter.add(egui::Shape::convex_polygon(tri, colour, Stroke::NONE));
+                }
+                let galley =
+                    painter.layout_no_wrap(scene.marks[i].label.clone(), font.clone(), colour);
+                let wl = galley.size().x;
+                // Right of the tick, or left of it at the view's right edge.
+                let x0 = if x + 6.0 + wl <= rect.right() - 2.0 {
+                    x + 6.0
+                } else {
+                    x - 6.0 - wl
+                };
+                let x1 = x0 + wl;
+                // The top row runs through the ticks' triangles: clear of
+                // all but this one's (and others on its frequency).
+                let clear_of_ticks = ticks
+                    .iter()
+                    .all(|&t| (t - x).abs() < 0.5 || t < x0 - 5.0 || t > x1 + 5.0);
+                let free = (0..rows).find(|&r| {
+                    (r > 0 || clear_of_ticks)
+                        && taken[r].iter().all(|&(a, b)| x1 + 4.0 < a || x0 > b + 4.0)
+                });
+                if let Some(r) = free {
+                    taken[r].push((x0, x1));
+                    let y = tip_y - 6.0 + r as f32 * row_h;
+                    painter.galley(pos2(x0, y - galley.size().y / 2.0), galley, colour);
+                }
+            }
+            // The beacons under the pointer, in full.
+            if let Some(p) = pointer.filter(|p| spec.contains(*p) && !plan_hover) {
+                let near: Vec<String> = shown
+                    .iter()
+                    .filter(|(_, x)| (x - p.x).abs() <= 5.0)
+                    .take(6)
+                    .map(|&(i, _)| {
+                        let line = match scene.heard[i] {
+                            Some(true) => "\na line here",
+                            Some(false) => "\nno line here",
+                            None => "",
+                        };
+                        format!("{}{line}", scene.marks[i].detail)
+                    })
+                    .collect();
+                if !near.is_empty() {
+                    let g = painter.layout_no_wrap(
+                        near.join("\n\n"),
+                        FontId::proportional(12.0),
+                        Color32::BLACK,
+                    );
+                    let at = pos2(
+                        (p.x + 12.0).min(rect.right() - g.size().x - 8.0),
+                        (p.y + 14.0)
+                            .max(spec.top() + 22.0)
+                            .min(spec.bottom() - g.size().y - 6.0),
+                    );
+                    let r = Rect::from_min_size(at, g.size()).expand(4.0);
+                    painter.rect_filled(r, CornerRadius::same(4), amber);
+                    painter.galley(at, g, Color32::BLACK);
+                }
             }
         }
 

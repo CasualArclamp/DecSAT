@@ -772,6 +772,16 @@ it; the chosen satellite's beacons (by name, or by a position such as
 `160`) are marked on the waterfall. The list is
 `apps/decsat-gui/src/ku_beacons.csv`.
 
+**📡 All beacons** (beside the volume) marks every satellite's beacons at
+once, to find a satellite or check which one the dish is on: a mark with a
+narrow line within 100 kHz of it (and nearer it than any other listed
+beacon) is drawn bright, one without dim, and the satellite whose beacons
+have the lines is named beside the button — *Intelsat 19 · 5 of 5*, or
+*Koreasat 7 or Eutelsat 172B · 1 of 1* where satellites list the same
+frequency. Only beacons on the polarisation of the lit ones count against
+a satellite. Most of these satellites keep a beacon at 12.20–12.26 or
+12.75 GHz; hover a mark for its satellite, frequency and source.
+
 **● Record** writes the frames raw to `decsat-<VFO>-<RF>MHz-beacon-<time>.bin`
 (one after another), a line each (time, counter, hex) to the `.csv` beside
 it, and the carrier's log (offset, C/N0, level every half second) to a

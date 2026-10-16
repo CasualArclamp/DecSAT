@@ -1,6 +1,7 @@
 //! The top of the window: a menu bar (File, View, Satellite, Tools, Audio,
 //! with the source on its right) over a row of the play button, the input
-//! level, the frequency readout, and the satellite, LO trim and volume.
+//! level, the frequency readout, and the satellite, LO trim, volume and
+//! the All beacons switch.
 //!
 //! Rust note: this is a child module of the crate root, where `App` is
 //! defined, so it can read and change `App`'s private fields and call its
@@ -11,7 +12,7 @@ use decsat_core::SampleFormat;
 use eframe::egui::{self, Color32, RichText};
 
 use crate::band_view::Action;
-use crate::{App, format, freq_display, prefs, side_panel, survey};
+use crate::{App, beacon_list, format, freq_display, prefs, side_panel, survey};
 
 /// Running: a live radio, a playing file, a survey.
 const GREEN: Color32 = Color32::from_rgb(110, 220, 110);
@@ -21,6 +22,8 @@ const GREEN_FILL: Color32 = Color32::from_rgb(31, 74, 38);
 const ORANGE: Color32 = Color32::from_rgb(255, 170, 60);
 /// Transmitting.
 const RED: Color32 = Color32::from_rgb(240, 90, 90);
+/// Beacons, as the waterfall marks them.
+const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
 
 /// What the play button does now.
 enum Play {
@@ -115,9 +118,86 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(w, h), line, |ui| {
                     // The master volume for everything played, voice included.
                     side_panel::volume_control(ui);
+                    ui.separator();
+                    self.all_beacons(ui);
                 });
             });
         });
+    }
+
+    /// The All beacons switch and, left of it (the line is laid out right
+    /// to left), which satellite the lines under the marks point to.
+    fn all_beacons(&mut self, ui: &mut egui::Ui) {
+        let on = self.beacon_marks == beacon_list::ALL;
+        if ui
+            .selectable_label(on, "📡 All beacons")
+            .on_hover_text(beacon_list::ALL_TIP)
+            .clicked()
+        {
+            self.set_all_beacons(!on);
+        }
+        if !on {
+            return;
+        }
+        let scene = &self.beacon_scene;
+        let list = beacon_list::catalogue();
+        let (text, tip) = match scene.ranked.first() {
+            Some(top) => {
+                // Satellites sharing a frequency share its line: name all
+                // that score the same.
+                let tied: Vec<&str> = scene
+                    .ranked
+                    .iter()
+                    .take_while(|m| m.seen == top.seen && m.of == top.of)
+                    .map(|m| list[m.sat].name.as_str())
+                    .collect();
+                let who = match tied.as_slice() {
+                    [one] => one.to_string(),
+                    [a, b] => format!("{a} or {b}"),
+                    [a, rest @ ..] => format!("{a} or {} others", rest.len()),
+                    [] => unreachable!("the first always ties with itself"),
+                };
+                let mut tip = format!(
+                    "Beacons with a line under them (within {:.0} kHz of the listed \
+                     frequency), by satellite:",
+                    beacon_list::LINE_TOL_HZ / 1e3
+                );
+                for m in scene.ranked.iter().take(8) {
+                    tip.push_str(&format!(
+                        "\n{}: {} of its {} beacons in view",
+                        list[m.sat].title(),
+                        m.seen,
+                        m.of
+                    ));
+                }
+                tip.push_str(
+                    "\n\nSatellites with a beacon on one frequency share its line: the one \
+                     with more of its beacons lit leads. Only beacons on the polarisation of \
+                     the lit ones count, as the LNB sees one at a time.",
+                );
+                (
+                    RichText::new(format!("{who} · {} of {}", top.seen, top.of)).color(AMBER),
+                    tip,
+                )
+            }
+            None if self.rf_center() <= 0.0 => (
+                RichText::new("no frequency").weak(),
+                "Set the radio's frequency and the LNB's LO first".to_string(),
+            ),
+            None if scene.in_view() == 0 => (
+                RichText::new("no beacons in view").weak(),
+                "Tune to 12.20–12.26 GHz or 12.75 GHz: most of these satellites keep a \
+                 beacon there"
+                    .to_string(),
+            ),
+            None => (
+                RichText::new(format!("no line under {} beacons", scene.in_view())).weak(),
+                "No line stands out under the beacon marks in view: a satellite with \
+                 beacons here is not in the beam, or the LNB is on the other polarisation"
+                    .to_string(),
+            ),
+        };
+        ui.label(text).on_hover_text(tip);
     }
 
     /// The big start/stop (HackRF) or play/pause (file) button.
@@ -578,8 +658,8 @@ impl App {
             .button("Beacons…")
             .on_hover_text(
                 "The Ku-band beacons of the satellites from 110°E to 180°E: tune to one \
-                 and put a beacon decoder on it; the dish's satellite's beacons are marked \
-                 on the waterfall",
+                 and put a beacon decoder on it; the dish's satellite's beacons (or, with \
+                 All beacons, every satellite's) are marked on the waterfall",
             )
             .clicked()
         {

@@ -170,9 +170,14 @@ struct App {
     /// Every carrier in the span tried in turn.
     survey: survey::Survey,
     /// The Ku-band beacon list, and whose beacons the waterfall marks
-    /// ("auto", "none" or a satellite's title).
+    /// ("auto", "none", "all" or a satellite's title).
     beacon_window: beacon_list::BeaconWindow,
     beacon_marks: String,
+    /// What the marks were before All beacons was switched on, to go back to.
+    beacon_marks_before: String,
+    /// This frame's beacon marks, which have a line under them, and the
+    /// satellites those point to (the toolbar and the waterfall share it).
+    beacon_scene: beacon_list::Scene,
     /// Carriers claimed from their brackets: Identify, then their decoder.
     auto_pick: auto_pick::AutoPick,
     /// The beacon decoder's pointing tone.
@@ -256,6 +261,8 @@ impl Default for App {
             survey: Default::default(),
             beacon_window: Default::default(),
             beacon_marks: prefs::beacon_marks(),
+            beacon_marks_before: String::new(),
+            beacon_scene: Default::default(),
             auto_pick: Default::default(),
             tone: Default::default(),
             selected: None,
@@ -1109,6 +1116,25 @@ impl App {
         self.note = format!("{name}: {}", format::freq(rf_hz));
     }
 
+    /// Mark every satellite's beacons on the waterfall, or go back to the
+    /// marks there were before (the toolbar's satellite's, when unknown).
+    fn set_all_beacons(&mut self, on: bool) {
+        if on == (self.beacon_marks == beacon_list::ALL) {
+            return;
+        }
+        if on {
+            // `mem::replace` puts the new value in and hands back the old.
+            self.beacon_marks_before =
+                std::mem::replace(&mut self.beacon_marks, beacon_list::ALL.to_string());
+        } else {
+            self.beacon_marks = match self.beacon_marks_before.as_str() {
+                "" | beacon_list::ALL => "auto".to_string(),
+                before => before.to_string(),
+            };
+        }
+        prefs::set_beacon_marks(&self.beacon_marks);
+    }
+
     /// The source is a running HackRF, so the view can tune it.
     fn can_retune(&self) -> bool {
         #[cfg(feature = "hackrf")]
@@ -1434,6 +1460,13 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.beacon_scene = beacon_list::Scene::new(
+            &self.beacon_marks,
+            &self.satellite,
+            self.rf_center(),
+            &self.front.spectrum_db,
+            self.band.span(),
+        );
         egui::Panel::top("menubar").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::top("freqbar").show(ui, |ui| self.freq_row(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -1483,8 +1516,6 @@ impl eframe::App for App {
         // is: live, its tuning; a file, the tuning its name gives.
         let bluetooth =
             decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0);
-        // The dish's satellite's beacons, marked on the waterfall.
-        let beacon_marks = beacon_list::marks(&self.beacon_marks, &self.satellite);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1503,7 +1534,7 @@ impl eframe::App for App {
                     plan: &self.plan,
                     caps: &self.carrier_caps,
                     bluetooth: &bluetooth,
-                    beacons: &beacon_marks,
+                    beacons: &self.beacon_scene,
                 };
                 actions.extend(self.band.show(ui, &inp));
             });
@@ -1522,6 +1553,9 @@ impl eframe::App for App {
             .beacon_window
             .show(ui.ctx(), &mut self.beacon_marks, &self.satellite);
         if self.beacon_marks != marks_was {
+            if self.beacon_marks == beacon_list::ALL {
+                self.beacon_marks_before = marks_was;
+            }
             prefs::set_beacon_marks(&self.beacon_marks);
         }
         if let Some(beacon_list::Request::Tune { rf_hz, name }) = req {
