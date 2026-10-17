@@ -262,6 +262,8 @@ pub struct GseBbFramer {
     seq: u32,
     pub roll_off: RollOff,
     pub ccm: bool,
+    /// Mix a few DNS queries and answers into the traffic.
+    dns: bool,
     /// BBFRAMEs made (see `TsBbFramer::frames`).
     frames: u64,
     /// GSE-HEM (S2X): packets sliced across frames rather than each frame
@@ -283,12 +285,20 @@ impl GseBbFramer {
             seq: 0,
             roll_off: RollOff::R35,
             ccm: true,
+            dns: false,
             frames: 0,
             hem: false,
             pending: Vec::new(),
             starts: Default::default(),
             labels: vec![Label::Six([0x02, 0, 0, 0, 0, 0x01])],
         }
+    }
+
+    /// Mix DNS in: a client asking a resolver for a few names, and the
+    /// answers (RFC 5737 addresses), about one packet in eleven.
+    pub fn with_dns(mut self) -> Self {
+        self.dns = true;
+        self
     }
 
     /// GSE-HEM framing (EN 302 307-2 §5.1.7): TS/GS `10`, CRC8_MODE =
@@ -358,6 +368,32 @@ impl GseBbFramer {
         self.seq += 1;
         if n.is_multiple_of(3) {
             return self.radio.next_packet();
+        }
+        if self.dns && n % 11 == 5 {
+            const NAMES: [&str; 6] = [
+                "www.example.com",
+                "mail.example.org",
+                "update.vendor.example.net",
+                "time.example.com",
+                "cdn.example.net",
+                "no-such-host.example.invalid",
+            ];
+            let k = (n / 11) as usize;
+            let name = NAMES[k / 2 % NAMES.len()];
+            let (client, resolver) = ([192, 0, 2, 10], [198, 51, 100, 53]);
+            return if k.is_multiple_of(2) {
+                let q = decsat_ip::dns::test_message(k as u16, name, None);
+                decsat_ip::packet::udp_v4(client, resolver, 41_000 + (k % 50) as u16, 53, &q)
+            } else if name.starts_with("no-such") {
+                // NXDOMAIN: the response flags' RCODE 3, no answer.
+                let mut a = decsat_ip::dns::test_message(k as u16 - 1, name, None);
+                a[2..4].copy_from_slice(&[0x81, 0x83]);
+                decsat_ip::packet::udp_v4(resolver, client, 53, 41_000 + (k % 50) as u16, &a)
+            } else {
+                let ip = [203, 0, 113, 10 + (k / 2 % NAMES.len()) as u8];
+                let a = decsat_ip::dns::test_message(k as u16 - 1, name, Some(ip));
+                decsat_ip::packet::udp_v4(resolver, client, 53, 41_000 + (k % 50) as u16 - 1, &a)
+            };
         }
         let flow = (n % 5) as u8;
         let len = [64usize, 1400, 512, 9000, 40, 1200, 200][n as usize % 7];

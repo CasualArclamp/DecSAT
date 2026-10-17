@@ -173,7 +173,12 @@ fn rdata_text(msg: &[u8], rtype: u16, at: usize, len: usize) -> String {
             (Some(p), Some(n)) => format!("{p} {n}"),
             _ => String::new(),
         },
-        33 => match (be16(msg, at), be16(msg, at + 2), be16(msg, at + 4), name_at(at + 6)) {
+        33 => match (
+            be16(msg, at),
+            be16(msg, at + 2),
+            be16(msg, at + 4),
+            name_at(at + 6),
+        ) {
             (Some(p), Some(_w), Some(port), Some(n)) => format!("{n}:{port} (prio {p})"),
             _ => String::new(),
         },
@@ -319,6 +324,8 @@ pub struct DnsName {
 pub struct DnsView {
     pub queries: u64,
     pub responses: u64,
+    /// Port-53 datagrams that did not read as DNS.
+    pub unparsed: u64,
     /// Distinct names (with types) seen, and the most recent of them.
     pub names_total: usize,
     pub names: Vec<DnsName>,
@@ -334,6 +341,9 @@ pub struct DnsRx {
     clients: HashSet<IpAddr>,
     queries: u64,
     responses: u64,
+    /// Datagrams on port 53 that were not DNS (a garbled or encrypted
+    /// payload, or another protocol).
+    unparsed: u64,
 }
 
 impl DnsRx {
@@ -343,7 +353,7 @@ impl DnsRx {
 
     /// Any DNS has been seen.
     pub fn active(&self) -> bool {
-        self.queries + self.responses > 0
+        self.queries + self.responses + self.unparsed > 0
     }
 
     /// A UDP datagram: `src` and `dst` are (address, port), `now` the signal
@@ -356,15 +366,23 @@ impl DnsRx {
             _ => return,
         };
         let Some(m) = parse(payload) else {
+            if service == Service::Dns {
+                self.unparsed += 1;
+            }
             return;
         };
         // A unicast DNS query goes to port 53 and its response comes from
         // it; the multicast services use their port both ways. A message
         // whose direction contradicts its QR bit is some other protocol.
         if service == Service::Dns && m.response != (src.1 == PORT_DNS) {
+            self.unparsed += 1;
             return;
         }
-        let (client, resolver) = if m.response { (dst.0, src.0) } else { (src.0, dst.0) };
+        let (client, resolver) = if m.response {
+            (dst.0, src.0)
+        } else {
+            (src.0, dst.0)
+        };
         if m.response {
             self.responses += 1;
         } else {
@@ -440,7 +458,11 @@ impl DnsRx {
 
     /// Drop the tenth of the names seen longest ago.
     fn evict(&mut self) {
-        let mut by_age: Vec<_> = self.names.iter().map(|(k, e)| (e.last, k.clone())).collect();
+        let mut by_age: Vec<_> = self
+            .names
+            .iter()
+            .map(|(k, e)| (e.last, k.clone()))
+            .collect();
         by_age.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (_, k) in by_age.into_iter().take(MAX_NAMES / 10) {
             self.names.remove(&k);
@@ -466,6 +488,7 @@ impl DnsRx {
         DnsView {
             queries: self.queries,
             responses: self.responses,
+            unparsed: self.unparsed,
             names_total: self.names.len(),
             names: recent
                 .into_iter()
@@ -487,6 +510,31 @@ impl DnsRx {
             resolvers,
         }
     }
+}
+
+/// A DNS A query for `name` (id `id`), or with `answer` its response with
+/// that address — for the test signals.
+pub fn test_message(id: u16, name: &str, answer: Option<[u8; 4]>) -> Vec<u8> {
+    let mut m = id.to_be_bytes().to_vec();
+    let (flags, an) = if answer.is_some() {
+        (0x8180u16, 1u16)
+    } else {
+        (0x0100, 0)
+    };
+    for w in [flags, 1, an, 0, 0] {
+        m.extend_from_slice(&w.to_be_bytes());
+    }
+    for label in name.split('.') {
+        m.push(label.len() as u8);
+        m.extend_from_slice(label.as_bytes());
+    }
+    m.extend_from_slice(&[0, 0, 1, 0, 1]); // root, type A, class IN
+    if let Some(a) = answer {
+        // Owner name: a pointer to the question's (0xC00C), TTL 300 s.
+        m.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0x01, 0x2C, 0, 4]);
+        m.extend_from_slice(&a);
+    }
+    m
 }
 
 #[cfg(test)]
@@ -542,8 +590,18 @@ mod tests {
     fn a_query_and_its_response_make_one_entry() {
         let mut rx = DnsRx::new();
         let (client, server) = (ip(10, 0, 0, 5), ip(8, 8, 8, 8));
-        rx.udp((client, 40000), (server, 53), &query("Www.Example.com", 1), 1.0);
-        rx.udp((server, 53), (client, 40000), &response("www.example.com", 0), 1.2);
+        rx.udp(
+            (client, 40000),
+            (server, 53),
+            &query("Www.Example.com", 1),
+            1.0,
+        );
+        rx.udp(
+            (server, 53),
+            (client, 40000),
+            &response("www.example.com", 0),
+            1.2,
+        );
         let v = rx.view(2.0, 10);
         assert_eq!((v.queries, v.responses, v.names_total), (1, 1, 1));
         let n = &v.names[0];
@@ -575,9 +633,20 @@ mod tests {
         let mut rx = DnsRx::new();
         // Noise, and a query-looking message heading the wrong way.
         rx.udp((ip(1, 1, 1, 1), 53), (ip(2, 2, 2, 2), 9), &[0xFF; 40], 0.0);
-        rx.udp((ip(1, 1, 1, 1), 53), (ip(2, 2, 2, 2), 9), &query("a.b", 1), 0.0);
-        rx.udp((ip(1, 1, 1, 1), 80), (ip(2, 2, 2, 2), 9), &query("a.b", 1), 0.0);
-        assert!(!rx.active());
+        rx.udp(
+            (ip(1, 1, 1, 1), 53),
+            (ip(2, 2, 2, 2), 9),
+            &query("a.b", 1),
+            0.0,
+        );
+        rx.udp(
+            (ip(1, 1, 1, 1), 80),
+            (ip(2, 2, 2, 2), 9),
+            &query("a.b", 1),
+            0.0,
+        );
+        let v = rx.view(0.0, 10);
+        assert_eq!((v.queries, v.responses, v.unparsed), (0, 0, 2));
     }
 
     #[test]
@@ -594,7 +663,12 @@ mod tests {
         m.extend(name("printer.local"));
         m.extend_from_slice(&[0, 1, 0x80, 1, 0, 0, 0, 120, 0, 4, 192, 168, 1, 9]);
         let mut rx = DnsRx::new();
-        rx.udp((ip(192, 168, 1, 9), 5353), (ip(224, 0, 0, 251), 5353), &m, 3.0);
+        rx.udp(
+            (ip(192, 168, 1, 9), 5353),
+            (ip(224, 0, 0, 251), 5353),
+            &m,
+            3.0,
+        );
         let n = &rx.view(3.0, 10).names[0];
         assert_eq!(n.name, "printer.local.");
         assert_eq!(n.service, Service::Mdns);
@@ -607,7 +681,12 @@ mod tests {
         let mut rx = DnsRx::new();
         let (c, s) = (ip(10, 0, 0, 5), ip(8, 8, 8, 8));
         for i in 0..(MAX_NAMES + 100) {
-            rx.udp((c, 1000), (s, 53), &query(&format!("h{i}.example.com"), 1), i as f64);
+            rx.udp(
+                (c, 1000),
+                (s, 53),
+                &query(&format!("h{i}.example.com"), 1),
+                i as f64,
+            );
         }
         let v = rx.view(1e6, 3);
         assert!(v.names_total <= MAX_NAMES);

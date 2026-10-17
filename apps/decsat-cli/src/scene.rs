@@ -70,8 +70,8 @@ pub fn write(out: &Path, seconds: f64) -> Result<()> {
     // LDPC), so the scene decodes end to end; their BBHEADERs announce the
     // roll-off each is shaped with.
     let a = {
-        let mut f =
-            PlFramer::new(0, 1).with_source(Box::new(GseBbFramer::new(1, Variant::STANDARD)));
+        let mut f = PlFramer::new(0, 1)
+            .with_source(Box::new(GseBbFramer::new(1, Variant::STANDARD).with_dns()));
         f.set_roll_off(RollOff::R20);
         let syms = f.build_schedule(&[FrameSpec::new(4, false, true)], n / 8 + 64);
         shaped(&syms, 8, 0.20)

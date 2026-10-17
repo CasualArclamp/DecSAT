@@ -2233,7 +2233,10 @@ impl IpStage {
             radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
             radio: self.radio.active().then(|| self.radio.view()),
             radio_voice: self.radio_voice.as_ref().map(|v| v.view()),
-            dns: self.dns.active().then(|| self.dns.view(self.clock, DNS_ROWS)),
+            dns: self
+                .dns
+                .active()
+                .then(|| self.dns.view(self.clock, DNS_ROWS)),
             udp_ts: self.udp_ts_found.clone(),
             udp_ts_taken: self.watch.as_ref().map(|(a, _)| *a),
         }

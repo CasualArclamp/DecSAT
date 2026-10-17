@@ -4874,7 +4874,7 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
         radio_section(ui, r);
     }
     if let Some(d) = &g.dns {
-        dns_section(ui, d, id);
+        dns_section(ui, d, id, actions);
     }
     if let Some(h) = &g.hub {
         hub_section(ui, h, id);
@@ -5003,129 +5003,27 @@ fn terminals_section(ui: &mut Ui, g: &GseView) {
     });
 }
 
-/// DNS in the link's UDP: the names asked for, who answered and with what.
-/// Collapsed to a header with the totals; the list can be filtered by a
-/// word in the name, the answer or the client's/server's address, and copied
-/// as tab-separated text.
-fn dns_section(ui: &mut Ui, d: &decsat_ip::dns::DnsView, id: VfoId) {
-    use decsat_ip::dns::{rcode_name, type_name};
+/// DNS in the link's UDP: a summary and a button for the window
+/// (`crate::dns_viewer`) that lists the names, answers and servers.
+fn dns_section(ui: &mut Ui, d: &decsat_ip::dns::DnsView, id: VfoId, actions: &mut Vec<Action>) {
     ui.add_space(6.0);
-    let title = format!(
-        "DNS — {} names, {} queries, {} answers",
-        d.names_total, d.queries, d.responses
-    );
-    egui::CollapsingHeader::new(RichText::new(title).strong())
-        .id_salt(("dns", id))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{} clients · servers: {}",
-                    d.clients,
-                    d.resolvers
-                        .iter()
-                        .take(4)
-                        .map(|(a, n)| format!("{a} ({n})"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-                .small(),
-            )
+    ui.horizontal(|ui| {
+        if ui
+            .button(format!("🔍 DNS ({} names)", d.names_total))
             .on_hover_text(
-                "Plain DNS over UDP (port 53), mDNS (5353) and LLMNR (5355). DNS over TCP, \
-                 TLS or HTTPS is not read — the last two are encrypted. The list is the \
-                 newest names; error answers (NXDOMAIN and the like) are red.",
-            );
-            let filter_id = ui.id().with(("dns_filter", id));
-            let mut filter: String = ui.data(|x| x.get_temp(filter_id)).unwrap_or_default();
-            let mut copy = false;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Filter").small());
-                ui.add(egui::TextEdit::singleline(&mut filter).desired_width(160.0));
-                copy = ui
-                    .small_button("Copy list")
-                    .on_hover_text("Copy the rows shown as tab-separated text")
-                    .clicked();
-            });
-            ui.data_mut(|x| x.insert_temp(filter_id, filter.clone()));
-            let needle = filter.trim().to_ascii_lowercase();
-            let rows: Vec<&decsat_ip::dns::DnsName> = d
-                .names
-                .iter()
-                .filter(|n| {
-                    needle.is_empty()
-                        || n.name.contains(&needle)
-                        || n.answers.iter().any(|a| a.to_ascii_lowercase().contains(&needle))
-                        || n.resolver.is_some_and(|r| r.to_string().contains(&needle))
-                })
-                .collect();
-            let answer_text = |n: &decsat_ip::dns::DnsName| match n.rcode {
-                Some(r) if r != 0 => rcode_name(r),
-                _ if n.answers.is_empty() && n.responses == 0 => "no answer yet".to_string(),
-                _ => n.answers.join(", "),
-            };
-            if copy {
-                let text: String = rows
-                    .iter()
-                    .map(|n| {
-                        format!(
-                            "{}\t{}\t{}\t{}\t{}\n",
-                            n.name,
-                            type_name(n.qtype),
-                            answer_text(n),
-                            n.resolver.map_or(String::new(), |r| r.to_string()),
-                            n.queries
-                        )
-                    })
-                    .collect();
-                ui.ctx().copy_text(text);
-            }
-            egui::ScrollArea::vertical()
-                .id_salt(("dns_scroll", id))
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    egui::Grid::new(("dns_names", id))
-                        .num_columns(4)
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for n in &rows {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} {}",
-                                        n.name.trim_end_matches('.'),
-                                        type_name(n.qtype)
-                                    ))
-                                    .monospace()
-                                    .small(),
-                                );
-                                let err = n.rcode.is_some_and(|r| r != 0);
-                                let a = RichText::new(answer_text(n)).small();
-                                if err {
-                                    ui.colored_label(Color32::from_rgb(240, 110, 90), a);
-                                } else {
-                                    ui.label(a);
-                                }
-                                ui.label(
-                                    RichText::new(format!("×{}/{}", n.queries, n.responses))
-                                        .small(),
-                                )
-                                .on_hover_text(format!(
-                                    "{} · {} queries, {} answers · {} client(s){}{}",
-                                    n.service.label(),
-                                    n.queries,
-                                    n.responses,
-                                    n.clients,
-                                    n.resolver.map_or(String::new(), |r| format!(" · server {r}")),
-                                    n.ttl.map_or(String::new(), |t| format!(" · TTL {t} s")),
-                                ));
-                                ui.label(RichText::new(format!("{:.0} s ago", n.age)).small());
-                                ui.end_row();
-                            }
-                        });
-                });
-            if rows.is_empty() {
-                ui.label(RichText::new("Nothing matches the filter.").small());
-            }
-        });
+                "Every name asked for in the link's DNS, its answers, the servers and clients",
+            )
+            .clicked()
+        {
+            actions.push(Action::OpenDnsViewer(id));
+        }
+        let text = if d.queries + d.responses == 0 {
+            format!("{} port-53 datagrams, none readable", d.unparsed)
+        } else {
+            format!("{} queries · {} answers", d.queries, d.responses)
+        };
+        ui.label(RichText::new(text).small());
+    });
 }
 
 /// ED-137 radio over IP: each stream's signalling now and so far, the SIP

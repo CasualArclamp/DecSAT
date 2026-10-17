@@ -48,6 +48,8 @@ pub enum Action {
     Play(VfoId, crate::player::Player),
     /// Open the TS analyser window on a VFO.
     OpenTsViewer(VfoId),
+    /// Open the DNS window on a VFO.
+    OpenDnsViewer(VfoId),
     /// Play a service of a VFO's TS in the app (its number; `None`: the
     /// first with pictures).
     Watch(VfoId, Option<u16>),

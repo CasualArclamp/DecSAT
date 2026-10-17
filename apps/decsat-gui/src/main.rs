@@ -13,6 +13,7 @@ mod beacon_card;
 mod beacon_list;
 mod biss_memory;
 mod carrier_caps;
+mod dns_viewer;
 mod filename;
 mod format;
 mod freq_display;
@@ -188,6 +189,7 @@ struct App {
     names: u32,
     paused: bool,
     ts_viewer: ts_viewer::TsViewer,
+    dns_viewer: dns_viewer::DnsViewer,
     /// The in-app player.
     tv: tv::TvWindow,
     /// BISS keys kept by carrier, and given back.
@@ -273,6 +275,7 @@ impl Default for App {
             pending_player: None,
             pending_audio: None,
             ts_viewer: Default::default(),
+            dns_viewer: Default::default(),
             tv: Default::default(),
             biss: Default::default(),
             radar_scope: Default::default(),
@@ -855,6 +858,7 @@ impl App {
                 }
             }
             Action::OpenTsViewer(id) => self.ts_viewer.open(id),
+            Action::OpenDnsViewer(id) => self.dns_viewer.open(id),
             Action::Watch(id, programme) => self.start_tv(id, programme, None),
             Action::OpenRadarScope(id) => self.radar_scope.open(id),
             Action::PlayAudio(id, key, p) => {
@@ -1410,6 +1414,11 @@ impl eframe::App for App {
             {
                 self.ts_viewer.open(id);
             }
+            if self.automation.dns_viewer
+                && let Some(id) = self.selected
+            {
+                self.dns_viewer.open(id);
+            }
             if self.automation.radar_scope
                 && let Some(id) = self.selected
             {
@@ -1664,6 +1673,22 @@ impl eframe::App for App {
                     }
                 }
                 None => self.ts_viewer.vfo = None, // the VFO was deleted
+            }
+        }
+
+        // The DNS window, likewise.
+        if let Some(id) = self.dns_viewer.vfo {
+            match self.vfos.iter().find(|v| v.id == id) {
+                Some(v) => {
+                    let dns = self
+                        .statuses
+                        .get(&id)
+                        .and_then(|st| st.fec.as_ref())
+                        .and_then(|f| f.gse.as_ref())
+                        .and_then(|g| g.dns.as_ref());
+                    self.dns_viewer.show(ui.ctx(), &v.settings.name, dns);
+                }
+                None => self.dns_viewer.vfo = None, // the VFO was deleted
             }
         }
 

@@ -41,6 +41,8 @@ pub struct Options {
     pub decoders: Vec<decsat_engine::DecoderKind>,
     /// Open the TS analyser on the selected VFO.
     pub ts_viewer: bool,
+    /// Open the DNS window on the selected VFO.
+    pub dns_viewer: bool,
     /// Open the radar scope on the selected VFO, at this range (NM).
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
@@ -97,6 +99,7 @@ impl Options {
                     o.claim_auto = true;
                 }
                 Some("--ts-viewer") => o.ts_viewer = true,
+                Some("--dns-viewer") => o.dns_viewer = true,
                 Some("--radar-scope") => o.radar_scope = true,
                 Some("--radar-track") => {
                     let v = args
@@ -255,6 +258,7 @@ pub struct Automation {
     pub survey: bool,
     pub select: Option<usize>,
     pub ts_viewer: bool,
+    pub dns_viewer: bool,
     pub radar_scope: bool,
     pub radar_range: Option<f32>,
     pub radar_track: Option<u16>,
@@ -284,6 +288,7 @@ impl Automation {
             claimed: false,
             select: o.select,
             ts_viewer: o.ts_viewer,
+            dns_viewer: o.dns_viewer,
             radar_scope: o.radar_scope,
             radar_range: o.radar_range,
             panel_scroll: o.panel_scroll,
