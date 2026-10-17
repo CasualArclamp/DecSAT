@@ -123,6 +123,14 @@ pub fn guid_mac(guid: u64) -> Option<String> {
     })
 }
 
+/// The manufacturer of the MAC address an identifier encapsulates, when it
+/// does and the address's OUI is one `crate::oui` knows.
+pub fn guid_vendor(guid: u64) -> Option<&'static str> {
+    guid_mac(guid)?;
+    let b = guid.to_be_bytes();
+    crate::oui::vendor([b[0], b[1], b[2]])
+}
+
 /// GF(2⁷) for the BCH code: x⁷ + x³ + 1, and the element β = α²³ whose
 /// powers β¹…β¹² are the generator's roots (found from table 4's
 /// polynomials; any degree-7 irreducible defines the same field).
@@ -1530,6 +1538,9 @@ mod tests {
         let g = 0x0006_B0FF_FF01_AC07;
         assert_eq!(guid_text(g), "75:00:06:B0:FF:FF:01:AC:07");
         assert_eq!(guid_mac(g).as_deref(), Some("00:06:B0:01:AC:07"));
+        assert_eq!(guid_vendor(g), Some("Comtech EF Data"));
+        // Not a MAC-based identifier: no vendor, even if the first octets match.
+        assert_eq!(guid_vendor(g ^ (0xFF << 32)), None);
         // §4.2: positions.
         let mut r = CidReport::default();
         r.fields[1] = Some(0b0001_1110_0110_1010_1110_0001); // 1245.9 S

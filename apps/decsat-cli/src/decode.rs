@@ -443,7 +443,7 @@ pub(crate) fn report(st: &VfoStatus) {
         print_beacon(v);
     }
     if let Some(c) = &st.cid {
-        use decsat_engine::cid::{guid_mac, guid_text};
+        use decsat_engine::cid::{guid_mac, guid_text, guid_vendor};
         let s = &c.stats;
         println!(
             "dvb-cid: {:.0} kchip/s, code {}, {} searches, {:+.1} Hz, {:.1} dB a bit, {} bits, {} frames ({} failed){}",
@@ -465,7 +465,10 @@ pub(crate) fn report(st: &VfoStatus) {
         if let Some(g) = r.guid {
             println!("  identifier {}", guid_text(g));
             if let Some(m) = guid_mac(g) {
-                println!("  MAC {m}");
+                match guid_vendor(g) {
+                    Some(v) => println!("  MAC {m} ({v})"),
+                    None => println!("  MAC {m}"),
+                }
             }
         }
         if let (Some(lat), Some(lon)) = (r.latitude(), r.longitude()) {

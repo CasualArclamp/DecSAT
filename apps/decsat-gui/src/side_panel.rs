@@ -2337,6 +2337,15 @@ fn cid_card(ui: &mut Ui, c: &decsat_engine::CidView) {
                 ui.label("MAC");
                 ui.label(RichText::new(mac).monospace());
                 ui.end_row();
+                if let Some(v) = cid::guid_vendor(g) {
+                    ui.label("Maker");
+                    ui.label(v).on_hover_text(
+                        "From the MAC address's OUI, in a short built-in list of \
+                         satellite-modem and common network makers (not the full IEEE \
+                         registry).",
+                    );
+                    ui.end_row();
+                }
             }
         }
         if let (Some(lat), Some(lon)) = (r.latitude(), r.longitude()) {

@@ -15,7 +15,7 @@ use decsat_modem::cid::{CidRx, SPS, chip_rate};
 // What a CID VFO's view holds, and how to show it, for the apps.
 pub use decsat_modem::cid::{
     CHIPS, CidLive, CidReport, CidSearch, CidStats, FRAME_BITS, LIVE_BITS, REPEAT, ScramblerOrder,
-    guid_mac, guid_text,
+    guid_mac, guid_text, guid_vendor,
 };
 
 /// A CID VFO's state, for display.
