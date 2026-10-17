@@ -44,6 +44,7 @@ pub struct DecodeArgs {
     pub programme_record: bool,
     /// psk: how the .bin numbers the symbols.
     pub labels: String,
+    pub subcarrier: Option<f64>,
     /// cid: low-SNR mode.
     pub low_snr: bool,
     /// cid: the clock correction, ppm.
@@ -171,6 +172,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
             other => bail!("--labels: `{other}` (want standard, natural or gray)"),
         };
     }
+    s.beacon_tune.subcarrier_hz = a.subcarrier;
     s.cid_low_snr = a.low_snr;
     s.clock_ppm = a.clock_ppm;
     s.psk_bits = a.bits;
@@ -1754,6 +1756,19 @@ pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
         ),
         None if v.unmodulated => println!("  telemetry: none found (an unmodulated carrier)"),
         None => println!("  telemetry: not found yet"),
+    }
+    if let Some(t) = &v.telemetry
+        && !t.other_subcarriers_hz.is_empty()
+    {
+        let others: Vec<String> = t
+            .other_subcarriers_hz
+            .iter()
+            .map(|f| format!("{:.3} kHz", f / 1e3))
+            .collect();
+        println!(
+            "  also: another subcarrier at {} (read it with --subcarrier)",
+            others.join(", ")
+        );
     }
     if let Some(f) = &v.framing {
         println!(

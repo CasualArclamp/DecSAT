@@ -207,6 +207,11 @@ enum Command {
         /// by position (`natural`), or Gray-coded by position (`gray`).
         #[arg(long, default_value = "standard")]
         labels: String,
+        /// beacon: the data subcarrier's frequency from the carrier, Hz (found
+        /// blind otherwise; a beacon with two subcarriers is read one at a
+        /// time).
+        #[arg(long)]
+        subcarrier: Option<f64>,
         /// cid: low-SNR mode (searches 96–384 bits deep, looser threshold).
         #[arg(long)]
         low_snr: bool,
@@ -361,6 +366,7 @@ fn main() -> Result<()> {
             tdm_record,
             programme_record,
             labels,
+            subcarrier,
             low_snr,
             clock_ppm,
             bits,
@@ -388,6 +394,7 @@ fn main() -> Result<()> {
             tdm_record,
             programme_record,
             labels,
+            subcarrier,
             low_snr,
             clock_ppm,
             bits,

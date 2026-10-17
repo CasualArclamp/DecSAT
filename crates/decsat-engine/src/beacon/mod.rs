@@ -151,16 +151,17 @@ pub fn look(x: &[Iq], rate: f64, band: f64) -> Option<Look> {
     if (phi.len() as f64) < 0.3 * rate {
         return Some(l);
     }
-    let found = match pm::find_subcarrier(phi, rate) {
-        Some(sc) => {
-            let d = SubDemod::new(rate, sc.freq_hz, sc.half_width_hz);
-            let r = Riding::Subcarrier {
-                freq_hz: sc.freq_hz,
-            };
-            look_bits(phi, d, 1.6 * sc.half_width_hz)
-                .map(|(rb, c)| (r, rb, c, sc.freq_hz + 1.5 * sc.half_width_hz))
-        }
-        None if line.share >= 0.2 => pm::direct_width(phi, rate, 4.0 * BN_START)
+    let subs = pm::find_subcarriers(phi, rate);
+    let found = match subs.iter().find_map(|sc| {
+        let d = SubDemod::new(rate, sc.freq_hz, sc.half_width_hz);
+        let r = Riding::Subcarrier {
+            freq_hz: sc.freq_hz,
+        };
+        look_bits(phi, d, 1.6 * sc.half_width_hz)
+            .map(|(rb, c)| (r, rb, c, sc.freq_hz + 1.5 * sc.half_width_hz))
+    }) {
+        Some(f) => Some(f),
+        None if subs.is_empty() && line.share >= 0.2 => pm::direct_width(phi, rate, 4.0 * BN_START)
             .filter(|&w| w > 8.0 * BN_START)
             .and_then(|w| {
                 let d = SubDemod::new(rate, 0.0, w);
@@ -172,7 +173,11 @@ pub fn look(x: &[Iq], rate: f64, band: f64) -> Option<Look> {
     };
     if let Some((r, rb, c, reach)) = found {
         l.telemetry = Some((r, rb, c));
-        l.reach_hz = reach;
+        // A VFO that holds every subcarrier there is.
+        l.reach_hz = subs
+            .iter()
+            .map(|sc| sc.freq_hz + 1.5 * sc.half_width_hz)
+            .fold(reach, f64::max);
     }
     Some(l)
 }
@@ -232,6 +237,9 @@ pub struct TelemetryView {
     /// How far the data reach either side of the subcarrier (or of the
     /// carrier, for data on its phase), Hz.
     pub half_width_hz: f64,
+    /// Other data subcarriers found beside it, Hz from the carrier (some
+    /// beacons carry two); set the subcarrier by hand to read one.
+    pub other_subcarriers_hz: Vec<f64>,
 }
 
 /// Where to look for the telemetry, set by hand (each `None`: found
@@ -543,6 +551,8 @@ pub struct BeaconRx {
     looks: u32,
     unmodulated: bool,
     chain: Option<Chain>,
+    /// Other subcarriers found beside the chain's.
+    other_subcarriers: Vec<f64>,
     // Suppressed carriers.
     psk: Option<Box<PskDemod>>,
     mix: (f64, f64),
@@ -610,6 +620,7 @@ impl BeaconRx {
             looks: 0,
             unmodulated: false,
             chain: None,
+            other_subcarriers: Vec::new(),
             psk: None,
             mix: (0.0, 0.0),
             syms: Vec::new(),
@@ -899,40 +910,50 @@ impl BeaconRx {
     fn analyse(&mut self) {
         let phi = std::mem::take(&mut self.analysis);
         self.looks += 1;
-        let sub = match self.tune.subcarrier_hz {
+        // Found blind there may be several subcarriers (two on some
+        // beacons): each tried, the best first, until one gives a clock.
+        let subs = match self.tune.subcarrier_hz {
             // Placed by hand: snapped to its line, its width measured there.
-            Some(f) if f > 0.0 => pm::subcarrier_at(&phi, self.rate, f, self.tune.half_width_hz),
-            Some(_) => None,
-            None => pm::find_subcarrier(&phi, self.rate),
+            Some(f) if f > 0.0 => pm::subcarrier_at(&phi, self.rate, f, self.tune.half_width_hz)
+                .into_iter()
+                .collect(),
+            Some(_) => Vec::new(),
+            None => pm::find_subcarriers(&phi, self.rate),
         };
         let direct = self.tune.subcarrier_hz.is_none_or(|f| f <= 0.0);
-        let found = match sub {
-            Some(sc) => {
-                let demod = SubDemod::new(self.rate, sc.freq_hz, sc.half_width_hz);
-                self.try_chain(
-                    &phi,
-                    demod,
-                    Riding::Subcarrier {
-                        freq_hz: sc.freq_hz,
-                    },
-                    sc.half_width_hz,
-                )
+        let mut found = false;
+        for (i, sc) in subs.iter().enumerate() {
+            let demod = SubDemod::new(self.rate, sc.freq_hz, sc.half_width_hz);
+            if self.try_chain(
+                &phi,
+                demod,
+                Riding::Subcarrier {
+                    freq_hz: sc.freq_hz,
+                },
+                sc.half_width_hz,
+            ) {
+                // The others are shown, to be read on a VFO of their own
+                // with the subcarrier set.
+                self.other_subcarriers = subs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, o)| o.freq_hz)
+                    .collect();
+                found = true;
+                break;
             }
-            None if direct => {
-                let width = self.tune.half_width_hz.or_else(|| {
-                    pm::direct_width(&phi, self.rate, 4.0 * self.loop_hz)
-                        .filter(|&w| w > 8.0 * self.loop_hz)
-                });
-                match width {
-                    Some(w) => {
-                        let demod = SubDemod::new(self.rate, 0.0, w);
-                        self.try_chain(&phi, demod, Riding::Direct, w)
-                    }
-                    None => false,
-                }
+        }
+        if !found && subs.is_empty() && direct {
+            let width = self.tune.half_width_hz.or_else(|| {
+                pm::direct_width(&phi, self.rate, 4.0 * self.loop_hz)
+                    .filter(|&w| w > 8.0 * self.loop_hz)
+            });
+            if let Some(w) = width {
+                let demod = SubDemod::new(self.rate, 0.0, w);
+                found = self.try_chain(&phi, demod, Riding::Direct, w);
             }
-            None => false,
-        };
+        }
         // Set by hand, it is looked for until found.
         if !found && self.looks >= MAX_LOOKS && self.tune == Tune::default() {
             self.unmodulated = true;
@@ -947,6 +968,7 @@ impl BeaconRx {
         }
         self.tune = tune;
         self.chain = None;
+        self.other_subcarriers.clear();
         self.analysis.clear();
         self.looks = 0;
         self.unmodulated = false;
@@ -1444,6 +1466,7 @@ impl BeaconRx {
                     .and_then(|c| c.locked())
                     .map(|t| t.code.name()),
                 half_width_hz: ch.half_width,
+                other_subcarriers_hz: self.other_subcarriers.clone(),
             }
         });
         let framing = self.active_lock().map(|(l, st, coded)| {

@@ -140,13 +140,70 @@ fn fft_size(len: usize, rate: f64, bin_hz: f64) -> usize {
         .clamp(256, 1 << 16)
 }
 
-/// Find a data subcarrier in `phi` (the carrier's phase at `rate`): the
-/// squared phase's lines, each judged by the data spread round half its
-/// frequency.
+/// How much wider than the data show above the noise (95 % of their power)
+/// a subcarrier's band is taken.
+const WIDTH_MARGIN: f64 = 1.5;
+
+/// The data round a subcarrier at bin `ksc` of the (median-smoothed)
+/// phase spectrum `smooth`, up to `reach` bins out: the noise round it
+/// (from the quietest quarter of the span: the phase's noise is not flat,
+/// the carrier loop and the receiver's filter shape it; `floor`, the whole
+/// spectrum's, bounds it from below) and how far the data go either side
+/// with nothing missing, across no gap of more than `tolerance` bins
+/// (bi-phase dips at its very centre): another subcarrier's data beyond a
+/// gap are no part of this one's.
+fn data_extent(
+    smooth: &[f64],
+    floor: f64,
+    ksc: usize,
+    reach: usize,
+    tolerance: usize,
+) -> (f64, usize) {
+    let mut around: Vec<f64> = smooth[ksc - reach..=ksc + reach].to_vec();
+    let near = around.len() / 4;
+    let local = *around.select_nth_unstable_by(near, f64::total_cmp).1;
+    let local = local.max(floor.min(local * 4.0)).max(1e-30);
+    let run = |dir: isize| {
+        let (mut last, mut gap) = (0, 0);
+        for d in 1..reach {
+            let k = (ksc as isize + dir * d as isize) as usize;
+            if smooth[k] - local > 0.5 * local {
+                (last, gap) = (d, 0);
+            } else {
+                gap += 1;
+                if gap > tolerance {
+                    break;
+                }
+            }
+        }
+        last
+    };
+    (local, run(-1).max(run(1)))
+}
+
+/// Find the data subcarrier in `phi` (the carrier's phase at `rate`): the
+/// best of [`find_subcarriers`].
 pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
+    find_subcarriers(phi, rate).into_iter().next()
+}
+
+/// Find the data subcarriers in `phi` (the carrier's phase at `rate`),
+/// best first: the squared phase's lines, each judged by the data spread
+/// round half its frequency.
+///
+/// A beacon may carry two subcarriers (Intelsat's: 48 and 72 kHz, each
+/// 4800 bit/s bi-phase). The squared phase then holds a line at the sum
+/// of their frequencies too — the data's clock lines beat into one — and
+/// half of it, 60 kHz, has the data spread symmetrically about it just as a
+/// subcarrier's would. What gives it away is the gap: a subcarrier has its
+/// data right up to it (bi-phase dips only at the very centre), the
+/// midpoint of two has none, and the data are measured only as far as they
+/// run unbroken, so one subcarrier's band never takes in the other's. A
+/// candidate that still reaches into a better one's band is dropped.
+pub fn find_subcarriers(phi: &[f32], rate: f64) -> Vec<Subcarrier> {
     let n = fft_size(phi.len(), rate, rate / 8192.0);
     if phi.len() < 4 * n {
-        return None;
+        return Vec::new();
     }
     let (p, _) = psd_real(phi, n, 256);
     let sq: Vec<f32> = phi.iter().map(|v| v * v).collect();
@@ -156,9 +213,12 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
     let mut all = p[1..].to_vec();
     let floor = median(&mut all).max(1e-30);
     let smooth = median_smoothed(&p);
-    let mut best: Option<(f64, Subcarrier)> = None;
+    let mut found: Vec<(f64, Subcarrier)> = Vec::new();
     // Subcarriers from ~500 Hz up.
     let lo = ((1000.0 / bin) as usize).max(4);
+    // Data run on from a subcarrier through the dip a bi-phase spectrum has
+    // at its very centre, not across a gap of more than this many bins.
+    let tolerance = ((1500.0 / bin) as usize).max(4);
     for (_, kf, _) in lines(&q, lo, half_bins, 10.0).into_iter().take(8) {
         let f2 = kf * bin;
         // Twice the subcarrier may have aliased past the Nyquist edge.
@@ -168,11 +228,12 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
                 continue;
             }
             let reach = ksc.min(half_bins - ksc).min((0.9 * fsc / bin) as usize);
-            let excess = |k: usize| (smooth[k] - floor).max(0.0);
+            let (local, extent) = data_extent(&smooth, floor, ksc, reach, tolerance);
+            let excess = |k: usize| (smooth[k] - local).max(0.0);
             let mut sum = 0.0;
             let mut sym = (0.0, 0.0);
-            let mut cum = Vec::with_capacity(reach);
-            for d in 1..reach {
+            let mut cum = Vec::with_capacity(extent);
+            for d in 1..=extent {
                 let (a, b) = (excess(ksc - d), excess(ksc + d));
                 sum += a + b;
                 sym.0 += a.min(b);
@@ -188,24 +249,33 @@ pub fn find_subcarrier(phi: &[f32], rate: f64) -> Option<Subcarrier> {
                 .position(|&c| c >= 0.95 * sum)
                 .unwrap_or(cum.len())
                 + 1;
-            let snr = sum / (floor * 2.0 * width as f64);
+            let snr = sum / (local * 2.0 * width as f64);
             if symmetry < 0.5 || snr < 0.3 || width < 3 {
                 continue;
             }
-            let score = sum * symmetry;
-            if best.as_ref().is_none_or(|(s, _)| score > *s) {
-                best = Some((
-                    score,
-                    Subcarrier {
-                        freq_hz: fsc,
-                        half_width_hz: width as f64 * bin,
-                        snr,
-                    },
-                ));
-            }
+            found.push((
+                sum * symmetry,
+                Subcarrier {
+                    freq_hz: fsc,
+                    // Data that stand only just over the noise reach
+                    // further than they show: room is left for them.
+                    half_width_hz: WIDTH_MARGIN * width as f64 * bin,
+                    snr,
+                },
+            ));
         }
     }
-    best.map(|(_, s)| s)
+    found.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut out: Vec<Subcarrier> = Vec::new();
+    for (_, s) in found {
+        let clear = out
+            .iter()
+            .all(|o| (s.freq_hz - o.freq_hz).abs() > 0.8 * (s.half_width_hz + o.half_width_hz));
+        if clear {
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// A subcarrier placed by hand at about `near_hz`: snapped to the squared
@@ -241,12 +311,14 @@ pub fn subcarrier_at(
     let floor = median(&mut all).max(1e-30);
     let reach = ksc.min(half_bins - ksc);
     // The data's spread: narrow lines dropped first, then only what both
-    // sides share, as data on a subcarrier are mirrored about it.
+    // sides share, as data on a subcarrier are mirrored about it, and only
+    // as far as they run unbroken (a second subcarrier is no part of it).
     let smooth = median_smoothed(&p);
-    let excess = |k: usize| (smooth[k] - floor).max(0.0);
+    let (local, extent) = data_extent(&smooth, floor, ksc, reach, ((1500.0 / bin) as usize).max(4));
+    let excess = |k: usize| (smooth[k] - local).max(0.0);
     let mut sum = 0.0;
-    let mut cum = Vec::with_capacity(reach);
-    for d in 1..reach {
+    let mut cum = Vec::with_capacity(extent);
+    for d in 1..=extent {
         sum += 2.0 * excess(ksc - d).min(excess(ksc + d));
         cum.push(sum);
     }
@@ -255,11 +327,11 @@ pub fn subcarrier_at(
         .position(|&c| c >= 0.95 * sum)
         .unwrap_or(cum.len())
         + 1;
-    let measured = (width_bins as f64 * bin).max(4.0 * bin);
+    let measured = (WIDTH_MARGIN * width_bins as f64 * bin).max(4.0 * bin);
     Some(Subcarrier {
         freq_hz: fsc,
         half_width_hz: width_hz.unwrap_or(measured).min(fsc).max(bin),
-        snr: sum / (floor * 2.0 * width_bins as f64),
+        snr: sum / (local * 2.0 * width_bins as f64),
     })
 }
 
@@ -576,6 +648,48 @@ mod tests {
             "{}",
             sc.half_width_hz
         );
+    }
+
+    /// Two bi-phase subcarriers (48 and 72 kHz, 4800 bit/s each, on the
+    /// beacon this was fixed on): both found, neither the 60 kHz midpoint
+    /// their clock lines beat into.
+    #[test]
+    fn two_subcarriers_are_two_not_their_midpoint() {
+        let rate = 400_000.0;
+        // Filtered, as a transmitter's data are: the unfiltered waveform's
+        // sidelobes would fill the band.
+        let smooth = |mut v: Vec<f32>| {
+            for _ in 0..4 {
+                let w: Vec<f32> = v
+                    .iter()
+                    .scan(0.0, |z, &x| (*z += 0.2 * (x - *z), Some(*z)).1)
+                    .collect();
+                v = w;
+            }
+            v
+        };
+        let a = smooth(waveform(&prbs(4000, 9), rate, 4800.0, true, 0.0));
+        let b = smooth(waveform(&prbs(4000, 31), rate, 4800.0, true, 0.0));
+        let noise = prbs(a.len(), 77);
+        let tone = |f: f64, i: usize| (std::f64::consts::TAU * f * i as f64 / rate).sin() as f32;
+        let phi: Vec<f32> = (0..a.len().min(b.len()))
+            .map(|i| {
+                0.9 * a[i] * tone(48_000.0, i)
+                    + 0.9 * b[i] * tone(72_000.0, i)
+                    + if noise[i] == 1 { 0.5 } else { -0.5 }
+            })
+            .collect();
+        let subs = find_subcarriers(&phi, rate);
+        let at = |f: f64| subs.iter().any(|s| (s.freq_hz - f).abs() < 150.0);
+        assert!(at(48_000.0) && at(72_000.0), "{subs:?}");
+        assert!(!at(60_000.0), "{subs:?}");
+        assert_eq!(subs.len(), 2, "{subs:?}");
+        // Each one's data reach is its own (8–10 kHz), not both.
+        assert!(subs.iter().all(|s| s.half_width_hz < 14_000.0), "{subs:?}");
+        // Set by hand near one of them it snaps there and measures its own.
+        let one = subcarrier_at(&phi, rate, 48_500.0, None).expect("at 48 kHz");
+        assert!((one.freq_hz - 48_000.0).abs() < 150.0, "{}", one.freq_hz);
+        assert!(one.half_width_hz < 14_000.0, "{}", one.half_width_hz);
     }
 
     #[test]

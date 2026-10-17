@@ -163,6 +163,19 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
             };
             ui.label(riding);
             ui.end_row();
+            if !t.other_subcarriers_hz.is_empty() {
+                ui.label("Also");
+                let others: Vec<String> = t
+                    .other_subcarriers_hz
+                    .iter()
+                    .map(|f| format!("{:.3} kHz", f / 1e3))
+                    .collect();
+                ui.label(format!("another subcarrier at {}", others.join(", ")))
+                    .on_hover_text(
+                        "This beacon carries more than one data subcarrier. This reads the                          strongest; untick Subcarrier › found blind and set the other's                          offset (on a VFO of its own, to read both).",
+                    );
+                ui.end_row();
+            }
             ui.label("Bits");
             ui.label(format!(
                 "{:.2} bit/s {}{}",
