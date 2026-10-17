@@ -417,6 +417,8 @@ pub struct CallVoiceView {
 
 /// How long an ED-137 stream counts as talking after its last packet of
 /// sound with PTT or squelch on (they come every 20 ms), s.
+/// DNS names a view carries (the newest).
+const DNS_ROWS: usize = 400;
 const RADIO_TALK_HOLD: f64 = 0.3;
 
 /// A Q-Flex call's G.728 voice (decoded by the TDM receiver, at any of the
@@ -1299,6 +1301,9 @@ pub struct GseView {
     /// Its voice, played and recorded as a call's is (▶ and ● set
     /// `tdm_play` and `tdm_record`; `voice_auto` plays it once it talks).
     pub radio_voice: Option<CallVoiceView>,
+    /// DNS (and mDNS, LLMNR) in the UDP, once any is seen: the names asked
+    /// for, their answers, the servers, newest first.
+    pub dns: Option<decsat_ip::dns::DnsView>,
     /// The GSE labels (terminals, on a hub's outbound) sent the most bytes,
     /// with the MODCODs their PDUs went in; and how many labels in all.
     pub terminals: Vec<TerminalView>,
@@ -1651,6 +1656,8 @@ struct IpStage {
     /// waiting for them, that stream, and until when (signal time) it
     /// counts as talking.
     radio_voice: Option<CallVoice>,
+    /// The DNS in the UDP (`decsat_ip::dns`).
+    dns: decsat_ip::dns::DnsRx,
     radio_pcm: Vec<f32>,
     radio_heard: Option<String>,
     radio_talk_until: f64,
@@ -1699,6 +1706,7 @@ impl IpStage {
             rcms: None,
             radio: decsat_ip::ed137::RadioRx::new(),
             radio_voice: None,
+            dns: decsat_ip::dns::DnsRx::new(),
             radio_pcm: Vec::new(),
             radio_heard: None,
             radio_talk_until: f64::NEG_INFINITY,
@@ -2025,6 +2033,8 @@ impl IpStage {
                     self.watch_packets(dst, ts);
                 }
             }
+            self.dns
+                .udp((info.src, sport), (info.dst, dport), payload, self.clock);
             // ED-137 radio over IP: its RTP's signalling, its SIP.
             self.radio
                 .udp((info.src, sport), (info.dst, dport), payload, self.clock);
@@ -2223,6 +2233,7 @@ impl IpStage {
             radar_stations: self.rcms.as_ref().map_or(Vec::new(), |r| r.view()),
             radio: self.radio.active().then(|| self.radio.view()),
             radio_voice: self.radio_voice.as_ref().map(|v| v.view()),
+            dns: self.dns.active().then(|| self.dns.view(self.clock, DNS_ROWS)),
             udp_ts: self.udp_ts_found.clone(),
             udp_ts_taken: self.watch.as_ref().map(|(a, _)| *a),
         }
@@ -3951,6 +3962,33 @@ mod tests {
             assert!(st.is_voice(1), "G.728 found in timeslot 1");
             assert_eq!(st.view(Default::default()).playing, auto.then_some(MIX));
         }
+    }
+
+    /// DNS over UDP through the IP stage: a query and its answer come out
+    /// as one name in the view, with the server and the address answered.
+    #[test]
+    fn dns_in_the_ip_is_listed() {
+        let mut ip = IpStage::new();
+        assert!(ip.view().dns.is_none());
+        let mut q = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        q.extend_from_slice(b"wwwexamplecom   ");
+        let mut a = q.clone();
+        a[2..4].copy_from_slice(&[0x81, 0x80]);
+        a[6..8].copy_from_slice(&[0, 1]);
+        a.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 203, 0, 113, 9]);
+        for (src, dst, sp, dp, m) in [
+            ([10, 0, 0, 5], [9, 9, 9, 9], 40000, 53, &q),
+            ([9, 9, 9, 9], [10, 0, 0, 5], 53, 40000, &a),
+        ] {
+            let p = decsat_ip::packet::udp_v4(src, dst, sp, dp, m);
+            ip.ip(&p, &decsat_ip::parse(&p).unwrap());
+        }
+        let v = ip.view().dns.expect("DNS seen");
+        assert_eq!((v.queries, v.responses), (1, 1));
+        let n = &v.names[0];
+        assert_eq!(n.name, "www.example.com.");
+        assert_eq!(n.answers, vec!["203.0.113.9"]);
+        assert_eq!(n.resolver, Some("9.9.9.9".parse().unwrap()));
     }
 
     /// ED-137 radio over IP: a second of PTT with sound between seconds of
