@@ -3,7 +3,8 @@
 //! its log says.
 //!
 //! ffmpeg reads the programme's packets on stdin and writes Matroska on
-//! stdout: video deinterlaced (frames flagged interlaced only), fitted into
+//! stdout: video deinterlaced (frames flagged interlaced only; bob ×2 or
+//! frame-rate, see [`Deinterlace`]), fitted into
 //! a fixed frame by its display aspect ratio (so anamorphic SD comes out
 //! 16:9) and letterboxed, as raw RGBA; audio as stereo float PCM at 48 kHz.
 //! Its log (stderr) gives what the input streams are and any errors.
@@ -56,9 +57,33 @@ pub fn find(configured: Option<&Path>) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(EXE)).find(|p| p.is_file())
 }
 
+/// How interlaced pictures are made progressive (frames flagged
+/// progressive pass through either way).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Deinterlace {
+    /// Bob ×2: each field becomes a picture of its own, the other field's
+    /// lines interpolated (yadif `send_field`). 50 i gives 50 pictures a
+    /// second, with full temporal resolution.
+    #[default]
+    Bob,
+    /// One picture per frame (yadif `send_frame`): half the rate, more
+    /// vertical detail on still scenes.
+    Frame,
+}
+
+impl Deinterlace {
+    /// yadif's `mode` for this.
+    fn yadif_mode(self) -> &'static str {
+        match self {
+            Deinterlace::Bob => "send_field",
+            Deinterlace::Frame => "send_frame",
+        }
+    }
+}
+
 /// ffmpeg's arguments for a programme whose video is PID `video` and the
 /// audio to play PID `audio` (either may be absent).
-pub fn args(video: Option<u16>, audio: Option<u16>) -> Vec<String> {
+pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace) -> Vec<String> {
     let mut a: Vec<String> = [
         "-hide_banner",
         "-nostdin",
@@ -94,7 +119,10 @@ pub fn args(video: Option<u16>, audio: Option<u16>) -> Vec<String> {
         );
         a.extend([
             "-vf".to_string(),
-            format!("yadif=mode=send_frame:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1"),
+            format!(
+                "yadif=mode={}:deint=interlaced,{fit},setsar=1,pad={w}:{h}:-1:-1",
+                deint.yadif_mode()
+            ),
             "-c:v".into(),
             "rawvideo".into(),
             "-pix_fmt".into(),
@@ -196,7 +224,7 @@ mod tests {
 
     #[test]
     fn maps_by_pid_and_fits_the_picture() {
-        let a = args(Some(0x21), Some(0x22));
+        let a = args(Some(0x21), Some(0x22), Deinterlace::Frame);
         let maps: Vec<&String> = a
             .iter()
             .zip(a.iter().skip(1))
@@ -209,9 +237,20 @@ mod tests {
         assert!(vf.contains("pad=960:540"));
         assert!(a.ends_with(&["pipe:1".to_string()]));
         // Radio: no video options.
-        let r = args(None, Some(0x22));
+        let r = args(None, Some(0x22), Deinterlace::Frame);
         assert!(!r.iter().any(|x| x == "-vf"));
         assert!(r.iter().any(|x| x == "pcm_f32le"));
+    }
+
+    #[test]
+    fn bob_sends_each_field() {
+        let vf = |d| {
+            let a = args(Some(0x21), None, d);
+            a[a.iter().position(|x| x == "-vf").unwrap() + 1].clone()
+        };
+        assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));
+        assert!(vf(Deinterlace::Frame).starts_with("yadif=mode=send_frame:deint=interlaced,"));
+        assert_eq!(Deinterlace::default(), Deinterlace::Bob);
     }
 
     #[test]

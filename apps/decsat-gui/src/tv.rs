@@ -13,7 +13,7 @@ use std::sync::mpsc::Receiver;
 
 use decsat_engine::{TsView, VfoId};
 use decsat_ts::{Programme, TS_LEN, Verdict};
-use decsat_video::{Selection, VideoPlayer};
+use decsat_video::{Deinterlace, Selection, VideoPlayer};
 use eframe::egui::{
     self, Color32, ColorImage, Rect, RichText, Sense, TextureHandle, TextureOptions, pos2, vec2,
 };
@@ -44,6 +44,8 @@ pub struct TvWindow {
     ffmpeg_edit: String,
     /// The window's own volume, 0..=1, on top of the toolbar's.
     volume: f32,
+    /// Deinterlace bob ×2 (a picture per field) rather than per frame.
+    bob: bool,
 }
 
 impl Default for TvWindow {
@@ -57,6 +59,7 @@ impl Default for TvWindow {
             error: None,
             ffmpeg_edit: String::new(),
             volume: prefs::tv_volume(),
+            bob: prefs::tv_bob(),
         }
     }
 }
@@ -73,7 +76,12 @@ pub fn selection(p: &Programme, audio: Option<u16>) -> Selection {
     let audio = audio
         .filter(|a| p.streams.iter().any(|e| e.pid == *a))
         .or_else(|| p.streams.iter().find(|e| e.is_audio()).map(|e| e.pid));
-    Selection { pids, video, audio }
+    Selection {
+        pids,
+        video,
+        audio,
+        deint: Deinterlace::default(),
+    }
 }
 
 impl TvWindow {
@@ -88,7 +96,12 @@ impl TvWindow {
         self.stop();
         self.vfo = Some(vfo);
         self.programme = Some(p.number);
-        let sel = selection(p, audio);
+        let mut sel = selection(p, audio);
+        sel.deint = if self.bob {
+            Deinterlace::Bob
+        } else {
+            Deinterlace::Frame
+        };
         self.audio = sel.audio;
         let configured = prefs::ffmpeg_path();
         let Some(exe) = decsat_video::find_ffmpeg(configured.as_deref()) else {
@@ -239,6 +252,19 @@ impl TvWindow {
                 if playing {
                     self.stop();
                 } else {
+                    *req = Some(TvRequest::Play(self.programme, self.audio));
+                }
+            }
+            if ui
+                .checkbox(&mut self.bob, "Bob ×2")
+                .on_hover_text(
+                    "Deinterlace to a picture per field (50 i → 50 pictures a second); \
+                     off: one per frame. Restarts the picture; remembered",
+                )
+                .changed()
+            {
+                prefs::set_tv_bob(self.bob);
+                if self.player.is_some() {
                     *req = Some(TvRequest::Play(self.programme, self.audio));
                 }
             }

@@ -649,6 +649,19 @@ pub fn set_tv_volume(v: f32) {
     let _ = write_key("tv_volume", &format!("{:.3}", v.clamp(0.0, 1.0)));
 }
 
+/// Whether the player deinterlaces bob ×2 (a picture per field; true when
+/// never set) rather than one picture per frame.
+pub fn tv_bob() -> bool {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "tv_bob")
+        .is_none_or(|(_, v)| v != "0")
+}
+
+pub fn set_tv_bob(bob: bool) {
+    let _ = write_key("tv_bob", if bob { "1" } else { "0" });
+}
+
 pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
     write_key(
         "ffmpeg",

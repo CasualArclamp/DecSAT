@@ -19,6 +19,8 @@
 pub mod ffmpeg;
 pub mod mkv;
 
+pub use ffmpeg::Deinterlace;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -35,8 +37,9 @@ use decsat_ts::TS_LEN;
 use crate::mkv::{Event, MkvReader};
 
 /// Pictures held waiting for their time; beyond this the oldest go (a
-/// stall in the sound, or a clock that has lost the pictures).
-const MAX_QUEUE: usize = 40;
+/// stall in the sound, or a clock that has lost the pictures). Sized for
+/// bob ×2 of 50 i: 1.6 s of pictures.
+const MAX_QUEUE: usize = 80;
 /// The sound card's own delay past the buffer, ms (WASAPI shared mode).
 const AUDIO_LATENCY_MS: i64 = 40;
 /// With no sound: pictures are held this long before they are shown, ms.
@@ -56,6 +59,8 @@ pub struct Selection {
     pub pids: Vec<u16>,
     pub video: Option<u16>,
     pub audio: Option<u16>,
+    /// How interlaced pictures are deinterlaced (bob ×2 by default).
+    pub deint: Deinterlace,
 }
 
 /// One picture, RGBA.
@@ -165,7 +170,7 @@ impl VideoPlayer {
         let (s, exe, args) = (
             sh.clone(),
             exe.to_path_buf(),
-            ffmpeg::args(sel.video, sel.audio),
+            ffmpeg::args(sel.video, sel.audio, sel.deint),
         );
         threads.push(
             std::thread::Builder::new()
@@ -568,6 +573,7 @@ mod tests {
             pids: vec![0, 0x1000, 0x100, 0x101],
             video: Some(0x100),
             audio: audio.then_some(0x101),
+            deint: Deinterlace::default(),
         };
         let p = VideoPlayer::start(exe, rx, sel, OutputKind::Null).unwrap();
         std::thread::spawn(move || {
