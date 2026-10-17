@@ -5553,6 +5553,183 @@ for single-parity checks of weight ~9 (needs an item family of four
 information bits, ~4·10¹⁰ items, or a restriction like pair mode's); or
 the code's family from Newtec documentation.
 
+### A fourth pass: a 16-state recursive constituent, and where it stops (2026-10-16)
+
+Follow-up on the quasi-cyclic lead: explain the co-moving clusters, use
+the model to look for checks of weight 9–12, and make pair mode usable on
+the full set. Same data (`cw6_0104.bin`, the 108 clean words); scratch
+scripts and an agreement-gated dualsearch copy in the session scratchpad,
+nothing in the repo.
+
+- **The clusters are one 4-bit state.** Over the 8 527 partly filled
+  bursts the 15 clusters (phi ≥ 0.6, 156 parity bits) XOR to zero in
+  exactly 35 triples (0.945–0.961; the next best 0.635): the 35 lines of
+  PG(3,2), i.e. the 15 nonzero linear functionals of a 4-bit state — the
+  autonomous response of a 16-state linear recursion after the last
+  changed input. Ordered by the early ring bits they obey
+  v[t+4] = v[t+1] ⊕ v[t]: the recursion x⁴ + x + 1, feedback 1 + D³ + D⁴
+  (23 octal) — the feedback of the DVB-RCS2 16-state double-binary turbo
+  code (EN 301 545-2 V1.2.1 clause 7.3.5.1; Y 35, W 27 octal).
+- **254 parity bits ("A") lie on that trajectory**, each at one of the 15
+  phases (agreement 0.93–0.97 in partly filled bursts; in the clean words
+  mismatches only in blocks 10–15, besides ~0.1 % isolated cells —
+  residual combining errors, as are the isolated "changes" some of those
+  words show mid-word: a real input there would flip about half the A
+  bits before it). The other 172 ("B") never do, but
+  have short co-moving pairs of their own (phi 0.70–0.78 in low-payload
+  bursts): A behaves as a natural-order constituent, B as one fed through
+  a permutation.
+- **A is fed the information, coarsely in symbol order, tail-biting.**
+  Where A turns autonomous follows the payload end: ~16 information bits
+  (8 couples) per 5-symbol block, phase +1 per block within a parity slot.
+  Header and CRC tail enter A together in blocks 10–13 (circularly
+  adjacent); the ring parity of blocks 0–9 is A at couples ~250–480, one
+  bit per 8 couples.
+- **Slot layout** (6 parity slots a block: 1r 1l 2r 2l 4r 4l): blocks 0–9
+  strictly A B A B… (ring A, lsb B) — the RCS2 mapping order
+  Z1,0 Z2,0 Z1,1 … (clause 7.3.7.1.4); from block 14 one 6-slot pattern,
+  A A A B A B, cyclically rotated, the rotation stepping every 7 blocks
+  (+3, −1 alternately): one plane all A, the other A at one slot in three.
+  At ~8.2 couples a block (not a whole number) the 4 A bits of a block lie
+  within ~8 couples: a period-8 puncturing of A drifting against the
+  6-slot blocks.
+- **Adjacent in the encoder**: one couple is two phase steps, so parity
+  bits whose phases form a line {t, t+2, t+8} are 4 couples apart, a line
+  {t, t+1, t+4} 8, equal phases 15 (phase and onset of every bit:
+  `phase3.pkl`, `order5.pkl`).
+- **No checks from it, weight 9–12 included.** A true check of weight
+  ≤ 12 agrees 0.70–0.80 on busy bursts (soft z ~50–70); every candidate
+  stayed at the payload-bias level (agreement ≤ 0.58, z 10–27):
+  - time-invariant models in symbol order — binary input in both
+    recursion directions, double-binary with any second-input vector —
+    every member set they allow for line triples near their onsets;
+  - the exact RCS2 constituent (A to tap 1, B to taps 1, S1, S3;
+    tail-biting) on couples (2t, 2t+1): over the 108 clean words it
+    reproduces none of the 426 parity bits (best 0.82), also with A/B
+    swapped, N = 500 or an odd couple alignment; on busy bursts no triple
+    or pair check;
+  - model-free: a Walsh–Hadamard transform over every subset of a 26-bit
+    information window, for the tightest line triples (4 couples) and
+    equal-phase pairs: none.
+  So the information entering A between nearby A bits is not local in
+  symbol order: the systematic bits reach the encoder through a
+  permutation wider than ~26 bits (plausibly within the 7-block runs), or
+  A shares only its feedback with RCS2's constituent.
+- **Pair mode, agreement gate.** On the full set each pair has ~11 000
+  held-out bursts, and the z gates pass the payload's faint correlations by
+  the million (33 s a pair). `--agree 0.65` adds a hard-agreement gate on
+  the held-out bursts (first 512 ≥ 0.59, then all ≥ 0.65), mirrored in the
+  control accounting. Test (6 pairs + 10 planted, 20 tables): 2 s a pair,
+  no real candidate kept, planted held agreement 0.78–0.83, forced controls
+  10/10, unforced 2/10 (3.6 expected). Then the run the third pass had
+  to stop: the top 300 parity pairs of the full set (phi 0.79–0.67, ~11 400
+  bursts each), T = a ⊕ b + up to 6 of the 250 least-changing information
+  bits, 40 tables a pair, 24 min: no real candidate passes; the 32 planted
+  pair checks (weight 7–8) agree 0.75–0.84 on the held-out bursts, forced
+  tables 32/32, unforced 18/32 (17.6 expected). So no weight ≤ 8 check
+  through the co-moving pairs on the full set either — as the structure
+  predicts: the top pairs are equal-phase A bits (p52/p404 = 44r/337r,
+  p28/p334 = 24r/279r: early ring with late slot, phases 11 and 14), A
+  times a multiple of 15 couples apart, so their checks carry the
+  information of every couple in between.
+
+**Stopped.** The code is turbo-like: the natural-order constituent has
+DVB-RCS2's 16-state feedback and its parity sits in a regular, rotating
+slot pattern; checks (and a decoder) need the order in which the
+systematic bits enter it, which partly filled bursts cannot resolve —
+their payload ends cluster, so onsets are good to only ±10 bits. What
+would move it: words with payload known exactly (repeated or predictable
+bursts — each A bit is then a linear function of its block's ~16
+information bits, solvable directly), or a compiled search over couple
+permutations within a block with the exact constituent (7!·2⁷ per block).
+
+### A fifth pass: windows round the A lines, and what A is fed (2026-10-17)
+
+Follow-up on the fourth pass: look for the checks the A constituent
+predicts (three A bits on a PG(3,2) line XOR to the information entering
+A between them) in information windows wider than 26 bits. Same data
+(`cw6_0104.bin`, the 108 clean words); two compiled tools (Rust, no
+dependencies, idle priority) and scratch scripts in the session
+scratchpad, nothing in the repo.
+
+- **The onset-tight lines were mostly aliases.** Onsets bunch where
+  payload ends bunch (seven A bits at 736–737), so a small onset spread
+  does not mean a small A-time distance: of the 87 "4-couple" line
+  triples with onsets within 16 bits, 60 are 15 couples off — and the
+  fourth pass's 26-bit Walsh–Hadamard ran mostly on those. The **exact A
+  time** of every A bit follows from the slot table: within a slot column
+  the phase steps +1 a block, i.e. +8 couples; within a block the four A
+  bits sit at couples {0, 2, 3, 7} of a period-8 pattern (or,
+  phase-equivalent, both outputs at 2 couples of 8), the base drifting
+  0.22 couple a block (8.22 couples a block): τ = 8b + d̃,
+  d = (8·phase − 8b) mod 15 unwrapped round 6 + 0.22(b − 17), unique for
+  the 225 late A bits but for two collisions; the 29 early-ring and
+  header A bits from the onset fit (onset ≈ 1.846 τ − 157). True 4-couple
+  lines (couples t, t + 1, t + 4; one per 8 couples, at offsets 7, 8, 11):
+  **59 triples**, 11 of them with an early ring bit.
+- **Searched on the 59: nothing.** A true check scores like the planted
+  ones — z 41–75, agreement 0.60–0.71 on every covering burst, ≥ 0.95 on
+  the bursts that read every member reliably; the best real candidates
+  are the payload's own bias (z ≤ 34, agreement ≤ 0.60; the 0.89–0.94
+  some reach on member-reliable bursts comes from ≤ 90 low-payload
+  bursts, at z ≤ 13).
+  - Every subset of 28 information positions (Walsh–Hadamard, soft-
+    weighted), 413 windows: three placements a triple (onset anchor − 8,
+    position fit − 14 and − 2), two mixing 20 information bits with the
+    8 nearest B parity cells, two chosen by each position's own A-time
+    bound (below). The planted control (8 members, calibrated noise) was
+    the top subset in 413/413.
+  - Meet in the middle (K key bursts drawn from the 200 that read the
+    window best, a representation filter, planted columns with noise
+    drawn cell by cell sharing every table, every 32nd table forced),
+    planted found at least once a triple:
+
+    | window (from anchor) | members | tables | w12 | w10 | w8 | w6 | forced |
+    |---|---|---|---|---|---|---|---|
+    | 64 (−12) | ≤ 12 | 400 | 114/118 | 118/118 | 59/59 | 59/59 | 700/708 |
+    | 96 (−16) | ≤ 10 | 400 | — | 175/177 | 116/118 | 59/59 | 699/708 |
+    | 128 (−16) | ≤ 10 | 200 | — | 168/177 | 118/118 | 59/59 | 345/354 |
+    | 128 (−56) | ≤ 10 | 100 | — | 109/118 | 74/118 | 41/59 | 168/177 |
+
+    So if the 59 lines were checks of ≤ 10–12 information bits inside
+    these windows, 37–59 would have been found per run (55–59 at weight
+    10 in the first three); none was. (The few forced misses are three
+    windows near positions 130–210, where structured payload floods the
+    prefilter's cap.)
+- **Why: A is not fed one systematic couple a step.** Per partly filled
+  burst, the last A bit off the autonomous trajectory dates the burst's
+  last input; per position, the third-smallest such date over the bursts
+  where it is a reliable 1 bounds its A time. That bound is linear in the
+  position (0.47 couple a position) within ±10–20 couples over positions
+  40–520: information reaches A in coarse symbol order, locally. But in
+  the 722 bursts whose last nonzero information bit is at 405–413, every
+  A bit from couple 310 on is on the trajectory (≤ 2 % off) and every one
+  up to 309 is random — the last input enters at ~309.5 — and the A bit
+  at 309 (187l), which then depends only on that last step, is explained
+  by no subset of the 24 positions 390–413 (best z 5, the random
+  maximum), by no single bit, pair or triple of the 196 reliably read
+  information positions anywhere, nor of the 143 B parity cells
+  (|z| ≤ 4.4); A bits 2–8 couples earlier show only partial local
+  structure (186l: 9 of 402–413 at agreement 0.75). The cluster at
+  465–469 (409 bursts, last input ~326) says the same. So one step of A's
+  input is a combination of many information bits — local in time but
+  not sparse: a precoder or outer code ahead of A, or check-node inputs
+  (an IRA/ARA shape with a 1 + D³ + D⁴ accumulator) — and no line of A
+  bits gives a sparse check.
+
+**Stopped.** Excluded for the 59 true 4-couple lines: checks of any
+weight inside 28-position windows (seven placements, information and
+nearby B parity), and of ≤ 12 (64-bit) / ≤ 10 (96- and 128-bit)
+information bits, with the control power above. What would move it: the
+cluster method, widened — the residual of the A bit just before a
+cluster's last input, over all ~420 varying positions. A compiled
+meet-in-the-middle on the 405–413 cluster's own bursts was tried and is
+confounded: those bursts carry one packet type, so planted checks have
+many near-equivalent subsets (forced controls 23/100). It wants clusters
+with diverse payload, or repeated words that end in a cluster
+(GF(2) elimination); the support of one residual is a row of the
+precoder.
+
 ## Multicast television in UDP plays in the app (2026-10-16)
 
 Rory asked for the in-app player to play the BBC News multicast on
