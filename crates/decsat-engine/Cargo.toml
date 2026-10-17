@@ -22,5 +22,6 @@ decsat-modem = { path = "../decsat-modem" }
 decsat-mod = { path = "../decsat-mod" }
 num-complex.workspace = true
 rustfft.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

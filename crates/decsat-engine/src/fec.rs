@@ -2794,14 +2794,10 @@ struct Backlog {
     lossless: Arc<AtomicBool>,
 }
 
-/// Queued inputs from which a live FEC thread hurries: a quarter of the
-/// queue, about 15 ms of a 6.75 MBd ACM carrier's frames.
-const HURRY_AT: usize = QUEUE / 4;
-
-/// Decoding lanes at most (a quarter of the machine's threads, so several
-/// VFOs and the demodulators keep theirs): one short-frame LDPC decode is
-/// ~1 ms, and a 6.75 MBd ACM carrier sends ~1000 frames a second.
-const LANES: usize = 4;
+/// Inputs still queued after a batch was taken, beyond which a live FEC
+/// thread hurries: the pool did not clear the backlog, an eighth of the
+/// queue (about 8 ms of a 6.75 MBd ACM carrier's short frames) is waiting.
+const HURRY_AT: usize = QUEUE / 8;
 
 /// A frame decoded ahead, and its share of its batch's time (s).
 struct Decoded {
@@ -2809,15 +2805,44 @@ struct Decoded {
     secs: f64,
 }
 
-/// The frames among `inputs` decoded at once, on `dec` and the `extra`
-/// lanes — when there are two or more of them and lanes to share; else
-/// `None` throughout and the loop decodes them as it comes to them.
-fn decode_ahead(
-    dec: &mut FecDecoder,
-    extra: &mut [FecDecoder],
-    inputs: &[FecInput],
-    hurry: bool,
-) -> Vec<Option<Decoded>> {
+/// The threads that decode a backlog of frames, shared by every VFO's FEC
+/// thread: two fewer than the machine has, so the demodulators and the
+/// screen keep theirs. One VFO with a backlog can use them all; several
+/// share them as their batches come, which is how the work spreads out
+/// when decoders are few and holds back when they are many.
+///
+/// Rust note: a `static OnceLock` is a value made on first use and shared
+/// by everything after; `rayon` is a work-stealing thread pool.
+fn pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.saturating_sub(2).max(2))
+            .thread_name(|i| format!("decsat-ldpc-{i}"))
+            .build()
+            .expect("spawn the decoding pool")
+    })
+}
+
+/// Frames taken from the queue to decode at once: two for each of the
+/// pool's threads, so none waits for a straggler (a frame that runs its
+/// whole iteration budget takes ten times a quick one's time).
+fn batch_size() -> usize {
+    2 * pool().current_num_threads()
+}
+
+thread_local! {
+    /// A decoder (its codes, built as met, and their working memory) for
+    /// each pool thread, shared by every VFO that thread decodes for.
+    static LANE: std::cell::RefCell<FecDecoder> = std::cell::RefCell::new(FecDecoder::new());
+}
+
+/// The frames among `inputs` decoded at once on the pool, when there are
+/// two or more of them; else `None` throughout and the loop decodes them as
+/// it comes to them.
+fn decode_ahead(inputs: &[FecInput], hurry: bool) -> Vec<Option<Decoded>> {
+    use rayon::prelude::*;
     let frames: Vec<(usize, &PlFrame)> = inputs
         .iter()
         .enumerate()
@@ -2827,40 +2852,24 @@ fn decode_ahead(
         })
         .collect();
     let mut out: Vec<Option<Decoded>> = inputs.iter().map(|_| None).collect();
-    if frames.len() < 2 || extra.is_empty() {
+    if frames.len() < 2 {
         return out;
     }
-    let lanes = (1 + extra.len()).min(frames.len());
     let t0 = Instant::now();
-    // Rust note: `thread::scope` lets the lanes borrow the frames and their
-    // decoders; every lane is joined before it returns. Lane 0 is this
-    // thread; lane j takes frames j, j + lanes, …
-    let results: Vec<(usize, Option<BbFrame>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = extra
-            .iter_mut()
-            .take(lanes - 1)
-            .enumerate()
-            .map(|(j, d)| {
-                let mine: Vec<(usize, &PlFrame)> =
-                    frames.iter().skip(j + 1).step_by(lanes).copied().collect();
-                scope.spawn(move || {
+    // `install` runs this on the pool and waits; `par_iter().collect()`
+    // keeps the frames' order.
+    let results: Vec<(usize, Option<BbFrame>)> = pool().install(|| {
+        frames
+            .par_iter()
+            .map(|&(i, f)| {
+                let b = LANE.with(|d| {
+                    let mut d = d.borrow_mut();
                     d.hurry = hurry;
-                    mine.into_iter()
-                        .map(|(i, f)| (i, d.decode(f)))
-                        .collect::<Vec<_>>()
-                })
+                    d.decode(f)
+                });
+                (i, b)
             })
-            .collect();
-        dec.hurry = hurry;
-        let mut all: Vec<(usize, Option<BbFrame>)> = frames
-            .iter()
-            .step_by(lanes)
-            .map(|&(i, f)| (i, dec.decode(f)))
-            .collect();
-        for h in handles {
-            all.extend(h.join().expect("an FEC lane panicked"));
-        }
-        all
+            .collect()
     });
     let secs = t0.elapsed().as_secs_f64() / frames.len() as f64;
     for (i, b) in results {
@@ -2910,10 +2919,9 @@ fn run(
     let mut programme: Option<crate::programme::ProgrammeStage> = None;
     let mut radar: Option<crate::radar::RadarStage> = None;
     let mut src_clock = SourceClock::default();
-    // A backlog of frames is decoded on several lanes at once (`dec` and
-    // these), then taken through the rest one by one, in order.
-    let lanes = std::thread::available_parallelism().map_or(1, |n| (n.get() / 4).clamp(1, LANES));
-    let mut extra: Vec<FecDecoder> = (1..lanes).map(|_| FecDecoder::new()).collect();
+    // A backlog of frames is decoded on the pool at once, then taken through
+    // the rest one by one, in order.
+    let batch_max = batch_size();
     let mut ready: VecDeque<(FecInput, Option<Decoded>)> = VecDeque::new();
     loop {
         let (input, pre) = match ready.pop_front() {
@@ -2923,7 +2931,7 @@ fn run(
                 backlog.queued.fetch_sub(1, Ordering::Relaxed);
                 // What else is waiting, up to two frames a lane.
                 let mut batch = vec![first];
-                while lanes > 1 && batch.len() < 2 * lanes {
+                while batch.len() < batch_max {
                     match rx.try_recv() {
                         Ok(next) => {
                             backlog.queued.fetch_sub(1, Ordering::Relaxed);
@@ -2935,9 +2943,9 @@ fn run(
                 // Live and behind: frames that stall are given up rather
                 // than spending the budget the frames behind them need.
                 let hurry = !backlog.lossless.load(Ordering::Relaxed)
-                    && backlog.queued.load(Ordering::Relaxed) + batch.len() > HURRY_AT;
+                    && backlog.queued.load(Ordering::Relaxed) > HURRY_AT;
                 dec.hurry = hurry;
-                let decoded = decode_ahead(&mut dec, &mut extra, &batch, hurry);
+                let decoded = decode_ahead(&batch, hurry);
                 ready.extend(batch.into_iter().zip(decoded));
                 ready.pop_front().expect("a batch holds one input at least")
             }
@@ -4285,11 +4293,11 @@ mod tests {
         stats.lock().unwrap().clone()
     }
 
-    /// A backlog decoded on several lanes at once gives each frame exactly
+    /// A backlog decoded on the pool at once gives each frame exactly
     /// what one decoder gives it, in its place; other inputs, and a lone
     /// frame, are left to the loop.
     #[test]
-    fn frames_decoded_ahead_on_lanes_match_one_decoder() {
+    fn frames_decoded_ahead_on_the_pool_match_one_decoder() {
         let schedule = [
             FrameSpec::new(6, true, true),
             FrameSpec::new(14, true, true),
@@ -4309,9 +4317,7 @@ mod tests {
 
         let mut inputs: Vec<FecInput> = frames.into_iter().map(FecInput::Frame).collect();
         inputs.insert(3, FecInput::Dvbs(Vec::new()));
-        let mut dec = FecDecoder::new();
-        let mut extra = vec![FecDecoder::new(), FecDecoder::new()];
-        let got = decode_ahead(&mut dec, &mut extra, &inputs, false);
+        let got = decode_ahead(&inputs, false);
         assert!(got[3].is_none(), "not a frame: left to the loop");
         let got: Vec<_> = got
             .into_iter()
@@ -4321,7 +4327,7 @@ mod tests {
             .collect();
         assert_eq!(got, want);
         // One frame alone: nothing to share.
-        let lone = decode_ahead(&mut dec, &mut extra, &inputs[..1], false);
+        let lone = decode_ahead(&inputs[..1], false);
         assert!(lone[0].is_none());
     }
 

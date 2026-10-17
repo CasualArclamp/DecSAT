@@ -148,29 +148,65 @@ impl Mapper {
     pub fn demap_llr(&self, symbols: &[Iq], noise_var: f32, out: &mut [f32]) {
         assert!(symbols.len() >= self.rows, "too few symbols");
         assert_eq!(out.len(), self.n);
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU has the feature the function was compiled for.
+            unsafe { self.demap_llr_avx2(symbols, noise_var, out) };
+            return;
+        }
+        self.demap_llr_body(symbols, noise_var, out);
+    }
+
+    /// The same, compiled for AVX2 (picked at run time; see
+    /// `LdpcDecoder::decode_budget` for the idiom).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn demap_llr_avx2(&self, symbols: &[Iq], noise_var: f32, out: &mut [f32]) {
+        self.demap_llr_body(symbols, noise_var, out);
+    }
+
+    /// `BLOCK` symbols at a time, point by point: every step is the same
+    /// operation across the block's symbols (`d[point][symbol]`), which the
+    /// compiler turns into vector instructions. A constellation of 32
+    /// points and 5 bits is 160 minima a symbol, so this is where a
+    /// high-order carrier's time goes next to the LDPC decoder.
+    #[inline(always)]
+    fn demap_llr_body(&self, symbols: &[Iq], noise_var: f32, out: &mut [f32]) {
+        const BLOCK: usize = 16;
         let m = self.cst.bits() as usize;
         let inv = 1.0 / noise_var.max(1e-6);
-        let npts = self.cst.points.len();
-        let mut d = vec![0f32; npts];
-        for (s, &y) in symbols[..self.rows].iter().enumerate() {
-            for (i, p) in self.cst.points.iter().enumerate() {
-                d[i] = (y - p).norm_sqr();
+        let mut d = vec![[0f32; BLOCK]; self.cst.points.len()];
+        for (blk, ys) in symbols[..self.rows].chunks(BLOCK).enumerate() {
+            let (mut re, mut im) = ([0f32; BLOCK], [0f32; BLOCK]);
+            for (l, y) in ys.iter().enumerate() {
+                (re[l], im[l]) = (y.re, y.im);
+            }
+            for (di, p) in d.iter_mut().zip(&self.cst.points) {
+                for l in 0..BLOCK {
+                    let (dr, dq) = (re[l] - p.re, im[l] - p.im);
+                    di[l] = dr * dr + dq * dq;
+                }
             }
             for b in 0..m {
-                let idx = self.bit_index(s, b);
-                if idx >= self.n {
-                    continue; // padding
-                }
                 let shift = m - 1 - b;
-                let (mut d0, mut d1) = (f32::INFINITY, f32::INFINITY);
-                for (i, &di) in d.iter().enumerate() {
-                    if (i >> shift) & 1 == 0 {
-                        d0 = d0.min(di);
+                let mut d0 = [f32::INFINITY; BLOCK];
+                let mut d1 = [f32::INFINITY; BLOCK];
+                for (i, di) in d.iter().enumerate() {
+                    let dst = if (i >> shift) & 1 == 0 {
+                        &mut d0
                     } else {
-                        d1 = d1.min(di);
+                        &mut d1
+                    };
+                    for l in 0..BLOCK {
+                        dst[l] = dst[l].min(di[l]);
                     }
                 }
-                out[idx] = (d1 - d0) * inv;
+                for l in 0..ys.len() {
+                    let idx = self.bit_index(blk * BLOCK + l, b);
+                    if idx < self.n {
+                        out[idx] = (d1[l] - d0[l]) * inv; // else padding
+                    }
+                }
             }
         }
     }
@@ -375,5 +411,42 @@ mod tests {
         let k = 2.0 * std::f32::consts::SQRT_2 / 0.5;
         assert!((a[0] - k * 0.3).abs() < 1e-5 && (a[1] - k * -0.2).abs() < 1e-5);
         assert!((b[0] - 2.0 * a[0]).abs() < 1e-5);
+    }
+
+    /// Demapping speed, release build:
+    /// `cargo test -p decsat-fec --release demap_throughput -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn demap_throughput() {
+        for (name, m, r) in [
+            ("QPSK 1/2", Modulation::Qpsk, (1, 2)),
+            ("8PSK 2/3", Modulation::Psk8, (2, 3)),
+            ("16APSK 2/3", Modulation::Apsk16, (2, 3)),
+            ("32APSK 3/4", Modulation::Apsk32, (3, 4)),
+        ] {
+            let r = CodeRate::new(r.0, r.1);
+            let map = Mapper::s2(Constellation::for_s2(m, r).unwrap(), r, 64800);
+            let bytes = rand_bytes(map.bits() / 8, 7);
+            let mut syms = Vec::new();
+            map.map(&bytes, &mut syms);
+            let mut llr = vec![0f32; map.bits()];
+            let mut q = vec![0i8; map.bits()];
+            let t0 = std::time::Instant::now();
+            let reps = 20;
+            for _ in 0..reps {
+                map.demap_llr(&syms, 0.05, &mut llr);
+            }
+            let t1 = t0.elapsed().as_secs_f64() / reps as f64;
+            let t0 = std::time::Instant::now();
+            for _ in 0..reps {
+                quantize(&llr, 4.0, &mut q);
+            }
+            let t2 = t0.elapsed().as_secs_f64() / reps as f64;
+            eprintln!(
+                "{name}: demap {:.2} ms, quantize {:.2} ms per normal frame",
+                t1 * 1e3,
+                t2 * 1e3
+            );
+        }
     }
 }

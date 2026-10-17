@@ -76,6 +76,14 @@ IqSource (HackRF 20 MS/s, or a wideband file)
   dragging on the waterfall, or by clicking a detected carrier (which sizes it
   correctly for you). Several decode at once, one worker thread each, with a CPU
   meter per VFO and an enable/disable that does not delete it.
+- **FEC decoding spreads over the machine** (2026-10-17): each DVB-S2 VFO's FEC
+  thread sends a backlog of PLFRAMEs (up to two per pool thread) to one
+  work-stealing pool shared by all VFOs (`decsat-engine::fec::pool`, rayon,
+  two threads fewer than the machine has), then takes the decoded frames
+  through GSE/TS in order. One VFO with a backlog can use every pool thread;
+  several share them. The LDPC kernel has an AVX-512 copy picked at run time
+  (`is_x86_feature_detected!`, ~4.5x on a Zen 5; plain x86-64 elsewhere) and
+  the LLR demapper an AVX2 one, so the one portable exe is fast where it can be.
 - **Carrier detection** sweeps the band estimator (§ `decsat-engine::estimate`)
   across the span and marks each candidate with its centre and estimated symbol
   rate. The estimate is good to a few percent, which is close enough to seed a

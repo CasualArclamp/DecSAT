@@ -8,11 +8,12 @@ version = "0.10.16"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/CasualArclamp/DecSAT"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
 num-complex = "0.4.6"
 rustfft = "6.4"
+rayon = "1.10"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
