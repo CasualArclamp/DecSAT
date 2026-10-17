@@ -225,7 +225,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         v.settings.decoder,
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
     ) {
-        ts_pick = dvb_card(ui, v.settings.decoder, &st);
+        // The RF scale only means something once the radio's tuning or a
+        // file's centre is known; at 0 Hz it is baseband.
+        let vfo_rf = (inp.rf_center.abs() > 1e6).then_some(inp.rf_center + v.settings.offset_hz);
+        ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
         ui.add_space(6.0);
     }
 
@@ -5315,12 +5318,14 @@ const RIGHT_PAD: f32 = 6.0;
 
 /// A DVB-S/S2/S2X VFO's card, at the top of its panel. A title bar in the
 /// standard's colour — DVB-S2X blue, DVB-S2 green, DVB-S yellow — names
-/// the standard, CCM or ACM, and the symbol rate. Under it the MODCOD being
+/// the standard, CCM or ACM, the space-segment frequency (`vfo_rf`, the
+/// VFO's RF centre, plus the demodulator's offset once locked) and the
+/// symbol rate. Under it the MODCOD being
 /// received (DVB-S: the code rate), big, in that colour once locked, dimmed
 /// while the lock is confirmed, grey while searching; the link margin beside
 /// it and an Es/N0 bar ticked at the MODCOD's ideal QEF Es/N0. Then the
 /// receive chain, stage by stage ([`dvb_chain`]).
-fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) -> Option<u8> {
+fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus, vfo_rf: Option<f64>) -> Option<u8> {
     let grey = ui.visuals().weak_text_color();
     // A lock being confirmed: the standard's colour, half lit.
     let dim = |c: Color32| c.gamma_multiply(0.55);
@@ -5464,6 +5469,11 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) -> Option<u8> {
         Some(r) => (format!("{:.1}", r / 1e3), "kS/s"),
         None => ("–".to_string(), ""),
     };
+    // The carrier's downlink frequency: the VFO's centre on the RF scale
+    // (tuning, LNB LO and trim), moved by the carrier loop's offset while it
+    // is locked — the VFO alone is only as close as it was placed.
+    let carrier_lock = st.carrier.filter(|c| c.locked);
+    let space_hz = vfo_rf.map(|f| f + carrier_lock.map_or(0.0, |c| c.offset_hz));
     let strong = ui.visuals().strong_text_color();
     let bar = egui::Frame::new()
         .fill(colour.gamma_multiply(0.15))
@@ -5492,6 +5502,22 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus) -> Option<u8> {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(unit).size(11.0).weak());
                     ui.label(RichText::new(rate).monospace().size(20.0).color(strong));
+                    if let Some(f) = space_hz {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("MHz").size(11.0).weak());
+                        ui.label(
+                            RichText::new(format!("{:.3}", f / 1e6))
+                                .monospace()
+                                .size(16.0)
+                                .color(if carrier_lock.is_some() { strong } else { grey }),
+                        )
+                        .on_hover_text(
+                            "Space-segment frequency: the carrier's downlink as received — \
+                             the radio's tuning, the LNB's LO and trim and the VFO, plus the \
+                             demodulator's offset once locked (grey: the VFO's centre only). \
+                             As good as the LO trim: an untrimmed LNB is off by kHz.",
+                        );
+                    }
                 });
             });
         })
