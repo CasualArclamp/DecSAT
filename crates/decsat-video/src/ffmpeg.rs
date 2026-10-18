@@ -82,8 +82,10 @@ impl Deinterlace {
 }
 
 /// ffmpeg's arguments for a programme whose video is PID `video` and the
-/// audio to play PID `audio` (either may be absent).
-pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace) -> Vec<String> {
+/// audio to play PID `audio` (either may be absent). With `gpu`, the video
+/// is decoded by the graphics card's decoder (NVDEC / D3D11VA / VAAPI,
+/// whichever ffmpeg finds), which leaves the CPU to the demodulator and FEC.
+pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace, gpu: bool) -> Vec<String> {
     let mut a: Vec<String> = [
         "-hide_banner",
         "-nostdin",
@@ -95,13 +97,17 @@ pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace) -> Vec<S
         "2000000",
         "-analyzeduration",
         "1500000",
-        "-f",
-        "mpegts",
-        "-i",
-        "pipe:0",
     ]
     .map(String::from)
     .to_vec();
+    if gpu && video.is_some() {
+        // An input option, so it goes before `-i`. With no
+        // `-hwaccel_output_format` the decoded pictures come back to system
+        // memory for the filters below, and a codec or card the decoder
+        // cannot take (MPEG-2 on some, 4:2:2) falls back to software.
+        a.extend(["-hwaccel", "auto"].map(String::from));
+    }
+    a.extend(["-f", "mpegts", "-i", "pipe:0"].map(String::from));
     // By PID (`i:` matches an MPEG-TS stream's PID); `?`: no such stream is
     // not an error.
     for pid in [video, audio].into_iter().flatten() {
@@ -224,7 +230,8 @@ mod tests {
 
     #[test]
     fn maps_by_pid_and_fits_the_picture() {
-        let a = args(Some(0x21), Some(0x22), Deinterlace::Frame);
+        let a = args(Some(0x21), Some(0x22), Deinterlace::Frame, false);
+        assert!(!a.iter().any(|x| x == "-hwaccel"));
         let maps: Vec<&String> = a
             .iter()
             .zip(a.iter().skip(1))
@@ -237,15 +244,25 @@ mod tests {
         assert!(vf.contains("pad=960:540"));
         assert!(a.ends_with(&["pipe:1".to_string()]));
         // Radio: no video options.
-        let r = args(None, Some(0x22), Deinterlace::Frame);
+        let r = args(None, Some(0x22), Deinterlace::Frame, true);
         assert!(!r.iter().any(|x| x == "-vf"));
         assert!(r.iter().any(|x| x == "pcm_f32le"));
+        // Radio has nothing to decode on the GPU.
+        assert!(!r.iter().any(|x| x == "-hwaccel"));
+    }
+
+    #[test]
+    fn gpu_decode_is_an_input_option() {
+        let a = args(Some(0x21), None, Deinterlace::Bob, true);
+        let hw = a.iter().position(|x| x == "-hwaccel").unwrap();
+        assert_eq!(a[hw + 1], "auto");
+        assert!(hw < a.iter().position(|x| x == "-i").unwrap());
     }
 
     #[test]
     fn bob_sends_each_field() {
         let vf = |d| {
-            let a = args(Some(0x21), None, d);
+            let a = args(Some(0x21), None, d, false);
             a[a.iter().position(|x| x == "-vf").unwrap() + 1].clone()
         };
         assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));

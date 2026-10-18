@@ -46,6 +46,8 @@ pub struct TvWindow {
     volume: f32,
     /// Deinterlace bob ×2 (a picture per field) rather than per frame.
     bob: bool,
+    /// Decode the video on the graphics card.
+    gpu: bool,
 }
 
 impl Default for TvWindow {
@@ -60,6 +62,7 @@ impl Default for TvWindow {
             ffmpeg_edit: String::new(),
             volume: prefs::tv_volume(),
             bob: prefs::tv_bob(),
+            gpu: prefs::tv_gpu(),
         }
     }
 }
@@ -81,6 +84,7 @@ pub fn selection(p: &Programme, audio: Option<u16>) -> Selection {
         video,
         audio,
         deint: Deinterlace::default(),
+        gpu: false,
     }
 }
 
@@ -102,6 +106,7 @@ impl TvWindow {
         } else {
             Deinterlace::Frame
         };
+        sel.gpu = self.gpu;
         self.audio = sel.audio;
         let configured = prefs::ffmpeg_path();
         let Some(exe) = decsat_video::find_ffmpeg(configured.as_deref()) else {
@@ -264,6 +269,20 @@ impl TvWindow {
                 .changed()
             {
                 prefs::set_tv_bob(self.bob);
+                if self.player.is_some() {
+                    *req = Some(TvRequest::Play(self.programme, self.audio));
+                }
+            }
+            if ui
+                .checkbox(&mut self.gpu, "GPU decode")
+                .on_hover_text(
+                    "Decode the video on the graphics card (NVDEC, D3D11VA…), leaving the \
+                     CPU to the demodulator and FEC; falls back to software if the card \
+                     cannot. Restarts the picture; remembered",
+                )
+                .changed()
+            {
+                prefs::set_tv_gpu(self.gpu);
                 if self.player.is_some() {
                     *req = Some(TvRequest::Play(self.programme, self.audio));
                 }

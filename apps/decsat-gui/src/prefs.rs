@@ -662,6 +662,18 @@ pub fn set_tv_bob(bob: bool) {
     let _ = write_key("tv_bob", if bob { "1" } else { "0" });
 }
 
+/// Whether the player decodes video on the GPU (true when never set).
+pub fn tv_gpu() -> bool {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "tv_gpu")
+        .is_none_or(|(_, v)| v != "0")
+}
+
+pub fn set_tv_gpu(gpu: bool) {
+    let _ = write_key("tv_gpu", if gpu { "1" } else { "0" });
+}
+
 pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
     write_key(
         "ffmpeg",

@@ -61,6 +61,9 @@ pub struct Selection {
     pub audio: Option<u16>,
     /// How interlaced pictures are deinterlaced (bob ×2 by default).
     pub deint: Deinterlace,
+    /// Decode the video on the GPU (ffmpeg `-hwaccel auto`; software when
+    /// the card cannot).
+    pub gpu: bool,
 }
 
 /// One picture, RGBA.
@@ -170,7 +173,7 @@ impl VideoPlayer {
         let (s, exe, args) = (
             sh.clone(),
             exe.to_path_buf(),
-            ffmpeg::args(sel.video, sel.audio, sel.deint),
+            ffmpeg::args(sel.video, sel.audio, sel.deint, sel.gpu),
         );
         threads.push(
             std::thread::Builder::new()
@@ -574,6 +577,7 @@ mod tests {
             video: Some(0x100),
             audio: audio.then_some(0x101),
             deint: Deinterlace::default(),
+            gpu: false,
         };
         let p = VideoPlayer::start(exe, rx, sel, OutputKind::Null).unwrap();
         std::thread::spawn(move || {
