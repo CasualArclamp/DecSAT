@@ -59,6 +59,14 @@ const CARRIER_BN: f64 = 0.01;
 /// and one slip misaligns the rest of a frame's descrambling, losing it.
 const TIMING_BN_SEARCH: f64 = 0.005;
 const TIMING_BN_LOCKED: f64 = 0.001;
+/// The carrier loop steers on soft decisions (see `CarrierPll::step_soft`)
+/// while the squared distance between the closest points of the frame's
+/// constellation, over the noise power per symbol, is below this: where a
+/// symbol lands in a neighbour's decision region once in a few thousand or
+/// more (`d²/2N0` under about 15; 30 here leaves room), and the hard decision
+/// and the soft one part company. Above it they agree, and the soft one costs
+/// a weight for each point a symbol.
+const SOFT_BELOW: f32 = 30.0;
 /// Carrier-locked data symbols kept for display.
 const RECENT: usize = 3000;
 /// A pilot block's correction, as a fraction of the constellation's finest
@@ -90,10 +98,27 @@ pub const PREFERRED_GOLD_CODES: [u32; 7] = [
 /// fits: ~1 when it does, ~0.05 when not.
 const GOLD_FITS: f32 = 0.5;
 
-/// How far an outside frequency hint may be from the headers' own estimate
-/// and still be used, cycles per symbol: far past that estimate's noise, so a
-/// stale hint is caught but a good one is kept at low SNR.
-const SEED_TRUST: f64 = 0.02;
+/// The spread of a PLHEADER's frequency estimate, cycles per symbol, at an
+/// Es/N0 of 1 (0 dB), as `K / sqrt(Es/N0)`: the Cramér–Rao bound for a tone in
+/// noise over the header's 90 symbols, `sqrt(6 / (4π²·N(N²−1)))`, with a
+/// little over for the estimators here, which fall short of it (checked
+/// against noise in `header_frequency_estimates_scatter_as_predicted`).
+const HDR_FREQ_SIGMA: f64 = 6.0e-4;
+/// How many sigmas of the headers' own estimate an outside frequency hint may
+/// be from it and still be used: a stale hint is caught, a good one kept at
+/// low SNR (where the headers' estimate is the noisier of the two).
+const SEED_SIGMAS: f64 = 4.0;
+/// Headers' frequency errors kept to judge the carrier loop's frequency by:
+/// none are judged before `MIN`, the oldest let go past `MAX`.
+const FREQ_WATCH_MIN: usize = 4;
+const FREQ_WATCH_MAX: usize = 8;
+/// How many sigmas of the mean of those errors the loop's frequency may be
+/// off before it is put right, and the least it is ever allowed to be off
+/// (cycles per symbol) before it is: with noise this small a decision-directed
+/// loop is as good as the headers, and they only need to catch the loop
+/// being a long way out.
+const FREQ_WATCH_SIGMAS: f64 = 3.5;
+const FREQ_WATCH_FLOOR: f64 = 5.0e-5;
 
 /// One demodulated PLFRAME.
 #[derive(Debug, Clone)]
@@ -225,6 +250,11 @@ pub struct Demod {
     raw: Vec<Iq>,
     /// Stretches of data re-derotated after a slip.
     slips: u64,
+    /// The carrier loop's frequency error at recent headers (cycles per
+    /// symbol, the headers' known symbols against the loop), since the loop
+    /// was last seeded or corrected, and the corrections made so far.
+    freq_watch: Vec<f64>,
+    freq_fixes: u64,
     /// Smoothed signal amplitude and noise variance (see `PlFrame`).
     amp: f32,
     noise: f32,
@@ -278,6 +308,8 @@ impl Demod {
             gold_verified: false,
             raw: Vec::new(),
             slips: 0,
+            freq_watch: Vec::new(),
+            freq_fixes: 0,
             amp: 1.0,
             noise: 1.0,
             level_fresh: true,
@@ -384,6 +416,12 @@ impl Demod {
     /// Stretches of data repaired after a carrier slip.
     pub fn slips_repaired(&self) -> u64 {
         self.slips
+    }
+
+    /// Times the carrier loop's frequency was found off against the headers'
+    /// known symbols and put right.
+    pub fn frequency_corrections(&self) -> u64 {
+        self.freq_fixes
     }
 
     /// Times lock has been lost.
@@ -651,22 +689,14 @@ impl Demod {
             }
         }
         let f_hdr = tone_freq(&[&z[0], &z[1]], &[1, 8, 32]);
-        let f = match self.seed {
-            Some(s) if (s - f_hdr).abs() < SEED_TRUST => s,
-            _ => f_hdr,
-        };
-        self.pll.set_freq_cycles(f);
-        self.pll.set_phase(phase_of(&z[0], f));
-        // The loop's bandwidth from the headers' own SNR, so the first frame
-        // is tracked as narrowly as the later ones (it starts wide otherwise,
-        // and near threshold the first frame was lost to a slip).
+        // The headers' own SNR (the signal in them is the tone at `f_hdr`).
         let (mut a, mut p) = (0f32, 0f32);
         for zk in &z {
             let acc: Iq = zk
                 .iter()
                 .enumerate()
                 .map(|(n, &v)| {
-                    let ph = -TAU * f * n as f64;
+                    let ph = -TAU * f_hdr * n as f64;
                     v * Iq::new(ph.cos() as f32, ph.sin() as f32)
                 })
                 .sum();
@@ -674,12 +704,89 @@ impl Demod {
             p += zk.iter().map(|v| v.norm_sqr()).sum::<f32>() / (2 * PLHEADER_LEN) as f32;
         }
         let snr = a * a / (p - a * a).max(a * a * 1e-6);
+        // An outside hint (Identify's, averaged over many headers, or where
+        // the carrier was before) beats the two headers' estimate where they
+        // agree to within the latter's noise, which scales with the SNR: a
+        // fixed window, wide enough for the noisy case, once let a hint a
+        // few hundred hertz off start the loop outside its pull-in, and
+        // frames failed for good while the headers still read a clean carrier.
+        let window = SEED_SIGMAS * HDR_FREQ_SIGMA / f64::from(snr).sqrt();
+        let f = match self.seed {
+            Some(s) if (s - f_hdr).abs() < window => s,
+            _ => f_hdr,
+        };
+        self.pll.set_freq_cycles(f);
+        self.pll.set_phase(phase_of(&z[0], f));
+        self.freq_watch.clear();
+        // The loop's bandwidth from the headers' own SNR, so the first frame
+        // is tracked as narrowly as the later ones (it starts wide otherwise,
+        // and near threshold the first frame was lost to a slip).
         self.pll
             .set_bandwidth(carrier_bandwidth(10.0 * snr.log10() as f64));
         self.pll_live = true;
         self.fresh = true;
         self.level_fresh = true;
         pls[0]
+    }
+
+    /// Judge the carrier loop's frequency by the header at `h0` (`hdr_ref`
+    /// holds it as sent; the loop must stand there, its phase anchored on
+    /// it), and put it right if the last few headers all say it is out.
+    ///
+    /// Nothing else watches the loop's *frequency*: the headers and pilots
+    /// re-anchor its phase, and the Es/N0 and the margin shown are measured
+    /// on those same known symbols, so a loop whose frequency is a few
+    /// hundred hertz out — started so by a stale hint, or walked off by
+    /// decision errors near threshold — still reads a clean carrier while the
+    /// data between the known blocks rotate away and every frame fails to
+    /// decode. (With pilots it is worse: slip repair joins the blocks'
+    /// phases across the data by the nearest turn, and a loop a pilot-
+    /// spacing's reciprocal out settles on that alias for good.) The header
+    /// is 90 known symbols: split in halves, the phase between them is the
+    /// frequency error, unambiguous at any plausible error, and its
+    /// noise is known from the SNR. One header says little; a few in a row
+    /// that agree say the loop is out, and by how much.
+    fn check_frequency(&mut self, h0: usize) {
+        const HALF: usize = PLHEADER_LEN / 2;
+        let (phase, w) = (self.pll.phase(), self.pll.freq_rad());
+        let (mut first, mut second) = (Iq::new(0.0, 0.0), Iq::new(0.0, 0.0));
+        let (mut acc, mut power) = (Iq::new(0.0, 0.0), 0f32);
+        for n in 0..PLHEADER_LEN {
+            let y = self.sym[h0 + n];
+            let z = y * cis(-(phase + w * n as f64)) * self.hdr_ref[n].conj();
+            if n < HALF {
+                first += z;
+            } else {
+                second += z;
+            }
+            acc += z;
+            power += y.norm_sqr();
+        }
+        let err = header_split_frequency(first, second, HALF);
+        // The SNR the estimate's noise follows: the smoothed one once there
+        // is one, else this header's own.
+        let snr = if self.level_fresh {
+            let a = acc.norm() / PLHEADER_LEN as f32;
+            a * a / (power / PLHEADER_LEN as f32 - a * a).max(a * a * 1e-6)
+        } else {
+            self.amp * self.amp / self.noise.max(1e-12)
+        };
+
+        self.freq_watch.push(err);
+        if self.freq_watch.len() > FREQ_WATCH_MAX {
+            self.freq_watch.remove(0);
+        }
+        let n = self.freq_watch.len();
+        if n < FREQ_WATCH_MIN {
+            return;
+        }
+        let mean = self.freq_watch.iter().sum::<f64>() / n as f64;
+        let sigma = HDR_FREQ_SIGMA / f64::from(snr).sqrt() / (n as f64).sqrt();
+        if mean.abs() > (FREQ_WATCH_SIGMAS * sigma).max(FREQ_WATCH_FLOOR) {
+            self.pll.set_freq_cycles(self.pll.freq_cycles() + mean);
+            self.freq_watch.clear();
+            self.freq_fixes += 1;
+        }
     }
 
     /// Take the carrier off one frame (the loop must be running): its header
@@ -694,6 +801,7 @@ impl Demod {
         let hdr = self.hdr_ref;
         self.pll
             .anchor(&self.sym[h0..h0 + PLHEADER_LEN], |n| hdr[n]);
+        self.check_frequency(h0);
         for n in 0..PLHEADER_LEN {
             let y = self.pll.step_known(self.sym[h0 + n], self.hdr_ref[n]);
             known.add(y, self.hdr_ref[n]);
@@ -733,6 +841,24 @@ impl Demod {
             self.pll
                 .set_bandwidth(carrier_bandwidth(snr - 20.0 * (dense / 4.0).log10()));
         }
+        // The levels the soft decisions below are made against: the smoothed
+        // ones, or on a first frame this header's own.
+        let (soft_amp, soft_noise) = match (self.level_fresh, known.estimate()) {
+            (true, Some(level)) => level,
+            _ => (self.amp, self.noise),
+        };
+        let inv_amp = 1.0 / soft_amp.max(1e-6);
+        // (Capped: with next to no noise the weights are hard decisions
+        // anyway, and an infinite scale would make 0 × ∞.)
+        let inv_n0 = (soft_amp * soft_amp / soft_noise.max(1e-12)).min(1e4);
+        // Soft decisions only where hard ones are unreliable, which is what
+        // they cost (a weight per point a symbol) for: the squared distance
+        // between the closest points over the noise per symbol is the
+        // constellation's own measure of it (8PSK: 15 dB or less).
+        let soft = cst.is_some_and(|c| {
+            c.points.len() <= decsat_dsp::carrier::SOFT_MAX_POINTS
+                && inv_n0 * min_distance_sq(&c.points) < SOFT_BELOW
+        });
         self.raw.clear();
         self.raw.extend_from_slice(payload);
         // Where the current stretch of data began, and the loop's phase and
@@ -794,7 +920,11 @@ impl Demod {
             let x = payload[i];
             payload[i] = match cst {
                 Some(c) if !pilot => {
-                    let y = self.pll.step(x, &c.points);
+                    let y = if soft {
+                        self.pll.step_soft(x, &c.points, inv_amp, inv_n0)
+                    } else {
+                        self.pll.step(x, &c.points)
+                    };
                     self.data.push(y);
                     y
                 }
@@ -932,6 +1062,17 @@ fn carrier_bandwidth(es_n0_db: f64) -> f64 {
     0.002 * 5f64.powf(t)
 }
 
+/// The squared distance between the two closest of `points`.
+fn min_distance_sq(points: &[Iq]) -> f32 {
+    let mut least = f32::INFINITY;
+    for (i, a) in points.iter().enumerate() {
+        for b in &points[i + 1..] {
+            least = least.min((a - b).norm_sqr());
+        }
+    }
+    least
+}
+
 /// The constellation a frame's data is decided against; QPSK where the PLS
 /// code names none — VL-SNR (pi/2-BPSK and QPSK, all on QPSK's points),
 /// reserved codes, S2's unused MODCODs — whose decisions still track the
@@ -940,6 +1081,15 @@ fn frame_constellation(pls: PlsInfo) -> Constellation {
     pls.modcod()
         .and_then(|mc| Constellation::for_modcod(&mc))
         .unwrap_or_else(Constellation::qpsk)
+}
+
+/// A tone's frequency, cycles per symbol, from the sums of its two halves of
+/// `half` symbols each (the tone read through whatever phase the first
+/// half's sum has): the phase the second half has gained over the first, over
+/// the `half` symbols between their centres. Near the Cramér–Rao bound, and
+/// unambiguous to ±1/(2·half) — far beyond a carrier loop's error.
+fn header_split_frequency(first: Iq, second: Iq, half: usize) -> f64 {
+    (second * first.conj()).arg() as f64 / (TAU * half as f64)
 }
 
 /// Frequency of a pure tone in noise, cycles per symbol, from blocks of it:
@@ -1159,6 +1309,105 @@ mod tests {
         d.process(&x, &mut frames);
         assert!(d.carrier_locked(), "MER {:.1} dB", d.mer_db());
         assert!((d.carrier_offset_hz() + 0.01).abs() < 2e-4);
+    }
+
+    #[test]
+    fn a_stale_hint_does_not_leave_the_loop_off_the_carrier() {
+        // 8PSK 3/5 (MODCOD 12) near its threshold, the carrier 0.35 % of the
+        // symbol rate off, and a hint 0.04 % (400 Hz at 1 MBd) from it: well
+        // inside the old trust window, outside what a decision-directed loop
+        // pulls in at this SNR. Without pilots the loop sat out of tune for
+        // good; with them slip repair settled on a frequency a pilot-spacing's
+        // reciprocal off. Either way the headers and pilots kept reading a
+        // clean carrier, so the Es/N0 and margin looked fine while every
+        // frame failed to decode. The loop must end on the carrier.
+        for pilots in [true, false] {
+            let x = signal(&[FrameSpec::new(12, false, pilots)], 700_000, 4, 0.2, 31);
+            let carrier = 0.0035;
+            // (`impair`'s SNR is per sample: 7 dB Es/N0 at 4 samples a
+            // symbol is 6 dB less.)
+            let x = impair(&x, carrier / 4.0, 0.9, 7.0 - 10.0 * 4f64.log10(), 32);
+            let mut d = Demod::new(4.0, 1.0, 0.2, 0).with_carrier_offset(carrier + 4.0e-4);
+            let mut frames = Vec::new();
+            for chunk in x.chunks(50_000) {
+                d.process(chunk, &mut frames);
+            }
+            assert!(
+                frames.len() >= 25,
+                "pilots {pilots}: {} frames",
+                frames.len()
+            );
+            let err = d.carrier_offset_hz() - carrier;
+            assert!(
+                err.abs() < 4.0e-5,
+                "pilots {pilots}: loop {:+.1e} cycles/symbol off, {} corrections",
+                err,
+                d.frequency_corrections()
+            );
+        }
+    }
+
+    /// Complex Gaussian noise generator for the tests below.
+    fn noise_source(seed: u64) -> impl FnMut(f64) -> Iq {
+        let mut s = seed | 1;
+        let mut uniform = move || {
+            s ^= s >> 12;
+            s ^= s << 25;
+            s ^= s >> 27;
+            (s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+        };
+        move |sigma| {
+            let r = (-2.0 * uniform().max(1e-300).ln()).sqrt()
+                * sigma
+                * std::f64::consts::FRAC_1_SQRT_2;
+            let t = TAU * uniform();
+            Iq::new((r * t.cos()) as f32, (r * t.sin()) as f32)
+        }
+    }
+
+    #[test]
+    fn header_frequency_estimates_scatter_as_predicted() {
+        // A header's known symbols with modulation removed are a tone in
+        // noise. Both estimators (the split halves the carrier watch uses,
+        // and `tone_freq` over two headers, which seeds the loop) must scatter
+        // no more than HDR_FREQ_SIGMA says at the SNRs where they matter, or
+        // the watch cries wolf and the hint window rejects good hints.
+        let mut noise = noise_source(21);
+        let f_true = 3.1e-3;
+        for snr_db in [3.0f64, 6.0, 10.0, 20.0] {
+            let sigma = 10f64.powf(-snr_db / 20.0);
+            let predicted = HDR_FREQ_SIGMA / 10f64.powf(snr_db / 20.0);
+            let (mut split, mut pair) = (Vec::new(), Vec::new());
+            for k in 0..400 {
+                let block = |start: usize, phase: f64, noise: &mut dyn FnMut(f64) -> Iq| {
+                    (0..PLHEADER_LEN)
+                        .map(|n| {
+                            let ph = TAU * f_true * (start + n) as f64 + phase;
+                            cis(ph) + noise(sigma)
+                        })
+                        .collect::<Vec<Iq>>()
+                };
+                let a = block(0, 0.3 * k as f64, &mut noise);
+                let b = block(21_690, 1.1 * k as f64, &mut noise);
+                let half = PLHEADER_LEN / 2;
+                let sum = |z: &[Iq]| z.iter().sum::<Iq>();
+                split.push(header_split_frequency(sum(&a[..half]), sum(&a[half..]), half) - f_true);
+                pair.push(tone_freq(&[&a, &b], &[1, 8, 32]) - f_true);
+            }
+            let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+            assert!(
+                rms(&split) < predicted,
+                "{snr_db} dB: split halves rms {:.2e} against {predicted:.2e}",
+                rms(&split)
+            );
+            // Two blocks should do better than one; at least as well as the
+            // single-header figure.
+            assert!(
+                rms(&pair) < predicted,
+                "{snr_db} dB: two headers rms {:.2e} against {predicted:.2e}",
+                rms(&pair)
+            );
+        }
     }
 
     #[test]

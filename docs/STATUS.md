@@ -5961,3 +5961,49 @@ C/N 9–12 dB; 184 terminals in the plans (0CEh and 02Dh ~17 slots a frame).
 symbols unread, so their slots are counted, not demodulated); the FEC; the
 16-byte records and what the slot kinds mean; the pool tracker still splits
 a carrier at the HackRF's DC notch.
+
+## Low-SNR 8PSK: locked, margin fine, every frame bad (2026-10-19)
+
+Reported live: an 8PSK MPEG-TS carrier at a low SNR showed the lock, a green
+margin and a good Es/N0 while all its frames failed, until blind scan was
+toggled or the VFO moved (a new Identify, a new loop). Reproduced with
+`DatvModulator` + noise + a carrier offset, through `Demod` and `FecDecoder`
+(8PSK 3/5, 2/3; pilots on and off). Three causes in `demod.rs`, one shared
+reason they hid: the Es/N0 and margin are measured on the headers and pilots,
+which the loop re-anchors in *phase* every frame — nothing watched its
+*frequency*, so a loop off by a few hundred Hz read a clean carrier while the
+data between the known blocks rotated away.
+
+- **A stale hint stuck for good.** `acquire` took Identify's frequency (or
+  the last lock's) over the two headers' own whenever they were within 2 %
+  of the symbol rate. A hint 400 Hz off at 1 MBd (4e-4 cycles/symbol) left
+  8PSK 3/5 at 7 dB with 0 of 90 frames decoding, for good: without pilots the
+  decision-directed loop is outside its pull-in; with them slip repair joins
+  the pilot blocks' phases by the nearest turn and settled 6.6e-4 cycles/symbol
+  off, the reciprocal of the pilot spacing (1476 symbols), with hundreds of
+  "slips repaired". Now the hint wins only within 4 sigma of the headers'
+  estimate (sigma = 6e-4/sqrt(Es/N0), the Cramér–Rao bound for 90 symbols
+  with the estimators' shortfall; `header_frequency_estimates_scatter_as_predicted`).
+- **A frequency watch.** At every header the 90 known symbols, split in
+  halves, give the loop's frequency error (unambiguous, noise known from the
+  SNR); the mean of the last 4–8 headers beyond 3.5 sigma puts the loop's
+  frequency right (`check_frequency`, `frequency_corrections()`). Catches what
+  gets past the window (400 Hz: 3 frames lost, then fine) and a loop that
+  walks off by itself.
+- **Walking off.** The hard-decision detector, `Im(y·nearest*)`, is biased
+  where a point lands in a neighbour's region one time in five (8PSK, 6 dB):
+  the loop's frequency random-walked 450 Hz away over 25 frames at 1 MBd with
+  24 frames in a row failing, unaided. `CarrierPll::step_soft` steers on the
+  soft symbol instead (the gradient of the log-likelihood), for QPSK and 8PSK
+  while `d_min²/N0 < 30` (15 dB for 8PSK; above it hard and soft agree and
+  the weights cost ~20 % of the demodulator). 8PSK 3/5 without pilots, 1.2 dB
+  over the ideal Es/N0: 60 % of frames good, now 95 %; 0.8 dB: 15 %, now 70 %.
+
+Tests: `a_stale_hint_does_not_leave_the_loop_off_the_carrier` (fails with
+the three switched off, +6.6e-4 off with pilots), `soft_steps_hold_8psk_…`,
+`exp_neg_matches_exp`.
+
+**Not done**: unpiloted 8PSK still loses frames within ~1 dB of the ideal
+threshold (the loop's own noise and a slip now and then; pilots are lossless
+there) — a header-to-header phase (a long-baseline FLL) would tighten it. No
+reset from FEC failures into the demodulator: with the watch it was not needed.

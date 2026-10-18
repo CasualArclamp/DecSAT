@@ -58,6 +58,27 @@ pub fn cis(theta: f64) -> Iq {
     Iq::new(sign * re, sign * im)
 }
 
+/// `e^{-x}` for `x ≥ 0`, good to 3·10⁻⁴ (relative) and 0 past `x = 16`: the
+/// weights of a soft decision need no more, and the library's `exp` is a call
+/// per point per symbol. Split as `2^t`, `t = -x·log2(e)`, into the integer
+/// part, set straight into a float's exponent, and a fifth-order Taylor series
+/// of `2^f` on the fraction `f` in (-1, 0].
+#[inline]
+fn exp_neg(x: f32) -> f32 {
+    let t = -x * std::f32::consts::LOG2_E;
+    if t < -23.0 {
+        return 0.0;
+    }
+    // Rust note: `as i32` truncates toward zero, so for t ≤ 0 it is the
+    // ceiling, and `f` is in (-1, 0].
+    let i = t as i32;
+    let f = t - i as f32;
+    let p = 1.0
+        + f * (std::f32::consts::LN_2
+            + f * (0.240_226_5 + f * (0.055_504_1 + f * (0.009_618_1 + f * 0.001_333_4))));
+    p * f32::from_bits(((i + 127) as u32) << 23)
+}
+
 /// Index of the constellation point nearest `y`.
 #[inline]
 fn nearest_index(y: Iq, points: &[Iq]) -> usize {
@@ -100,6 +121,9 @@ fn fold(u: Iq, order: u32) -> Iq {
     }
     acc
 }
+
+/// The most points [`CarrierPll::step_soft`] takes (8PSK).
+pub const SOFT_MAX_POINTS: usize = 8;
 
 /// Second-order carrier PLL.
 #[derive(Debug, Clone)]
@@ -207,6 +231,44 @@ impl CarrierPll {
         let d = nearest(y, points);
         let err = (y * d.conj()).im as f64;
         self.update(err);
+        y
+    }
+
+    /// Like [`Self::step`], but steering on the *soft* decision: the mean of
+    /// the constellation under the posterior of the symbol sent,
+    /// `ŝ = Σ p·e^{-|u-p|²/N0} / Σ e^{-|u-p|²/N0}` with `u` the de-rotated
+    /// symbol on the points' scale (`inv_amp` is 1 over the signal amplitude)
+    /// and `inv_n0` 1 over the noise variance per symbol on that scale. The
+    /// error `Im(y·ŝ*)` is the gradient of the symbol's log-likelihood with
+    /// respect to the phase, so near threshold it is unbiased where the hard
+    /// decision's is not: at 6 dB Es/N0 an 8PSK point lands in a neighbour's
+    /// sector one time in five, and those errors pull the loop's frequency
+    /// off at random until it slips cycles for good. Clean symbols make
+    /// `ŝ` the nearest point, so at high SNR this is `step`.
+    ///
+    /// Meant for small constellations (QPSK, 8PSK): it costs an exponential
+    /// per point.
+    pub fn step_soft(&mut self, x: Iq, points: &[Iq], inv_amp: f32, inv_n0: f32) -> Iq {
+        // Rust note: a fixed-size array on the stack, so no allocation per
+        // symbol; `zip` stops at the shorter of the two.
+        let mut dist = [0f32; SOFT_MAX_POINTS];
+        let y = self.rotate(x);
+        let u = y * inv_amp;
+        let mut nearest = f32::INFINITY;
+        for (d, &p) in dist.iter_mut().zip(points) {
+            *d = (u - p).norm_sqr();
+            nearest = nearest.min(*d);
+        }
+        // Distances are taken from the nearest point's, so the largest weight
+        // is 1 and the sums cannot overflow or both vanish.
+        let (mut num, mut den) = (Iq::new(0.0, 0.0), 0f32);
+        for (&d, &p) in dist.iter().zip(points) {
+            let w = exp_neg((d - nearest) * inv_n0);
+            num += p * w;
+            den += w;
+        }
+        let soft = num / den;
+        self.update((y * soft.conj()).im as f64);
         y
     }
 
@@ -420,6 +482,82 @@ mod tests {
             .collect();
         assert!(lock_coherence(&rotating, &pts) < 0.1);
         assert!(lock_coherence(&pts.repeat(100), &pts) > 0.99);
+    }
+
+    #[test]
+    fn exp_neg_matches_exp() {
+        let mut worst = 0f32;
+        for k in 0..=20_000 {
+            let x = k as f32 * 1e-3;
+            let (got, want) = (exp_neg(x), (-x).exp());
+            if want > 1e-6 {
+                worst = worst.max((got - want).abs() / want);
+            } else {
+                assert!(got < 2e-6, "{x}: {got}");
+            }
+        }
+        assert!(worst < 3e-4, "worst relative error {worst:e}");
+        assert_eq!(exp_neg(0.0), 1.0);
+        assert_eq!(exp_neg(1e6), 0.0);
+    }
+
+    #[test]
+    fn soft_steps_hold_8psk_where_hard_ones_wander() {
+        // 8PSK at 6 dB Es/N0, the loop started on the right frequency: the
+        // hard-decision loop walks off it and slips cycles (every symbol is
+        // then wrong), the soft one stays on the carrier. Judged by the
+        // symbol error rate after the loop, over a few noise draws; ideal at
+        // this SNR is 0.28.
+        let pts: Vec<Iq> = (0..8)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                Iq::new(a.cos(), a.sin())
+            })
+            .collect();
+        let n0 = 10f64.powf(-0.6) as f32; // Es/N0 6 dB: noise power per symbol
+        let freq = 2.0e-4;
+        let run = |soft: bool, seed: u64| {
+            let mut s = seed | 1;
+            let mut next = move || {
+                s ^= s >> 12;
+                s ^= s << 25;
+                s ^= s >> 27;
+                (s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let mut pll = CarrierPll::new(0.002, freq);
+            let (mut wrong, mut total) = (0usize, 0usize);
+            for n in 0..600_000 {
+                // A frame of 21 600 symbols: its header re-anchors the phase
+                // (not the frequency), as the demodulator does.
+                if n % 21_600 == 0 {
+                    pll.set_phase((TAU * freq * n as f64 + 0.4).rem_euclid(TAU));
+                }
+                let k = (next() * 8.0) as usize % 8;
+                let (r, t) = ((-2.0 * next().max(1e-300).ln()).sqrt(), TAU * next());
+                let sd = (n0 / 2.0).sqrt() as f64;
+                let nz = Iq::new((r * t.cos() * sd) as f32, (r * t.sin() * sd) as f32);
+                let x = pts[k] * cis(TAU * freq * n as f64 + 0.4) + nz;
+                let y = if soft {
+                    pll.step_soft(x, &pts, 1.0, 1.0 / n0)
+                } else {
+                    pll.step(x, &pts)
+                };
+                if n > 20_000 {
+                    wrong += (nearest_index(y, &pts) != k) as usize;
+                    total += 1;
+                }
+            }
+            wrong as f64 / total as f64
+        };
+        let (mut hard, mut soft) = (0.0, 0.0);
+        for seed in 1..=3 {
+            hard += run(false, seed) / 3.0;
+            soft += run(true, seed) / 3.0;
+        }
+        assert!(
+            soft < 0.31 && soft + 0.05 < hard,
+            "symbol error rate: soft {soft:.3}, hard {hard:.3}"
+        );
     }
 
     #[test]
