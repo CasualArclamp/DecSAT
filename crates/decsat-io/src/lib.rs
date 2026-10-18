@@ -3,7 +3,7 @@
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
 //! (replay, and the only way to handle transponders wider than the HackRF) or
-//! the live HackRF One. Recording goes out through [`IqFileWriter`].
+//! the live HackRF One or Fobos SDR. Recording goes out through [`IqFileWriter`].
 
 pub mod file;
 pub mod wav;
@@ -13,9 +13,14 @@ pub mod hackrf;
 #[cfg(feature = "hackrf")]
 pub mod hackrf_tx;
 
+#[cfg(feature = "fobos")]
+pub mod fobos;
+
 pub use file::{IqFileReader, IqFileWriter, format_from_path};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
 
+#[cfg(feature = "fobos")]
+pub use fobos::{FOBOS_RATES, FobosControl, FobosGains, FobosInfo, FobosSettings, FobosSource};
 #[cfg(feature = "hackrf")]
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};
 #[cfg(feature = "hackrf")]

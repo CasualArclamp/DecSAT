@@ -14,8 +14,10 @@ path = "src/main.rs"
 
 [features]
 # The HackRF driver is pure Rust (no SDK, no DLLs), so it is on by default.
-default = ["hackrf"]
+# The Fobos SDR loads RigExpert's library at run time, so it is on too.
+default = ["hackrf", "fobos"]
 hackrf = ["decsat-io/hackrf"]
+fobos = ["decsat-io/fobos"]
 
 [dependencies]
 decsat-core = { path = "../../crates/decsat-core" }

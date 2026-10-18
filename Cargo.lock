@@ -726,6 +726,7 @@ name = "decsat-io"
 version = "0.10.17"
 dependencies = [
  "decsat-core",
+ "libloading",
  "num-complex",
  "seify-hackrfone",
  "thiserror 2.0.21",

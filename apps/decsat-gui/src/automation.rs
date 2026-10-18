@@ -24,6 +24,9 @@ pub struct Options {
     pub select: Option<usize>,
     /// Start the HackRF tuned here, MHz (receive only).
     pub hackrf_mhz: Option<f64>,
+    /// Start the Fobos SDR tuned here, MHz (receive only). `--rate`, `--lo`
+    /// and `--vga` (dB) apply to it too; `--lna` is its step, 0–3.
+    pub fobos_mhz: Option<f64>,
     /// HackRF sample rate, MS/s.
     pub rate_msps: Option<f64>,
     /// HackRF RF amplifier on (+14 dB).
@@ -159,7 +162,7 @@ impl Options {
                     o.lna_db = Some(
                         v.to_str()
                             .and_then(|s| s.parse().ok())
-                            .ok_or("--lna takes 0–40 dB")?,
+                            .ok_or("--lna takes 0–40 dB (a Fobos: its step, 0–3)")?,
                     );
                 }
                 Some("--vga") => {
@@ -197,13 +200,14 @@ impl Options {
                             .ok_or("--select needs a VFO number")?,
                     );
                 }
-                Some(flag @ ("--hackrf" | "--rate" | "--lo")) => {
+                Some(flag @ ("--hackrf" | "--fobos" | "--rate" | "--lo")) => {
                     let v: f64 = args
                         .next()
                         .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
                         .ok_or_else(|| format!("{flag} needs a number"))?;
                     match flag {
                         "--hackrf" => o.hackrf_mhz = Some(v),
+                        "--fobos" => o.fobos_mhz = Some(v),
                         "--rate" => o.rate_msps = Some(v),
                         _ => o.lo_mhz = Some(v),
                     }

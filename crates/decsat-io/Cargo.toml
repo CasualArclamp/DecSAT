@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "decsat-io"
-description = "DecSAT I/O: IQ file replay/record and the HackRF front end"
+description = "DecSAT I/O: IQ file replay/record and the HackRF and Fobos SDR front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,10 @@ default = []
 # libusb, no DLLs — the portable exe stays a single file. On Windows the HackRF
 # must use the WinUSB driver (Zadig, or the in-box winusb.inf).
 hackrf = ["dep:seify-hackrfone"]
+# Live RigExpert Fobos SDR front end. RigExpert's C library (fobos_sdr.dll for
+# the agile firmware, fobos.dll for the stock one) is loaded at run time, so
+# nothing extra is needed to build, and only a Fobos user needs the file.
+fobos = ["dep:libloading"]
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }
@@ -21,3 +25,4 @@ num-complex.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 seify-hackrfone = { version = "0.2.2", optional = true }
+libloading = { version = "0.8", optional = true }

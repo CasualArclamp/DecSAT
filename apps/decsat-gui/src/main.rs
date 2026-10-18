@@ -61,7 +61,7 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch] [--watch-after S]"
@@ -136,7 +136,25 @@ fn main() -> eframe::Result {
                 // Rust note: `snapped` rounds the gains to the HackRF's own
                 // steps (8 dB for the LNA, 2 for the VGA).
                 app.radio.settings.gains = app.radio.settings.gains.snapped();
-                app.start_hackrf();
+                app.radio.device = radio::Device::HackRf;
+                app.start_radio();
+            }
+            #[cfg(feature = "fobos")]
+            if let Some(mhz) = opts.fobos_mhz {
+                let r = &mut app.radio;
+                r.device = radio::Device::Fobos;
+                r.settings.center_hz = (mhz * 1e6).round() as u64;
+                if let Some(v) = opts.rate_msps {
+                    r.fobos.sample_rate = (v * 1e6).round() as u32;
+                }
+                r.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                if let Some(g) = opts.lna_db {
+                    r.fobos.gains.lna = g.min(3) as u8;
+                }
+                if let Some(g) = opts.vga_db {
+                    r.fobos.gains.vga = (g / 2).min(31) as u8;
+                }
+                app.start_radio();
             }
             Ok(Box::new(app))
         }),
@@ -210,9 +228,9 @@ struct App {
     automation: automation::Automation,
     #[cfg(feature = "hackrf")]
     radio: radio::RadioPanel,
-    /// Live controls while the HackRF is the source.
+    /// Live controls while a radio (HackRF or Fobos) is the source.
     #[cfg(feature = "hackrf")]
-    hackrf: Option<decsat_io::HackRfControl>,
+    live: Option<radio::Live>,
     /// The radio's tuning the VFOs were last placed against (`None` until
     /// the first frame), to carry them along when it changes.
     #[cfg(feature = "hackrf")]
@@ -285,7 +303,7 @@ impl Default for App {
             #[cfg(feature = "hackrf")]
             radio: radio::RadioPanel::default(),
             #[cfg(feature = "hackrf")]
-            hackrf: None,
+            live: None,
             #[cfg(feature = "hackrf")]
             tuned_hz: None,
             remember: false,
@@ -367,6 +385,17 @@ impl App {
                     u8::from(r.settings.gains.amp).to_string(),
                 ),
                 ("radio.lnb_lo_mhz".to_string(), r.lnb_lo_mhz.to_string()),
+                ("radio.device".to_string(), r.device.key().to_string()),
+            ]);
+            #[cfg(feature = "fobos")]
+            p.extend([
+                ("fobos.rate".to_string(), r.fobos.sample_rate.to_string()),
+                ("fobos.lna".to_string(), r.fobos.gains.lna.to_string()),
+                ("fobos.vga".to_string(), r.fobos.gains.vga.to_string()),
+                (
+                    "fobos.ext_clock".to_string(),
+                    u8::from(r.fobos.external_clock).to_string(),
+                ),
             ]);
         }
         let surveying = self.survey.vfo_ids();
@@ -571,6 +600,25 @@ impl App {
             if let Some(v) = get("radio.lnb_lo_mhz").and_then(|v| v.parse().ok()) {
                 r.lnb_lo_mhz = v;
             }
+            if let Some(d) = get("radio.device").and_then(radio::Device::from_key) {
+                r.device = d;
+            }
+            #[cfg(feature = "fobos")]
+            {
+                if let Some(v) = get("fobos.rate").and_then(|v| v.parse().ok()) {
+                    r.fobos.sample_rate = v;
+                }
+                if let Some(v) = get("fobos.lna").and_then(|v| v.parse().ok()) {
+                    r.fobos.gains.lna = v;
+                }
+                if let Some(v) = get("fobos.vga").and_then(|v| v.parse().ok()) {
+                    r.fobos.gains.vga = v;
+                }
+                if let Some(v) = get("fobos.ext_clock") {
+                    r.fobos.external_clock = v == "1";
+                }
+                r.fobos.gains = r.fobos.gains.snapped();
+            }
         }
         let dir = prefs::output_dir();
         for i in 0.. {
@@ -616,6 +664,16 @@ impl App {
             return self.radio.rf_center();
         }
         self.rf_center_mhz * 1e6
+    }
+
+    /// Whether the span could hold the HackRF's own artefacts (Bluetooth in its
+    /// IF): a HackRF chosen as the radio, or a file (which may be from one).
+    fn source_is_hackrf(&self) -> bool {
+        #[cfg(feature = "hackrf")]
+        if self.path.is_none() {
+            return self.radio.device == radio::Device::HackRf;
+        }
+        true
     }
 
     /// What a HackRF would be tuned to for this span (no LO): the radio's
@@ -706,22 +764,38 @@ impl App {
     fn stop_source(&mut self) {
         #[cfg(feature = "hackrf")]
         {
-            self.hackrf = None;
+            self.live = None;
         }
         self.engine = None;
     }
 
-    /// Start the HackRF with the panel's settings.
+    /// Start the chosen radio (HackRF or Fobos) with the panel's settings.
     #[cfg(feature = "hackrf")]
-    fn start_hackrf(&mut self) {
+    fn start_radio(&mut self) {
         self.stop_source();
         self.path = None;
-        match decsat_io::HackRfSource::open(self.radio.settings) {
-            Ok(src) => {
-                self.hackrf = Some(src.control());
+        // Rust note: both arms yield the same pair — the live control and the
+        // source boxed as a trait object — so the engine need not know which.
+        let opened: decsat_core::Result<(radio::Live, Box<dyn decsat_io::IqSource>)> =
+            match self.radio.device {
+                radio::Device::HackRf => decsat_io::HackRfSource::open(self.radio.settings)
+                    .map(|src| (radio::Live::HackRf(src.control()), Box::new(src) as _)),
+                #[cfg(feature = "fobos")]
+                radio::Device::Fobos => {
+                    decsat_io::FobosSource::open(self.radio.fobos_settings()).map(|src| {
+                        let c = src.control();
+                        // The board's nearest rate is what runs.
+                        self.radio.fobos.sample_rate = c.settings().sample_rate;
+                        (radio::Live::Fobos(c), Box::new(src) as _)
+                    })
+                }
+            };
+        match opened {
+            Ok((live, src)) => {
+                self.live = Some(live);
                 self.radio.error = None;
-                self.note = "Live from the HackRF.".into();
-                self.start_engine(Box::new(src));
+                self.note = format!("Live from the {}.", self.radio.device.short());
+                self.start_engine(src);
                 self.applied = Some(self.source_key());
             }
             Err(e) => self.radio.error = Some(e.to_string()),
@@ -762,8 +836,8 @@ impl App {
     /// keeping the VFOs.
     fn restart(&mut self) {
         #[cfg(feature = "hackrf")]
-        if self.hackrf.is_some() {
-            self.start_hackrf();
+        if self.live.is_some() {
+            self.start_radio();
             return;
         }
         let Some(path) = self.path.clone() else {
@@ -1146,7 +1220,7 @@ impl App {
     fn can_retune(&self) -> bool {
         #[cfg(feature = "hackrf")]
         {
-            self.path.is_none() && self.hackrf.is_some()
+            self.path.is_none() && self.live.is_some()
         }
         #[cfg(not(feature = "hackrf"))]
         {
@@ -1161,9 +1235,10 @@ impl App {
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
-            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(1e6, 6e9).round() as u64;
+            let min = self.radio.device.min_hz();
+            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(min, 6e9).round() as u64;
             self.radio.settings.center_hz = tuned;
-            if let Some(c) = &self.hackrf
+            if let Some(c) = &self.live
                 && let Err(e) = c.set_center(tuned)
             {
                 self.radio.error = Some(e.to_string());
@@ -1494,12 +1569,12 @@ impl eframe::App for App {
 
         #[cfg(feature = "hackrf")]
         {
-            let live = self.hackrf.clone();
+            let live = self.live.clone();
             match self.radio.show(ui.ctx(), live.as_ref()) {
-                Some(radio::RadioAction::Start) => self.start_hackrf(),
+                Some(radio::RadioAction::Start) => self.start_radio(),
                 Some(radio::RadioAction::Stop) => {
                     self.stop_source();
-                    self.note = "HackRF stopped.".into();
+                    self.note = format!("{} stopped.", self.radio.device.short());
                 }
                 None => {}
             }
@@ -1535,8 +1610,11 @@ impl eframe::App for App {
 
         // Where Bluetooth would leak in, were the source a HackRF tuned as it
         // is: live, its tuning; a file, the tuning its name gives.
-        let bluetooth =
-            decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0);
+        let bluetooth = if self.source_is_hackrf() {
+            decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0)
+        } else {
+            Vec::new()
+        };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1586,7 +1664,10 @@ impl eframe::App for App {
             match req {
                 #[cfg(feature = "hackrf")]
                 transmit::TxRequest::StartHackRf => {
-                    if self.path.is_none() && self.engine.is_some() {
+                    if self.path.is_none()
+                        && self.engine.is_some()
+                        && self.live.as_ref().is_some_and(|l| l.is_hackrf())
+                    {
                         self.stop_source();
                         self.note = "Receive stopped: the HackRF is transmitting \
                                      (it cannot do both). Start it again after."

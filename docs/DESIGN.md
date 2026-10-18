@@ -368,7 +368,7 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
 
 ## 7. Input / output
 
-- **Input:** HackRF live via `libhackrf` FFI (preferred; a `libhackrf.dll` is already present on this PC) — optionally SoapySDR later. IQ files: HackRF `cs8` (int8 I/Q), `cs16`, `cf32`. Center-freq / sample-rate / gain in config; LNB LO offset handling for Ku.
+- **Input:** HackRF live via `libhackrf` FFI (preferred; a `libhackrf.dll` is already present on this PC) — optionally SoapySDR later. *(2026-10-18: a second live receiver, the RigExpert **Fobos SDR** — `decsat-io::fobos`, feature `fobos`, on by default — through RigExpert's C library loaded at run time with `libloading`: `fobos_sdr_*` (agile firmware) or `fobos_rx_*` (stock). Not SoapySDR: the PothosSDR module is built with MSVC and a MinGW host cannot load it. The GUI's live radio is an enum (`radio::Live`) over the two; both share the tuning and LNB LO.)* IQ files: HackRF `cs8` (int8 I/Q), `cs16`, `cf32`. Center-freq / sample-rate / gain in config; LNB LO offset handling for Ku.
 - **Output:** `.pcap` for IP; `.ts` for transport; GUI panels; CSV/JSON metrics.
 
 ## 8. Platform, build, release

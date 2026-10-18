@@ -138,10 +138,10 @@ enum Command {
         #[arg(long)]
         decode: bool,
     },
-    /// Run one decoder over a capture — or live from the HackRF — and report
+    /// Run one decoder over a capture — or live from a HackRF or Fobos — and report
     /// what it finds.
     Decode {
-        /// The capture (not needed with --hackrf).
+        /// The capture (not needed with --hackrf or --fobos).
         file: Option<PathBuf>,
         /// Live from the HackRF instead: its centre frequency, MHz (as it
         /// tunes: L-band behind an LNB). Receive only, antenna power off.
@@ -156,6 +156,17 @@ enum Command {
         /// HackRF RF amplifier on (+14 dB).
         #[arg(long)]
         amp: bool,
+        /// Live from a Fobos SDR instead: its centre frequency, MHz (RF input,
+        /// 50–6000 MHz). Needs RigExpert's fobos_sdr.dll (agile firmware) or
+        /// fobos.dll (stock) beside decsat, or DECSAT_FOBOS_LIB. Receive only.
+        #[arg(long, conflicts_with = "hackrf")]
+        fobos: Option<f64>,
+        /// Fobos RF LNA step, 0–3 (2 ≈ +16 dB, 3 ≈ +33 dB).
+        #[arg(long, default_value_t = 1)]
+        fobos_lna: u8,
+        /// Fobos IF VGA gain, dB: 0–62 in 2 dB steps.
+        #[arg(long, default_value_t = 16)]
+        fobos_vga: u16,
         /// Stop after this many seconds (live runs otherwise go on until
         /// stopped).
         #[arg(long)]
@@ -351,6 +362,9 @@ fn main() -> Result<()> {
             lna,
             vga,
             amp,
+            fobos,
+            fobos_lna,
+            fobos_vga,
             seconds,
             record_on_activity,
             format,
@@ -379,6 +393,9 @@ fn main() -> Result<()> {
             lna,
             vga,
             amp,
+            fobos,
+            fobos_lna,
+            fobos_vga,
             seconds,
             record_on_activity,
             format,

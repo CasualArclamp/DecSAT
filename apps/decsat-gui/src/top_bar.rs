@@ -212,7 +212,7 @@ impl App {
             (None, _) => Play::Nothing,
         };
         #[cfg(feature = "hackrf")]
-        let what = match (&self.path, &self.hackrf) {
+        let what = match (&self.path, &self.live) {
             (None, Some(_)) => Play::StopRadio,
             (None, None) => Play::StartRadio,
             (Some(_), _) => file,
@@ -225,14 +225,18 @@ impl App {
             Play::TogglePause => !self.paused,
             _ => false,
         };
-        let (text, tip) = match what {
+        #[cfg(feature = "hackrf")]
+        let radio = self.radio.device.name();
+        #[cfg(feature = "hackrf")]
+        let (start_tip, stop_tip) = (
+            format!("Start the {radio} with its settings (File ▸ Radio settings…)"),
+            format!("Stop the {radio}"),
+        );
+        let (text, tip): (&str, &str) = match what {
             #[cfg(feature = "hackrf")]
-            Play::StartRadio => (
-                "▶ Start",
-                "Start the HackRF with its settings (File ▸ HackRF settings…)",
-            ),
+            Play::StartRadio => ("▶ Start", &start_tip),
             #[cfg(feature = "hackrf")]
-            Play::StopRadio => ("⏹ Stop", "Stop the HackRF"),
+            Play::StopRadio => ("⏹ Stop", &stop_tip),
             Play::TogglePause if self.paused => ("▶ Play", "Carry on playing the file"),
             Play::TogglePause => ("⏸ Pause", "Pause the file"),
             Play::OpenFile => ("▶ Play", "Play the file from the start"),
@@ -261,15 +265,15 @@ impl App {
         match what {
             #[cfg(feature = "hackrf")]
             Play::StartRadio => {
-                self.start_hackrf();
+                self.start_radio();
                 if let Some(e) = &self.radio.error {
-                    self.note = format!("HackRF: {e}");
+                    self.note = format!("{}: {e}", self.radio.device.short());
                 }
             }
             #[cfg(feature = "hackrf")]
             Play::StopRadio => {
                 self.stop_source();
-                self.note = "HackRF stopped.".into();
+                self.note = format!("{} stopped.", self.radio.device.short());
             }
             Play::TogglePause => {
                 self.paused = !self.paused;
@@ -326,16 +330,28 @@ impl App {
             };
             // Live: the USB buffers dropped too (a new `text` shadows the old).
             #[cfg(feature = "hackrf")]
-            let text = match &self.hackrf {
+            let text = match &self.live {
                 Some(c) => format!("{text} · {} drops", c.overflows()),
                 None => text,
             };
+            // The overload advice is the HackRF's; a Fobos (14 bits, its own
+            // AGC-free chain) is judged by the level alone.
+            #[cfg(feature = "hackrf")]
+            let hackrf = self.path.is_some() || self.radio.device == crate::radio::Device::HackRf;
+            #[cfg(not(feature = "hackrf"))]
+            let hackrf = true;
             let label = if strong {
                 RichText::new(text).color(ORANGE)
             } else {
                 RichText::new(text).weak()
             };
-            let tip = if strong {
+            let tip = if strong && !hackrf {
+                "Strong input, close to the ADC's full scale: lower the VGA (or the LNA \
+                 step) in the radio settings."
+            } else if !hackrf {
+                "The samples' RMS level, relative to full scale. Drops: USB buffers lost \
+                 since Start because the PC fell behind."
+            } else if strong {
                 "Strong input: the HackRF's RF chain overloads long before its ADC clips, \
                  and carriers then slip and lose frames (at LNA 40 a 14 dB carrier lost \
                  most of its frames; at LNA 24 none). Lower the LNA gain in the HackRF \
@@ -356,7 +372,7 @@ impl App {
             ui.add_space(8.0);
             #[cfg(feature = "hackrf")]
             if self.path.is_none() {
-                let live = self.hackrf.is_some();
+                let live = self.live.is_some();
                 let trim = if self.lo_trim_hz != 0.0 {
                     format!("  ·  trim {:+.3} kHz", self.lo_trim_hz / 1e3)
                 } else {
@@ -424,10 +440,10 @@ impl App {
             }
             #[cfg(feature = "hackrf")]
             None => {
-                let live = self.hackrf.is_some();
-                let rate = format::rate(self.radio.settings.sample_rate as f64);
+                let live = self.live.is_some();
+                let rate = format::rate(self.radio.sample_rate() as f64);
                 let dot = if live { "● " } else { "" };
-                (format!("{dot}HackRF · {rate}"), live)
+                (format!("{dot}{} · {rate}", self.radio.device.short()), live)
             }
             #[cfg(not(feature = "hackrf"))]
             None => ("No source".to_string(), false),
@@ -440,19 +456,23 @@ impl App {
         ui.menu_button(text, |ui| {
             #[cfg(feature = "hackrf")]
             {
-                if ui
-                    .selectable_label(self.path.is_none(), "📡 HackRF")
-                    .on_hover_text("Live from the HackRF One: ▶ Start starts it")
-                    .clicked()
-                {
-                    if self.path.is_some() {
-                        self.stop_source();
-                        self.path = None;
-                        self.paused = false;
+                for &d in crate::radio::Device::all() {
+                    let chosen = self.path.is_none() && self.radio.device == d;
+                    if ui
+                        .selectable_label(chosen, format!("📡 {}", d.name()))
+                        .on_hover_text(format!("Live from the {}: ▶ Start starts it", d.name()))
+                        .clicked()
+                    {
+                        if self.path.is_some() || (self.radio.device != d && self.live.is_some()) {
+                            self.stop_source();
+                            self.path = None;
+                            self.paused = false;
+                        }
+                        self.radio.device = d;
+                        ui.close();
                     }
-                    ui.close();
                 }
-                if ui.button("HackRF settings…").clicked() {
+                if ui.button("Radio settings…").clicked() {
                     self.radio.open = true;
                     ui.close();
                 }
@@ -464,7 +484,7 @@ impl App {
             }
         })
         .response
-        .on_hover_text("The source: the HackRF or an IQ file");
+        .on_hover_text("The source: a radio (HackRF One, Fobos SDR) or an IQ file");
     }
 
     fn file_menu(&mut self, ui: &mut egui::Ui) {
@@ -474,15 +494,15 @@ impl App {
         }
         #[cfg(feature = "hackrf")]
         if ui
-            .button("📡 HackRF settings…")
-            .on_hover_text("Frequency, sample rate, gains and LNB LO of the HackRF One")
+            .button("📡 Radio settings…")
+            .on_hover_text("The receiver (HackRF One or Fobos SDR), its frequency, sample rate, gains and the LNB LO")
             .clicked()
         {
             self.radio.open = !self.radio.open;
             ui.close();
         }
         #[cfg(not(feature = "hackrf"))]
-        ui.add_enabled(false, egui::Button::new("📡 HackRF settings…"))
+        ui.add_enabled(false, egui::Button::new("📡 Radio settings…"))
             .on_disabled_hover_text("Built without the hackrf feature.");
         if ui
             .button("📁 Output folder…")
