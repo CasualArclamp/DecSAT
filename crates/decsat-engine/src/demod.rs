@@ -1321,28 +1321,61 @@ mod tests {
         // reciprocal off. Either way the headers and pilots kept reading a
         // clean carrier, so the Es/N0 and margin looked fine while every
         // frame failed to decode. The loop must end on the carrier.
+        //
+        // Over 8 noise realisations, not one: near threshold an unpiloted
+        // decision-directed loop pulls in slowly, and in a few realisations
+        // in a hundred (9 of 300 tried) it is still 1e-4 to 3e-4 out after 32
+        // frames, the data demodulating as cleanly meanwhile. Which
+        // realisation that is changes with the platform's maths library, so
+        // a single seed that settled on Windows failed on Linux. With pilots
+        // the old code ended every time at +6.8e-4, a pilot spacing's
+        // reciprocal (1/1476) out, and the new one never in 300: all must
+        // settle. Without, most must, and none may end farther out than the
+        // hint began.
+        const SEEDS: u64 = 8;
         for pilots in [true, false] {
-            let x = signal(&[FrameSpec::new(12, false, pilots)], 700_000, 4, 0.2, 31);
             let carrier = 0.0035;
-            // (`impair`'s SNR is per sample: 7 dB Es/N0 at 4 samples a
-            // symbol is 6 dB less.)
-            let x = impair(&x, carrier / 4.0, 0.9, 7.0 - 10.0 * 4f64.log10(), 32);
-            let mut d = Demod::new(4.0, 1.0, 0.2, 0).with_carrier_offset(carrier + 4.0e-4);
-            let mut frames = Vec::new();
-            for chunk in x.chunks(50_000) {
-                d.process(chunk, &mut frames);
+            let mut errs = Vec::new();
+            for k in 0..SEEDS {
+                let x = signal(
+                    &[FrameSpec::new(12, false, pilots)],
+                    700_000,
+                    4,
+                    0.2,
+                    31 + 100 * k,
+                );
+                // (`impair`'s SNR is per sample: 7 dB Es/N0 at 4 samples a
+                // symbol is 6 dB less.)
+                let x = impair(
+                    &x,
+                    carrier / 4.0,
+                    0.9,
+                    7.0 - 10.0 * 4f64.log10(),
+                    32 + 100 * k,
+                );
+                let mut d = Demod::new(4.0, 1.0, 0.2, 0).with_carrier_offset(carrier + 4.0e-4);
+                let mut frames = Vec::new();
+                for chunk in x.chunks(50_000) {
+                    d.process(chunk, &mut frames);
+                }
+                assert!(
+                    frames.len() >= 25,
+                    "pilots {pilots}, seed {k}: {} frames",
+                    frames.len()
+                );
+                errs.push(d.carrier_offset_hz() - carrier);
             }
+            let settled = errs.iter().filter(|e| e.abs() < 4.0e-5).count();
+            let worst = errs.iter().fold(0.0f64, |w, e| w.max(e.abs()));
+            let need = if pilots { SEEDS as usize } else { 6 };
             assert!(
-                frames.len() >= 25,
-                "pilots {pilots}: {} frames",
-                frames.len()
-            );
-            let err = d.carrier_offset_hz() - carrier;
-            assert!(
-                err.abs() < 4.0e-5,
-                "pilots {pilots}: loop {:+.1e} cycles/symbol off, {} corrections",
-                err,
-                d.frequency_corrections()
+                settled >= need && worst < 4.0e-4,
+                "pilots {pilots}: {settled} of {SEEDS} loops settled on the carrier (need \
+                 {need}), the worst {worst:.1e} cycles/symbol off: {}",
+                errs.iter()
+                    .map(|e| format!("{e:+.1e}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
     }
