@@ -841,6 +841,9 @@ pub(crate) fn report(st: &VfoStatus) {
         for p in &t.report.programmes {
             println!("  programme {:?}", p.name);
         }
+        for u in &t.report.uplink_ids {
+            println!("  uplink ID: {}", u.summary());
+        }
         if let Some(r) = &t.rcs {
             print_rcs(r);
         }

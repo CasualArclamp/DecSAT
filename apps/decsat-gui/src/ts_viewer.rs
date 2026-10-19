@@ -351,6 +351,10 @@ fn services(ui: &mut Ui, r: &TsReport) -> Option<u16> {
         return None;
     }
     let mut watch = None;
+    for u in &r.uplink_ids {
+        ui.label(format!("📡 Uplink ID: {}", u.summary()))
+            .on_hover_text(format!("Identification text in the SI, format {}", u.format));
+    }
     let rate = |pid: u16| {
         r.pids
             .iter()

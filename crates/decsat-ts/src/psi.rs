@@ -242,6 +242,9 @@ pub struct TsReport {
     /// The stream's clock from the TDT/TOT, UTC.
     pub utc: Option<String>,
     pub bad_sections: u64,
+    /// Uplink identification strings found in the SI text (see
+    /// [`crate::uplink_id`]).
+    pub uplink_ids: Vec<crate::uplink_id::UplinkId>,
 }
 
 /// Watches a transport stream: PID counts, continuity, and the PSI/SI.
@@ -265,6 +268,7 @@ pub struct TsAnalyser {
     /// The transport stream id, from the PAT.
     pub ts_id: Option<u16>,
     pub bad_sections: u64,
+    pub uplink_ids: Vec<crate::uplink_id::UplinkId>,
     // Rate window: signal seconds, and packet counts at its start.
     win_secs: f64,
     win_start: BTreeMap<u16, u64>,
@@ -498,6 +502,7 @@ impl TsAnalyser {
     fn sdt(&mut self, body: &[u8]) {
         // original_network_id (2), reserved (1), then services.
         let mut at = 3;
+        let mut found: Vec<String> = Vec::new();
         while at + 5 <= body.len() {
             let sid = u16::from_be_bytes([body[at], body[at + 1]]);
             let free_ca = body[at + 3] & 0x10 != 0;
@@ -518,8 +523,24 @@ impl TsAnalyser {
                         p.name = Some(dvb_text(name));
                     }
                 }
+                // Any descriptor's text may be an uplink identification
+                // (`Programme` is borrowed from `self`, so collect first).
+                found.push(dvb_text(v));
+                if tag == 0x48 && v.len() >= 2 {
+                    let pl = v[1] as usize;
+                    if 2 + pl < v.len() {
+                        found.push(dvb_text(&v[2..2 + pl]));
+                        let nl = v[2 + pl] as usize;
+                        found.push(dvb_text(
+                            &v[(3 + pl).min(v.len())..(3 + pl + nl).min(v.len())],
+                        ));
+                    }
+                }
             }
             at += 5 + loop_len;
+        }
+        for t in found {
+            self.note_uplink(&t);
         }
     }
 
@@ -532,7 +553,9 @@ impl TsAnalyser {
         let nd = &body[2..(2 + nd_len).min(body.len())];
         for (tag, d) in descriptors(nd) {
             if tag == 0x40 {
-                self.network.name = Some(dvb_text(d));
+                let name = dvb_text(d);
+                self.note_uplink(&name);
+                self.network.name = Some(name);
             }
         }
         let mut at = 2 + nd_len + 2; // past transport_stream_loop_length
@@ -544,6 +567,14 @@ impl TsAnalyser {
             };
             let dl = u16::from_be_bytes([body[at + 4] & 0x0F, body[at + 5]]) as usize;
             let desc = &body[(at + 6).min(body.len())..(at + 6 + dl).min(body.len())];
+            // The uplink identification comes as C4h followed straight by
+            // the text, no length byte, so `descriptors` cannot walk it:
+            // look at each run of printable characters instead.
+            for run in desc.split(|b| !(0x20..0x7F).contains(b)) {
+                if run.len() >= 20 {
+                    self.note_uplink(&String::from_utf8_lossy(run));
+                }
+            }
             for (tag, d) in descriptors(desc) {
                 if tag == 0x43 && d.len() >= 11 {
                     // satellite_delivery_system_descriptor (EN 300 468 §6.2.13.2).
@@ -689,6 +720,16 @@ impl TsAnalyser {
             tables: self.tables.iter().map(|(&(p, t), &n)| (p, t, n)).collect(),
             utc: self.utc.clone(),
             bad_sections: self.bad_sections,
+            uplink_ids: self.uplink_ids.clone(),
+        }
+    }
+
+    /// Note an uplink identification string if `text` is one.
+    fn note_uplink(&mut self, text: &str) {
+        if let Some(u) = crate::uplink_id::parse(text)
+            && !self.uplink_ids.contains(&u)
+        {
+            self.uplink_ids.push(u);
         }
     }
 }
