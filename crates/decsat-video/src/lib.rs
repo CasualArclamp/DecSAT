@@ -300,9 +300,7 @@ impl VideoPlayer {
             if a.handle.status().state != PlayState::Playing {
                 return None;
             }
-            a.handle
-                .position_ms()
-                .map(|p| p - AUDIO_LATENCY_MS as f64)
+            a.handle.position_ms().map(|p| p - AUDIO_LATENCY_MS as f64)
         });
         let mut q = self.sh.frames.lock().unwrap();
         let front = q.front()?.ms;
@@ -507,9 +505,7 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                         Ok(p) => {
                             p.handle()
                                 .set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
-                            *sh.audio.lock().unwrap() = Some(AudioClock {
-                                handle: p.handle(),
-                            });
+                            *sh.audio.lock().unwrap() = Some(AudioClock { handle: p.handle() });
                             player = Some(p);
                         }
                         Err(e) => sh.status.lock().unwrap().last_error = Some(e),
