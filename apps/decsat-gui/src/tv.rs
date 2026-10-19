@@ -48,6 +48,9 @@ pub struct TvWindow {
     bob: bool,
     /// Decode the video on the graphics card.
     gpu: bool,
+    /// Packets the engine could not hand to the player (it was behind),
+    /// as the last status said.
+    tap_dropped: u64,
 }
 
 impl Default for TvWindow {
@@ -63,6 +66,7 @@ impl Default for TvWindow {
             volume: prefs::tv_volume(),
             bob: prefs::tv_bob(),
             gpu: prefs::tv_gpu(),
+            tap_dropped: 0,
         }
     }
 }
@@ -149,6 +153,7 @@ impl TvWindow {
         ts: Option<&TsView>,
     ) -> Option<TvRequest> {
         self.vfo?;
+        self.tap_dropped = ts.map_or(0, |t| t.tap_dropped);
         // The picture due now.
         if let Some(f) = self.player.as_mut().and_then(|p| p.poll()) {
             let img =
@@ -400,6 +405,15 @@ impl TvWindow {
             "{} pictures shown, {} dropped",
             st.frames_shown, st.frames_dropped
         )];
+        if st.frames_skipped > 0 {
+            bits.push(format!("{} skipped to catch up", st.frames_skipped));
+        }
+        if self.tap_dropped > 0 {
+            bits.push(format!(
+                "{} packets lost before the player (it fell behind)",
+                self.tap_dropped
+            ));
+        }
         if let Some(a) = &st.audio {
             bits.push(format!("sound buffered {} ms", a.buffer_ms));
             if a.underruns > 0 {

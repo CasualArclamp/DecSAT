@@ -944,9 +944,11 @@ impl App {
             );
             return;
         };
-        // About a second of a busy stream's BBFRAMEs; its video's last
-        // keyframe on is handed over first.
-        let (tap, rx) = decsat_ts::TsTap::new(256);
+        // Several seconds of a busy stream's BBFRAMEs (a batch each, a few
+        // kB): a stall of ffmpeg's reading must not cut holes in the
+        // stream, as a full tap drops the batch that does not fit. Its
+        // video's last keyframe on is handed over first.
+        let (tap, rx) = decsat_ts::TsTap::new(2048);
         let tap = tap.for_video(tv::selection(&p, audio).video);
         let mut s = v.settings.clone();
         s.ts_tap = Some(tap);

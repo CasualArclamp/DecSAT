@@ -51,6 +51,16 @@ const SANE_MS: i64 = 5000;
 const SOUND_WAIT: Duration = Duration::from_secs(3);
 /// Wait between ffmpeg runs.
 const RESTART: Duration = Duration::from_millis(1500);
+/// How much of the sound clock's error is taken up at each poll (see
+/// [`SlewClock`]).
+const SLEW: f64 = 0.1;
+/// The sound clock further than this, ms, from where the pictures' clock was
+/// heading has jumped (audio cut back to live, a restart): follow it at once.
+const RESYNC_MS: f64 = 120.0;
+/// Pictures due at once beyond this many are dropped as late; up to it they
+/// are shown one at a time, oldest first, in the next polls (a slow frame of
+/// the GUI is then not a dropped picture).
+const MAX_LAG_PICS: usize = 3;
 
 /// What to play: the PIDs ffmpeg is given, and which of them are the
 /// picture and the sound.
@@ -94,6 +104,12 @@ pub struct Status {
     pub frames_shown: u64,
     /// Pictures dropped: too late to show, or too many waiting.
     pub frames_dropped: u64,
+    /// Pictures passed over to get to live: the stream's backlog when it
+    /// starts, and the jump when the sound is cut back after a stall. Not
+    /// the decoder's failing, so counted apart from `frames_dropped`.
+    pub frames_skipped: u64,
+    /// A picture has been shown since ffmpeg (re)started.
+    pub playing: bool,
     /// Transport stream bytes given to ffmpeg.
     pub fed_bytes: u64,
     /// What the pictures are timed by: "sound", "wall", or "waiting for the
@@ -104,9 +120,53 @@ pub struct Status {
 
 struct AudioClock {
     handle: AudioHandle,
-    /// The end of the newest audio handed to the player, ms; `None` until
-    /// some is.
-    end_ms: Option<i64>,
+}
+
+/// The sound's position as the pictures' clock, without the sound card's
+/// steps.
+///
+/// The position the audio player reports moves in the sound card's periods
+/// (10 ms and up, more when its thread is late), and a picture every 20 ms
+/// (bob ×2 of 50 i) means a step now and then makes two due at once. This
+/// runs on the wall clock between readings and takes up a tenth of the
+/// difference at each, so it follows the sound's rate and offset, and
+/// jumps only when the sound does ([`RESYNC_MS`]).
+#[derive(Debug, Default)]
+struct SlewClock {
+    last: Option<(Instant, f64)>,
+}
+
+impl SlewClock {
+    /// The clock, ms, for a sound position `raw` read at `now`, and whether
+    /// it had to jump to it.
+    fn update(&mut self, now: Instant, raw: f64) -> (f64, bool) {
+        let (clock, jumped) = match self.last {
+            Some((t, c)) => {
+                let predicted = c + now.duration_since(t).as_secs_f64() * 1000.0;
+                let err = raw - predicted;
+                if err.abs() > RESYNC_MS {
+                    (raw, true)
+                } else {
+                    (predicted + SLEW * err, false)
+                }
+            }
+            None => (raw, false),
+        };
+        self.last = Some((now, clock));
+        (clock, jumped)
+    }
+}
+
+/// From the queue of pictures, ordered by time, the one to show at `clock`
+/// and how many to drop to get to it. Pictures not yet due stay. Up to
+/// [`MAX_LAG_PICS`] due at once are shown in turn, oldest first; more than
+/// that, the oldest are dropped.
+fn take_due(q: &mut VecDeque<Frame>, clock: i64) -> (Option<Frame>, u64) {
+    let due = q.iter().take_while(|f| f.ms <= clock).count();
+    let excess = due.saturating_sub(MAX_LAG_PICS);
+    q.drain(..excess);
+    let shown = if due > 0 { q.pop_front() } else { None };
+    (shown, excess as u64)
 }
 
 struct Shared {
@@ -129,6 +189,8 @@ struct Sync {
     generation: u64,
     /// With no sound: the wall time a picture's timestamp was shown at.
     anchor: Option<(Instant, i64)>,
+    /// With sound: the clock following its position.
+    slew: SlewClock,
     /// When the pictures began waiting for the sound to play.
     waiting: Option<Instant>,
 }
@@ -230,24 +292,33 @@ impl VideoPlayer {
                 ..Sync::default()
             };
         }
-        // The sound's clock: the newest audio's end, less what is buffered
-        // ahead of the speaker. `None` with no sound; `Some(None)` while
-        // the sound is not playing yet.
-        let sound: Option<Option<i64>> = self.sh.audio.lock().unwrap().as_ref().map(|a| {
-            let st = a.handle.status();
-            a.end_ms
-                .filter(|_| st.state == PlayState::Playing)
-                .map(|end| end - st.buffer_ms as i64 - AUDIO_LATENCY_MS)
+        // The sound's clock: where the sound card is in the stream's own
+        // time (the newest audio's end less what is buffered ahead of the
+        // speaker, worked out as of now), less the card's own delay. `None`
+        // with no sound; `Some(None)` while the sound is not playing yet.
+        let sound: Option<Option<f64>> = self.sh.audio.lock().unwrap().as_ref().map(|a| {
+            if a.handle.status().state != PlayState::Playing {
+                return None;
+            }
+            a.handle
+                .position_ms()
+                .map(|p| p - AUDIO_LATENCY_MS as f64)
         });
         let mut q = self.sh.frames.lock().unwrap();
         let front = q.front()?.ms;
         let newest = q.back()?.ms;
         let mut st = self.sh.status.lock().unwrap();
         let now = Instant::now();
+        let mut jumped = false;
         let clock = match sound {
-            Some(Some(c)) if (c - front).abs() < SANE_MS || (c - newest).abs() < SANE_MS => {
+            Some(Some(raw))
+                if (raw - front as f64).abs() < SANE_MS as f64
+                    || (raw - newest as f64).abs() < SANE_MS as f64 =>
+            {
                 st.clock = "sound";
-                c
+                let (c, j) = self.sync.slew.update(now, raw);
+                jumped = j;
+                c.floor() as i64
             }
             // Sound on its way: hold the first picture until it plays, for
             // a while (a sound device that fails must not stop the picture).
@@ -255,10 +326,12 @@ impl VideoPlayer {
                 if now.duration_since(*self.sync.waiting.get_or_insert(now)) < SOUND_WAIT =>
             {
                 st.clock = "waiting for the sound";
+                self.sync.slew = SlewClock::default();
                 return None;
             }
             _ => {
                 st.clock = "wall";
+                self.sync.slew = SlewClock::default();
                 let wall = |(t, ms): (Instant, i64)| ms + now.duration_since(t).as_millis() as i64;
                 let restart = match self.sync.anchor {
                     // Pictures run out (the clock ahead of them): start
@@ -275,15 +348,17 @@ impl VideoPlayer {
                 self.sync.anchor.map_or(front, wall)
             }
         };
-        let mut shown = None;
-        while q.front().is_some_and(|f| f.ms <= clock) {
-            if shown.is_some() {
-                st.frames_dropped += 1;
-            }
-            shown = q.pop_front();
+        let (shown, excess) = take_due(&mut q, clock);
+        // Getting to live (the first pictures, or the sound cut back) is
+        // not a drop.
+        if jumped || !st.playing {
+            st.frames_skipped += excess;
+        } else {
+            st.frames_dropped += excess;
         }
         if shown.is_some() {
             st.frames_shown += 1;
+            st.playing = true;
         }
         shown
     }
@@ -374,6 +449,7 @@ fn supervise(exe: &Path, args: &[String], sh: &Arc<Shared>, output: OutputKind) 
             st.running = true;
             st.starts += 1;
             st.streams.clear();
+            st.playing = false;
         }
         let log = stderr.map(|e| {
             let s = sh.clone();
@@ -433,7 +509,6 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                                 .set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
                             *sh.audio.lock().unwrap() = Some(AudioClock {
                                 handle: p.handle(),
-                                end_ms: None,
                             });
                             player = Some(p);
                         }
@@ -456,7 +531,12 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                 st.frames_in += 1;
                 while q.len() > MAX_QUEUE {
                     q.pop_front();
-                    st.frames_dropped += 1;
+                    // The backlog of a start is skipped, not lost.
+                    if st.playing {
+                        st.frames_dropped += 1;
+                    } else {
+                        st.frames_skipped += 1;
+                    }
                 }
             }
             Event::Block { track, ms, data } if Some(track) == audio => {
@@ -471,10 +551,14 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                         .map(|b| f32::from_le_bytes(*b)),
                 );
                 let frames = (samples.len() / 2) as i64;
-                p.push_pcm(ffmpeg::AUDIO_RATE, std::mem::take(&mut samples));
-                if let Some(a) = sh.audio.lock().unwrap().as_mut() {
-                    a.end_ms = Some(ms + frames * 1000 / ffmpeg::AUDIO_RATE as i64);
-                }
+                // The end time goes in with the samples: the player keeps
+                // the two together, so the picture clock reads the sound's
+                // position from one place (`AudioHandle::position_ms`).
+                p.push_pcm_at(
+                    ffmpeg::AUDIO_RATE,
+                    std::mem::take(&mut samples),
+                    ms + frames * 1000 / ffmpeg::AUDIO_RATE as i64,
+                );
             }
             Event::Block { .. } => {}
         }
@@ -503,14 +587,16 @@ fn read_log(err: impl Read, sh: &Shared) {
 }
 
 /// On Windows, run ffmpeg (a console program) without a console window
-/// popping up, and below normal priority so the receiver's own threads
-/// come first.
+/// popping up. At normal priority: it was started below normal so the
+/// receiver's threads came first, but the FEC pool keeps every core busy at
+/// normal, and a below-normal ffmpeg was then not scheduled for seconds at a
+/// time, stopped reading the stream, and the pictures came late and in
+/// bursts.
 #[cfg(windows)]
 fn no_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-    cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
@@ -524,6 +610,77 @@ pub fn find_ffmpeg(configured: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pic(ms: i64) -> Frame {
+        Frame {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+            ms,
+        }
+    }
+
+    /// The sound card's position in 40 ms steps (what the clock was before:
+    /// a staircase) becomes a clock that moves each poll by about the wall
+    /// time between them, so no poll finds two 20 ms pictures due at once.
+    #[test]
+    fn the_clock_does_not_step_with_the_sound() {
+        let t0 = Instant::now();
+        let mut clock = SlewClock::default();
+        let mut q: VecDeque<Frame> = (0..400).map(|i| pic(i * 20)).collect();
+        let (mut shown, mut dropped, mut two_due) = (0u32, 0u64, 0u32);
+        // Polls every 16.7 ms for 5 s; the sound's position, true to the
+        // wall clock but read only in 40 ms steps.
+        for k in 1..=300u32 {
+            let t = k as f64 * 16.667;
+            let raw = (t / 40.0).floor() * 40.0;
+            let now = t0 + Duration::from_secs_f64(t / 1000.0);
+            let (c, jumped) = clock.update(now, raw);
+            assert!(!jumped, "jumped at poll {k}");
+            let due = q.iter().take_while(|f| f.ms <= c as i64).count();
+            if due > 1 {
+                two_due += 1;
+            }
+            let (s, d) = take_due(&mut q, c as i64);
+            shown += s.is_some() as u32;
+            dropped += d;
+        }
+        // The raw staircase makes two pictures due on every other step.
+        assert_eq!(dropped, 0, "pictures dropped");
+        assert!(two_due < 10, "{two_due} polls found two pictures due");
+        // 5 s at 50 pictures a second, less the clock's lag behind.
+        assert!(shown > 230, "{shown} shown");
+    }
+
+    #[test]
+    fn the_clock_jumps_when_the_sound_does() {
+        let t0 = Instant::now();
+        let mut clock = SlewClock::default();
+        clock.update(t0, 1000.0);
+        let (c, jumped) = clock.update(t0 + Duration::from_millis(16), 1016.0);
+        assert!(!jumped && (c - 1016.0).abs() < 2.0, "{c}");
+        // The sound cut back to live, 400 ms on.
+        let (c, jumped) = clock.update(t0 + Duration::from_millis(33), 1450.0);
+        assert!(jumped && c == 1450.0);
+    }
+
+    #[test]
+    fn pictures_due_together_are_shown_in_turn_then_dropped() {
+        let mut q: VecDeque<Frame> = (0..10).map(|i| pic(i * 20)).collect();
+        // Nothing due yet.
+        assert_eq!(take_due(&mut q, -1).0.map(|f| f.ms), None);
+        // Three due (0, 20, 40): the oldest, nothing dropped, two still due.
+        let (f, d) = take_due(&mut q, 40);
+        assert_eq!((f.map(|f| f.ms), d), (Some(0), 0));
+        let (f, d) = take_due(&mut q, 40);
+        assert_eq!((f.map(|f| f.ms), d), (Some(20), 0));
+        // Nine due at 160 (0 to 160): all but the newest three are dropped,
+        // the oldest of those shown, two still due.
+        let mut q: VecDeque<Frame> = (0..10).map(|i| pic(i * 20)).collect();
+        let (f, d) = take_due(&mut q, 160);
+        assert_eq!((f.map(|f| f.ms), d), (Some(120), 6));
+        assert_eq!(q.front().map(|f| f.ms), Some(140));
+    }
 
     /// A 5 s MPEG-2 + MP2 test stream made by ffmpeg, as TS packets; `None`
     /// where ffmpeg is not installed.

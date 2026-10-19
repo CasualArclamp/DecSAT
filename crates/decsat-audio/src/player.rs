@@ -164,6 +164,14 @@ struct Ring {
     /// Playing (rather than filling up to the start level).
     primed: bool,
     underruns: u64,
+    /// For PCM decoded elsewhere: the media time, ms, of the end of the
+    /// newest audio in `buf`. Set under the same lock as the samples go in,
+    /// so `end_ms` less what is still buffered is always the time of the
+    /// sound about to be played (see [`AudioHandle::position_ms`]).
+    end_ms: Option<i64>,
+    /// Ring samples (stereo, interleaved) per millisecond at the output's
+    /// rate; 0 until the output is open.
+    per_ms: f64,
 }
 
 struct Shared {
@@ -211,6 +219,17 @@ impl AudioHandle {
         s
     }
 
+    /// The media time, ms, of the sound the output is about to play, for
+    /// PCM handed over with [`AudioPlayer::push_pcm_at`]: the end of the
+    /// newest audio less what is still buffered. It is worked out from the
+    /// ring as it is now, so it moves with the sound card rather than in
+    /// steps as audio blocks arrive. `None` before any such audio.
+    pub fn position_ms(&self) -> Option<f64> {
+        let ring = self.0.ring.lock().unwrap();
+        let end = ring.end_ms?;
+        (ring.per_ms > 0.0).then(|| end as f64 - ring.buf.len() as f64 / ring.per_ms)
+    }
+
     /// Peak levels (left, right), 0..1, of the decoded audio before volume.
     pub fn levels(&self) -> [f32; 2] {
         [0, 1].map(|i| f32::from_bits(self.0.level[i].load(Ordering::Relaxed)))
@@ -246,8 +265,13 @@ impl AudioHandle {
 enum Input {
     /// A UDP payload of the stream, to depacketise and decode.
     Payload(Vec<u8>),
-    /// Audio already decoded: interleaved stereo at `rate`.
-    Pcm { rate: u32, samples: Vec<f32> },
+    /// Audio already decoded: interleaved stereo at `rate`, ending at
+    /// media time `end_ms` when the sender knows it.
+    Pcm {
+        rate: u32,
+        samples: Vec<f32>,
+        end_ms: Option<i64>,
+    },
 }
 
 /// Plays one multicast audio stream (or PCM decoded elsewhere).
@@ -288,6 +312,8 @@ impl AudioPlayer {
                 buf: VecDeque::new(),
                 primed: false,
                 underruns: 0,
+                end_ms: None,
+                per_ms: 0.0,
             }),
             paused: AtomicBool::new(false),
             status: Mutex::new(Status {
@@ -322,7 +348,22 @@ impl AudioPlayer {
     /// Decoded audio: interleaved stereo samples at `rate` (for a player
     /// made by [`AudioPlayer::start_pcm`]).
     pub fn push_pcm(&mut self, rate: u32, samples: Vec<f32>) {
-        self.send(Input::Pcm { rate, samples });
+        self.send(Input::Pcm {
+            rate,
+            samples,
+            end_ms: None,
+        });
+    }
+
+    /// As [`AudioPlayer::push_pcm`], saying the media time, ms, at which
+    /// these samples end, so [`AudioHandle::position_ms`] can tell where
+    /// the sound is.
+    pub fn push_pcm_at(&mut self, rate: u32, samples: Vec<f32>, end_ms: i64) {
+        self.send(Input::Pcm {
+            rate,
+            samples,
+            end_ms: Some(end_ms),
+        });
     }
 
     fn send(&mut self, input: Input) {
@@ -491,6 +532,9 @@ fn run(
     };
     let null = kind == OutputKind::Null;
     let mut per_ms = out.rate as f64 * 2.0 / 1000.0; // ring samples per ms
+    sh.ring.lock().unwrap().per_ms = per_ms;
+    // The media time the newest PCM block ends at, until it is in the ring.
+    let mut pcm_end: Option<i64> = None;
     let mut dec = Decoder::new();
     let mut units = Vec::new();
     let mut block = Block::default();
@@ -512,6 +556,7 @@ fn run(
                     resampler = None;
                     fill_ms = START_MS as f64;
                     let mut ring = sh.ring.lock().unwrap();
+                    ring.per_ms = per_ms;
                     ring.buf.clear();
                     ring.primed = false;
                     drop(ring);
@@ -533,11 +578,18 @@ fn run(
                     d.packet(&p, &mut units);
                 }
             }
-            Ok(Input::Pcm { rate, samples }) => units.push(Unit::Pcm {
+            Ok(Input::Pcm {
                 rate,
-                channels: 2,
                 samples,
-            }),
+                end_ms,
+            }) => {
+                pcm_end = end_ms.or(pcm_end);
+                units.push(Unit::Pcm {
+                    rate,
+                    channels: 2,
+                    samples,
+                });
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -580,6 +632,9 @@ fn run(
             }
             let mut ring = sh.ring.lock().unwrap();
             ring.buf.extend(resampled.iter().copied());
+            if let Some(e) = pcm_end.take() {
+                ring.end_ms = Some(e);
+            }
             let level_ms = ring.buf.len() as f64 / per_ms;
             if level_ms > sh.max_ms as f64 {
                 let cut = (ring.buf.len() - (START_MS as f64 * per_ms) as usize) & !1;
