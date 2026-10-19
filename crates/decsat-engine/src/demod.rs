@@ -1321,30 +1321,23 @@ mod tests {
         // reciprocal off. Either way the headers and pilots kept reading a
         // clean carrier, so the Es/N0 and margin looked fine while every
         // frame failed to decode. The loop must end on the carrier.
-        for pilots in [true, false] {
-            let x = signal(&[FrameSpec::new(12, false, pilots)], 700_000, 4, 0.2, 31);
+        let mut report = String::new();
+        for (pilots, sd) in [true, false].into_iter().flat_map(|p| (0..12u64).map(move |s| (p, s))) {
+            let x = signal(&[FrameSpec::new(12, false, pilots)], 700_000, 4, 0.2, 31 + 100 * sd);
             let carrier = 0.0035;
             // (`impair`'s SNR is per sample: 7 dB Es/N0 at 4 samples a
             // symbol is 6 dB less.)
-            let x = impair(&x, carrier / 4.0, 0.9, 7.0 - 10.0 * 4f64.log10(), 32);
+            let x = impair(&x, carrier / 4.0, 0.9, 7.0 - 10.0 * 4f64.log10(), 32 + 100 * sd);
             let mut d = Demod::new(4.0, 1.0, 0.2, 0).with_carrier_offset(carrier + 4.0e-4);
             let mut frames = Vec::new();
             for chunk in x.chunks(50_000) {
                 d.process(chunk, &mut frames);
             }
-            assert!(
-                frames.len() >= 25,
-                "pilots {pilots}: {} frames",
-                frames.len()
-            );
             let err = d.carrier_offset_hz() - carrier;
-            assert!(
-                err.abs() < 4.0e-5,
-                "pilots {pilots}: loop {:+.1e} cycles/symbol off, {} corrections",
-                err,
-                d.frequency_corrections()
-            );
+            report += &format!("SWEEP {pilots} {sd}: {} frames err {:+.1e} fixes {}
+", frames.len(), err, d.frequency_corrections());
         }
+        panic!("{report}");
     }
 
     /// Complex Gaussian noise generator for the tests below.
