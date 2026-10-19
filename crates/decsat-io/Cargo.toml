@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "decsat-io"
-description = "DecSAT I/O: IQ file replay/record and the HackRF and Fobos SDR front ends"
+description = "DecSAT I/O: IQ file replay/record and the HackRF, Fobos SDR and Airspy front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,6 +18,9 @@ hackrf = ["dep:seify-hackrfone"]
 # the agile firmware, fobos.dll for the stock one) is loaded at run time, so
 # nothing extra is needed to build, and only a Fobos user needs the file.
 fobos = ["dep:libloading"]
+# Live Airspy Mini / R2 front end, in pure Rust over USB (libairspy-rs on
+# nusb): no libairspy, no DLLs; on Windows the WinUSB driver.
+airspy = ["dep:libairspy-rs"]
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }
@@ -26,3 +29,4 @@ thiserror.workspace = true
 tracing.workspace = true
 seify-hackrfone = { version = "0.2.2", optional = true }
 libloading = { version = "0.8", optional = true }
+libairspy-rs = { version = "0.2.1", optional = true }

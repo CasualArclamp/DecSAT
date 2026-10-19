@@ -18,6 +18,7 @@ mod filename;
 mod format;
 mod freq_display;
 mod freqplan;
+mod orbit;
 mod player;
 mod prefs;
 mod radar_airports;
@@ -25,7 +26,9 @@ mod radar_map;
 mod radar_scope;
 mod radio;
 mod session;
+mod session_log;
 mod side_panel;
+mod snapshot;
 mod survey;
 mod top_bar;
 mod transmit;
@@ -61,10 +64,10 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -111,6 +114,11 @@ fn main() -> eframe::Result {
                 app.load_plan(p);
             }
             app.tx.open |= opts.tx_panel;
+            // PCAP parts and the session log, as last chosen.
+            decsat_engine::fec::set_pcap_rotate_minutes(prefs::pcap_rotate_minutes());
+            if (app.remember && prefs::session_log()) || opts.session_log {
+                app.log.start(&prefs::output_dir());
+            }
             app.beacon_window.open |= opts.beacons;
             // Claimed VFOs keep `VfoSettings::new`'s temp-dir output folder.
             if let Some(k) = opts.decoder {
@@ -156,6 +164,20 @@ fn main() -> eframe::Result {
                 }
                 app.start_radio();
             }
+            #[cfg(feature = "airspy")]
+            if let Some(mhz) = opts.airspy_mhz {
+                let r = &mut app.radio;
+                r.device = radio::Device::Airspy;
+                r.settings.center_hz = (mhz * 1e6).round() as u64;
+                if let Some(v) = opts.rate_msps {
+                    r.airspy.sample_rate = (v * 1e6).round() as u32;
+                }
+                r.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                if let Some(g) = opts.vga_db {
+                    r.airspy.gains.step = g.min(21) as u8;
+                }
+                app.start_radio();
+            }
             Ok(Box::new(app))
         }),
     )
@@ -184,6 +206,12 @@ struct App {
     /// named, whether a plan or labels are kept for none named, and the
     /// name being typed for a new one.
     satellite: String,
+    /// The 📷 snapshot on its way, and where the band was drawn.
+    snapshot: snapshot::Snapshot,
+    /// The session log (off unless switched on).
+    log: session_log::SessionLog,
+    /// Orbital positions the carriers signal (NIT, RCS map), with names.
+    orbit_found: Vec<orbit::Found>,
     satellites: Vec<String>,
     unnamed_kept: bool,
     satellite_edit: String,
@@ -276,6 +304,9 @@ impl Default for App {
             statuses: BTreeMap::new(),
             carrier_caps: carrier_caps::CarrierCaps::load(&prefs::satellite()),
             satellite: prefs::satellite(),
+            snapshot: snapshot::Snapshot::default(),
+            log: session_log::SessionLog::default(),
+            orbit_found: Vec::new(),
             satellites: prefs::satellites(),
             unnamed_kept: prefs::unnamed_kept(),
             satellite_edit: String::new(),
@@ -397,6 +428,19 @@ impl App {
                     u8::from(r.fobos.external_clock).to_string(),
                 ),
             ]);
+            #[cfg(feature = "airspy")]
+            p.extend([
+                ("airspy.rate".to_string(), r.airspy.sample_rate.to_string()),
+                ("airspy.gain".to_string(), r.airspy.gains.step.to_string()),
+                (
+                    "airspy.mode".to_string(),
+                    match r.airspy.gains.mode {
+                        decsat_io::AirspyGainMode::Linearity => "linearity",
+                        decsat_io::AirspyGainMode::Sensitivity => "sensitivity",
+                    }
+                    .to_string(),
+                ),
+            ]);
         }
         let surveying = self.survey.vfo_ids();
         let kept = self.vfos.iter().filter(|v| !surveying.contains(&v.id));
@@ -475,6 +519,16 @@ impl App {
         };
         let mut chosen: Option<String> = None;
         let mut renamed: Option<String> = None;
+        // A satellite the carriers name that is not the one chosen: said
+        // beside the list, offered first in it.
+        let hint = self
+            .orbit_found
+            .iter()
+            .find(|f| {
+                let n = orbit::at(f.deg).map_or(String::new(), |s| s.name.clone());
+                n.is_empty() || !self.satellite.contains(&n)
+            })
+            .cloned();
         egui::ComboBox::from_id_salt("satellite")
             .width(110.0)
             .truncate()
@@ -482,6 +536,33 @@ impl App {
             // Typing a new name is a click inside: only one outside closes.
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
+                // The satellites the carriers say they are on.
+                if !self.orbit_found.is_empty() {
+                    ui.label(egui::RichText::new("Signalled by the carriers").weak());
+                    for f in &self.orbit_found {
+                        let name = orbit::satellite_name(f.deg);
+                        let existing = self
+                            .satellites
+                            .iter()
+                            .find(|s| prefs::satellite_name_ok(&name, &[(*s).clone()]).is_none())
+                            .cloned();
+                        if ui
+                            .selectable_label(
+                                existing.as_deref() == Some(self.satellite.as_str()),
+                                format!("📡 {}", orbit::label(f.deg)),
+                            )
+                            .on_hover_text(format!(
+                                "{}: choose (or add) \"{}\"",
+                                f.source,
+                                existing.as_deref().unwrap_or(&name)
+                            ))
+                            .clicked()
+                        {
+                            chosen = Some(existing.unwrap_or(name));
+                        }
+                    }
+                    ui.separator();
+                }
                 // The labels from before satellites were named, while kept.
                 if (self.satellite.is_empty() || self.unnamed_kept)
                     && ui
@@ -538,6 +619,18 @@ impl App {
                  labels, shown only while it is chosen: another satellite's names at the same \
                  frequencies would be wrong.",
             );
+        if let Some(f) = hint {
+            ui.label(
+                egui::RichText::new(format!("📡 {}?", orbit::label(f.deg)))
+                    .color(egui::Color32::from_rgb(255, 196, 80)),
+            )
+            .on_hover_text(format!(
+                "{} says the carrier is on {} — the satellite list offers it by name. The \
+                 satellite chosen keeps the plan and carrier labels.",
+                f.source,
+                orbit::label(f.deg)
+            ));
+        }
         if let Some(name) = renamed {
             self.satellite_edit.clear();
             self.rename_satellite(&name);
@@ -618,6 +711,23 @@ impl App {
                     r.fobos.external_clock = v == "1";
                 }
                 r.fobos.gains = r.fobos.gains.snapped();
+            }
+            #[cfg(feature = "airspy")]
+            {
+                if let Some(v) = get("airspy.rate").and_then(|v| v.parse().ok()) {
+                    r.airspy.sample_rate = v;
+                }
+                if let Some(v) = get("airspy.gain").and_then(|v| v.parse().ok()) {
+                    r.airspy.gains.step = v;
+                }
+                if let Some(v) = get("airspy.mode") {
+                    r.airspy.gains.mode = if v == "sensitivity" {
+                        decsat_io::AirspyGainMode::Sensitivity
+                    } else {
+                        decsat_io::AirspyGainMode::Linearity
+                    };
+                }
+                r.airspy.gains = r.airspy.gains.snapped();
             }
         }
         let dir = prefs::output_dir();
@@ -787,6 +897,14 @@ impl App {
                         // The board's nearest rate is what runs.
                         self.radio.fobos.sample_rate = c.settings().sample_rate;
                         (radio::Live::Fobos(c), Box::new(src) as _)
+                    })
+                }
+                #[cfg(feature = "airspy")]
+                radio::Device::Airspy => {
+                    decsat_io::AirspySource::open(self.radio.airspy_settings()).map(|src| {
+                        let c = src.control();
+                        self.radio.airspy.sample_rate = c.settings().sample_rate;
+                        (radio::Live::Airspy(c), Box::new(src) as _)
                     })
                 }
             };
@@ -1216,6 +1334,96 @@ impl App {
         prefs::set_beacon_marks(&self.beacon_marks);
     }
 
+    /// Save the spectrum and waterfall (or the whole window) as a PNG in the
+    /// output folder, named by RF and UTC time, with a caption in it.
+    pub(crate) fn take_snapshot(&mut self, ctx: &egui::Context, area: snapshot::Area) {
+        if self.snapshot.busy() {
+            return;
+        }
+        let (when, stamp) = session_log::utc(std::time::SystemTime::now());
+        let rf = self.rf_center();
+        let sat = if self.satellite.is_empty() {
+            "unnamed".to_string()
+        } else {
+            self.satellite.clone()
+        };
+        let tag = if rf > 0.0 {
+            format!("{:.4}MHz", rf / 1e6)
+        } else {
+            "norf".into()
+        };
+        let what = match area {
+            snapshot::Area::Band => "band",
+            snapshot::Area::Window => "window",
+        };
+        let path = prefs::output_dir().join(format!(
+            "decsat-{}-{tag}-{stamp}-{what}.png",
+            sat.replace([' ', '/', '\\', ':'], "_")
+        ));
+        // Short lines: the band may be narrower than the window.
+        let mut caption = format!("DecSAT · {when} UTC\n{}\n", self.source_caption());
+        if rf > 0.0 {
+            caption += &format!("RF centre {} · ", format::freq(rf));
+        }
+        caption += &format!("span {}", format::rate(self.sample_rate));
+        #[cfg(feature = "hackrf")]
+        if self.path.is_none() {
+            caption += &format!(
+                "\ntuned {} · LNB LO {}",
+                format::freq(self.radio.settings.center_hz as f64),
+                format::freq(self.radio.lnb_lo_mhz * 1e6)
+            );
+        }
+        if self.lo_trim_hz != 0.0 {
+            caption += &format!(" · trim {:+.3} kHz", self.lo_trim_hz / 1e3);
+        }
+        caption += &format!("\nSatellite: {sat} · {} VFO", self.vfos.len());
+        self.snapshot.request(ctx, area, path.clone(), caption);
+        self.log
+            .note(&format!("snapshot ({what}): {}", path.display()));
+    }
+
+    /// The source in words, for captions.
+    fn source_caption(&self) -> String {
+        if let Some(p) = &self.path {
+            return p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+        }
+        #[cfg(feature = "hackrf")]
+        {
+            let live = if self.live.is_some() {
+                "live"
+            } else {
+                "stopped"
+            };
+            format!(
+                "{} {live}, {}",
+                self.radio.device.name(),
+                format::rate(self.radio.sample_rate() as f64)
+            )
+        }
+        #[cfg(not(feature = "hackrf"))]
+        "no source".to_string()
+    }
+
+    /// Switch the session log on or off (and remember the choice).
+    pub(crate) fn set_session_log(&mut self, on: bool) {
+        if on {
+            self.log.start(&prefs::output_dir());
+            self.note = match (&self.log.error, self.log.path()) {
+                (Some(e), _) => format!("Session log not started: {e}"),
+                (None, Some(p)) => format!("Session log: {}", p.display()),
+                (None, None) => String::new(),
+            };
+        } else {
+            self.log.stop();
+            self.note = "Session log stopped.".into();
+        }
+        prefs::set_session_log(on);
+    }
+
     /// The source is a running HackRF, so the view can tune it.
     fn can_retune(&self) -> bool {
         #[cfg(feature = "hackrf")]
@@ -1235,8 +1443,8 @@ impl App {
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
-            let min = self.radio.device.min_hz();
-            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(min, 6e9).round() as u64;
+            let (min, max) = (self.radio.device.min_hz(), self.radio.device.max_hz());
+            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(min, max).round() as u64;
             self.radio.settings.center_hz = tuned;
             if let Some(c) = &self.live
                 && let Err(e) = c.set_center(tuned)
@@ -1297,6 +1505,42 @@ impl eframe::App for App {
         // Recordings are named by the RF they hold (tuning + LO + trim).
         decsat_engine::rf::set_rf_center(self.rf_center());
         self.keep_session();
+        self.log
+            .observe(&self.vfos, &self.statuses, self.rf_center());
+        let names: Vec<(VfoId, String)> = self
+            .vfos
+            .iter()
+            .map(|v| (v.id, v.settings.name.clone()))
+            .collect();
+        let found = orbit::found(&names, &self.statuses);
+        for f in &found {
+            if !self
+                .orbit_found
+                .iter()
+                .any(|o| (o.deg - f.deg).abs() < 0.05)
+            {
+                self.log
+                    .note(&format!("{} signals {}", f.source, orbit::label(f.deg)));
+            }
+        }
+        if !found.is_empty() {
+            self.orbit_found = found;
+        }
+        self.log.follow_note(&self.note);
+        if let Some(r) = self.snapshot.handle(ctx) {
+            self.note = match r {
+                Ok(p) => format!("Snapshot saved: {}", p.display()),
+                Err(e) => format!("Snapshot not saved: {e}"),
+            };
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+            let area = if ctx.input(|i| i.modifiers.shift) {
+                snapshot::Area::Window
+            } else {
+                snapshot::Area::Band
+            };
+            self.take_snapshot(ctx, area);
+        }
         if self.plan_keep
             && !self.plan.is_empty()
             && self.engine.is_some()
@@ -1635,8 +1879,10 @@ impl eframe::App for App {
                     bluetooth: &bluetooth,
                     beacons: &self.beacon_scene,
                 };
+                self.snapshot.band_rect = Some(ui.max_rect());
                 actions.extend(self.band.show(ui, &inp));
             });
+        self.snapshot.overlay(ui.ctx());
 
         // The transmit panel; starting the HackRF takes it over from receive.
         let reqs = self.survey.show(

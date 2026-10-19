@@ -96,7 +96,9 @@ impl App {
             self.play_button(ui);
             ui.add_space(8.0);
             self.input_meter(ui);
-            ui.add_space(14.0);
+            ui.add_space(6.0);
+            self.snapshot_button(ui);
+            ui.add_space(10.0);
             let mut rf = self.rf_center();
             if freq_display::show(ui, &mut rf, 0.0, 999_999_999_999.0, 34.0) {
                 self.set_rf_center(rf);
@@ -346,8 +348,8 @@ impl App {
                 RichText::new(text).weak()
             };
             let tip = if strong && !hackrf {
-                "Strong input, close to the ADC's full scale: lower the VGA (or the LNA \
-                 step) in the radio settings."
+                "Strong input, close to the ADC's full scale: lower the gain (the VGA or LNA \
+                 step on a Fobos, the gain step on an Airspy) in the radio settings."
             } else if !hackrf {
                 "The samples' RMS level, relative to full scale. Drops: USB buffers lost \
                  since Start because the PC fell behind."
@@ -487,6 +489,45 @@ impl App {
         .on_hover_text("The source: a radio (HackRF One, Fobos SDR) or an IQ file");
     }
 
+    /// 📷: the spectrum and waterfall to a PNG (right-click: the whole
+    /// window); a 📝 beside it while the session log is written.
+    fn snapshot_button(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let r = ui
+                    .add_enabled(
+                        !self.snapshot.busy(),
+                        egui::Button::new(RichText::new("📷").size(18.0))
+                            .min_size(egui::vec2(36.0, 30.0)),
+                    )
+                    .on_hover_text(format!(
+                        "Snapshot of the spectrum and waterfall (F12), with a caption: \
+                         receiver, tuning, LNB LO, satellite and UTC time. Right-click \
+                         (or Shift+F12) for the whole window. Saved as PNG in:\n{}",
+                        prefs::output_dir().display()
+                    ));
+                if r.clicked() {
+                    self.take_snapshot(ui.ctx(), crate::snapshot::Area::Band);
+                } else if r.secondary_clicked() {
+                    self.take_snapshot(ui.ctx(), crate::snapshot::Area::Window);
+                }
+                if self.log.is_on() {
+                    let path = self
+                        .log
+                        .path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ui.label(RichText::new("📝").color(GREEN))
+                        .on_hover_text(format!(
+                            "Session log on: {} lines so far\n{path}\n(File ▸ Session log to stop)",
+                            self.log.lines()
+                        ));
+                }
+            });
+        });
+    }
+
     fn file_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("📂 Open IQ…").clicked() {
             ui.close();
@@ -515,6 +556,62 @@ impl App {
             ui.close();
             self.pick_output_dir();
         }
+        ui.separator();
+        if ui
+            .button("📷 Snapshot: spectrum + waterfall   F12")
+            .clicked()
+        {
+            ui.close();
+            self.take_snapshot(ui.ctx(), crate::snapshot::Area::Band);
+        }
+        if ui.button("📷 Snapshot: whole window   Shift+F12").clicked() {
+            ui.close();
+            self.take_snapshot(ui.ctx(), crate::snapshot::Area::Window);
+        }
+        let mut on = self.log.is_on();
+        if ui
+            .checkbox(&mut on, "📝 Session log")
+            .on_hover_text(
+                "Write what the VFOs report — Identify's verdicts, decoder messages, lock \
+                 and loss, new MODCODs, text found in the bits, a summary a minute — and \
+                 the app's notes to decsat-log-<UTC>.csv in the output folder, for reading \
+                 back later. Remembered between runs.",
+            )
+            .changed()
+        {
+            self.set_session_log(on);
+        }
+        if let Some(e) = &self.log.error {
+            ui.colored_label(RED, e);
+        }
+        ui.horizontal(|ui| {
+            ui.label("PCAP parts");
+            let mut min = decsat_engine::fec::pcap_rotate_minutes();
+            let text = |m: u64| {
+                if m == 0 {
+                    "one file".to_string()
+                } else {
+                    format!("every {m} min")
+                }
+            };
+            egui::ComboBox::from_id_salt("pcap_rotate")
+                .selected_text(text(min))
+                .show_ui(ui, |ui| {
+                    for m in [0u64, 1, 5, 10, 15, 30, 60] {
+                        if ui.selectable_value(&mut min, m, text(m)).changed() {
+                            decsat_engine::fec::set_pcap_rotate_minutes(m);
+                            prefs::set_pcap_rotate_minutes(m);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "While a PCAP records, start a new file this often. Each closed part is \
+                     a whole capture, so BruteShark or NetworkMiner can take the parts while \
+                     the recording goes on. Live Wireshark is fed through a pipe, not a \
+                     network port, so tools that read files take the parts instead.",
+                );
+        });
         ui.separator();
         ui.label(RichText::new("Raw IQ files").weak())
             .on_hover_text("How a raw capture is read; a WAV file's header sets them itself");

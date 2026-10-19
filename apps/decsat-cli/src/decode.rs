@@ -5,7 +5,7 @@
 //! E1 timeslots, text, frame structure).
 //!
 //! With `--hackrf <MHz>` the source is the HackRF instead (receive only, its
-//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR: a status line every 30 s, a report at the end
+//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy: a status line every 30 s, a report at the end
 //! (`--seconds`) — for watching a carrier unattended, e.g. a FastLink link
 //! with `--record-on-activity` until a voice channel speaks.
 
@@ -30,6 +30,12 @@ pub struct DecodeArgs {
     pub fobos_lna: u8,
     #[cfg_attr(not(feature = "fobos"), allow(dead_code))]
     pub fobos_vga: u16,
+    /// Live: the Airspy's centre frequency, MHz, and its gain step/table.
+    pub airspy: Option<f64>,
+    #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
+    pub airspy_gain: u8,
+    #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
+    pub airspy_sensitivity: bool,
     /// Stop after this long.
     pub seconds: Option<f64>,
     /// fastlink: record while a TDM channel is active.
@@ -147,6 +153,33 @@ fn fobos_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource
     Ok((Box::new(src), rate))
 }
 
+/// The Airspy at `mhz`, at the board's rate nearest `rate`.
+#[cfg(feature = "airspy")]
+fn airspy_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    use decsat_io::{AirspyGainMode, AirspyGains, AirspySettings, AirspySource};
+    let src = AirspySource::open(AirspySettings {
+        center_hz: (mhz * 1e6).round() as u64,
+        sample_rate: rate.round() as u32,
+        gains: AirspyGains {
+            mode: if a.airspy_sensitivity {
+                AirspyGainMode::Sensitivity
+            } else {
+                AirspyGainMode::Linearity
+            },
+            step: a.airspy_gain,
+        }
+        .snapped(),
+    })?;
+    let rate = src.sample_rate();
+    println!("{}", src.describe());
+    Ok((Box::new(src), rate))
+}
+
+#[cfg(not(feature = "airspy"))]
+fn airspy_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    bail!("this build has no Airspy support (the `airspy` feature)")
+}
+
 #[cfg(not(feature = "fobos"))]
 fn fobos_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
     bail!("this build has no Fobos SDR support (the `fobos` feature)")
@@ -154,8 +187,15 @@ fn fobos_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f6
 
 pub fn decode(a: DecodeArgs) -> Result<()> {
     let kind = decoder_by_name(&a.decoder)?;
-    let live = a.hackrf.is_some() || a.fobos.is_some();
-    let (source, rate): (Box<dyn IqSource>, f64) = if let Some(mhz) = a.fobos {
+    let live = a.hackrf.is_some() || a.fobos.is_some() || a.airspy.is_some();
+    let (source, rate): (Box<dyn IqSource>, f64) = if let Some(mhz) = a.airspy {
+        let (src, rate) = airspy_source(&a, mhz, a.rate.unwrap_or(6e6))?;
+        println!(
+            "live from the Airspy at {mhz:.4} MHz, {:.3} MS/s (receive only)",
+            rate / 1e6
+        );
+        (src, rate)
+    } else if let Some(mhz) = a.fobos {
         let (src, rate) = fobos_source(&a, mhz, a.rate.unwrap_or(8e6))?;
         println!(
             "live from the Fobos SDR at {mhz:.4} MHz, {:.3} MS/s (receive only)",
@@ -184,7 +224,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 println!("decoding {} at {:.3} MS/s", reader.describe(), rate / 1e6);
                 (Box::new(reader), rate)
             }
-            (None, None) => bail!("give a capture, or --hackrf <MHz> / --fobos <MHz>"),
+            (None, None) => bail!("give a capture, or --hackrf / --fobos / --airspy <MHz>"),
         }
     };
 

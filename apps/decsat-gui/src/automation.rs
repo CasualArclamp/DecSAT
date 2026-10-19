@@ -27,6 +27,12 @@ pub struct Options {
     /// Start the Fobos SDR tuned here, MHz (receive only). `--rate`, `--lo`
     /// and `--vga` (dB) apply to it too; `--lna` is its step, 0–3.
     pub fobos_mhz: Option<f64>,
+    /// Start the Airspy tuned here, MHz (receive only). `--rate` and `--lo`
+    /// apply to it too, and `--vga` is its gain step, 0–21.
+    pub airspy_mhz: Option<f64>,
+    /// Write the session log for this run (in the output folder), even on
+    /// an unattended run that otherwise leaves the user's settings alone.
+    pub session_log: bool,
     /// HackRF sample rate, MS/s.
     pub rate_msps: Option<f64>,
     /// HackRF RF amplifier on (+14 dB).
@@ -156,6 +162,7 @@ impl Options {
                     o.biss_key = Some(v.to_string_lossy().into_owned());
                 }
                 Some("--wireshark") => o.wireshark = true,
+                Some("--session-log") => o.session_log = true,
                 Some("--amp") => o.amp = true,
                 Some("--lna") => {
                     let v = args.next().ok_or("--lna needs dB")?;
@@ -200,7 +207,7 @@ impl Options {
                             .ok_or("--select needs a VFO number")?,
                     );
                 }
-                Some(flag @ ("--hackrf" | "--fobos" | "--rate" | "--lo")) => {
+                Some(flag @ ("--hackrf" | "--fobos" | "--airspy" | "--rate" | "--lo")) => {
                     let v: f64 = args
                         .next()
                         .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
@@ -208,6 +215,7 @@ impl Options {
                     match flag {
                         "--hackrf" => o.hackrf_mhz = Some(v),
                         "--fobos" => o.fobos_mhz = Some(v),
+                        "--airspy" => o.airspy_mhz = Some(v),
                         "--rate" => o.rate_msps = Some(v),
                         _ => o.lo_mhz = Some(v),
                     }
@@ -345,7 +353,9 @@ impl Automation {
         };
         let image = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                egui::Event::Screenshot {
+                    image, user_data, ..
+                } if !crate::snapshot::is_ours(user_data) => Some(image.clone()),
                 _ => None,
             })
         });

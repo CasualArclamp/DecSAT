@@ -1,13 +1,15 @@
 // made by CasualArclamp
-//! The radio panel: which receiver (HackRF One or Fobos SDR), its frequency,
+//! The radio panel: which receiver (HackRF One, Fobos SDR or Airspy), its frequency,
 //! sample rate, gains and the LNB LO, applied live while running.
 //!
-//! The tuning (`settings.center_hz`) is shared by both receivers, so the
+//! The tuning (`settings.center_hz`) is shared by all the receivers, so the
 //! frequency readout, panning and the beacon list need not know which one is
 //! chosen; each keeps its own sample rate and gains.
 
 use eframe::egui::{self, RichText};
 
+#[cfg(feature = "airspy")]
+use decsat_io::{AirspyControl, AirspyGainMode, AirspySettings};
 #[cfg(feature = "fobos")]
 use decsat_io::{FobosControl, FobosSettings};
 #[cfg(feature = "hackrf")]
@@ -32,6 +34,8 @@ pub enum Device {
     HackRf,
     #[cfg(feature = "fobos")]
     Fobos,
+    #[cfg(feature = "airspy")]
+    Airspy,
 }
 
 impl Device {
@@ -40,6 +44,8 @@ impl Device {
             Device::HackRf => "HackRF One",
             #[cfg(feature = "fobos")]
             Device::Fobos => "Fobos SDR",
+            #[cfg(feature = "airspy")]
+            Device::Airspy => "Airspy Mini / R2",
         }
     }
 
@@ -49,6 +55,8 @@ impl Device {
             Device::HackRf => "HackRF",
             #[cfg(feature = "fobos")]
             Device::Fobos => "Fobos",
+            #[cfg(feature = "airspy")]
+            Device::Airspy => "Airspy",
         }
     }
 
@@ -58,6 +66,8 @@ impl Device {
             Device::HackRf => "hackrf",
             #[cfg(feature = "fobos")]
             Device::Fobos => "fobos",
+            #[cfg(feature = "airspy")]
+            Device::Airspy => "airspy",
         }
     }
 
@@ -66,6 +76,8 @@ impl Device {
             "hackrf" => Some(Device::HackRf),
             #[cfg(feature = "fobos")]
             "fobos" => Some(Device::Fobos),
+            #[cfg(feature = "airspy")]
+            "airspy" => Some(Device::Airspy),
             _ => None,
         }
     }
@@ -76,6 +88,8 @@ impl Device {
             Device::HackRf,
             #[cfg(feature = "fobos")]
             Device::Fobos,
+            #[cfg(feature = "airspy")]
+            Device::Airspy,
         ]
     }
 
@@ -85,6 +99,17 @@ impl Device {
             Device::HackRf => 1e6,
             #[cfg(feature = "fobos")]
             Device::Fobos => decsat_io::fobos::FOBOS_MIN_HZ as f64,
+            #[cfg(feature = "airspy")]
+            Device::Airspy => decsat_io::airspy::AIRSPY_MIN_HZ as f64,
+        }
+    }
+
+    /// The highest frequency it tunes to, Hz.
+    pub fn max_hz(self) -> f64 {
+        match self {
+            #[cfg(feature = "airspy")]
+            Device::Airspy => decsat_io::airspy::AIRSPY_MAX_HZ as f64,
+            _ => 6e9,
         }
     }
 }
@@ -100,6 +125,8 @@ pub enum Live {
     HackRf(HackRfControl),
     #[cfg(feature = "fobos")]
     Fobos(FobosControl),
+    #[cfg(feature = "airspy")]
+    Airspy(AirspyControl),
 }
 
 #[cfg(feature = "hackrf")]
@@ -110,6 +137,8 @@ impl Live {
             Live::HackRf(c) => c.set_center(hz),
             #[cfg(feature = "fobos")]
             Live::Fobos(c) => c.set_center(hz),
+            #[cfg(feature = "airspy")]
+            Live::Airspy(c) => c.set_center(hz),
         }
     }
 
@@ -119,6 +148,8 @@ impl Live {
             Live::HackRf(c) => c.overflows(),
             #[cfg(feature = "fobos")]
             Live::Fobos(c) => c.overflows(),
+            #[cfg(feature = "airspy")]
+            Live::Airspy(c) => c.overflows(),
         }
     }
 
@@ -137,6 +168,9 @@ pub struct RadioPanel {
     /// The Fobos's rate and gains (its tuning is `settings.center_hz`).
     #[cfg(feature = "fobos")]
     pub fobos: FobosSettings,
+    /// The Airspy's rate and gain (its tuning is `settings.center_hz`).
+    #[cfg(feature = "airspy")]
+    pub airspy: AirspySettings,
     /// LNB local oscillator, MHz: the axis shows tuned + LO (0 = no LNB).
     pub lnb_lo_mhz: f64,
     pub error: Option<String>,
@@ -151,6 +185,8 @@ impl Default for RadioPanel {
             settings: HackRfSettings::default(),
             #[cfg(feature = "fobos")]
             fobos: FobosSettings::default(),
+            #[cfg(feature = "airspy")]
+            airspy: AirspySettings::default(),
             // A Ku LNB's 10.6 GHz LO (a universal LNB's high band; 9750
             // for its low band and QO-100).
             lnb_lo_mhz: 10_600.0,
@@ -172,6 +208,17 @@ impl RadioPanel {
             Device::HackRf => self.settings.sample_rate,
             #[cfg(feature = "fobos")]
             Device::Fobos => self.fobos.sample_rate,
+            #[cfg(feature = "airspy")]
+            Device::Airspy => self.airspy.sample_rate,
+        }
+    }
+
+    /// The settings the Airspy opens with: its own, at the shared tuning.
+    #[cfg(feature = "airspy")]
+    pub fn airspy_settings(&self) -> AirspySettings {
+        AirspySettings {
+            center_hz: self.settings.center_hz,
+            ..self.airspy
         }
     }
 
@@ -214,8 +261,9 @@ impl RadioPanel {
                     ui.label("Tuned");
                     let mut mhz = self.settings.center_hz as f64 / 1e6;
                     let lo = self.device.min_hz() / 1e6;
+                    let hi = self.device.max_hz() / 1e6;
                     if ui
-                        .add(egui::DragValue::new(&mut mhz).speed(0.01).range(lo..=6000.0).max_decimals(6).suffix(" MHz"))
+                        .add(egui::DragValue::new(&mut mhz).speed(0.01).range(lo..=hi).max_decimals(6).suffix(" MHz"))
                         .changed()
                     {
                         self.settings.center_hz = (mhz * 1e6).round() as u64;
@@ -235,6 +283,8 @@ impl RadioPanel {
                         Device::HackRf => self.hackrf_rows(ui, live),
                         #[cfg(feature = "fobos")]
                         Device::Fobos => self.fobos_rows(ui, live),
+                        #[cfg(feature = "airspy")]
+                        Device::Airspy => self.airspy_rows(ui, live),
                     }
                 });
 
@@ -242,6 +292,8 @@ impl RadioPanel {
                     Device::HackRf => "Receive only. Antenna-port power stays off — feed an LNB from an external inserter.",
                     #[cfg(feature = "fobos")]
                     Device::Fobos => "Receive only, RF input (50–6000 MHz). The Fobos does not power its antenna port — feed an LNB from an external inserter. Needs RigExpert's fobos_sdr.dll (agile firmware) or fobos.dll (stock) beside DecSAT.",
+                    #[cfg(feature = "airspy")]
+                    Device::Airspy => "Receive only, 24–1750 MHz: behind a Ku LNB, the IF up to about 1.7 GHz. The bias tee stays off — it cannot power an LNB; feed it from an external inserter. Pure Rust over USB (WinUSB driver), no DLL.",
                 };
                 ui.label(RichText::new(note).small().weak());
 
@@ -268,6 +320,15 @@ impl RadioPanel {
                             .weak(),
                         )
                         .on_hover_text(format!("{} {}", i.library, i.library_version));
+                    }
+                    #[cfg(feature = "airspy")]
+                    if let Live::Airspy(a) = c {
+                        let i = a.info();
+                        ui.label(
+                            RichText::new(format!("Airspy {} · {}", i.serial, i.firmware))
+                                .small()
+                                .weak(),
+                        );
                     }
                 }
 
@@ -398,6 +459,52 @@ impl RadioPanel {
         {
             match c.set_gains(f.gains) {
                 Ok(()) => f.gains = f.gains.snapped(),
+                Err(e) => self.error = Some(e.to_string()),
+            }
+        }
+    }
+
+    /// The Airspy's rate and gain.
+    #[cfg(feature = "airspy")]
+    fn airspy_rows(&mut self, ui: &mut egui::Ui, live: Option<&Live>) {
+        let a = &mut self.airspy;
+        let before = a.gains;
+        ui.label("Sample rate");
+        ui.add_enabled_ui(live.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("airspy_rate")
+                .selected_text(crate::format::rate(a.sample_rate as f64))
+                .show_ui(ui, |ui| {
+                    for r in decsat_io::AIRSPY_RATES {
+                        ui.selectable_value(&mut a.sample_rate, r, crate::format::rate(r as f64));
+                    }
+                });
+        })
+        .response
+        .on_hover_text("3 or 6 MS/s on a Mini (an R2: 2.5 or 10, the nearest is taken).")
+        .on_disabled_hover_text("Stop the radio to change the sample rate.");
+        ui.end_row();
+
+        ui.label("Gain table");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut a.gains.mode, AirspyGainMode::Linearity, "linearity")
+                .on_hover_text("Gain kept out of the mixer's compression: for an LNB's output and strong carriers.");
+            ui.selectable_value(&mut a.gains.mode, AirspyGainMode::Sensitivity, "sensitivity")
+                .on_hover_text("More gain up front: for weak carriers with nothing strong nearby.");
+        });
+        ui.end_row();
+
+        ui.label("Gain");
+        ui.add(egui::Slider::new(&mut a.gains.step, 0..=21))
+            .on_hover_text(
+                "One step of libairspy's gain table, 0–21. Behind an LNB, start around 8–12.",
+            );
+        ui.end_row();
+
+        if let Some(Live::Airspy(c)) = live
+            && a.gains != before
+        {
+            match c.set_gains(a.gains) {
+                Ok(()) => a.gains = a.gains.snapped(),
                 Err(e) => self.error = Some(e.to_string()),
             }
         }

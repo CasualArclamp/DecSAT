@@ -3863,11 +3863,10 @@ fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView, id: VfoId) {
             text.push_str(" · S2X fields reserved");
         }
         row(ui, "Forward link", RichText::new(text)).on_hover_text(format!(
-            "Satellite {} at {:.1}°{}, beam {}, NCC {}, link {} ({}). The frequency is the \
+            "Satellite {} at {}, beam {}, NCC {}, link {} ({}). The frequency is the \
              downlink the terminals tune.",
             f.satellite_id,
-            f.orbital_deg.abs(),
-            if f.orbital_deg >= 0.0 { "E" } else { "W" },
+            crate::orbit::label(f.orbital_deg),
             f.beam_id,
             f.ncc_id,
             f.local_link_id,
