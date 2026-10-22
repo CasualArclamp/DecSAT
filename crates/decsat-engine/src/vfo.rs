@@ -243,7 +243,9 @@ impl DecoderKind {
             DecoderKind::Cdm570Trunk => {
                 "CDM-570L trunk (TPC 2964 → G.728 voice + IP: ADS-B, radar)"
             }
-            DecoderKind::CdmAuto => "Type found (TPC 2964 or Viterbi; the model from its data)",
+            DecoderKind::CdmAuto => {
+                "Type found (TPC 2964 or Viterbi, DVB-S tried first on QPSK; the model from its data)"
+            }
             k => k.label(),
         }
     }
@@ -976,30 +978,51 @@ struct AutoPick {
 /// before the next is tried, s: TPC 2964's blind structure search takes a
 /// few seconds at the slow rates; the Viterbi's rate search less.
 pub const AUTO_LOCK_SECS: f64 = 10.0;
+/// DVB-S's budget, tried first on a QPSK carrier that may be one: it locks
+/// within 2 s (rate and RS sync found), so a modem's waits little longer.
+pub const AUTO_DVBS_SECS: f64 = 6.0;
 
 /// The chains the CDM type-found model may run.
-const AUTO_CHAINS: [DecoderKind; 3] = [
+const AUTO_CHAINS: [DecoderKind; 4] = [
     DecoderKind::Tpc2964,
     DecoderKind::Viterbi,
     DecoderKind::FastLink,
+    DecoderKind::DvbsTs,
 ];
 
+/// The signal a chain has to lock its code in, s.
+fn auto_lock_secs(kind: DecoderKind) -> f64 {
+    if kind == DecoderKind::DvbsTs {
+        AUTO_DVBS_SECS
+    } else {
+        AUTO_LOCK_SECS
+    }
+}
+
 /// The chain to try on a carrier Identify saw so: TPC 2964 when it found its
-/// unique word, a FastLink when it named one, else the K = 7 code (what the
-/// CDM-570L radar carriers run); one that failed before last, unless all
-/// have.
+/// unique word, a FastLink when it named one, DVB-S on QPSK it says may be
+/// DVB-S (its inner code is the K = 7 the Viterbi chain would lock and stay
+/// on, so DVB-S goes first), else the K = 7 code (what the CDM-570L radar
+/// carriers run); one that failed before last, unless all have.
 fn auto_chain(id: &Identification, failed: &[DecoderKind]) -> DecoderKind {
     let hint = match &id.verdict {
         Verdict::NotDvbS2 { hint } => hint.as_str(),
         _ => "",
     };
-    use DecoderKind::{FastLink, Tpc2964, Viterbi};
-    let order: [DecoderKind; 3] = if crate::identify::names_tpc(hint) {
-        [Tpc2964, Viterbi, FastLink]
+    use DecoderKind::{DvbsTs, FastLink, Tpc2964, Viterbi};
+    let maybe_dvbs = hint.contains("DVB-S (")
+        && matches!(
+            id.constellation,
+            Some(crate::identify::ConstellationGuess::Qpsk)
+        );
+    let order: [DecoderKind; 4] = if crate::identify::names_tpc(hint) {
+        [Tpc2964, Viterbi, FastLink, DvbsTs]
     } else if hint.contains("FastLink") {
-        [FastLink, Tpc2964, Viterbi]
+        [FastLink, Tpc2964, Viterbi, DvbsTs]
+    } else if maybe_dvbs {
+        [DvbsTs, Viterbi, Tpc2964, FastLink]
     } else {
-        [Viterbi, Tpc2964, FastLink]
+        [Viterbi, Tpc2964, FastLink, DvbsTs]
     };
     order
         .into_iter()
@@ -1008,9 +1031,13 @@ fn auto_chain(id: &Identification, failed: &[DecoderKind]) -> DecoderKind {
 }
 
 /// A chain has locked its code: TPC 2964 frames decoded, the K = 7 code's
-/// rate found, FastLink codewords decoded.
+/// rate found, FastLink codewords decoded, DVB-S's rate and packets found.
 fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
     match kind {
+        DecoderKind::DvbsTs => f
+            .dvbs
+            .as_ref()
+            .is_some_and(|d| d.rate.is_some() && d.packets > 0),
         DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| t.decoded > 0),
         DecoderKind::Viterbi => {
             f.viterbi.as_ref().is_some_and(|v| v.rate.is_some())
@@ -1137,6 +1164,25 @@ const FOLLOW_MIN_HZ: f64 = 5.0;
 const FOLLOW_MIN_RS: f64 = 1e-3;
 
 impl Worker {
+    /// The decoder is being replaced: its FEC thread is retired (it stops
+    /// after the input in hand and is joined in the background — dropped
+    /// with the decoder, it was waited for, and switching a Comtech chain
+    /// that was deep in a search to DVB-S held the VFO for minutes), its
+    /// CID thread told to stop.
+    fn retire_threads(&mut self) {
+        match &mut self.decoder {
+            Decoder::Dvbs2 { fec, .. } | Decoder::Modem { fec, .. } | Decoder::Psk { fec, .. } => {
+                if let Some(w) = fec.take() {
+                    w.retire();
+                }
+            }
+            Decoder::Cid {
+                worker: Some(w), ..
+            } => w.quit(),
+            _ => {}
+        }
+    }
+
     /// Tell the FEC or CID thread to stop after its current input.
     fn quit_threads(&self) {
         match &self.decoder {
@@ -1362,6 +1408,7 @@ impl Worker {
         // would be worse); everything that analyses the signal starts afresh.
         let analyses = !matches!(self.decoder, Decoder::Record { .. } | Decoder::Spectrum);
         if (signal_changed && analyses) || new_decoder {
+            self.retire_threads();
             self.decoder = Self::make_decoder(&self.settings, &self.ddc);
             self.modcods.clear();
             self.last_modcod = None;
@@ -1730,23 +1777,48 @@ impl Worker {
                     // look picks it).
                     if let Some(a) = auto.as_mut().filter(|a| !a.settled) {
                         a.samples += self.bb.len();
-                        if a.samples as f64 >= AUTO_LOCK_SECS * out_rate {
+                        if a.samples as f64 >= auto_lock_secs(*kind) * out_rate {
                             let locked =
                                 fec.as_ref().is_some_and(|w| code_locked(*kind, &w.stats()));
                             if locked {
                                 a.settled = true;
                             } else {
+                                // DVB-S that found its inner code (the K = 7
+                                // a Comtech's Viterbi carrier shares) but no
+                                // RS sync: the demodulator and its rate are
+                                // right, so it runs on into the next chain.
+                                // A fresh first look could measure the rate
+                                // worse on a weak carrier, and lose it.
+                                let inner_found = *kind == DecoderKind::DvbsTs
+                                    && fec.as_ref().is_some_and(|w| {
+                                        w.stats().dvbs.is_some_and(|s| s.rate.is_some())
+                                    });
                                 a.failed.push(*kind);
                                 if AUTO_CHAINS.iter().all(|k| a.failed.contains(k)) {
                                     a.failed.clear();
                                 }
                                 a.samples = 0;
                                 if let Some(w) = fec.take() {
-                                    w.quit();
+                                    w.retire();
                                 }
-                                *demod = None;
-                                buf.clear();
-                                *kind = DecoderKind::CdmAuto;
+                                match self.identification.as_ref().filter(|_| inner_found) {
+                                    Some(id) => {
+                                        *kind = auto_chain(id, &a.failed);
+                                        *fec = Some(
+                                            FecWorker::spawn(
+                                                d.symbol_rate(),
+                                                fec_output(&self.settings, &self.ddc, &self.plans),
+                                                self.pending.clone(),
+                                            )
+                                            .lossless(self.lossless),
+                                        );
+                                    }
+                                    None => {
+                                        *demod = None;
+                                        buf.clear();
+                                        *kind = DecoderKind::CdmAuto;
+                                    }
+                                }
                             }
                         }
                     }
@@ -3964,14 +4036,13 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn dvbs_vfo_decodes_the_transport_stream() {
-        use decsat_mod::{Shaper, TsBbFramer};
-        use decsat_modem::conv::Rate;
+    /// A DVB-S carrier at `rate`, 125 kBd at 40 kHz in a 500 kS/s band,
+    /// carrying the test signal's TS.
+    fn dvbs_test_carrier(rate: decsat_modem::conv::Rate) -> Vec<Iq> {
+        use decsat_mod::TsBbFramer;
         use decsat_modem::dvbs::DvbsTx;
-        // A DVB-S carrier, rate 5/6, 125 kBd at 40 kHz in a 500 kS/s band.
         let mut ts = TsBbFramer::new(11);
-        let mut tx = DvbsTx::new(Rate::R5_6);
+        let mut tx = DvbsTx::new(rate);
         let mut syms = Vec::new();
         while syms.len() < 320_000 {
             tx.packet(&ts.packet(), &mut syms);
@@ -3987,6 +4058,118 @@ mod tests {
             let ph = w * n as f64;
             *v *= Iq::new(ph.cos() as f32, ph.sin() as f32);
         }
+        x
+    }
+
+    /// The CDM type-found model on a DVB-S carrier: Identify's "possibly
+    /// DVB-S" puts the DVB-S chain first, and it locks (the Viterbi chain
+    /// would have locked the inner code and stayed, as Comtech).
+    #[test]
+    fn cdm_type_found_tries_dvbs_first_on_qpsk() {
+        let x = dvbs_test_carrier(decsat_modem::conv::Rate::R1_2);
+        let settings = VfoSettings::new("A", 40_000.0, 190_000.0, DecoderKind::CdmAuto);
+        let status = Arc::new(Mutex::new(VfoStatus::default()));
+        let mut wk = Worker::new(
+            500_000.0,
+            settings,
+            status.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        feed(&mut wk, &x, 65_536);
+        let t0 = Instant::now();
+        loop {
+            wk.publish(0);
+            {
+                let st = status.lock().unwrap();
+                let locked = st
+                    .fec
+                    .as_ref()
+                    .is_some_and(|f| code_locked(DecoderKind::DvbsTs, f));
+                if locked {
+                    assert_eq!(st.chain, Some(DecoderKind::DvbsTs));
+                    break;
+                }
+                assert!(
+                    t0.elapsed().as_secs() < 20,
+                    "not locked as DVB-S: {} / {:?}",
+                    st.message,
+                    st.chain
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The CDM type-found model on a Comtech-like K = 7 carrier (rate ½,
+    /// QPSK, no RS framing), which Identify also calls "possibly DVB-S":
+    /// DVB-S is tried first and finds the inner code but no packets, and
+    /// the Viterbi chain takes over on the same demodulator and locks.
+    #[test]
+    fn cdm_type_found_falls_back_from_dvbs_to_the_viterbi() {
+        use decsat_modem::conv::{Encoder, Rate};
+        // 25 kBd for 16 s at 8 kHz in a 100 kS/s band, random data (the
+        // budgets are signal time: slow, the test is quick).
+        let mut enc = Encoder::new(Rate::R1_2);
+        let mut coded = Vec::new();
+        let mut r = 12_345u32;
+        while coded.len() < 2 * 400_000 {
+            r = r.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            enc.push((r >> 31) as u8, &mut coded);
+        }
+        let k = std::f32::consts::FRAC_1_SQRT_2;
+        let pm = |b: u8| if b == 0 { k } else { -k };
+        let syms: Vec<Iq> = coded
+            .chunks(2)
+            .map(|c| Iq::new(pm(c[0]), pm(c[1])))
+            .collect();
+        let mut sh = Shaper::new(4, 0.35, 16);
+        let mut x = Vec::new();
+        sh.process(&syms, &mut x);
+        let w = std::f64::consts::TAU * 8_000.0 / 100_000.0;
+        for (n, v) in x.iter_mut().enumerate() {
+            let ph = w * n as f64;
+            *v *= Iq::new(ph.cos() as f32, ph.sin() as f32);
+        }
+        let settings = VfoSettings::new("A", 8_000.0, 38_000.0, DecoderKind::CdmAuto);
+        let status = Arc::new(Mutex::new(VfoStatus::default()));
+        let mut wk = Worker::new(
+            100_000.0,
+            settings,
+            status.clone(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        // In step with the FEC thread, as a file is played: each chain's
+        // budget is signal time, and its verdict must see that signal.
+        wk.lossless = true;
+        feed(&mut wk, &x, 16_384);
+        let t0 = Instant::now();
+        loop {
+            wk.publish(0);
+            {
+                let st = status.lock().unwrap();
+                let locked = st
+                    .fec
+                    .as_ref()
+                    .is_some_and(|f| code_locked(DecoderKind::Viterbi, f));
+                if locked && st.chain == Some(DecoderKind::Viterbi) {
+                    break;
+                }
+                assert!(
+                    t0.elapsed().as_secs() < 30,
+                    "Viterbi not locked after DVB-S: {} / {:?}",
+                    st.message,
+                    st.chain
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn dvbs_vfo_decodes_the_transport_stream() {
+        use decsat_modem::conv::Rate;
+        // A DVB-S carrier, rate 5/6.
+        let x = dvbs_test_carrier(Rate::R5_6);
         let settings = VfoSettings::new("S", 40_000.0, 190_000.0, DecoderKind::DvbsTs);
         let status = Arc::new(Mutex::new(VfoStatus::default()));
         let mut wk = Worker::new(
