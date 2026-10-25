@@ -86,7 +86,9 @@ impl RtlControl {
     pub fn tune(&self, hz:u32) { if let Ok(mut p)=self.0.lock(){p.frequency=Some(hz);} }
     pub fn gain(&self, manual:bool, tenths:i32) { if let Ok(mut p)=self.0.lock(){p.gain=Some((manual,tenths));} }
 }
-pub struct RtlSource {api:Api, dev:*mut c_void,settings:RtlSettings, bytes:Vec<u8>,control:RtlControl,tuner:RtlTunerInfo}
+/// Resets of the USB buffer tried after a failed read before the stream is declared dead.
+const MAX_USB_RECOVERIES:u32=3;
+pub struct RtlSource {api:Api, dev:*mut c_void,settings:RtlSettings, bytes:Vec<u8>,control:RtlControl,tuner:RtlTunerInfo,usb_errors:u32}
 unsafe impl Send for RtlSource {}
 impl RtlSource {
  pub fn control(&self)->RtlControl {self.control.clone()}
@@ -127,16 +129,25 @@ impl RtlSource {
  if s.manual_gain {let code=unsafe{(api.gain)(d,tuner.nearest_gain(s.gain_tenths))};if code!=0{return Err(Error::Other(format!("RTL-SDR: tuner gain failed ({code})")));}}
  let code=unsafe{(api.reset)(d)};if code!=0{return Err(Error::Other(format!("RTL-SDR: reset failed ({code})")));}Ok(())})();
  if let Err(e)=setup {unsafe{(api.close)(d)};return Err(e)}
- Ok(Self{api,dev:d,settings:s,bytes:vec![0;32768],control:RtlControl(Arc::new(Mutex::new(PendingControl{tuner:Some(tuner.clone()),..PendingControl::default()}))),tuner})
+ Ok(Self{api,dev:d,settings:s,bytes:vec![0;32768],control:RtlControl(Arc::new(Mutex::new(PendingControl{tuner:Some(tuner.clone()),..PendingControl::default()}))),tuner,usb_errors:0})
 }}
 impl Drop for RtlSource {fn drop(&mut self){unsafe{(self.api.close)(self.dev);}}}
 impl IqSource for RtlSource {
  fn read(&mut self,out:&mut Vec<Iq>)->Result<usize>{
   self.apply_controls()?;
   let mut n=0;
-  let code=unsafe{(self.api.read)(self.dev,self.bytes.as_mut_ptr().cast(),self.bytes.len() as c_int,&mut n)};
+  let mut code=unsafe{(self.api.read)(self.dev,self.bytes.as_mut_ptr().cast(),self.bytes.len() as c_int,&mut n)};
+  // A stalled bulk endpoint (libusb -9, PIPE) is what rtlsdr_reset_buffer clears, so
+  // try that a few times before giving up; a dead device fails the same way every time.
+  for _ in 0..MAX_USB_RECOVERIES {
+    if code==0 {break;}
+    self.usb_errors+=1;
+    if unsafe{(self.api.reset)(self.dev)}!=0 {break;}
+    n=0;
+    code=unsafe{(self.api.read)(self.dev,self.bytes.as_mut_ptr().cast(),self.bytes.len() as c_int,&mut n)};
+  }
   if code!=0 {
-    return Err(Error::Other(format!("RTL-SDR: USB read failed ({code}). Streaming stopped; check USB/WinUSB driver, power and compatible RTL DLLs. This is not a frequency-retune requirement.")));
+    return Err(Error::Other(format!("RTL-SDR: USB read failed ({code}) after {} recoveries. Streaming stopped; check USB/WinUSB driver, power and compatible RTL DLLs. This is not a frequency-retune requirement.",self.usb_errors)));
   }
   if n<0 || n as usize>self.bytes.len() || n%2!=0 {
     return Err(Error::Other(format!("RTL-SDR: invalid USB read size {n}")));
@@ -147,6 +158,6 @@ impl IqSource for RtlSource {
  }
  fn sample_rate(&self)->f64{self.settings.rate as f64}
  fn center_freq(&self)->f64{self.settings.center_hz as f64}
- fn describe(&self)->String{format!("RTL-SDR #{} @ {:.3} MS/s",self.settings.device_index,self.settings.rate as f64/1e6)}
+ fn describe(&self)->String{format!("RTL-SDR #{} @ {:.3} MS/s, USB recoveries {}",self.settings.device_index,self.settings.rate as f64/1e6,self.usb_errors)}
  fn is_live(&self)->bool{true}
 }
