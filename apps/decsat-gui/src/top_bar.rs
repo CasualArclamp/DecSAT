@@ -96,7 +96,9 @@ impl App {
             self.play_button(ui);
             ui.add_space(8.0);
             self.input_meter(ui);
-            ui.add_space(14.0);
+            ui.add_space(6.0);
+            self.snapshot_button(ui);
+            ui.add_space(10.0);
             let mut rf = self.rf_center();
             if freq_display::show(ui, &mut rf, 0.0, 999_999_999_999.0, 34.0) {
                 self.set_rf_center(rf);
@@ -212,7 +214,7 @@ impl App {
             (None, _) => Play::Nothing,
         };
         #[cfg(feature = "hackrf")]
-        let what = match (&self.path, &self.hackrf) {
+        let what = match (&self.path, &self.live) {
             (None, Some(_)) => Play::StopRadio,
             (None, None) => Play::StartRadio,
             (Some(_), _) => file,
@@ -225,14 +227,18 @@ impl App {
             Play::TogglePause => !self.paused,
             _ => false,
         };
-        let (text, tip) = match what {
+        #[cfg(feature = "hackrf")]
+        let radio = self.radio.device.name();
+        #[cfg(feature = "hackrf")]
+        let (start_tip, stop_tip) = (
+            format!("Start the {radio} with its settings (File ▸ Radio settings…)"),
+            format!("Stop the {radio}"),
+        );
+        let (text, tip): (&str, &str) = match what {
             #[cfg(feature = "hackrf")]
-            Play::StartRadio => (
-                "▶ Start",
-                "Start the HackRF with its settings (File ▸ HackRF settings…)",
-            ),
+            Play::StartRadio => ("▶ Start", &start_tip),
             #[cfg(feature = "hackrf")]
-            Play::StopRadio => ("⏹ Stop", "Stop the HackRF"),
+            Play::StopRadio => ("⏹ Stop", &stop_tip),
             Play::TogglePause if self.paused => ("▶ Play", "Carry on playing the file"),
             Play::TogglePause => ("⏸ Pause", "Pause the file"),
             Play::OpenFile => ("▶ Play", "Play the file from the start"),
@@ -261,15 +267,15 @@ impl App {
         match what {
             #[cfg(feature = "hackrf")]
             Play::StartRadio => {
-                self.start_hackrf();
+                self.start_radio();
                 if let Some(e) = &self.radio.error {
-                    self.note = format!("HackRF: {e}");
+                    self.note = format!("{}: {e}", self.radio.device.short());
                 }
             }
             #[cfg(feature = "hackrf")]
             Play::StopRadio => {
                 self.stop_source();
-                self.note = "HackRF stopped.".into();
+                self.note = format!("{} stopped.", self.radio.device.short());
             }
             Play::TogglePause => {
                 self.paused = !self.paused;
@@ -326,16 +332,28 @@ impl App {
             };
             // Live: the USB buffers dropped too (a new `text` shadows the old).
             #[cfg(feature = "hackrf")]
-            let text = match &self.hackrf {
+            let text = match &self.live {
                 Some(c) => format!("{text} · {} drops", c.overflows()),
                 None => text,
             };
+            // The overload advice is the HackRF's; a Fobos (14 bits, its own
+            // AGC-free chain) is judged by the level alone.
+            #[cfg(feature = "hackrf")]
+            let hackrf = self.path.is_some() || self.radio.device == crate::radio::Device::HackRf;
+            #[cfg(not(feature = "hackrf"))]
+            let hackrf = true;
             let label = if strong {
                 RichText::new(text).color(ORANGE)
             } else {
                 RichText::new(text).weak()
             };
-            let tip = if strong {
+            let tip = if strong && !hackrf {
+                "Strong input, close to the ADC's full scale: lower the gain (the VGA or LNA \
+                 step on a Fobos, the gain step on an Airspy) in the radio settings."
+            } else if !hackrf {
+                "The samples' RMS level, relative to full scale. Drops: USB buffers lost \
+                 since Start because the PC fell behind."
+            } else if strong {
                 "Strong input: the HackRF's RF chain overloads long before its ADC clips, \
                  and carriers then slip and lose frames (at LNA 40 a 14 dB carrier lost \
                  most of its frames; at LNA 24 none). Lower the LNA gain in the HackRF \
@@ -356,7 +374,7 @@ impl App {
             ui.add_space(8.0);
             #[cfg(feature = "hackrf")]
             if self.path.is_none() {
-                let live = self.hackrf.is_some();
+                let live = self.live.is_some();
                 let trim = if self.lo_trim_hz != 0.0 {
                     format!("  ·  trim {:+.3} kHz", self.lo_trim_hz / 1e3)
                 } else {
@@ -424,10 +442,10 @@ impl App {
             }
             #[cfg(feature = "hackrf")]
             None => {
-                let live = self.hackrf.is_some();
-                let rate = format::rate(self.radio.settings.sample_rate as f64);
+                let live = self.live.is_some();
+                let rate = format::rate(self.radio.sample_rate() as f64);
                 let dot = if live { "● " } else { "" };
-                (format!("{dot}HackRF · {rate}"), live)
+                (format!("{dot}{} · {rate}", self.radio.device.short()), live)
             }
             #[cfg(not(feature = "hackrf"))]
             None => ("No source".to_string(), false),
@@ -440,19 +458,23 @@ impl App {
         ui.menu_button(text, |ui| {
             #[cfg(feature = "hackrf")]
             {
-                if ui
-                    .selectable_label(self.path.is_none(), "📡 HackRF")
-                    .on_hover_text("Live from the HackRF One: ▶ Start starts it")
-                    .clicked()
-                {
-                    if self.path.is_some() {
-                        self.stop_source();
-                        self.path = None;
-                        self.paused = false;
+                for &d in crate::radio::Device::all() {
+                    let chosen = self.path.is_none() && self.radio.device == d;
+                    if ui
+                        .selectable_label(chosen, format!("📡 {}", d.name()))
+                        .on_hover_text(format!("Live from the {}: ▶ Start starts it", d.name()))
+                        .clicked()
+                    {
+                        if self.path.is_some() || (self.radio.device != d && self.live.is_some()) {
+                            self.stop_source();
+                            self.path = None;
+                            self.paused = false;
+                        }
+                        self.radio.device = d;
+                        ui.close();
                     }
-                    ui.close();
                 }
-                if ui.button("HackRF settings…").clicked() {
+                if ui.button("Radio settings…").clicked() {
                     self.radio.open = true;
                     ui.close();
                 }
@@ -464,7 +486,46 @@ impl App {
             }
         })
         .response
-        .on_hover_text("The source: the HackRF or an IQ file");
+        .on_hover_text("The source: a radio (HackRF One, Fobos SDR) or an IQ file");
+    }
+
+    /// 📷: the spectrum and waterfall to a PNG (right-click: the whole
+    /// window); a 📝 beside it while the session log is written.
+    fn snapshot_button(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let r = ui
+                    .add_enabled(
+                        !self.snapshot.busy(),
+                        egui::Button::new(RichText::new("📷").size(18.0))
+                            .min_size(egui::vec2(36.0, 30.0)),
+                    )
+                    .on_hover_text(format!(
+                        "Snapshot of the spectrum and waterfall (F12), with a caption: \
+                         receiver, tuning, LNB LO, satellite and UTC time. Right-click \
+                         (or Shift+F12) for the whole window. Saved as PNG in:\n{}",
+                        prefs::output_dir().display()
+                    ));
+                if r.clicked() {
+                    self.take_snapshot(ui.ctx(), crate::snapshot::Area::Band);
+                } else if r.secondary_clicked() {
+                    self.take_snapshot(ui.ctx(), crate::snapshot::Area::Window);
+                }
+                if self.log.is_on() {
+                    let path = self
+                        .log
+                        .path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    ui.label(RichText::new("📝").color(GREEN))
+                        .on_hover_text(format!(
+                            "Session log on: {} lines so far\n{path}\n(File ▸ Session log to stop)",
+                            self.log.lines()
+                        ));
+                }
+            });
+        });
     }
 
     fn file_menu(&mut self, ui: &mut egui::Ui) {
@@ -474,15 +535,15 @@ impl App {
         }
         #[cfg(feature = "hackrf")]
         if ui
-            .button("📡 HackRF settings…")
-            .on_hover_text("Frequency, sample rate, gains and LNB LO of the HackRF One")
+            .button("📡 Radio settings…")
+            .on_hover_text("The receiver (HackRF One or Fobos SDR), its frequency, sample rate, gains and the LNB LO")
             .clicked()
         {
             self.radio.open = !self.radio.open;
             ui.close();
         }
         #[cfg(not(feature = "hackrf"))]
-        ui.add_enabled(false, egui::Button::new("📡 HackRF settings…"))
+        ui.add_enabled(false, egui::Button::new("📡 Radio settings…"))
             .on_disabled_hover_text("Built without the hackrf feature.");
         if ui
             .button("📁 Output folder…")
@@ -495,6 +556,62 @@ impl App {
             ui.close();
             self.pick_output_dir();
         }
+        ui.separator();
+        if ui
+            .button("📷 Snapshot: spectrum + waterfall   F12")
+            .clicked()
+        {
+            ui.close();
+            self.take_snapshot(ui.ctx(), crate::snapshot::Area::Band);
+        }
+        if ui.button("📷 Snapshot: whole window   Shift+F12").clicked() {
+            ui.close();
+            self.take_snapshot(ui.ctx(), crate::snapshot::Area::Window);
+        }
+        let mut on = self.log.is_on();
+        if ui
+            .checkbox(&mut on, "📝 Session log")
+            .on_hover_text(
+                "Write what the VFOs report — Identify's verdicts, decoder messages, lock \
+                 and loss, new MODCODs, text found in the bits, a summary a minute — and \
+                 the app's notes to decsat-log-<UTC>.csv in the output folder, for reading \
+                 back later. Remembered between runs.",
+            )
+            .changed()
+        {
+            self.set_session_log(on);
+        }
+        if let Some(e) = &self.log.error {
+            ui.colored_label(RED, e);
+        }
+        ui.horizontal(|ui| {
+            ui.label("PCAP parts");
+            let mut min = decsat_engine::fec::pcap_rotate_minutes();
+            let text = |m: u64| {
+                if m == 0 {
+                    "one file".to_string()
+                } else {
+                    format!("every {m} min")
+                }
+            };
+            egui::ComboBox::from_id_salt("pcap_rotate")
+                .selected_text(text(min))
+                .show_ui(ui, |ui| {
+                    for m in [0u64, 1, 5, 10, 15, 30, 60] {
+                        if ui.selectable_value(&mut min, m, text(m)).changed() {
+                            decsat_engine::fec::set_pcap_rotate_minutes(m);
+                            prefs::set_pcap_rotate_minutes(m);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "While a PCAP records, start a new file this often. Each closed part is \
+                     a whole capture, so BruteShark or NetworkMiner can take the parts while \
+                     the recording goes on. Live Wireshark is fed through a pipe, not a \
+                     network port, so tools that read files take the parts instead.",
+                );
+        });
         ui.separator();
         ui.label(RichText::new("Raw IQ files").weak())
             .on_hover_text("How a raw capture is read; a WAV file's header sets them itself");

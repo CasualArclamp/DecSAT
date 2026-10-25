@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -1336,6 +1336,26 @@ impl TerminalView {
     }
 }
 
+/// How long one PCAP file runs before the next is started, seconds; 0 keeps
+/// one file per recording. A closed part is complete (flushed), so a tool
+/// that reads finished captures — BruteShark, NetworkMiner — can take the
+/// parts while the recording goes on.
+///
+/// Rust note: an atomic in a `static` is a process-wide setting any thread
+/// may read without a lock; the GUI sets it from its preferences, the CLI
+/// from `--pcap-rotate`.
+static PCAP_ROTATE_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Start a new PCAP file every `minutes` while recording (0: never).
+pub fn set_pcap_rotate_minutes(minutes: u64) {
+    PCAP_ROTATE_SECS.store(minutes.saturating_mul(60), Ordering::Relaxed);
+}
+
+/// The PCAP rotation, minutes (0: off).
+pub fn pcap_rotate_minutes() -> u64 {
+    PCAP_ROTATE_SECS.load(Ordering::Relaxed) / 60
+}
+
 /// Where and whether a VFO's FEC writes its output.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FecOutput {
@@ -1631,6 +1651,10 @@ struct IpStage {
     stats: IpStats,
     packets: Vec<IpPacket>,
     pcap: Option<PcapWriter>,
+    /// When the PCAP now being written was started (for its rotation),
+    /// and how many parts this recording has had.
+    pcap_since: Option<Instant>,
+    pcap_parts: u32,
     path: Option<PathBuf>,
     error: Option<String>,
     /// Wireshark capturing the IP live (`crate::wireshark`), the ask it
@@ -1749,6 +1773,8 @@ impl IpStage {
             stats: IpStats::default(),
             packets: Vec::new(),
             pcap: None,
+            pcap_since: None,
+            pcap_parts: 0,
             path: None,
             error: None,
             wireshark: None,
@@ -1852,20 +1878,47 @@ impl IpStage {
                 Err(e) => self.record_error = Some(format!("{}: {e}", st.name())),
             }
         }
+        // A part that has run its time is closed (flushed whole) and the
+        // next opened below, as a new file.
+        let rotate = PCAP_ROTATE_SECS.load(Ordering::Relaxed);
+        if o.pcap
+            && rotate > 0
+            && self
+                .pcap_since
+                .is_some_and(|t| t.elapsed().as_secs() >= rotate)
+            && let Some(mut w) = self.pcap.take()
+        {
+            let _ = w.flush();
+        }
         match (o.pcap, self.pcap.is_some()) {
             (true, false) if self.error.is_none() => {
                 let stamp = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
+                // The first part keeps the name a single file always had;
+                // later parts say which they are.
+                self.pcap_parts = if self.pcap_since.is_some() {
+                    self.pcap_parts + 1
+                } else {
+                    1
+                };
+                let part = if self.pcap_parts > 1 {
+                    format!("-part{:03}", self.pcap_parts)
+                } else {
+                    String::new()
+                };
                 let path = o.dir.join(format!(
-                    "decsat-{}-{}-{stamp}.pcap",
+                    "decsat-{}-{}-{stamp}{part}.pcap",
                     o.name.replace(' ', "_"),
                     crate::rf::freq_tag(o.carrier_hz)
                 ));
                 let _ = std::fs::create_dir_all(&o.dir);
                 match PcapWriter::create(&path) {
-                    Ok(w) => self.pcap = Some(w),
+                    Ok(w) => {
+                        self.pcap = Some(w);
+                        self.pcap_since = Some(Instant::now());
+                    }
                     Err(e) => self.error = Some(format!("{}: {e}", path.display())),
                 }
                 self.path = Some(path);
@@ -1874,8 +1927,12 @@ impl IpStage {
                 if let Some(mut w) = self.pcap.take() {
                     let _ = w.flush();
                 }
+                self.pcap_since = None;
             }
-            (false, false) => self.error = None,
+            (false, false) => {
+                self.error = None;
+                self.pcap_since = None;
+            }
             _ => {}
         }
     }
@@ -3661,6 +3718,52 @@ mod tests {
     /// 0010h and seven transport packets (the Eutelsat 172B BBC feed's form)
     /// become the VFO's MPEG-TS — its service listed, its packets handed to
     /// the player's tap — and a TS decoder's IP stage leaves them alone.
+    #[test]
+    fn a_long_pcap_recording_is_cut_into_whole_parts() {
+        // Seconds, not minutes, so the test runs quickly; set directly
+        // rather than through the minutes setter.
+        PCAP_ROTATE_SECS.store(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("decsat-pcap-rot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let o = FecOutput {
+            pcap: true,
+            dir: dir.clone(),
+            name: "VFO 1".into(),
+            ..FecOutput::default()
+        };
+        let d = decsat_ip::packet::udp_v4([10, 0, 0, 1], [10, 0, 0, 2], 1000, 2000, b"hello");
+        let mut ip = IpStage::new();
+        ip.follow(&o);
+        for _ in 0..3 {
+            for _ in 0..5 {
+                ip.ip(&d, &decsat_ip::parse(&d).unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            ip.follow(&o);
+        }
+        ip.follow(&FecOutput {
+            pcap: false,
+            ..o.clone()
+        });
+        PCAP_ROTATE_SECS.store(0, Ordering::Relaxed);
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(
+            names.iter().filter(|n| n.contains("-part")).count() == 3,
+            "{names:?}"
+        );
+        // Every closed part is a whole capture: header + 5 packets.
+        for n in names.iter().filter(|n| !n.contains("part004")) {
+            let packets = decsat_ip::read_pcap(&dir.join(n)).unwrap();
+            assert_eq!(packets.len(), 5, "{n}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn transport_packets_in_udp_become_the_ts_and_reach_the_tap() {
         // A PSI section in a packet of its own (ISO/IEC 13818-1 §2.4.4):

@@ -76,6 +76,9 @@ real carriers stay put.
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
 | **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
+| **Live Fobos SDR** (RigExpert), 8–50 MS/s, 14 bits: RigExpert's library loaded at run time (agile or stock firmware), the same waterfall, VFOs, retuning and decoders as the HackRF | 🟡 tested against RigExpert's library and a replaying stand-in; not yet on a board |
+| **Live Airspy Mini / R2**, 3/6 MS/s (2.5/10 on an R2), 12 bits, 24–1750 MHz: pure Rust over USB (`libairspy-rs`, no DLL), bias tee always off | 🟡 against the library's own tests; not yet on a board |
+| **📷 Snapshots** of the spectrum and waterfall (or the window) to PNG, captioned; **session log** to CSV; **PCAP in parts** for tools that read finished captures; the **satellite named** from the orbital position a NIT or RCS map signals | ✅ |
 | **LDPC + BCH → BBFRAMEs**: all 21 S2 and 31 S2X codes, BBHEADER, stream info, payload rate | ✅ |
 | **S2X**: 8-bit PLS code, all 55 normal/short MODCODs — 2+4+2 8APSK to 256APSK, the new interleavers | ✅ |
 | **S2X VL-SNR**: the VL-SNR header, pi/2-BPSK (and spread), medium FECFRAMEs, all 9 MODCODs — down to about 0 dB Es/N0 so far | ✅ |
@@ -1123,6 +1126,100 @@ VFOs, which removes the spike the HackRF leaves at the centre frequency.
 Its notch is under a hertz wide, so a carrier a few tens of hertz off the
 centre (a VFO recording replayed is centred on its carrier) keeps its
 phase.
+
+### Fobos SDR
+
+The RigExpert Fobos SDR is the other live receiver: 50–6000 MHz on its RF
+input, 8–50 MS/s of 14-bit IQ (58 and 64 on a rev. 4 board) — a whole
+40 MHz of a Ku LNB's IF at once, which the HackRF cannot stream. Choose it
+in **File ▸ 📡 Radio settings…** (or the source at the right of the menu
+bar), then ▶ Start; everything else — waterfall, VFOs, panning past the
+edge to retune, the beacon list, Survey — works as with the HackRF, on the
+same tuning and LNB LO.
+
+DecSAT talks to it through RigExpert's own library, loaded when Start is
+pressed, so nothing extra is needed to build. Put the 64-bit library beside
+`decsat-gui.exe`: **`fobos_sdr.dll`** (libfobos-sdr-agile) for a board on the
+*agile* firmware, **`fobos.dll`** (libfobos) for the stock firmware — the
+first one that finds a board is used; on Linux `libfobos_sdr.so` /
+`libfobos.so` on the library path. `DECSAT_FOBOS_LIB` names the file to use
+instead. The board needs the USB driver RigExpert's installer sets up.
+
+- **Gains:** the RF LNA in four steps (0–3; 2 ≈ +16 dB, 3 ≈ +33 dB) and the
+  IF VGA, 0–62 dB in 2 dB steps, applied live. Behind an LNB, start with LNA
+  0–1 and raise the VGA until the input meter sits around −30 to −20 dBFS.
+- **Rate:** the board's nearest rate to the one chosen; fixed while running
+  (the firmware is not asked to change it mid-stream). Above ~20 MS/s the
+  PC sets the limit: every VFO's DDC runs on the full rate.
+- **Clock:** an external 10 MHz on CLK IN, if ticked.
+- The library removes DC and balances I/Q itself; its samples (±0.25 full
+  scale) are scaled to ±1, so the input meter reads dBFS as for the HackRF.
+- Receive only, RF input only (the HF direct-sampling inputs are not used).
+  The Fobos does not power its antenna port: feed an LNB from an inserter.
+- The HackRF's own artefacts (Bluetooth in its IF, its overload advice) are
+  not marked while the Fobos runs, and transmitting with a HackRF no longer
+  stops a Fobos receive session.
+
+```
+decsat-gui --fobos 1748 --rate 20 --lo 10600 --vga 30
+decsat decode --fobos 1748 --rate 20e6 --fobos-lna 1 --fobos-vga 30 --decoder id --offset -915e3 --bandwidth 640e3
+```
+
+### Airspy Mini / R2
+
+A third live receiver: an Airspy Mini (3 or 6 MS/s) or R2 (2.5 or 10 MS/s),
+12-bit, 24–1750 MHz — behind a Ku LNB the IF up to about 1.7 GHz, not the
+top of the 950–2150 MHz band. Narrower than the HackRF or the Fobos, so for
+a few SCPC carriers, beacons or L-band rather than a transponder. Like the
+HackRF it needs no DLL: [`libairspy-rs`](https://crates.io/crates/libairspy-rs)
+(BSD-3-Clause and MIT, a port of Airspy's libairspy whose IQ converter is
+bit-exact against the C library) speaks to it over USB through `nusb`; on
+Windows the board needs the WinUSB driver Airspy's installer or Zadig sets
+up. One gain step 0–21 on libairspy's *linearity* table (for an LNB's
+output) or its *sensitivity* table. The bias tee is switched off on every
+open and never on: 4.5 V cannot power an LNB.
+
+```
+decsat-gui --airspy 1450 --rate 6 --lo 10600 --vga 10    # --vga is the gain step here
+decsat decode --airspy 1450 --airspy-gain 10 --decoder id --offset 200e3 --bandwidth 300e3
+```
+
+### Snapshots, the session log and PCAP parts
+
+**📷** beside the input level (or **F12**) saves the spectrum and
+waterfall as a PNG in the output folder; right-click (or **Shift+F12**) the
+whole window. The file is named by the satellite, the RF and the UTC time
+(`decsat-<satellite>-<RF>MHz-<UTC>-band.png`) and the picture carries a
+caption: time, receiver and rate, RF centre and span, tuning and LNB LO,
+satellite and VFOs.
+
+**File ▸ 📝 Session log** writes what the VFOs report to
+`decsat-log-<UTC>.csv` in the output folder — UTC time, VFO, RF, decoder,
+kind and text: Identify's verdicts, decoder messages, lock and loss (held
+2 s, so a flickering lock is one line), each MODCOD when first seen, text
+found in the bits (strings that read as text, 30 a minute at most), a
+summary a minute, VFOs added and changed, snapshots and the status bar's
+notes. A line is written when what is said changes, figures aside, and the
+same statement again at most once a minute, so the file stays readable. A
+📝 beside the 📷 shows it is on; the choice is remembered.
+
+**File ▸ PCAP parts** starts a new PCAP every 1–60 minutes while one
+records (`…-part002.pcap` and on). Each closed part is a whole capture, so
+tools that read finished files — BruteShark, NetworkMiner — can take them
+while the recording goes on. (Live Wireshark is fed through a pipe to its
+standard input, not a network port, so other tools cannot attach to it.)
+`decsat decode … --pcap-rotate MIN` does the same unattended.
+
+### Which satellite
+
+A DVB network's NIT gives its transponders' orbital position, and a
+DVB-RCS map its forward link's. DecSAT names the satellite there from a
+table of 78 positions (177°W–180°E, `apps/decsat-gui/src/orbital_positions.json`):
+the TS analyser's network tab and the RCS card show `28.2°E · Astra
+2E/2F/2G`, the toolbar shows it in amber beside the satellite list while
+another satellite is chosen, and the list offers it first — one click
+chooses (or adds) "Astra 2E/2F/2G (28.2°E)", whose plan and carrier labels
+then apply. The session log notes each position found.
 
 ## Scope
 

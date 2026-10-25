@@ -22,6 +22,13 @@ GPL. `git submodule update --init` fetches both.
 
 The live HackRF front end is behind `--features hackrf` (on `decsat-io`, re-exported
 by both apps), so a plain build never needs the HackRF SDK and CI stays green.
+The Fobos SDR is behind `--features fobos` (on by default in both apps): it
+loads RigExpert's `fobos_sdr`/`fobos` library at run time, so building needs
+nothing extra. `DECSAT_FOBOS_LIB=/path/to/lib cargo test -p decsat-io
+--features fobos live_fobos -- --ignored` runs the live test against a board
+(or a stand-in library).
+The Airspy Mini / R2 is behind `--features airspy` (on by default in both
+apps): pure Rust over USB through `libairspy-rs`, no DLL.
 
 ## House rules
 

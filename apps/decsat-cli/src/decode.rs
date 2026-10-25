@@ -5,7 +5,7 @@
 //! E1 timeslots, text, frame structure).
 //!
 //! With `--hackrf <MHz>` the source is the HackRF instead (receive only, its
-//! antenna power forced off): a status line every 30 s, a report at the end
+//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy: a status line every 30 s, a report at the end
 //! (`--seconds`) — for watching a carrier unattended, e.g. a FastLink link
 //! with `--record-on-activity` until a voice channel speaks.
 
@@ -24,6 +24,18 @@ pub struct DecodeArgs {
     pub lna: u16,
     pub vga: u16,
     pub amp: bool,
+    /// Live: the Fobos SDR's centre frequency, MHz, its LNA step and VGA dB.
+    pub fobos: Option<f64>,
+    #[cfg_attr(not(feature = "fobos"), allow(dead_code))]
+    pub fobos_lna: u8,
+    #[cfg_attr(not(feature = "fobos"), allow(dead_code))]
+    pub fobos_vga: u16,
+    /// Live: the Airspy's centre frequency, MHz, and its gain step/table.
+    pub airspy: Option<f64>,
+    #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
+    pub airspy_gain: u8,
+    #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
+    pub airspy_sensitivity: bool,
     /// Stop after this long.
     pub seconds: Option<f64>,
     /// fastlink: record while a TDM channel is active.
@@ -121,31 +133,99 @@ fn hackrf_source(_: &DecodeArgs, _: f64, _: f64) -> Result<Box<dyn IqSource>> {
     bail!("this build has no HackRF support (the `hackrf` feature)")
 }
 
+/// The Fobos SDR at `mhz`, at the board's rate nearest `rate`. Returns the
+/// rate it runs at.
+#[cfg(feature = "fobos")]
+fn fobos_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    use decsat_io::{FobosGains, FobosSettings, FobosSource};
+    let src = FobosSource::open(FobosSettings {
+        center_hz: (mhz * 1e6).round() as u64,
+        sample_rate: rate.round() as u32,
+        gains: FobosGains {
+            lna: a.fobos_lna,
+            vga: (a.fobos_vga / 2).min(31) as u8,
+        }
+        .snapped(),
+        external_clock: false,
+    })?;
+    let rate = src.sample_rate();
+    println!("{}", src.describe());
+    Ok((Box::new(src), rate))
+}
+
+/// The Airspy at `mhz`, at the board's rate nearest `rate`.
+#[cfg(feature = "airspy")]
+fn airspy_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    use decsat_io::{AirspyGainMode, AirspyGains, AirspySettings, AirspySource};
+    let src = AirspySource::open(AirspySettings {
+        center_hz: (mhz * 1e6).round() as u64,
+        sample_rate: rate.round() as u32,
+        gains: AirspyGains {
+            mode: if a.airspy_sensitivity {
+                AirspyGainMode::Sensitivity
+            } else {
+                AirspyGainMode::Linearity
+            },
+            step: a.airspy_gain,
+        }
+        .snapped(),
+    })?;
+    let rate = src.sample_rate();
+    println!("{}", src.describe());
+    Ok((Box::new(src), rate))
+}
+
+#[cfg(not(feature = "airspy"))]
+fn airspy_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    bail!("this build has no Airspy support (the `airspy` feature)")
+}
+
+#[cfg(not(feature = "fobos"))]
+fn fobos_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    bail!("this build has no Fobos SDR support (the `fobos` feature)")
+}
+
 pub fn decode(a: DecodeArgs) -> Result<()> {
     let kind = decoder_by_name(&a.decoder)?;
-    let live = a.hackrf.is_some();
-    let (source, rate): (Box<dyn IqSource>, f64) = match (a.hackrf, &a.file) {
-        (Some(mhz), _) => {
-            let rate = a.rate.unwrap_or(2e6);
-            let src = hackrf_source(&a, mhz, rate)?;
-            println!(
-                "live from the HackRF at {mhz:.4} MHz, {:.3} MS/s, LNA {} dB, VGA {} dB{} \
+    let live = a.hackrf.is_some() || a.fobos.is_some() || a.airspy.is_some();
+    let (source, rate): (Box<dyn IqSource>, f64) = if let Some(mhz) = a.airspy {
+        let (src, rate) = airspy_source(&a, mhz, a.rate.unwrap_or(6e6))?;
+        println!(
+            "live from the Airspy at {mhz:.4} MHz, {:.3} MS/s (receive only)",
+            rate / 1e6
+        );
+        (src, rate)
+    } else if let Some(mhz) = a.fobos {
+        let (src, rate) = fobos_source(&a, mhz, a.rate.unwrap_or(8e6))?;
+        println!(
+            "live from the Fobos SDR at {mhz:.4} MHz, {:.3} MS/s (receive only)",
+            rate / 1e6
+        );
+        (src, rate)
+    } else {
+        match (a.hackrf, &a.file) {
+            (Some(mhz), _) => {
+                let rate = a.rate.unwrap_or(2e6);
+                let src = hackrf_source(&a, mhz, rate)?;
+                println!(
+                    "live from the HackRF at {mhz:.4} MHz, {:.3} MS/s, LNA {} dB, VGA {} dB{} \
                  (receive only)",
-                rate / 1e6,
-                a.lna,
-                a.vga,
-                if a.amp { ", amp on" } else { "" }
-            );
-            (src, rate)
+                    rate / 1e6,
+                    a.lna,
+                    a.vga,
+                    if a.amp { ", amp on" } else { "" }
+                );
+                (src, rate)
+            }
+            (None, Some(file)) => {
+                let (fmt, rate) = crate::capture_format_rate(file, a.format, a.rate)?;
+                let reader = IqFileReader::open(file, fmt, rate, 1 << 16)
+                    .with_context(|| format!("opening {}", file.display()))?;
+                println!("decoding {} at {:.3} MS/s", reader.describe(), rate / 1e6);
+                (Box::new(reader), rate)
+            }
+            (None, None) => bail!("give a capture, or --hackrf / --fobos / --airspy <MHz>"),
         }
-        (None, Some(file)) => {
-            let (fmt, rate) = crate::capture_format_rate(file, a.format, a.rate)?;
-            let reader = IqFileReader::open(file, fmt, rate, 1 << 16)
-                .with_context(|| format!("opening {}", file.display()))?;
-            println!("decoding {} at {:.3} MS/s", reader.describe(), rate / 1e6);
-            (Box::new(reader), rate)
-        }
-        (None, None) => bail!("give a capture, or --hackrf <MHz>"),
     };
 
     // Real time by default: a VFO that falls behind drops blocks, and a

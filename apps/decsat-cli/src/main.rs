@@ -138,10 +138,10 @@ enum Command {
         #[arg(long)]
         decode: bool,
     },
-    /// Run one decoder over a capture — or live from the HackRF — and report
+    /// Run one decoder over a capture — or live from a HackRF or Fobos — and report
     /// what it finds.
     Decode {
-        /// The capture (not needed with --hackrf).
+        /// The capture (not needed with --hackrf, --fobos or --airspy).
         file: Option<PathBuf>,
         /// Live from the HackRF instead: its centre frequency, MHz (as it
         /// tunes: L-band behind an LNB). Receive only, antenna power off.
@@ -156,6 +156,33 @@ enum Command {
         /// HackRF RF amplifier on (+14 dB).
         #[arg(long)]
         amp: bool,
+        /// Live from a Fobos SDR instead: its centre frequency, MHz (RF input,
+        /// 50–6000 MHz). Needs RigExpert's fobos_sdr.dll (agile firmware) or
+        /// fobos.dll (stock) beside decsat, or DECSAT_FOBOS_LIB. Receive only.
+        #[arg(long, conflicts_with = "hackrf")]
+        fobos: Option<f64>,
+        /// Fobos RF LNA step, 0–3 (2 ≈ +16 dB, 3 ≈ +33 dB).
+        #[arg(long, default_value_t = 1)]
+        fobos_lna: u8,
+        /// Fobos IF VGA gain, dB: 0–62 in 2 dB steps.
+        #[arg(long, default_value_t = 16)]
+        fobos_vga: u16,
+        /// Live from an Airspy Mini / R2 instead: its centre frequency, MHz
+        /// (24–1750). Pure Rust over USB; the bias tee stays off.
+        #[arg(long, conflicts_with_all = ["hackrf", "fobos"])]
+        airspy: Option<f64>,
+        /// Airspy gain step, 0–21 (libairspy's linearity table; add
+        /// --airspy-sensitivity for its sensitivity table).
+        #[arg(long, default_value_t = 10)]
+        airspy_gain: u8,
+        /// Use the Airspy's sensitivity gain table.
+        #[arg(long)]
+        airspy_sensitivity: bool,
+        /// While a PCAP records (--out with an IP decoder), start a new
+        /// file every this many minutes; each closed part is whole, for
+        /// tools that read finished captures (BruteShark, NetworkMiner).
+        #[arg(long)]
+        pcap_rotate: Option<u64>,
         /// Stop after this many seconds (live runs otherwise go on until
         /// stopped).
         #[arg(long)]
@@ -351,6 +378,13 @@ fn main() -> Result<()> {
             lna,
             vga,
             amp,
+            fobos,
+            fobos_lna,
+            fobos_vga,
+            airspy,
+            airspy_gain,
+            airspy_sensitivity,
+            pcap_rotate,
             seconds,
             record_on_activity,
             format,
@@ -373,35 +407,46 @@ fn main() -> Result<()> {
             bbframes,
             wireshark,
             plan_from,
-        } => decode::decode(decode::DecodeArgs {
-            file,
-            hackrf,
-            lna,
-            vga,
-            amp,
-            seconds,
-            record_on_activity,
-            format,
-            rate,
-            decoder,
-            offset,
-            bandwidth,
-            symbol_rate,
-            modulation,
-            out,
-            fast,
-            e1_record,
-            tdm_record,
-            programme_record,
-            labels,
-            subcarrier,
-            low_snr,
-            clock_ppm,
-            bits,
-            bbframes,
-            wireshark,
-            plan_from,
-        }),
+        } => {
+            if let Some(m) = pcap_rotate {
+                decsat_engine::fec::set_pcap_rotate_minutes(m);
+            }
+            decode::decode(decode::DecodeArgs {
+                file,
+                hackrf,
+                lna,
+                vga,
+                amp,
+                fobos,
+                fobos_lna,
+                fobos_vga,
+                airspy,
+                airspy_gain,
+                airspy_sensitivity,
+                seconds,
+                record_on_activity,
+                format,
+                rate,
+                decoder,
+                offset,
+                bandwidth,
+                symbol_rate,
+                modulation,
+                out,
+                fast,
+                e1_record,
+                tdm_record,
+                programme_record,
+                labels,
+                subcarrier,
+                low_snr,
+                clock_ppm,
+                bits,
+                bbframes,
+                wireshark,
+                plan_from,
+            })
+        }
     }
 }
 
