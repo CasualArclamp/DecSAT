@@ -264,8 +264,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                             (None, _) => "finding its type…".into(),
                         };
                         ui.label(RichText::new(found).small().weak()).on_hover_text(
-                            "Picked from Identify's first look (TPC 2964's unique word, else \
-                             a K = 7 code; the next tried if one does not lock in 10 s); the \
+                            "Picked from Identify's first look (TPC 2964's unique word; on \
+                             QPSK that may be DVB-S, DVB-S for 6 s — found, the VFO moves to \
+                             the DVB-S decoder; else a K = 7 code; the next tried if one does \
+                             not lock in 10 s); the \
                              model from what its data carry: D&I++ or E1 timeslots a \
                              CDM-600L's voice, timeslots in HDLC packets a CDM-570L trunk, \
                              other TPC data a CDM-570L's, the K = 7 code a CDM-570L Viterbi \

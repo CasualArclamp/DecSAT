@@ -1512,6 +1512,23 @@ impl FecWorker {
         self.quit.store(true, Ordering::Relaxed);
     }
 
+    /// Stop without waiting (its decoder replaced): the thread leaves its
+    /// queue after the input in hand and is joined on a thread of its own.
+    /// Dropping it instead waits for that input, and a chain deep in a
+    /// blind search held its VFO for minutes after a switch of decoder.
+    pub fn retire(mut self) {
+        self.quit();
+        // Closing the queue lets the thread count off what it leaves.
+        self.tx = None;
+        if let Some(j) = self.join.take() {
+            let _ = std::thread::Builder::new()
+                .name("fec-reaper".into())
+                .spawn(move || {
+                    let _ = j.join();
+                });
+        }
+    }
+
     /// Wait for the thread instead of dropping input when it is behind (a
     /// file played as fast as possible).
     pub fn lossless(mut self, on: bool) -> Self {
@@ -2952,6 +2969,16 @@ fn run(
         };
         let _done = pending.guard();
         if quit.load(Ordering::Relaxed) {
+            // What is left is counted off, or the engine's pending work
+            // never reaches zero and a file run waits on it for good: the
+            // inputs taken ahead, then the queue until it is closed.
+            for _ in ready.drain(..) {
+                pending.done();
+            }
+            while rx.recv().is_ok() {
+                backlog.queued.fetch_sub(1, Ordering::Relaxed);
+                pending.done();
+            }
             break;
         }
         // Decoding done ahead counts toward the load as its share of the
@@ -3808,7 +3835,8 @@ mod tests {
             })
             .collect();
         for quit in [false, true] {
-            let w = FecWorker::spawn(100e3, FecOutput::default(), Pending::default());
+            let pending = Pending::default();
+            let w = FecWorker::spawn(100e3, FecOutput::default(), pending.clone());
             if quit {
                 w.quit();
             }
@@ -3819,6 +3847,45 @@ mod tests {
             drop(w);
             let s = stats.lock().unwrap();
             assert_eq!(s.tpc.is_some(), !quit, "quit {quit}");
+            // What it left is counted off too: nothing waits on it.
+            assert_eq!(pending.get(), 0, "quit {quit}");
+        }
+    }
+
+    /// A replaced decoder's FEC thread is retired: the caller does not
+    /// wait for it, and what it leaves is counted off once it stops.
+    #[test]
+    fn a_retired_fec_thread_is_not_waited_for() {
+        let mut x = 11u32;
+        let block: Vec<Iq> = (0..20_000)
+            .map(|_| {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                Iq::new(
+                    (x >> 16) as f32 / 65_536.0 - 0.5,
+                    (x >> 8 & 0xFF) as f32 / 256.0 - 0.5,
+                )
+            })
+            .collect();
+        let pending = Pending::default();
+        let w = FecWorker::spawn(100e3, FecOutput::default(), pending.clone()).lossless(true);
+        // A backlog for TPC 2964's blind search (noise: it never locks).
+        for _ in 0..QUEUE {
+            w.offer_tpc(block.clone(), decsat_core::Modulation::Qpsk);
+        }
+        let t0 = Instant::now();
+        w.retire();
+        assert!(
+            t0.elapsed().as_millis() < 100,
+            "retire waited {:?}",
+            t0.elapsed()
+        );
+        while pending.get() != 0 {
+            assert!(
+                t0.elapsed().as_secs() < 30,
+                "{} still pending",
+                pending.get()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 

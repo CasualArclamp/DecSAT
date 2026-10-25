@@ -175,3 +175,42 @@ impl AutoPick {
         (updates, note)
     }
 }
+
+/// VFOs on the CDM type-found model whose chain turned out DVB-S (tried
+/// first on QPSK that may be DVB-S): moved to the DVB-S decoder, whose
+/// TS cards and outputs are keyed on it, with a line for the status bar.
+/// `skip`: the survey's VFOs, which it moves itself.
+pub fn dvbs_found(
+    statuses: &BTreeMap<VfoId, VfoStatus>,
+    vfos: &[UiVfo],
+    skip: &[VfoId],
+) -> (Vec<(VfoId, VfoSettings)>, Option<String>) {
+    let mut updates = Vec::new();
+    let mut note = None;
+    for v in vfos {
+        if v.settings.decoder != DecoderKind::CdmAuto || skip.contains(&v.id) {
+            continue;
+        }
+        let Some(st) = statuses.get(&v.id) else {
+            continue;
+        };
+        let locked = st.chain == Some(DecoderKind::DvbsTs)
+            && st
+                .fec
+                .as_ref()
+                .and_then(|f| f.dvbs.as_ref())
+                .is_some_and(|d| d.rate.is_some() && d.packets > 0);
+        if locked {
+            let mut s = v.settings.clone();
+            s.decoder = DecoderKind::DvbsTs;
+            s.signal = decsat_engine::SignalMode::of(DecoderKind::DvbsTs);
+            updates.push((v.id, s));
+            note = Some(format!(
+                "{}: DVB-S found → {}",
+                v.settings.name,
+                DecoderKind::DvbsTs.label()
+            ));
+        }
+    }
+    (updates, note)
+}
