@@ -6025,3 +6025,45 @@ old-width row after the backlog was cleared (test
 `fft_size_changes_without_a_restart` caught it); clippy `-D warnings` clean.
 Not verified: any of the new radios or StreamReader on real hardware (the
 zip's own notes say it was never built or run on Windows).
+
+## DVB-S under the Comtech type-finder; switching decoder no longer hangs (2026-10-22)
+
+Adam: muxes known to be DVB-S came up "Comtech CDM modem" in auto mode, and
+switching such a VFO to DVB-S by hand locked the app up; DVB-S chosen from
+the start locked at once. Seen on his E9B 12 506.92 MHz capture (QPSK
+256 kBd, rate ½, a one-programme radio TS, MP2 160k on PID 0x301).
+
+- **Why Comtech.** The GUI's `survey::pick` sends Identify's "possibly
+  DVB-S" to `CdmAuto` (the CLI tries `DvbsTs` first). CdmAuto ran TPC 2964,
+  the Viterbi or a FastLink — and DVB-S's inner code is the K = 7 the Viterbi
+  locks, so the chain settled as a CDM-570L and never looked further.
+  Now `DvbsTs` is one of `AUTO_CHAINS`, first on QPSK whose hint says
+  "DVB-S (" (`auto_chain`), with its own 6 s budget (`AUTO_DVBS_SECS`: it
+  locks within 2 s on the capture); locked = a rate and RS-synced packets.
+  DVB-S that found the inner code but no packets hands its demodulator on to
+  the next chain rather than a fresh first look (a second look measured a
+  weak carrier's rate 3 % off and lost it). The GUI moves a CdmAuto VFO whose
+  chain locked DVB-S to the DVB-S decoder (`auto_pick::dvbs_found`, not the
+  survey's VFOs), so its TS cards and outputs are the usual ones;
+  `carrier_caps::modem` counts the DVB-S chain as decoded.
+- **Why it hung.** `Worker::apply` replaced the decoder by dropping it, and
+  `FecWorker`'s drop joins its thread — after the thread had worked through
+  everything queued, which on a Comtech chain deep in a blind search is
+  minutes, all on the VFO's worker thread (and the decode pool kept busy).
+  Now `retire_threads` retires the FEC thread first (`FecWorker::retire`:
+  quit, close the queue, join on a reaper thread), as a VFO's deletion did.
+- **Pending leak.** A quit FEC thread left its queue uncounted, so
+  `pending_work` never reached zero after CdmAuto gave up a chain: the CLI's
+  "stopped waiting after 120 s: still 69 blocks behind" on file runs. The
+  quitting thread now counts off what it took ahead and the queue until it
+  is closed.
+
+Checked: auto on the E9B capture now gives 2646 TS packets (5 CC errors),
+as `--decoder dvbs` does. Tests: `cdm_type_found_tries_dvbs_first_on_qpsk`,
+`cdm_type_found_falls_back_from_dvbs_to_the_viterbi` (a K = 7 carrier with
+no RS: DVB-S 6 s, then the Viterbi locks), `a_retired_fec_thread_is_not_
+waited_for`; `a_quit_fec_thread_leaves_its_queue` also checks pending.
+
+**Not done**: the CDM-570L Viterbi capture (VFO_10, 4.3 s) is too short to
+show the fallback live; a carrier whose DVB-S chain never finds the inner
+code still takes a fresh first look, as before.

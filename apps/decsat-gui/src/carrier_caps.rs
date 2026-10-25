@@ -160,6 +160,12 @@ fn modem(s: &VfoSettings, st: &VfoStatus) -> Option<DecoderKind> {
         }
         DecoderKind::Viterbi => f.viterbi.as_ref().is_some_and(|v| v.rate.is_some()),
         DecoderKind::FastLink => f.fastlink.as_ref().is_some_and(|x| x.decoded > 0),
+        // The CDM type-found model's DVB-S chain (tried first on QPSK that
+        // may be DVB-S).
+        DecoderKind::DvbsTs => f
+            .dvbs
+            .as_ref()
+            .is_some_and(|d| d.rate.is_some() && d.packets > 0),
         _ => false,
     };
     if !locked {

@@ -1805,6 +1805,15 @@ impl eframe::App for App {
             if let Some(n) = note {
                 self.note = n;
             }
+            // The CDM type-found model's DVB-S: on to the DVB-S decoder.
+            let (updates, note) =
+                auto_pick::dvbs_found(&self.statuses, &self.vfos, &self.survey.vfo_ids());
+            for (id, s) in updates {
+                self.apply(Action::Update(id, s));
+            }
+            if let Some(n) = note {
+                self.note = n;
+            }
             self.tone.tick(&self.vfos, &self.statuses);
             // What each VFO's carrier carries, learnt by its RF — only from
             // a status of the carrier it is on: one from before the VFO
