@@ -284,30 +284,51 @@ impl Ddc {
 
     /// Mix, filter and decimate `input`, appending to `out`.
     pub fn process(&mut self, input: &[Iq], out: &mut Vec<Iq>) {
-        // Mix every input sample down.
-        self.mixed.clear();
-        self.mixed.reserve(input.len());
-        let (sr, si) = self.step;
-        for &x in input {
-            let (pr, pi) = self.phasor;
-            self.mixed.push(Iq::new(
-                (x.re as f64 * pr - x.im as f64 * pi) as f32,
-                (x.re as f64 * pi + x.im as f64 * pr) as f32,
-            ));
-            self.phasor = (pr * sr - pi * si, pr * si + pi * sr);
-            self.since_renorm += 1;
-            if self.since_renorm == RENORM_EVERY {
-                let mag = (self.phasor.0 * self.phasor.0 + self.phasor.1 * self.phasor.1).sqrt();
-                self.phasor = (self.phasor.0 / mag, self.phasor.1 / mag);
-                self.since_renorm = 0;
+        // The mixer is on the VFO worker's hot path, executed at the full
+        // *wideband* rate (for example 30.72 MS/s), before FIR decimation.
+        // Keep the f64 oscillator accumulation for long-term frequency
+        // accuracy, but carry out the per-sample IQ multiplications in f32.
+        // The input and downstream FIR are both f32 already.
+        //
+        // A VFO at DC needs no mixer at all. In that case the FIR can read
+        // the input slice directly, avoiding a full-band temporary copy.
+        let mixed: &[Iq] = if self.offset_hz == 0.0 {
+            input
+        } else {
+            self.mixed.clear();
+            self.mixed.reserve(input.len());
+            let (sr, si) = self.step;
+            let mut pr = self.phasor.0;
+            let mut pi = self.phasor.1;
+            let mut since = self.since_renorm;
+            for &x in input {
+                let re = pr as f32;
+                let im = pi as f32;
+                self.mixed.push(Iq::new(
+                    x.re * re - x.im * im,
+                    x.re * im + x.im * re,
+                ));
+                let next_re = pr * sr - pi * si;
+                pi = pr * si + pi * sr;
+                pr = next_re;
+                since += 1;
+                if since == RENORM_EVERY {
+                    let mag = (pr * pr + pi * pi).sqrt();
+                    pr /= mag;
+                    pi /= mag;
+                    since = 0;
+                }
             }
-        }
+            self.phasor = (pr, pi);
+            self.since_renorm = since;
+            &self.mixed
+        };
 
         match self.stages.as_mut_slice() {
-            [only] => only.process(&self.mixed, out),
+            [only] => only.process(mixed, out),
             [first, second] => {
                 self.mid.clear();
-                first.process(&self.mixed, &mut self.mid);
+                first.process(mixed, &mut self.mid);
                 second.process(&self.mid, out);
             }
             _ => unreachable!("a DDC has one or two stages"),

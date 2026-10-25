@@ -7,6 +7,14 @@
 
 pub mod file;
 pub mod wav;
+#[cfg(all(windows, feature = "uhd"))]
+pub mod uhd;
+#[cfg(all(windows, feature = "pluto"))]
+pub mod pluto;
+#[cfg(all(windows, feature = "pluto"))]
+pub use pluto::{PlutoSettings,PlutoSource,PlutoControl};
+#[cfg(all(windows, feature = "uhd"))]
+pub use uhd::{UhdSettings, UhdSource, UhdControl};
 
 #[cfg(feature = "hackrf")]
 pub mod hackrf;
@@ -59,3 +67,8 @@ pub trait IqSource: Send {
         false
     }
 }
+
+#[cfg(all(windows, feature = "rtl"))]
+pub mod rtl;
+#[cfg(all(windows, feature = "rtl"))]
+pub use rtl::{RtlSettings,RtlSource,RtlControl};

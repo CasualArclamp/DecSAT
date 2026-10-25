@@ -484,6 +484,15 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             .as_ref()
             .map(|(_, b)| format!("{:.1} MB", *b as f64 / 1e6))
             .unwrap_or_default(),
+        DecoderKind::Am => "AM".into(),
+        DecoderKind::Nfm => "NFM".into(),
+        DecoderKind::Wfm => "WFM".into(),
+        DecoderKind::Usb => "USB".into(),
+        DecoderKind::Lsb => "LSB".into(),
+        DecoderKind::Dsb => "DSB".into(),
+        DecoderKind::Cw => "CW".into(),
+        DecoderKind::AtvAm => "ATV-AM".into(),
+        DecoderKind::AtvFm => "ATV-FM".into(),
         DecoderKind::Spectrum => format!("{:.1} dB", st.level_db),
     }
 }

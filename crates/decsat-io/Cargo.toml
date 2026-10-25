@@ -14,6 +14,9 @@ default = []
 # libusb, no DLLs — the portable exe stays a single file. On Windows the HackRF
 # must use the WinUSB driver (Zadig, or the in-box winusb.inf).
 hackrf = ["dep:seify-hackrfone"]
+uhd = []
+pluto = []
+rtl = []
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }

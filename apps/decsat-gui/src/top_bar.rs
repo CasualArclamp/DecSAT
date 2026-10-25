@@ -28,6 +28,18 @@ const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
 
 /// What the play button does now.
 enum Play {
+    #[cfg(all(windows, feature = "rtl"))]
+    StartRtl,
+    #[cfg(all(windows, feature = "rtl"))]
+    StopRtl,
+    #[cfg(all(windows, feature = "uhd"))]
+    StartUhd,
+    #[cfg(all(windows, feature = "pluto"))]
+    StartPluto,
+    #[cfg(all(windows, feature = "uhd"))]
+    StopUhd,
+    #[cfg(all(windows, feature = "pluto"))]
+    StopPluto,
     #[cfg(feature = "hackrf")]
     StartRadio,
     #[cfg(feature = "hackrf")]
@@ -217,15 +229,45 @@ impl App {
             (None, None) => Play::StartRadio,
             (Some(_), _) => file,
         };
+        #[cfg(all(windows, feature = "uhd"))]
+        let what = if self.path.is_none() && self.uhd_selected {
+            if self.uhd_running { Play::StopUhd } else { Play::StartUhd }
+        } else { what };
+        #[cfg(all(windows, feature = "pluto"))]
+        let what = if self.path.is_none() && self.pluto_selected {
+            if self.pluto_running {Play::StopPluto} else {Play::StartPluto}
+        } else {what};
+        #[cfg(all(windows, feature = "rtl"))]
+        let what = if self.path.is_none() && self.rtl_selected {
+            if self.rtl_running {Play::StopRtl} else {Play::StartRtl}
+        } else {what};
         #[cfg(not(feature = "hackrf"))]
         let what = file;
         let running = match what {
+            #[cfg(all(windows, feature = "rtl"))]
+            Play::StopRtl => true,
             #[cfg(feature = "hackrf")]
             Play::StopRadio => true,
+            #[cfg(all(windows, feature = "uhd"))]
+            Play::StopUhd => true,
+            #[cfg(all(windows, feature = "pluto"))]
+            Play::StopPluto => true,
             Play::TogglePause => !self.paused,
             _ => false,
         };
         let (text, tip) = match what {
+            #[cfg(all(windows, feature = "rtl"))]
+            Play::StartRtl => ("▶ Start","Start selected RTL-SDR dongle"),
+            #[cfg(all(windows, feature = "rtl"))]
+            Play::StopRtl => ("⏹ Stop","Stop RTL-SDR dongle"),
+            #[cfg(all(windows, feature = "uhd"))]
+            Play::StartUhd => ("▶ Start", "Start the selected UHD receiver"),
+            #[cfg(all(windows, feature = "pluto"))]
+            Play::StartPluto => ("▶ Start", "Start the selected PlutoSDR receiver"),
+            #[cfg(all(windows, feature = "pluto"))]
+            Play::StopPluto => ("⏹ Stop", "Stop the PlutoSDR receiver"),
+            #[cfg(all(windows, feature = "uhd"))]
+            Play::StopUhd => ("⏹ Stop", "Stop the UHD receiver"),
             #[cfg(feature = "hackrf")]
             Play::StartRadio => (
                 "▶ Start",
@@ -259,6 +301,18 @@ impl App {
             return;
         }
         match what {
+            #[cfg(all(windows, feature = "rtl"))]
+            Play::StartRtl => self.start_rtl(),
+            #[cfg(all(windows, feature = "rtl"))]
+            Play::StopRtl => {self.stop_source();self.note="RTL-SDR stopped".into();},
+            #[cfg(all(windows, feature = "uhd"))]
+            Play::StartUhd => self.start_uhd(),
+            #[cfg(all(windows, feature = "pluto"))]
+            Play::StartPluto => self.start_pluto(),
+            #[cfg(all(windows, feature = "pluto"))]
+            Play::StopPluto => {self.stop_source();self.note="PlutoSDR stopped".into();},
+            #[cfg(all(windows, feature = "uhd"))]
+            Play::StopUhd => { self.stop_source(); self.note = "UHD stopped".into(); }
             #[cfg(feature = "hackrf")]
             Play::StartRadio => {
                 self.start_hackrf();
@@ -422,6 +476,23 @@ impl App {
                     self.engine.is_some() && !self.paused,
                 )
             }
+            #[cfg(all(windows, feature = "rtl"))]
+            None if self.rtl_selected => {
+                let dot=if self.rtl_running {"● "}else{""};
+                (format!("{dot}RTL-SDR · {}",format::rate(self.rtl_settings.rate as f64)),self.rtl_running)
+            }
+            #[cfg(all(windows, feature = "pluto"))]
+            None if self.pluto_selected => {
+                let live=self.pluto_running;
+                let dot=if live {"● "}else{""};
+                (format!("{dot}PlutoSDR · {}",format::rate(self.pluto_settings.rate)),live)
+            }
+            #[cfg(all(windows, feature = "uhd"))]
+            None if self.uhd_selected => {
+                let live = self.uhd_running;
+                let dot = if live { "● " } else { "" };
+                (format!("{dot}UHD B210 · {}", format::rate(self.uhd_settings.rate)), live)
+            }
             #[cfg(feature = "hackrf")]
             None => {
                 let live = self.hackrf.is_some();
@@ -438,18 +509,70 @@ impl App {
             RichText::new(text)
         };
         ui.menu_button(text, |ui| {
+            #[cfg(all(windows, feature = "rtl"))]
+            {
+                if ui.selectable_label(self.path.is_none() && self.rtl_selected,"📡 RTL-SDR (RTL2832U)").clicked(){
+                    if self.path.is_some() || !self.rtl_selected {self.stop_source();}
+                    self.path=None;self.rtl_selected=true;
+                    #[cfg(all(windows, feature = "pluto"))]
+                    {self.pluto_selected=false;}
+                    #[cfg(all(windows, feature = "uhd"))]
+                    {self.uhd_selected=false;}
+                    self.paused=false;ui.close();
+                }
+                if ui.button("RTL-SDR settings…").clicked(){self.rtl_open=true;ui.close();}
+                ui.separator();
+            }
+            #[cfg(all(windows, feature = "pluto"))]
+            {
+                if ui.selectable_label(self.path.is_none() && self.pluto_selected,"📡 PlutoSDR / LibreSDR").clicked(){
+                    if self.path.is_some() || !self.pluto_selected{self.stop_source();}
+                    self.path=None; self.pluto_selected=true;
+                    #[cfg(all(windows, feature = "rtl"))]
+                    {self.rtl_selected=false;}
+                    #[cfg(all(windows, feature = "uhd"))]
+                    {self.uhd_selected=false;}
+                    self.paused=false;ui.close();
+                }
+                if ui.button("PlutoSDR settings…").clicked(){self.pluto_open=true;ui.close();}
+                ui.separator();
+            }
+
+            #[cfg(all(windows, feature = "uhd"))]
+            {
+                if ui.selectable_label(self.path.is_none() && self.uhd_selected, "📡 UHD B210 / LibreSDR")
+                    .on_hover_text("Select UHD for the main Start/Stop control").clicked() {
+                    if self.path.is_some() || !self.uhd_selected { self.stop_source(); }
+                    self.path = None;
+                    self.uhd_selected = true;
+                    #[cfg(all(windows, feature = "rtl"))]
+                    {self.rtl_selected=false;}
+                    #[cfg(all(windows, feature = "pluto"))]
+                    {self.pluto_selected=false;}
+                    self.paused = false;
+                    ui.close();
+                }
+                if ui.button("UHD settings…").clicked() { self.uhd_open = true; ui.close(); }
+                ui.separator();
+            }
             #[cfg(feature = "hackrf")]
             {
                 if ui
-                    .selectable_label(self.path.is_none(), "📡 HackRF")
+                    .selectable_label(self.path.is_none() && !self.uhd_selected && !self.pluto_selected && !self.rtl_selected, "📡 HackRF")
                     .on_hover_text("Live from the HackRF One: ▶ Start starts it")
                     .clicked()
                 {
-                    if self.path.is_some() {
+                    if self.path.is_some() || self.uhd_selected || self.pluto_selected || self.rtl_selected {
                         self.stop_source();
                         self.path = None;
                         self.paused = false;
                     }
+                    #[cfg(all(windows, feature = "uhd"))]
+                    { self.uhd_selected = false; }
+                    #[cfg(all(windows, feature = "pluto"))]
+                    {self.pluto_selected=false;}
+                    #[cfg(all(windows, feature = "rtl"))]
+                    {self.rtl_selected=false;}
                     ui.close();
                 }
                 if ui.button("HackRF settings…").clicked() {
@@ -472,18 +595,6 @@ impl App {
             ui.close();
             self.pick_iq_file();
         }
-        #[cfg(feature = "hackrf")]
-        if ui
-            .button("📡 HackRF settings…")
-            .on_hover_text("Frequency, sample rate, gains and LNB LO of the HackRF One")
-            .clicked()
-        {
-            self.radio.open = !self.radio.open;
-            ui.close();
-        }
-        #[cfg(not(feature = "hackrf"))]
-        ui.add_enabled(false, egui::Button::new("📡 HackRF settings…"))
-            .on_disabled_hover_text("Built without the hackrf feature.");
         if ui
             .button("📁 Output folder…")
             .on_hover_text(format!(
@@ -534,6 +645,11 @@ impl App {
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.checkbox(&mut self.overview.visible,"Wideband spectrum overview").clicked() {
+            ui.close();
+        }
+        ui.checkbox(&mut self.streamreader.visible, "StreamReader");
+        ui.separator();
         // The FFT size applies at once, file or radio, with no restart.
         let fft_before = self.opts.fft_size;
         ui.menu_button(format!("FFT size  {}", self.opts.fft_size), |ui| {

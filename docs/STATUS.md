@@ -6007,3 +6007,21 @@ the three switched off, +6.6e-4 off with pilots), `soft_steps_hold_8psk_…`,
 threshold (the loop's own noise and a slip now and then; pilots are lossless
 there) — a header-to-header phase (a long-baseline FLL) would tighten it. No
 reset from FEC failures into the demodulator: with the watch it was not needed.
+
+## VMA snapshot merged (2026-10-25)
+
+`DecSAT_VMA_20261025.zip` (a DecSAT tree whose baseline was this repo's HEAD)
+was merged three-way (HEAD as base), so uncommitted work here was kept.
+Brought in: the StreamReader control strip (TCP 127.0.0.1:8888, launches the
+user's own `streamreader.exe -server`) and the sweep overview; RTL-SDR, Pluto
+and UHD backends (DLLs loaded at run time, features `rtl`/`pluto`/`uhd`, on by
+default in the GUI); analog TV/RDS in the engine; the spectrum FFT on its own
+display thread (a slow FFT skips a block, never delays the VFOs); a DDC/VFO
+live-tuning update. Not taken: the zip's `lto = false` release profile (kept
+`lto = "thin"`), older copies of files this repo had since changed, the
+binaries, the VS2022 solution and C++ launcher, `apply_fix.py`.
+Fixed on the way: after an FFT-size change the display thread could push one
+old-width row after the backlog was cleared (test
+`fft_size_changes_without_a_restart` caught it); clippy `-D warnings` clean.
+Not verified: any of the new radios or StreamReader on real hardware (the
+zip's own notes say it was never built or run on Windows).

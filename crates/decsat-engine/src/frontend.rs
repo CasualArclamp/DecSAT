@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -331,14 +332,23 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     // than two FFTs. Both change with the FFT size, so they are `mut`.
     let block_for = |fft: usize| ((rate / opts.rows_per_sec).round() as usize).max(fft * 2);
     let mut block_len = block_for(opts.fft_size);
-    let mut spec = Spectrum::new(opts.fft_size);
-    // A finer spectrum for the narrow lines the detector reports (see
-    // `carriers::resolve_narrow`), made only then; sized from the FFT size.
-    let mut fine: Option<Spectrum> = None;
+    // Spectrum is optional, unlike the sample stream consumed by the VFOs.
+    // A bounded 1-slot queue ensures that a slow FFT never holds the receiver.
+    let fft_size = Arc::new(AtomicUsize::new(opts.fft_size));
+    let (spectrum_tx, spectrum_rx) = mpsc::sync_channel::<Arc<Vec<Iq>>>(1);
+    let spectrum_thread = {
+        let shared = Arc::clone(&shared);
+        let fft_size = Arc::clone(&fft_size);
+        let snr = opts.carrier_snr_db;
+        std::thread::Builder::new().name("decsat-spectrum".into())
+            .spawn(move || {
+                crate::thread_priority::set_display_priority();
+                run_spectrum(spectrum_rx, shared, rate, fft_size, snr)
+            })
+            .expect("spawning spectrum thread")
+    };
     let mut acc: Vec<Iq> = Vec::with_capacity(block_len * 2);
     let mut tmp: Vec<Iq> = Vec::new();
-    let mut avg_lin: Vec<f32> = Vec::new();
-    let mut row_seq = 0u64;
     let mut samples = 0u64;
     // The source clock the VFOs share: samples so far, plus a second's
     // jump at each rewind of a looping file, so a decoder that lines up
@@ -350,13 +360,6 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     // Real-time pacing: signal time played since `clock`.
     let mut clock = Instant::now();
     let mut played = 0.0f64;
-    let mut last_carriers = Instant::now() - Duration::from_secs(1);
-    // Bursty bands: the meter, the segment spacing, and a take every 2 s.
-    let mut bursts = crate::bursty::BurstMeter::default();
-    let mut last_hop_secs = 0.0;
-    let mut last_bursts = Instant::now();
-    // The last few takes, together: a slow TDMA carrier stays shown.
-    let mut takes: VecDeque<Vec<crate::bursty::BurstBand>> = VecDeque::new();
     let mut dc_removal = opts.dc_removal;
     let mut dc = decsat_dsp::DcBlocker::new(rate);
 
@@ -394,13 +397,12 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
                     dc_removal = on;
                     dc.reset();
                 }
-                Some(Cmd::FftSize(n)) if n != spec.size() => {
-                    spec = Spectrum::new(n);
+                Some(Cmd::FftSize(n)) if n != fft_size.load(Ordering::Relaxed) => {
+                    fft_size.store(n, Ordering::Relaxed);
                     block_len = block_for(n);
                     // The smoothed spectrum starts again at the new
                     // resolution (its length no longer matches), and rows of
                     // the old width are dropped so the GUI never mixes them.
-                    avg_lin.clear();
                     shared.rows.lock().unwrap().clear();
                     shared.front.lock().unwrap().fft_size = n;
                 }
@@ -462,15 +464,60 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         }
         let t0 = Instant::now();
 
-        // Waterfall row; its segments feed the burst meter too, spaced as
-        // the last row's were (the same in a steady stream).
+        // VFO fan-out first. The FFT branch may discard a display frame,
+        // but must never delay the source or demodulator.
+        for h in shared.vfos.lock().unwrap().values() {
+            h.offer(&block, block_start_s);
+        }
+        let _ = spectrum_tx.try_send(Arc::clone(&block));
+
+        let used = t0.elapsed().as_secs_f64() / (block_len as f64 / rate);
+        load = 0.9 * load + 0.1 * used as f32;
+
+        let mut f = shared.front.lock().unwrap();
+        f.samples = samples;
+        f.load = load;
+        f.input_dbfs = input_dbfs.unwrap_or(-200.0);
+        if f.state == SourceState::Paused {
+            f.state = SourceState::Running;
+        }
+    }
+    // Flush the optional display queue and join after acquisition ends.
+    drop(spectrum_tx);
+    let _ = spectrum_thread.join();
+}
+
+/// Non-critical display worker. Slow rendering skips whole blocks, never
+/// creates a gap in the independent VFO IQ stream.
+fn run_spectrum(
+    rx: Receiver<Arc<Vec<Iq>>>,
+    shared: Arc<Shared>,
+    rate: f64,
+    fft_size: Arc<AtomicUsize>,
+    carrier_snr_db: f32,
+) {
+    let mut spec = Spectrum::new(fft_size.load(Ordering::Relaxed));
+    let mut fine: Option<Spectrum> = None;
+    let mut avg_lin: Vec<f32> = Vec::new();
+    let mut row_seq = 0u64;
+    let mut last_carriers = Instant::now() - Duration::from_secs(1);
+    let mut bursts = crate::bursty::BurstMeter::default();
+    let mut last_hop_secs = 0.0;
+    let mut last_bursts = Instant::now();
+    let mut takes: VecDeque<Vec<crate::bursty::BurstBand>> = VecDeque::new();
+    while let Ok(block) = rx.recv() {
+        let want = fft_size.load(Ordering::Relaxed);
+        if want != spec.size() {
+            spec = Spectrum::new(want);
+            fine = None;
+            avg_lin.clear();
+            takes.clear();
+        }
         let spacing = last_hop_secs;
-        let (row, hop) =
-            spec.compute_max_with(&block, SEGMENTS_PER_ROW, |p| bursts.push(p, rate, spacing));
+        let (row, hop) = spec.compute_max_with(&block, SEGMENTS_PER_ROW,
+            |p| bursts.push(p, rate, spacing));
         last_hop_secs = hop as f64 / rate;
         row_seq += 1;
-
-        // Smoothed spectrum, averaged in linear power.
         if avg_lin.len() != row.len() {
             avg_lin = row.iter().map(|&d| 10f32.powf(d / 10.0)).collect();
         } else {
@@ -478,71 +525,45 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
                 *a += 0.15 * (10f32.powf(d / 10.0) - *a);
             }
         }
-        let avg_db: Vec<f32> = avg_lin
-            .iter()
-            .map(|&p| 10.0 * p.max(1e-20).log10())
-            .collect();
-
+        let avg_db: Vec<f32> = avg_lin.iter()
+            .map(|&p| 10.0 * p.max(1e-20).log10()).collect();
         let carriers = (last_carriers.elapsed() >= Duration::from_millis(500)).then(|| {
             last_carriers = Instant::now();
-            let mut found = detect_carriers(&avg_db, rate, opts.carrier_snr_db);
+            let mut found = detect_carriers(&avg_db, rate, carrier_snr_db);
             if found.iter().any(|c| c.narrow) {
-                // A look at the narrow lines with 16× the bins, from this
-                // block alone — as long as it holds a few segments of them
-                // (seven at 50 % overlap).
-                let cap = 1usize << (block_len / 4).max(1).ilog2();
+                let cap = 1usize << (block.len() / 4).max(1).ilog2();
                 let want = (spec.size() * 16).min(cap);
                 if want > spec.size() {
                     let f = fine.get_or_insert_with(|| Spectrum::new(want));
-                    if f.size() != want {
-                        *f = Spectrum::new(want);
-                    }
+                    if f.size() != want { *f = Spectrum::new(want); }
                     resolve_narrow(&mut found, &f.compute_max(&block, 64), rate);
                 }
             }
             found
         });
-
         let burst_bands = (last_bursts.elapsed() >= Duration::from_secs(2)).then(|| {
             last_bursts = Instant::now();
             takes.push_back(bursts.take());
-            if takes.len() > BURST_TAKES {
-                takes.pop_front();
-            }
+            if takes.len() > BURST_TAKES { takes.pop_front(); }
             crate::bursty::union(takes.make_contiguous())
         });
-
         {
             let mut rows = shared.rows.lock().unwrap();
-            if rows.len() == ROW_BACKLOG {
-                rows.pop_front();
-            }
+            // This worker is the only producer: a row of another width than
+            // those kept (the FFT size changed while it computed) starts the
+            // backlog again, so the GUI never mixes widths.
+            if rows.back().is_some_and(|(_, r)| r.len() != row.len()) { rows.clear(); }
+            if rows.len() == ROW_BACKLOG { rows.pop_front(); }
             rows.push_back((row_seq, row));
         }
-
-        for h in shared.vfos.lock().unwrap().values() {
-            h.offer(&block, block_start_s);
-        }
-
-        let used = t0.elapsed().as_secs_f64() / (block_len as f64 / rate);
-        load = 0.9 * load + 0.1 * used as f32;
-
         let mut f = shared.front.lock().unwrap();
         f.spectrum_db = avg_db;
-        if let Some(c) = carriers {
-            f.carriers = c;
-        }
+        if let Some(c) = carriers { f.carriers = c; }
         if let Some(b) = burst_bands {
             f.burst_bands = b;
             f.burst_takes += 1;
         }
-        f.samples = samples;
-        f.load = load;
         f.row_seq = row_seq;
-        f.input_dbfs = input_dbfs.unwrap_or(-200.0);
-        if f.state == SourceState::Paused {
-            f.state = SourceState::Running;
-        }
     }
 }
 

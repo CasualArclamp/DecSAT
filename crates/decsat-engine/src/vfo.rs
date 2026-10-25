@@ -103,6 +103,16 @@ pub enum DecoderKind {
     /// layout over time and its slot and frame grid ([`crate::tdma::pool`]),
     /// matched against an outbound's signalling timing in the GUI.
     ReturnPool,
+    /// Analogue radio demodulators, with PCM audio routed to the normal player.
+    Am,
+    Nfm,
+    Wfm,
+    Usb,
+    Lsb,
+    Dsb,
+    Cw,
+    AtvAm,
+    AtvFm,
     /// Record the VFO's narrowband IQ.
     IqRecord,
     /// Zoomed spectrum and level only.
@@ -110,7 +120,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 19] = [
+    pub const ALL: [DecoderKind; 28] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -128,6 +138,15 @@ impl DecoderKind {
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::ReturnPool,
+        DecoderKind::Am,
+        DecoderKind::Nfm,
+        DecoderKind::Wfm,
+        DecoderKind::Usb,
+        DecoderKind::Lsb,
+        DecoderKind::Dsb,
+        DecoderKind::Cw,
+        DecoderKind::AtvAm,
+        DecoderKind::AtvFm,
         DecoderKind::IqRecord,
         DecoderKind::Spectrum,
     ];
@@ -154,6 +173,15 @@ impl DecoderKind {
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
             DecoderKind::IqRecord => "IQ recorder",
+            DecoderKind::Am => "AM (envelope / AGC)",
+            DecoderKind::Nfm => "NFM (narrowband FM)",
+            DecoderKind::Wfm => "WFM (FM broadcast / stereo)",
+            DecoderKind::Usb => "USB (upper sideband)",
+            DecoderKind::Lsb => "LSB (lower sideband)",
+            DecoderKind::Dsb => "DSB (double sideband)",
+            DecoderKind::Cw => "CW (800 Hz BFO)",
+            DecoderKind::AtvAm => "ATV AM (PAL B/G monochrome)",
+            DecoderKind::AtvFm => "ATV FM (experimental monochrome)",
             DecoderKind::Spectrum => "Spectrum only",
         }
     }
@@ -180,6 +208,15 @@ impl DecoderKind {
             DecoderKind::Tdma => "tdma",
             DecoderKind::ReturnPool => "return-pool",
             DecoderKind::IqRecord => "iq-record",
+            DecoderKind::Am => "am",
+            DecoderKind::Nfm => "nfm",
+            DecoderKind::Wfm => "wfm",
+            DecoderKind::Usb => "usb",
+            DecoderKind::Lsb => "lsb",
+            DecoderKind::Dsb => "dsb",
+            DecoderKind::Cw => "cw",
+            DecoderKind::AtvAm => "atv-am",
+            DecoderKind::AtvFm => "atv-fm",
             DecoderKind::Spectrum => "spectrum",
         }
     }
@@ -306,6 +343,15 @@ impl DecoderKind {
             DecoderKind::Tdma => "TDMA",
             DecoderKind::ReturnPool => "POOL",
             DecoderKind::IqRecord => "REC",
+            DecoderKind::Am => "AM",
+            DecoderKind::Nfm => "NFM",
+            DecoderKind::Wfm => "WFM",
+            DecoderKind::Usb => "USB",
+            DecoderKind::Lsb => "LSB",
+            DecoderKind::Dsb => "DSB",
+            DecoderKind::Cw => "CW",
+            DecoderKind::AtvAm => "ATV-AM",
+            DecoderKind::AtvFm => "ATV-FM",
             DecoderKind::Spectrum => "SPEC",
         }
     }
@@ -321,15 +367,20 @@ pub enum SignalMode {
     #[default]
     Scpc,
     Tdma,
+    Analog,
 }
 
 impl SignalMode {
-    pub const ALL: [SignalMode; 2] = [SignalMode::Scpc, SignalMode::Tdma];
+    pub const ALL: [SignalMode; 3] = [SignalMode::Scpc, SignalMode::Tdma, SignalMode::Analog];
 
     /// The mode a decoder belongs to (the tools, either: SCPC).
     pub fn of(decoder: DecoderKind) -> Self {
         if matches!(decoder, DecoderKind::Tdma | DecoderKind::ReturnPool) {
             SignalMode::Tdma
+        } else if matches!(decoder, DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
+            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb | DecoderKind::Cw
+            | DecoderKind::AtvAm | DecoderKind::AtvFm) {
+            SignalMode::Analog
         } else {
             SignalMode::Scpc
         }
@@ -339,6 +390,7 @@ impl SignalMode {
         match self {
             SignalMode::Scpc => "SCPC",
             SignalMode::Tdma => "TDMA",
+            SignalMode::Analog => "ANALOG",
         }
     }
 
@@ -347,6 +399,7 @@ impl SignalMode {
         match self {
             SignalMode::Scpc => "scpc",
             SignalMode::Tdma => "tdma",
+            SignalMode::Analog => "analog",
         }
     }
 
@@ -360,6 +413,7 @@ impl SignalMode {
         match self {
             SignalMode::Scpc => DecoderKind::Identify,
             SignalMode::Tdma => DecoderKind::Tdma,
+            SignalMode::Analog => DecoderKind::Am,
         }
     }
 }
@@ -369,8 +423,13 @@ impl DecoderKind {
     /// the rest in SCPC, the IQ recorder and the spectrum in both.
     pub fn fits(self, mode: SignalMode) -> bool {
         match self {
-            DecoderKind::IqRecord | DecoderKind::Spectrum => true,
+            DecoderKind::IqRecord | DecoderKind::Spectrum => mode != SignalMode::Analog,
             DecoderKind::Tdma | DecoderKind::ReturnPool => mode == SignalMode::Tdma,
+            DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
+            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb | DecoderKind::Cw
+            | DecoderKind::AtvAm | DecoderKind::AtvFm => {
+                mode == SignalMode::Analog
+            }
             _ => mode == SignalMode::Scpc,
         }
     }
@@ -558,6 +617,8 @@ pub struct VfoStatus {
     pub spectrum_db: Vec<f32>,
     /// Points for the constellation view.
     pub scatter: Vec<Iq>,
+    /// Decoded monochrome analogue video snapshot, 128 x 96 pixels.
+    pub atv_frame: Vec<u8>,
     pub identification: Option<Identification>,
     /// A coded modem's chain running (TPC 2964, the Viterbi, FastLink):
     /// for the CDM type-found model, the one it picked.
@@ -793,7 +854,10 @@ impl VfoHandle {
 }
 
 /// Blocks a worker may have queued before new ones are dropped.
-const QUEUE_DEPTH: usize = 8;
+// 16 x ~40-ms live blocks provides ~640 ms of scheduling headroom.
+// Still bounded: sustained DSP overload will ultimately drop samples.
+// At 30.72 MS/s this may retain ~160 MiB of shared IQ data per queued VFO.
+const QUEUE_DEPTH: usize = 16;
 
 /// A VFO centred outside what a receiver at `in_rate` takes in (±half the
 /// rate about its centre).
@@ -830,6 +894,9 @@ pub(crate) fn spawn(
         std::thread::Builder::new()
             .name(format!("vfo-{}", settings.name))
             .spawn(move || {
+                // Prioritise real-time channel processing over display work.
+                // Windows remains free to schedule the thread across cores.
+                crate::thread_priority::set_dsp_priority();
                 let mut w = Worker::new(in_rate, settings, status, dropped);
                 w.lossless = lossless;
                 w.plans = plans;
@@ -877,6 +944,7 @@ fn enough_frames(out_rate: f64, rs: f64) -> usize {
 /// Pause between Identify checks once it has a confident answer.
 const IDENTIFY_REST: std::time::Duration = std::time::Duration::from_secs(3);
 
+#[allow(clippy::large_enum_variant)]
 enum Decoder {
     Identify {
         buf: Vec<Iq>,
@@ -889,6 +957,7 @@ enum Decoder {
         live: Option<LiveView>,
     },
     Spectrum,
+    Analog(crate::analog::AnalogReceiver),
     Record {
         writer: Option<IqFileWriter>,
         path: PathBuf,
@@ -1091,6 +1160,10 @@ struct Worker {
     ddc: Ddc,
     decoder: Decoder,
     spec: Spectrum,
+    /// Last optional VFO spectrum refresh. DSP/decoder work has priority.
+    last_spectrum_refresh: std::time::Instant,
+    /// Throttle expensive GUI/FEC status snapshots independently of sample decoding.
+    last_status_refresh: std::time::Instant,
     status: Arc<Mutex<VfoStatus>>,
     dropped: Arc<AtomicU64>,
     load: f32,
@@ -1167,6 +1240,8 @@ impl Worker {
             ddc,
             decoder,
             spec: Spectrum::new(1024),
+            last_spectrum_refresh: std::time::Instant::now() - std::time::Duration::from_secs(1),
+            last_status_refresh: std::time::Instant::now() - std::time::Duration::from_secs(1),
             settings,
             status,
             dropped,
@@ -1202,6 +1277,12 @@ impl Worker {
                 live: None,
             },
             DecoderKind::Spectrum => Decoder::Spectrum,
+            DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
+            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb
+            | DecoderKind::Cw | DecoderKind::AtvAm | DecoderKind::AtvFm
+            => Decoder::Analog(crate::analog::AnalogReceiver::new(
+                s.decoder, ddc.out_rate(), s.bandwidth_hz,
+            )),
             DecoderKind::IqRecord => {
                 // Named by the VFO's RF centre (when known), which is the
                 // recording's centre: opening it labels the axis.
@@ -1508,7 +1589,16 @@ impl Worker {
                     let real = block.len() as f64 / self.in_rate;
                     let used = t0.elapsed().as_secs_f64() / real.max(1e-9);
                     self.load = 0.9 * self.load + 0.1 * used as f32;
-                    self.publish(n);
+                    // Publishing snapshots the demodulator, copies the constellation,
+                    // reads FEC statistics and sometimes calculates an FFT. None of
+                    // that needs to run for every incoming sample block. Preserve
+                    // uninterrupted DDC / decoder processing as the priority.
+                    if self.last_status_refresh.elapsed()
+                        >= std::time::Duration::from_millis(200)
+                    {
+                        self.last_status_refresh = std::time::Instant::now();
+                        self.publish(n);
+                    }
                 }
             }
         }
@@ -1582,6 +1672,7 @@ impl Worker {
         let out_rate = self.ddc.out_rate();
         match &mut self.decoder {
             Decoder::Spectrum => {}
+            Decoder::Analog(a) => a.process(&self.bb),
             Decoder::Record { writer, bytes, .. } => {
                 if let Some(w) = writer {
                     if w.write(&self.bb).is_ok() {
@@ -2102,8 +2193,14 @@ impl Worker {
 
     fn publish(&mut self, new_samples: usize) {
         let out_rate = self.ddc.out_rate();
-        let spectrum_db = if self.bb.len() >= 1024 {
-            Some(self.spec.compute_max(&self.bb, 16))
+        // Rendering is optional: do not perform up to 16 FFTs for every
+        // source block. The DVB decoder still consumes every available sample.
+        // Approx. 10 updates/s is ample for the VFO spectrum display.
+        let spectrum_db = if self.bb.len() >= 1024
+            && self.last_spectrum_refresh.elapsed() >= std::time::Duration::from_millis(200)
+        {
+            self.last_spectrum_refresh = std::time::Instant::now();
+            Some(self.spec.compute_max(&self.bb, 8))
         } else {
             None
         };
@@ -2193,6 +2290,14 @@ impl Worker {
                         }
                         None => {}
                     }
+                }
+            }
+            Decoder::Analog(a) => {
+                st.message = a.status_message();
+                st.atv_frame = a.video_frame().to_vec();
+                if new_samples > 0 {
+                    let stride = (self.bb.len() / 2000).max(1);
+                    st.scatter = self.bb.iter().step_by(stride).copied().collect();
                 }
             }
             Decoder::Spectrum => {
