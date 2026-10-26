@@ -46,11 +46,15 @@ fn wfm_rds_panel(ui: &mut Ui, message: &str) {
     let pty = field(message, "PTY=", Some(" PS="));
     let ps = field(message, "PS=", Some(" RT="));
     let raw_rt = field(message, "RT=", Some(" ("));
-    let groups = message.rsplit_once('(')
+    let groups = message
+        .rsplit_once('(')
         .and_then(|(_, tail)| tail.strip_suffix(" groups)"))
         .and_then(|count| count.trim().parse::<u64>().ok());
-    let station = ps.filter(|name| !name.is_empty()).unwrap_or("Waiting for station name…");
-    let radio_text = raw_rt.filter(|text| !text.is_empty())
+    let station = ps
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Waiting for station name…");
+    let radio_text = raw_rt
+        .filter(|text| !text.is_empty())
         .unwrap_or("Waiting for RadioText…");
 
     egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1317,68 +1321,106 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     // has its own.)
     // Constellation plots describe discrete digital symbols, not analogue audio.
     // Keep the RF spectrum below, but show useful mode context instead.
-    if matches!(v.settings.decoder, DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb | DecoderKind::Cw | DecoderKind::AtvAm | DecoderKind::AtvFm) {
+    if matches!(
+        v.settings.decoder,
+        DecoderKind::Am
+            | DecoderKind::Nfm
+            | DecoderKind::Wfm
+            | DecoderKind::Usb
+            | DecoderKind::Lsb
+            | DecoderKind::Dsb
+            | DecoderKind::Cw
+            | DecoderKind::AtvAm
+            | DecoderKind::AtvFm
+    ) {
         ui.label(RichText::new("Analogue receiver").strong());
         match v.settings.decoder {
             DecoderKind::Wfm => {
                 wfm_rds_panel(ui, &st.message);
             }
-            DecoderKind::Nfm => { ui.label("Narrowband FM · 48 kHz audio"); }
-            DecoderKind::Am => { ui.label("AM envelope receiver · 48 kHz audio"); }
-            DecoderKind::Usb => { ui.label("Upper sideband · 48 kHz audio"); }
-            DecoderKind::Lsb => { ui.label("Lower sideband · 48 kHz audio"); }
-            DecoderKind::Dsb => { ui.label("Double sideband · 48 kHz audio"); }
-            DecoderKind::Cw => { ui.label("CW · 800 Hz BFO · 48 kHz audio"); }
+            DecoderKind::Nfm => {
+                ui.label("Narrowband FM · 48 kHz audio");
+            }
+            DecoderKind::Am => {
+                ui.label("AM envelope receiver · 48 kHz audio");
+            }
+            DecoderKind::Usb => {
+                ui.label("Upper sideband · 48 kHz audio");
+            }
+            DecoderKind::Lsb => {
+                ui.label("Lower sideband · 48 kHz audio");
+            }
+            DecoderKind::Dsb => {
+                ui.label("Double sideband · 48 kHz audio");
+            }
+            DecoderKind::Cw => {
+                ui.label("CW · 800 Hz BFO · 48 kHz audio");
+            }
             DecoderKind::AtvAm | DecoderKind::AtvFm => {
                 ui.label(&st.message);
                 let key = egui::Id::new(("atv_picture_controls", v.id));
-                let (mut bright,mut contrast,mut xshift,mut yshift): (f32,f32,i32,i32) =
-                    ui.ctx().data_mut(|d| d.get_persisted(key).unwrap_or((0.0,1.0,0,0)));
+                let (mut bright, mut contrast, mut xshift, mut yshift): (f32, f32, i32, i32) = ui
+                    .ctx()
+                    .data_mut(|d| d.get_persisted(key).unwrap_or((0.0, 1.0, 0, 0)));
                 ui.horizontal(|ui| {
                     ui.label("Brightness");
-                    ui.add(egui::Slider::new(&mut bright,-1.0..=1.0).show_value(false));
+                    ui.add(egui::Slider::new(&mut bright, -1.0..=1.0).show_value(false));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Contrast");
-                    ui.add(egui::Slider::new(&mut contrast,0.2..=3.0).show_value(false));
+                    ui.add(egui::Slider::new(&mut contrast, 0.2..=3.0).show_value(false));
                 });
                 ui.horizontal(|ui| {
                     ui.label("H-sync trim");
-                    ui.add(egui::Slider::new(&mut xshift,-360..=360));
+                    ui.add(egui::Slider::new(&mut xshift, -360..=360));
                 });
                 ui.horizontal(|ui| {
                     ui.label("V-sync trim");
-                    ui.add(egui::Slider::new(&mut yshift,-288..=288));
+                    ui.add(egui::Slider::new(&mut yshift, -288..=288));
                 });
-                ui.ctx().data_mut(|d| d.insert_persisted(key,(bright,contrast,xshift,yshift)));
+                ui.ctx()
+                    .data_mut(|d| d.insert_persisted(key, (bright, contrast, xshift, yshift)));
                 if st.atv_frame.len() == 720 * 576 {
-                    let mut pixels=vec![0u8;720*576*3];
-                    for y in 0..576usize { for x in 0..720usize {
-                        let sx=(x as i32+xshift).rem_euclid(720) as usize;
-                        let sy_i=y as i32+yshift;
-                        // V trim is a visible display offset, not a substitute
-                        // for correctly acquired field synchronisation.
-                        if !(0..576).contains(&sy_i) { continue; }
-                        let sy=sy_i as usize;
-                        let grey = st.atv_frame[sy*720+sx] as f32 / 255.0;
-                        let value = (((grey - 0.5)*contrast + 0.5 + bright).clamp(0.0, 1.0)*255.0) as u8;
-                        let off = (y*720+x)*3;
-                        pixels[off] = value;
-                        pixels[off+1] = value;
-                        pixels[off+2] = value;
-                    }}
+                    let mut pixels = vec![0u8; 720 * 576 * 3];
+                    for y in 0..576usize {
+                        for x in 0..720usize {
+                            let sx = (x as i32 + xshift).rem_euclid(720) as usize;
+                            let sy_i = y as i32 + yshift;
+                            // V trim is a visible display offset, not a substitute
+                            // for correctly acquired field synchronisation.
+                            if !(0..576).contains(&sy_i) {
+                                continue;
+                            }
+                            let sy = sy_i as usize;
+                            let grey = st.atv_frame[sy * 720 + sx] as f32 / 255.0;
+                            let value = (((grey - 0.5) * contrast + 0.5 + bright).clamp(0.0, 1.0)
+                                * 255.0) as u8;
+                            let off = (y * 720 + x) * 3;
+                            pixels[off] = value;
+                            pixels[off + 1] = value;
+                            pixels[off + 2] = value;
+                        }
+                    }
                     let image = egui::ColorImage::from_rgb([720, 576], &pixels);
                     let texture = ui.ctx().load_texture(
-                        format!("analog-tv-preview-{:?}", v.id), image, Default::default());
+                        format!("analog-tv-preview-{:?}", v.id),
+                        image,
+                        Default::default(),
+                    );
                     // Always keep a compact preview in the existing VFO panel.
                     ui.label("PAL video · 720 × 576 source");
                     let preview_width = ui.available_width().clamp(80.0, 260.0);
-                    ui.image((texture.id(), vec2(preview_width, preview_width * 576.0 / 720.0)));
+                    ui.image((
+                        texture.id(),
+                        vec2(preview_width, preview_width * 576.0 / 720.0),
+                    ));
 
                     // Open a native-resolution floating window inside the same DecSAT GUI.
                     // Its open state is stored separately for each VFO.
                     let window_id = egui::Id::new(("pal_full_resolution_window", v.id));
-                    let mut full_open = ui.ctx().data_mut(|d| d.get_persisted::<bool>(window_id).unwrap_or(false));
+                    let mut full_open = ui
+                        .ctx()
+                        .data_mut(|d| d.get_persisted::<bool>(window_id).unwrap_or(false));
                     if ui.button("Open full resolution (720 × 576)").clicked() {
                         full_open = true;
                     }
@@ -1392,7 +1434,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                                 ui.image((texture.id(), vec2(720.0, 576.0)));
                             });
                     }
-                    ui.ctx().data_mut(|d| d.insert_persisted(window_id, full_open));
+                    ui.ctx()
+                        .data_mut(|d| d.insert_persisted(window_id, full_open));
                 }
             }
             _ => {}
@@ -4497,7 +4540,9 @@ fn mode_switch(ui: &mut Ui, id: &str, mode: &mut SignalMode) -> bool {
                      bursts, layout, slots, terminals and code",
                 );
             ui.selectable_value(mode, SignalMode::Analog, SignalMode::Analog.label())
-                .on_hover_text("Analogue reception: AM, NFM, WFM/RDS, USB, LSB, DSB, CW and analogue TV");
+                .on_hover_text(
+                    "Analogue reception: AM, NFM, WFM/RDS, USB, LSB, DSB, CW and analogue TV",
+                );
         });
     });
     *mode != before
