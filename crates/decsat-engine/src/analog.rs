@@ -15,7 +15,11 @@ fn coeff(hz: f64, rate: f64) -> f32 {
 /// Three cascaded low-pass poles. This removes substantially more out-of-band
 /// energy than the original one-pole filter before PCM decimation.
 #[derive(Default)]
-struct LowPass3 { a: f32, b: f32, c: f32 }
+struct LowPass3 {
+    a: f32,
+    b: f32,
+    c: f32,
+}
 impl LowPass3 {
     #[inline]
     fn tick(&mut self, value: f32, k: f32) -> f32 {
@@ -48,7 +52,9 @@ pub struct AnalogReceiver {
     pilot_omega: f64,
     pilot_level: f32,
     last_error: Option<String>,
-    rf_a: Iq, rf_b: Iq, rf_c: Iq,
+    rf_a: Iq,
+    rf_b: Iq,
+    rf_c: Iq,
     decim_phase: usize,
     rds: crate::analog_rds::RdsDecoder,
     tv: crate::analog_tv::MonochromeTv,
@@ -61,21 +67,38 @@ impl AnalogReceiver {
         };
         let rate = rate.max(1.0);
         Self {
-            mode, rate, player,
-            previous: Iq::new(1.0, 0.0), power: 0.1,
-            dc: 0.0, fm_dc: 0.0,
-            mono: LowPass3::default(), difference: LowPass3::default(),
-            ssb_i: LowPass3::default(), ssb_q: LowPass3::default(),
-            deemph_l: 0.0, deemph_r: 0.0, phase: 0.0, audio_phase: 0.0,
-            pilot_i: 0.0, pilot_q: 0.0, pilot_phase: 0.0,
-            pilot_omega: TAU * 19_000.0 / (rate / (rate / 384_000.0).floor().max(1.0)), pilot_level: 0.0,
-            last_error, rds: crate::analog_rds::RdsDecoder::default(),
+            mode,
+            rate,
+            player,
+            previous: Iq::new(1.0, 0.0),
+            power: 0.1,
+            dc: 0.0,
+            fm_dc: 0.0,
+            mono: LowPass3::default(),
+            difference: LowPass3::default(),
+            ssb_i: LowPass3::default(),
+            ssb_q: LowPass3::default(),
+            deemph_l: 0.0,
+            deemph_r: 0.0,
+            phase: 0.0,
+            audio_phase: 0.0,
+            pilot_i: 0.0,
+            pilot_q: 0.0,
+            pilot_phase: 0.0,
+            pilot_omega: TAU * 19_000.0 / (rate / (rate / 384_000.0).floor().max(1.0)),
+            pilot_level: 0.0,
+            last_error,
+            rds: crate::analog_rds::RdsDecoder::default(),
             tv: crate::analog_tv::MonochromeTv::default(),
-            rf_a: Iq::new(0.0, 0.0), rf_b: Iq::new(0.0, 0.0),
-            rf_c: Iq::new(0.0, 0.0), decim_phase: 0,
+            rf_a: Iq::new(0.0, 0.0),
+            rf_b: Iq::new(0.0, 0.0),
+            rf_c: Iq::new(0.0, 0.0),
+            decim_phase: 0,
         }
     }
-    pub fn video_frame(&self) -> &[u8] { self.tv.frame() }
+    pub fn video_frame(&self) -> &[u8] {
+        self.tv.frame()
+    }
     pub fn status_message(&self) -> String {
         if let Some(e) = &self.last_error {
             format!("{}: audio error: {e}", self.mode.label())
@@ -83,9 +106,15 @@ impl AnalogReceiver {
             if self.mode == DecoderKind::Wfm {
                 format!("WFM stereo / RDS — {}", self.rds.summary())
             } else if matches!(self.mode, DecoderKind::AtvAm | DecoderKind::AtvFm) {
-                format!("{} — PAL monochrome, pulse sync ({} H lines, {} V events)",
-                    self.mode.label(), self.tv.sync_count(), self.tv.vertical_sync_count())
-            } else { format!("{} — 48 kHz audio", self.mode.label()) }
+                format!(
+                    "{} — PAL monochrome, pulse sync ({} H lines, {} V events)",
+                    self.mode.label(),
+                    self.tv.sync_count(),
+                    self.tv.vertical_sync_count()
+                )
+            } else {
+                format!("{} — 48 kHz audio", self.mode.label())
+            }
         }
     }
     /// Use the existing VFO bandwidth control to set the channel width.
@@ -95,13 +124,16 @@ impl AnalogReceiver {
     /// require GUI settings plumbing and are intentionally not represented
     /// here as if already available.
     pub fn process(&mut self, iq: &[Iq]) {
-        if iq.is_empty() { return; }
+        if iq.is_empty() {
+            return;
+        }
         if matches!(self.mode, DecoderKind::AtvAm | DecoderKind::AtvFm) {
-            self.tv.process(iq, self.rate, self.mode == DecoderKind::AtvFm);
+            self.tv
+                .process(iq, self.rate, self.mode == DecoderKind::AtvFm);
             return;
         }
         let mut pcm = Vec::with_capacity(
-            ((iq.len() as f64 * PCM_RATE as f64 / self.rate).ceil() as usize + 2) * 2
+            ((iq.len() as f64 * PCM_RATE as f64 / self.rate).ceil() as usize + 2) * 2,
         );
         // Wideband VFOs can output tens of MS/s. Reduce that to approximately
         // 384 kS/s *before* costly trigonometric/FM/stereo processing.
@@ -122,7 +154,14 @@ impl AnalogReceiver {
         let diff_k = coeff(15_000.0, rate);
         // Broadcast FM commonly uses 50 us in Europe; NFM voice generally
         // uses 300 us or 750 us depending on service. 300 us chosen here.
-        let de_k = coeff(if self.mode == DecoderKind::Wfm { 3183.1 } else { 530.5 }, rate);
+        let de_k = coeff(
+            if self.mode == DecoderKind::Wfm {
+                3183.1
+            } else {
+                530.5
+            },
+            rate,
+        );
         let dc_k = coeff(15.0, rate);
         let agc_k = coeff(12.0, rate);
         let pilot_k = coeff(500.0, rate);
@@ -134,10 +173,14 @@ impl AnalogReceiver {
                 self.rf_b += (self.rf_a - self.rf_b) * rf_k;
                 self.rf_c += (self.rf_b - self.rf_c) * rf_k;
                 self.decim_phase += 1;
-                if self.decim_phase < decim { continue; }
+                if self.decim_phase < decim {
+                    continue;
+                }
                 self.decim_phase = 0;
                 self.rf_c
-            } else { raw };
+            } else {
+                raw
+            };
             let amp2 = x.norm_sqr();
             self.power += agc_k * (amp2 - self.power);
             let gain = 0.6 / self.power.max(EPS).sqrt();
@@ -145,9 +188,13 @@ impl AnalogReceiver {
             let mut right: f32;
             if is_fm {
                 let delta = x * self.previous.conj();
-                let deviation = if self.mode == DecoderKind::Nfm { 5_000.0 } else { 75_000.0 };
-                let multiplex = (delta.im.atan2(delta.re)
-                    * (rate / (TAU * deviation)) as f32).clamp(-4.0, 4.0);
+                let deviation = if self.mode == DecoderKind::Nfm {
+                    5_000.0
+                } else {
+                    75_000.0
+                };
+                let multiplex =
+                    (delta.im.atan2(delta.re) * (rate / (TAU * deviation)) as f32).clamp(-4.0, 4.0);
                 self.fm_dc += dc_k * (multiplex - self.fm_dc);
                 let multiplex = multiplex - self.fm_dc;
                 if self.mode == DecoderKind::Wfm && rate >= 140_000.0 {
@@ -163,16 +210,16 @@ impl AnalogReceiver {
                     self.pilot_q += pilot_k * (multiplex * -sn - self.pilot_q);
                     let error = self.pilot_q.atan2(self.pilot_i) as f64;
                     self.pilot_omega += (0.00000012 * error).clamp(-pll_limit, pll_limit);
-                    self.pilot_omega = self.pilot_omega.clamp(
-                        TAU * 18_800.0 / rate, TAU * 19_200.0 / rate
-                    );
-                    self.pilot_phase = (self.pilot_phase + self.pilot_omega
-                        + 0.0015 * error).rem_euclid(TAU);
+                    self.pilot_omega = self
+                        .pilot_omega
+                        .clamp(TAU * 18_800.0 / rate, TAU * 19_200.0 / rate);
+                    self.pilot_phase =
+                        (self.pilot_phase + self.pilot_omega + 0.0015 * error).rem_euclid(TAU);
                     let amplitude = self.pilot_i.hypot(self.pilot_q);
                     self.pilot_level += pilot_energy_k * (amplitude - self.pilot_level);
                     let difference = self.difference.tick(
                         multiplex * (2.0 * self.pilot_phase).cos() as f32 * 2.0,
-                        diff_k
+                        diff_k,
                     );
                     // Quiet mono fallback when no reliable 19-kHz pilot.
                     let blend = ((self.pilot_level - 0.002) / 0.01).clamp(0.0, 1.0);
@@ -201,15 +248,25 @@ impl AnalogReceiver {
                         let s = self.phase.sin() as f32;
                         let rotated_i = x.re * c - x.im * s;
                         let rotated_q = x.re * s + x.im * c;
-                        let k = if self.mode == DecoderKind::Cw { coeff(500.0, rate) } else { ssb_k };
-                        { self.ssb_q.tick(rotated_q, k); self.ssb_i.tick(rotated_i, k) * gain }
+                        let k = if self.mode == DecoderKind::Cw {
+                            coeff(500.0, rate)
+                        } else {
+                            ssb_k
+                        };
+                        {
+                            self.ssb_q.tick(rotated_q, k);
+                            self.ssb_i.tick(rotated_i, k) * gain
+                        }
                     }
                     _ => 0.0,
                 };
                 if self.mode == DecoderKind::Am {
                     self.dc += dc_k * (y - self.dc);
                     left = self.mono.tick(y - self.dc, audio_k);
-                } else if matches!(self.mode, DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Cw) {
+                } else if matches!(
+                    self.mode,
+                    DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Cw
+                ) {
                     left = y;
                 } else {
                     left = self.mono.tick(y, audio_k);
@@ -225,6 +282,9 @@ impl AnalogReceiver {
             }
         }
         if !pcm.is_empty()
-            && let Some(p) = &mut self.player { p.push_pcm(PCM_RATE, pcm); }
+            && let Some(p) = &mut self.player
+        {
+            p.push_pcm(PCM_RATE, pcm);
+        }
     }
 }

@@ -9,13 +9,17 @@ mod win {
         fn SetThreadPriority(h_thread: *mut c_void, priority: i32) -> i32;
     }
     pub(super) fn set(priority: i32) {
-        unsafe { let _ = SetThreadPriority(GetCurrentThread(), priority); }
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), priority);
+        }
     }
 }
 
 pub(crate) fn set_dsp_priority() {
-    #[cfg(windows)] win::set(1); // THREAD_PRIORITY_ABOVE_NORMAL
+    #[cfg(windows)]
+    win::set(1); // THREAD_PRIORITY_ABOVE_NORMAL
 }
 pub(crate) fn set_display_priority() {
-    #[cfg(windows)] win::set(-1); // THREAD_PRIORITY_BELOW_NORMAL
+    #[cfg(windows)]
+    win::set(-1); // THREAD_PRIORITY_BELOW_NORMAL
 }

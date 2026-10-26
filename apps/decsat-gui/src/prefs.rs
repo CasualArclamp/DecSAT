@@ -363,7 +363,10 @@ fn write_key(key: &str, value: &str) -> std::io::Result<()> {
 
 /// The last session's keys: the radio, the file source, the VFOs.
 fn is_session(key: &str) -> bool {
-    key.starts_with("radio.") || key.starts_with("source.") || key.starts_with("vfo.") || key.starts_with("device.")
+    key.starts_with("radio.")
+        || key.starts_with("source.")
+        || key.starts_with("vfo.")
+        || key.starts_with("device.")
 }
 
 /// The session saved last time, as key/value pairs.
@@ -383,12 +386,15 @@ pub fn save_session(pairs: &[(String, String)]) -> std::io::Result<()> {
 }
 
 /// Persist the StreamReader control bar and wideband overview settings.
-pub fn toolbar_settings() -> Vec<(String,String)> {
-    read_all().into_iter().filter(|(k,_)| k.starts_with("toolbar.")).collect()
+pub fn toolbar_settings() -> Vec<(String, String)> {
+    read_all()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("toolbar."))
+        .collect()
 }
-pub fn save_toolbars(pairs: &[(String,String)]) -> std::io::Result<()> {
-    let mut all=read_all();
-    all.retain(|(k,_)| !k.starts_with("toolbar."));
+pub fn save_toolbars(pairs: &[(String, String)]) -> std::io::Result<()> {
+    let mut all = read_all();
+    all.retain(|(k, _)| !k.starts_with("toolbar."));
     all.extend(pairs.iter().cloned());
     write_all(&all)
 }

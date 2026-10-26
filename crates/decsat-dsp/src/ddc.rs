@@ -304,10 +304,8 @@ impl Ddc {
             for &x in input {
                 let re = pr as f32;
                 let im = pi as f32;
-                self.mixed.push(Iq::new(
-                    x.re * re - x.im * im,
-                    x.re * im + x.im * re,
-                ));
+                self.mixed
+                    .push(Iq::new(x.re * re - x.im * im, x.re * im + x.im * re));
                 let next_re = pr * sr - pi * si;
                 pi = pr * si + pi * sr;
                 pr = next_re;
