@@ -53,6 +53,29 @@ enum Play {
 }
 
 impl App {
+    /// Whether a radio other than the HackRF (UHD, Pluto, RTL-SDR) is the
+    /// selected source. Those backends are Windows-only and feature-gated, so
+    /// their `*_selected` fields exist only in such builds; elsewhere this is
+    /// always false.
+    #[cfg(feature = "hackrf")]
+    fn other_radio_selected(&self) -> bool {
+        #[allow(unused_mut)]
+        let mut selected = false;
+        #[cfg(all(windows, feature = "uhd"))]
+        {
+            selected |= self.uhd_selected;
+        }
+        #[cfg(all(windows, feature = "pluto"))]
+        {
+            selected |= self.pluto_selected;
+        }
+        #[cfg(all(windows, feature = "rtl"))]
+        {
+            selected |= self.rtl_selected;
+        }
+        selected
+    }
+
     /// The menu bar, and the source on its right.
     pub(crate) fn menu_bar(&mut self, ui: &mut egui::Ui) {
         // Menus with switches and values in them stay open until a click
@@ -647,20 +670,13 @@ impl App {
             {
                 if ui
                     .selectable_label(
-                        self.path.is_none()
-                            && !self.uhd_selected
-                            && !self.pluto_selected
-                            && !self.rtl_selected,
+                        self.path.is_none() && !self.other_radio_selected(),
                         "📡 HackRF",
                     )
                     .on_hover_text("Live from the HackRF One: ▶ Start starts it")
                     .clicked()
                 {
-                    if self.path.is_some()
-                        || self.uhd_selected
-                        || self.pluto_selected
-                        || self.rtl_selected
-                    {
+                    if self.path.is_some() || self.other_radio_selected() {
                         self.stop_source();
                         self.path = None;
                         self.paused = false;

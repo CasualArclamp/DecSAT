@@ -458,6 +458,8 @@ impl App {
             ]);
         }
         // Persist the active hardware and all device-specific control-panel values.
+        // Only reassigned by the Windows-only radio backends below.
+        #[allow(unused_mut)]
         let mut active = "hackrf";
         #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_selected {
