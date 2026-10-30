@@ -480,7 +480,7 @@ impl RadioPanel {
                 });
         })
         .response
-        .on_hover_text("3 or 6 MS/s on a Mini (an R2: 2.5 or 10, the nearest is taken).")
+        .on_hover_text("A Mini runs at 3 or 6 MS/s, an R2 at 2.5 or 10; another choice becomes the board's nearest rate.")
         .on_disabled_hover_text("Stop the radio to change the sample rate.");
         ui.end_row();
 

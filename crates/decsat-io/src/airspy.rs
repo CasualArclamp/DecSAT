@@ -43,9 +43,11 @@ const QUEUE: usize = 64;
 pub const AIRSPY_MIN_HZ: u64 = 24_000_000;
 pub const AIRSPY_MAX_HZ: u64 = 1_750_000_000;
 
-/// Sample rates an Airspy Mini offers (an R2 offers 2.5 and 10 MS/s; the
-/// board's own list decides at open time).
-pub const AIRSPY_RATES: [u32; 2] = [3_000_000, 6_000_000];
+/// Sample rates an Airspy offers: 3 and 6 MS/s on a Mini, 2.5 and 10 MS/s
+/// on an R2. All four are offered; at open time the board's own list
+/// decides, and a rate the board lacks becomes its nearest (10 → 6 on a
+/// Mini, 3 → 2.5 on an R2).
+pub const AIRSPY_RATES: [u32; 4] = [2_500_000, 3_000_000, 6_000_000, 10_000_000];
 
 /// Which of libairspy's gain tables the single gain step drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -363,9 +365,15 @@ mod tests {
 
     #[test]
     fn nearest_rate_picks_the_closest() {
-        assert_eq!(nearest_rate(&AIRSPY_RATES, 8_000_000), 6_000_000);
-        assert_eq!(nearest_rate(&AIRSPY_RATES, 2_000_000), 3_000_000);
-        assert_eq!(nearest_rate(&[2_500_000, 10_000_000], 6_000_000), 2_500_000);
+        let mini = [3_000_000, 6_000_000];
+        let r2 = [2_500_000, 10_000_000];
+        // Every rate offered in the GUI lands on one the board has.
+        assert_eq!(nearest_rate(&mini, 10_000_000), 6_000_000);
+        assert_eq!(nearest_rate(&mini, 2_500_000), 3_000_000);
+        assert_eq!(nearest_rate(&r2, 10_000_000), 10_000_000);
+        assert_eq!(nearest_rate(&r2, 3_000_000), 2_500_000);
+        assert_eq!(nearest_rate(&r2, 6_000_000), 2_500_000);
+        assert!(AIRSPY_RATES.contains(&10_000_000));
     }
 
     #[test]
