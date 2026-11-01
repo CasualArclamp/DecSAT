@@ -256,7 +256,7 @@ impl AirspySource {
                 };
                 let mut v = spare_rx.try_recv().unwrap_or_default();
                 v.clear();
-                v.extend(s.chunks_exact(2).map(|p| Iq::new(p[0], p[1])));
+                v.extend(s.as_chunks::<2>().0.iter().map(|&[i, q]| Iq::new(i, q)));
                 match tx.try_send(v) {
                     Ok(()) => true,
                     Err(TrySendError::Full(_)) => {

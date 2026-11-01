@@ -505,8 +505,10 @@ fn deliver(ctx: &CbCtx, buf: *const f32, len: u32) {
     let mut v = ctx.spare.try_recv().unwrap_or_default();
     v.clear();
     v.extend(
-        s.chunks_exact(2)
-            .map(|p| Iq::new(p[0] * SCALE, p[1] * SCALE)),
+        s.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[i, q]| Iq::new(i * SCALE, q * SCALE)),
     );
     match ctx.tx.try_send(v) {
         Ok(()) => {}

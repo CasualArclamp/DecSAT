@@ -13,6 +13,7 @@ pub struct Spectrum {
     /// Scratch buffers, kept across calls to avoid per-frame allocation.
     scratch: Vec<Iq>,
     accum: Vec<f32>,
+    frame: Vec<f32>,
 }
 
 impl Spectrum {
@@ -36,6 +37,7 @@ impl Spectrum {
             window,
             scratch: vec![Iq::new(0.0, 0.0); size],
             accum: vec![0.0; size],
+            frame: vec![0.0; size],
         }
     }
 
@@ -79,7 +81,6 @@ impl Spectrum {
             self.size / 2
         };
         let half = self.size / 2;
-        let mut frame = vec![0f32; self.size];
         let mut segments = 0usize;
         let mut start = 0usize;
         while start + self.size <= samples.len() {
@@ -91,9 +92,9 @@ impl Spectrum {
                 let p = self.scratch[k].norm_sqr();
                 self.accum[k] += p;
                 // FFT-shifted, as the row.
-                frame[(k + half) % self.size] = p;
+                self.frame[(k + half) % self.size] = p;
             }
-            each(&frame);
+            each(&self.frame);
             segments += 1;
             start += hop.max(1);
         }

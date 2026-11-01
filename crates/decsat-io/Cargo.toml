@@ -21,6 +21,9 @@ fobos = ["dep:libloading"]
 # Live Airspy Mini / R2 front end, in pure Rust over USB (libairspy-rs on
 # nusb): no libairspy, no DLLs; on Windows the WinUSB driver.
 airspy = ["dep:libairspy-rs"]
+uhd = []
+pluto = []
+rtl = []
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }
