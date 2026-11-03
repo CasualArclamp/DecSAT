@@ -76,6 +76,7 @@ real carriers stay put.
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
 | **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
+| **Network IQ**: raw IQ from another program, so any radio it drives works (an SDRplay RSPduo under SDR++, say), on Windows or Linux. SDR++'s IQ Exporter, GNU Radio's TCP/UDP sinks, rtl_tcp (recognised and tuned); `tcp://` connects, `listen://` waits for a sender, `udp://` binds; int8, uint8, int16, int32, float32; the rate, the sender's frequency and the LNB LO entered (the stream carries none) | ✅ on simulated carriers over TCP and UDP |
 | **LDPC + BCH → BBFRAMEs**: all 21 S2 and 31 S2X codes, BBHEADER, stream info, payload rate | ✅ |
 | **S2X**: 8-bit PLS code, all 55 normal/short MODCODs — 2+4+2 8APSK to 256APSK, the new interleavers | ✅ |
 | **S2X VL-SNR**: the VL-SNR header, pi/2-BPSK (and spread), medium FECFRAMEs, all 9 MODCODs — down to about 0 dB Es/N0 so far | ✅ |

@@ -147,6 +147,16 @@ enum Command {
         /// tunes: L-band behind an LNB). Receive only, antenna power off.
         #[arg(long)]
         hackrf: Option<f64>,
+        /// Live from another program over the network instead: raw IQ from
+        /// `tcp://HOST:PORT` (SDR++'s IQ Exporter as a TCP server),
+        /// `listen://ADDR:PORT` or `udp://ADDR:PORT`; an rtl_tcp server is
+        /// recognised. Needs --rate.
+        #[arg(long)]
+        net: Option<String>,
+        /// The network stream's sample type: int8, uint8, int16, int32 or
+        /// float32.
+        #[arg(long, default_value = "int8")]
+        iq: String,
         /// HackRF IF (LNA) gain, dB: 0–40 in 8 dB steps.
         #[arg(long, default_value_t = 24)]
         lna: u16,
@@ -348,6 +358,8 @@ fn main() -> Result<()> {
         Command::Decode {
             file,
             hackrf,
+            net,
+            iq,
             lna,
             vga,
             amp,
@@ -376,6 +388,8 @@ fn main() -> Result<()> {
         } => decode::decode(decode::DecodeArgs {
             file,
             hackrf,
+            net,
+            iq,
             lna,
             vga,
             amp,

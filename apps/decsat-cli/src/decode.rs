@@ -7,7 +7,9 @@
 //! With `--hackrf <MHz>` the source is the HackRF instead (receive only, its
 //! antenna power forced off): a status line every 30 s, a report at the end
 //! (`--seconds`) — for watching a carrier unattended, e.g. a FastLink link
-//! with `--record-on-activity` until a voice channel speaks.
+//! with `--record-on-activity` until a voice channel speaks. With `--net
+//! URL` it is raw IQ from another program (SDR++'s IQ Exporter, GNU Radio,
+//! rtl_tcp), live in the same way.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -21,6 +23,9 @@ pub struct DecodeArgs {
     pub file: Option<PathBuf>,
     /// Live: the HackRF's centre frequency, MHz, and its gains.
     pub hackrf: Option<f64>,
+    /// Live: raw IQ over the network, and its sample type.
+    pub net: Option<String>,
+    pub iq: String,
     pub lna: u16,
     pub vga: u16,
     pub amp: bool,
@@ -123,8 +128,27 @@ fn hackrf_source(_: &DecodeArgs, _: f64, _: f64) -> Result<Box<dyn IqSource>> {
 
 pub fn decode(a: DecodeArgs) -> Result<()> {
     let kind = decoder_by_name(&a.decoder)?;
-    let live = a.hackrf.is_some();
+    let live = a.hackrf.is_some() || a.net.is_some();
     let (source, rate): (Box<dyn IqSource>, f64) = match (a.hackrf, &a.file) {
+        (None, _) if a.net.is_some() => {
+            use decsat_io::{NetIqSettings, NetIqSource, NetSample};
+            let url = a.net.as_deref().unwrap_or_default();
+            let (mode, addr) = NetIqSettings::parse_url(url)?;
+            let sample = NetSample::parse(&a.iq)
+                .with_context(|| format!("--iq {}: int8, uint8, int16, int32 or float32", a.iq))?;
+            let rate = a
+                .rate
+                .context("give --rate: a network stream does not say its rate")?;
+            let src = NetIqSource::open(NetIqSettings {
+                mode,
+                addr,
+                sample,
+                sample_rate: rate,
+                center_hz: 0.0,
+            })?;
+            println!("live from {}", src.describe());
+            (Box::new(src), rate)
+        }
         (Some(mhz), _) => {
             let rate = a.rate.unwrap_or(2e6);
             let src = hackrf_source(&a, mhz, rate)?;
@@ -145,7 +169,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
             println!("decoding {} at {:.3} MS/s", reader.describe(), rate / 1e6);
             (Box::new(reader), rate)
         }
-        (None, None) => bail!("give a capture, or --hackrf <MHz>"),
+        (None, None) => bail!("give a capture, --hackrf <MHz> or --net tcp://HOST:PORT"),
     };
 
     // Real time by default: a VFO that falls behind drops blocks, and a

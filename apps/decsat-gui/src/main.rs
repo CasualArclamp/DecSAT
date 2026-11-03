@@ -140,6 +140,20 @@ fn main() -> eframe::Result {
                 app.radio.settings.gains = app.radio.settings.gains.snapped();
                 app.start_hackrf();
             }
+            if let Some(url) = opts.net.clone() {
+                app.net_url = url;
+                if let Some(t) = opts.iq {
+                    app.net_settings.sample = t;
+                }
+                if let Some(r) = opts.rate_msps {
+                    app.net_settings.sample_rate = r * 1e6;
+                }
+                if let Some(f) = opts.net_mhz {
+                    app.net_settings.center_hz = f * 1e6;
+                }
+                app.net_lo_hz = opts.lo_mhz.unwrap_or(0.0) * 1e6;
+                app.start_net();
+            }
             Ok(Box::new(app))
         }),
     )
@@ -248,6 +262,16 @@ struct App {
     rtl_running: bool,
     #[cfg(all(windows, feature = "rtl"))]
     rtl_control: Option<decsat_io::RtlControl>,
+    /// Network IQ (SDR++'s IQ Exporter, GNU Radio, rtl_tcp): where from, as
+    /// a `tcp://`, `listen://` or `udp://` URL, the stream's settings (its
+    /// centre is the IF the sender is tuned to) and the LNB's LO above it.
+    net_url: String,
+    net_settings: decsat_io::NetIqSettings,
+    net_lo_hz: f64,
+    net_open: bool,
+    net_selected: bool,
+    net_running: bool,
+    net_control: Option<decsat_io::NetIqControl>,
     /// The radio's tuning the VFOs were last placed against (`None` until
     /// the first frame), to carry them along when it changes.
     #[cfg(feature = "hackrf")]
@@ -354,6 +378,17 @@ impl Default for App {
             rtl_running: false,
             #[cfg(all(windows, feature = "rtl"))]
             rtl_control: None,
+            net_url: "tcp://127.0.0.1:7777".into(),
+            net_settings: decsat_io::NetIqSettings {
+                sample_rate: 8e6,
+                center_hz: 1_100e6,
+                ..decsat_io::NetIqSettings::default()
+            },
+            net_lo_hz: 0.0,
+            net_open: false,
+            net_selected: false,
+            net_running: false,
+            net_control: None,
             #[cfg(feature = "hackrf")]
             tuned_hz: None,
             remember: false,
@@ -445,7 +480,16 @@ impl App {
         if self.pluto_selected { active="pluto"; }
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected { active="rtl"; }
+        if self.net_selected { active="net"; }
         p.push(("device.selected".into(), active.into()));
+        {
+            let u=&self.net_settings;
+            for (k,v) in [("url",self.net_url.clone()),("iq",u.sample.label().into()),
+                ("rate",u.sample_rate.to_string()),("center",u.center_hz.to_string()),
+                ("lo",self.net_lo_hz.to_string())] {
+                p.push((format!("device.net.{k}"),v));
+            }
+        }
         #[cfg(all(windows, feature = "uhd"))]
         {
             let u=&self.uhd_settings;
@@ -711,7 +755,13 @@ impl App {
             if let Some(v)=get("device.rtl.manual").and_then(|s|s.parse().ok()){u.manual_gain=v;}
             if let Some(v)=get("device.rtl.lo").and_then(|s|s.parse().ok()){u.lnb_lo_hz=v;}
         }
+        if let Some(v)=get("device.net.url"){self.net_url=v.to_string();}
+        if let Some(v)=get("device.net.iq").and_then(decsat_io::NetSample::parse){self.net_settings.sample=v;}
+        if let Some(v)=get("device.net.rate").and_then(|s|s.parse().ok()){self.net_settings.sample_rate=v;}
+        if let Some(v)=get("device.net.center").and_then(|s|s.parse().ok()){self.net_settings.center_hz=v;}
+        if let Some(v)=get("device.net.lo").and_then(|s|s.parse().ok()){self.net_lo_hz=v;}
         match get("device.selected") {
+            Some("net")=>self.net_selected=true,
             #[cfg(all(windows, feature = "uhd"))] Some("uhd")=>self.uhd_selected=true,
             #[cfg(all(windows, feature = "pluto"))] Some("pluto")=>self.pluto_selected=true,
             #[cfg(all(windows, feature = "rtl"))] Some("rtl")=>self.rtl_selected=true,
@@ -762,6 +812,11 @@ impl App {
         if self.path.is_none() && self.pluto_selected {return self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz;}
         #[cfg(all(windows, feature = "rtl"))]
         if self.path.is_none() && self.rtl_selected { return self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz; }
+        if self.path.is_none() && self.net_selected {
+            // rtl_tcp may have been tuned since: the source knows.
+            let c=self.net_control.as_ref().filter(|c|c.is_rtl_tcp()).map(|_|self.net_settings.center_hz).unwrap_or(self.net_settings.center_hz);
+            return c + self.net_lo_hz;
+        }
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
             return self.radio.rf_center();
@@ -851,6 +906,66 @@ impl App {
         self.band.set_span(rate);
     }
 
+    /// Open the network stream with the panel's settings.
+    fn start_net(&mut self) {
+        self.stop_source(); self.path=None;
+        let mut s=self.net_settings.clone();
+        match decsat_io::NetIqSettings::parse_url(&self.net_url) {
+            Ok((mode,addr))=>{s.mode=mode;s.addr=addr;}
+            Err(e)=>{self.note=format!("Network IQ: {e}");return;}
+        }
+        match decsat_io::NetIqSource::open(s) {
+            Ok(src)=>{
+                self.net_control=Some(src.control());self.net_running=true;self.net_selected=true;
+                self.sample_rate=decsat_io::IqSource::sample_rate(&src);
+                self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
+                self.note=format!("Network IQ: {}",decsat_io::IqSource::describe(&src));
+                self.start_engine(Box::new(src));
+            }
+            Err(e)=>self.note=format!("Network IQ: {e}"),
+        }
+    }
+
+    /// Network IQ's settings. The stream carries neither rate nor frequency,
+    /// so both are entered; an rtl_tcp server is recognised and tuned.
+    fn net_panel(&mut self,ctx:&egui::Context){
+        let mut open=self.net_open;
+        egui::Window::new("Network IQ (SDR++, GNU Radio, rtl_tcp)").open(&mut open).show(ctx,|ui|{
+            ui.horizontal(|ui|{ui.label("From");ui.add(egui::TextEdit::singleline(&mut self.net_url).desired_width(200.0));});
+            ui.label("tcp://HOST:PORT connects (SDR++ IQ Exporter: TCP (Server)); listen://0.0.0.0:PORT waits for a sender (TCP (Client)); udp://0.0.0.0:PORT takes UDP.");
+            ui.horizontal(|ui|{ui.label("Sample type");
+                egui::ComboBox::from_id_salt("net_iq").selected_text(self.net_settings.sample.label()).show_ui(ui,|ui|{
+                    for t in decsat_io::NetSample::ALL {ui.selectable_value(&mut self.net_settings.sample,t,t.label());}
+                });
+            });
+            ui.horizontal(|ui|{ui.label("Sample rate MS/s");let mut f=self.net_settings.sample_rate/1e6;
+                if ui.add(egui::DragValue::new(&mut f).speed(0.01).range(0.001..=100.0).max_decimals(6)).changed(){self.net_settings.sample_rate=f*1e6;}
+            });
+            ui.horizontal(|ui|{ui.label("Sender's MHz");let mut f=self.net_settings.center_hz/1e6;
+                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(0.0..=30000.0).max_decimals(6)).changed(){
+                    self.net_settings.center_hz=(f*1e6).round();
+                    if let Some(c)=&self.net_control{let _=c.tune(self.net_settings.center_hz);}
+                    self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
+                }
+            });
+            ui.horizontal(|ui|{ui.label("LNB LO MHz (0=direct)");let mut f=self.net_lo_hz/1e6;
+                if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){
+                    self.net_lo_hz=f*1e6;
+                    self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
+                }
+            });
+            if let Some(c)=&self.net_control {
+                let rate=c.measured_rate().map(|r|format!(", arriving at {:.3} MS/s",r/1e6)).unwrap_or_default();
+                ui.label(format!("{}{rate}{}",c.state(),if c.overflows()>0 {format!(", {} buffers dropped",c.overflows())} else {String::new()}));
+                if c.is_rtl_tcp(){ui.label("rtl_tcp server: the frequency is tuned from here.");}
+                else {ui.label("Tune at the sender; the frequency here only labels the band.");}
+            }
+            ui.label("Main Start/Stop controls the stream. Address, type and rate changes need a restart.");
+            if self.net_running && ui.button("Apply settings (reconnect)").clicked(){self.start_net();}
+            if self.note.starts_with("Network IQ"){ui.label(&self.note);}
+        });self.net_open=open;
+    }
+
     #[cfg(all(windows, feature = "rtl"))]
     fn start_rtl(&mut self) {
         self.stop_source(); self.path=None;
@@ -916,6 +1031,7 @@ impl App {
         {self.pluto_running=false;self.pluto_control=None;}
         #[cfg(all(windows, feature = "rtl"))]
         {self.rtl_running=false;self.rtl_control=None;}
+        self.net_running=false;self.net_control=None;
         #[cfg(feature = "hackrf")]
         {
             self.hackrf = None;
@@ -1475,6 +1591,7 @@ impl App {
         if self.pluto_running {return self.pluto_control.is_some();}
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_running {return self.rtl_control.is_some();}
+        if self.net_running {return self.net_control.as_ref().is_some_and(|c|c.is_rtl_tcp());}
         #[cfg(feature = "hackrf")]
         {
             self.path.is_none() && self.hackrf.is_some()
@@ -1490,6 +1607,17 @@ impl App {
     fn set_rf_center(&mut self, rf: f64) {
         // The readout shows the trimmed RF; the tuning is without the trim.
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
+        if self.net_selected && self.path.is_none() {
+            let if_hz=(rf-self.net_lo_hz).max(0.0);
+            self.net_settings.center_hz=if_hz.round();
+            self.rf_center_mhz=rf/1e6;
+            self.note=match self.net_control.as_ref().map(|c|c.tune(if_hz)) {
+                Some(Ok(true))=>"Network IQ: rtl_tcp server retuned".into(),
+                Some(Err(e))=>format!("Network IQ: retune failed: {e}"),
+                _=>"Network IQ: band relabelled; tune the sender to match".into(),
+            };
+            return;
+        }
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected && self.path.is_none() {
             let if_hz=rf-self.rtl_settings.lnb_lo_hz;
@@ -1640,6 +1768,7 @@ impl App {
     }
     #[allow(clippy::type_complexity)]
     fn open_overview_source(&mut self, frequency:f64)->Option<(Box<dyn decsat_io::IqSource>,Box<dyn FnMut(f64)+Send>)>{
+        if self.net_selected {self.note="Network IQ: the wideband sweep needs a radio DecSAT tunes".into();return None;}
         #[cfg(all(windows,feature="rtl"))]
         if self.rtl_selected {
             let mut settings=self.rtl_settings.clone();settings.center_hz=frequency as u32;
@@ -1664,6 +1793,7 @@ impl App {
         None
     }
     fn restart_selected_overview(&mut self,was_running:bool){if !was_running{return;}
+        if self.net_selected{self.start_net();return;}
         #[cfg(all(windows,feature="rtl"))]
         if self.rtl_selected{self.start_rtl();return;}
         #[cfg(all(windows,feature="pluto"))]
@@ -2033,6 +2163,7 @@ impl eframe::App for App {
         self.pluto_panel(ui.ctx());
         #[cfg(all(windows, feature = "rtl"))]
         self.rtl_panel(ui.ctx());
+        self.net_panel(ui.ctx());
         self.streamreader.show(ui);
         egui::Panel::top("freqbar").show(ui, |ui| self.freq_row(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));

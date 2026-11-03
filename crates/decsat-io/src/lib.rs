@@ -2,10 +2,12 @@
 //! IQ input and output for DecSAT.
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
-//! (replay, and the only way to handle transponders wider than the HackRF) or
-//! the live HackRF One. Recording goes out through [`IqFileWriter`].
+//! (replay, and the only way to handle transponders wider than the HackRF),
+//! the live HackRF One, or IQ over the network ([`net`]: SDR++'s IQ Exporter,
+//! GNU Radio, rtl_tcp). Recording goes out through [`IqFileWriter`].
 
 pub mod file;
+pub mod net;
 pub mod wav;
 #[cfg(all(windows, feature = "uhd"))]
 pub mod uhd;
@@ -22,6 +24,7 @@ pub mod hackrf;
 pub mod hackrf_tx;
 
 pub use file::{IqFileReader, IqFileWriter, format_from_path};
+pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
 
 #[cfg(feature = "hackrf")]

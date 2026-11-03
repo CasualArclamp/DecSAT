@@ -28,6 +28,8 @@ const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
 
 /// What the play button does now.
 enum Play {
+    StartNet,
+    StopNet,
     #[cfg(all(windows, feature = "rtl"))]
     StartRtl,
     #[cfg(all(windows, feature = "rtl"))]
@@ -243,7 +245,11 @@ impl App {
         } else {what};
         #[cfg(not(feature = "hackrf"))]
         let what = file;
+        let what = if self.path.is_none() && self.net_selected {
+            if self.net_running {Play::StopNet} else {Play::StartNet}
+        } else {what};
         let running = match what {
+            Play::StopNet => true,
             #[cfg(all(windows, feature = "rtl"))]
             Play::StopRtl => true,
             #[cfg(feature = "hackrf")]
@@ -256,6 +262,8 @@ impl App {
             _ => false,
         };
         let (text, tip) = match what {
+            Play::StartNet => ("▶ Start","Open the network IQ stream (Source ▸ Network IQ settings…)"),
+            Play::StopNet => ("⏹ Stop","Close the network IQ stream"),
             #[cfg(all(windows, feature = "rtl"))]
             Play::StartRtl => ("▶ Start","Start selected RTL-SDR dongle"),
             #[cfg(all(windows, feature = "rtl"))]
@@ -301,6 +309,8 @@ impl App {
             return;
         }
         match what {
+            Play::StartNet => self.start_net(),
+            Play::StopNet => {self.stop_source();self.note="Network IQ stopped".into();},
             #[cfg(all(windows, feature = "rtl"))]
             Play::StartRtl => self.start_rtl(),
             #[cfg(all(windows, feature = "rtl"))]
@@ -408,6 +418,23 @@ impl App {
     fn freq_note(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.add_space(8.0);
+            if self.path.is_none() && self.net_selected {
+                let tunes = self.net_control.as_ref().is_some_and(|c| c.is_rtl_tcp());
+                ui.label(
+                    RichText::new(format!(
+                        "sender {}  ·  LO {}",
+                        format::freq(self.net_settings.center_hz),
+                        format::freq(self.net_lo_hz),
+                    ))
+                    .weak(),
+                )
+                .on_hover_text(if tunes {
+                    "An rtl_tcp server: scroll or click a digit to tune it."
+                } else {
+                    "Tuned at the sender: changing this only relabels the axis."
+                });
+                return;
+            }
             #[cfg(feature = "hackrf")]
             if self.path.is_none() {
                 let live = self.hackrf.is_some();
@@ -476,6 +503,10 @@ impl App {
                     self.engine.is_some() && !self.paused,
                 )
             }
+            None if self.net_selected => {
+                let dot=if self.net_running {"● "}else{""};
+                (format!("{dot}Network IQ · {}",format::rate(self.net_settings.sample_rate)),self.net_running)
+            }
             #[cfg(all(windows, feature = "rtl"))]
             None if self.rtl_selected => {
                 let dot=if self.rtl_running {"● "}else{""};
@@ -509,11 +540,24 @@ impl App {
             RichText::new(text)
         };
         ui.menu_button(text, |ui| {
+            if ui.selectable_label(self.path.is_none() && self.net_selected,"🖧 Network IQ (SDR++, GNU Radio, rtl_tcp)").clicked(){
+                if self.path.is_some() || !self.net_selected {self.stop_source();}
+                self.path=None;self.net_selected=true;
+                #[cfg(all(windows, feature = "rtl"))]
+                {self.rtl_selected=false;}
+                #[cfg(all(windows, feature = "pluto"))]
+                {self.pluto_selected=false;}
+                #[cfg(all(windows, feature = "uhd"))]
+                {self.uhd_selected=false;}
+                self.paused=false;ui.close();
+            }
+            if ui.button("Network IQ settings…").clicked(){self.net_open=true;ui.close();}
+            ui.separator();
             #[cfg(all(windows, feature = "rtl"))]
             {
                 if ui.selectable_label(self.path.is_none() && self.rtl_selected,"📡 RTL-SDR (RTL2832U)").clicked(){
                     if self.path.is_some() || !self.rtl_selected {self.stop_source();}
-                    self.path=None;self.rtl_selected=true;
+                    self.path=None;self.rtl_selected=true;self.net_selected=false;
                     #[cfg(all(windows, feature = "pluto"))]
                     {self.pluto_selected=false;}
                     #[cfg(all(windows, feature = "uhd"))]
@@ -527,7 +571,7 @@ impl App {
             {
                 if ui.selectable_label(self.path.is_none() && self.pluto_selected,"📡 PlutoSDR / LibreSDR").clicked(){
                     if self.path.is_some() || !self.pluto_selected{self.stop_source();}
-                    self.path=None; self.pluto_selected=true;
+                    self.path=None; self.pluto_selected=true;self.net_selected=false;
                     #[cfg(all(windows, feature = "rtl"))]
                     {self.rtl_selected=false;}
                     #[cfg(all(windows, feature = "uhd"))]
@@ -545,6 +589,7 @@ impl App {
                     if self.path.is_some() || !self.uhd_selected { self.stop_source(); }
                     self.path = None;
                     self.uhd_selected = true;
+                    self.net_selected = false;
                     #[cfg(all(windows, feature = "rtl"))]
                     {self.rtl_selected=false;}
                     #[cfg(all(windows, feature = "pluto"))]
@@ -558,15 +603,16 @@ impl App {
             #[cfg(feature = "hackrf")]
             {
                 if ui
-                    .selectable_label(self.path.is_none() && !self.uhd_selected && !self.pluto_selected && !self.rtl_selected, "📡 HackRF")
+                    .selectable_label(self.path.is_none() && !self.uhd_selected && !self.pluto_selected && !self.rtl_selected && !self.net_selected, "📡 HackRF")
                     .on_hover_text("Live from the HackRF One: ▶ Start starts it")
                     .clicked()
                 {
-                    if self.path.is_some() || self.uhd_selected || self.pluto_selected || self.rtl_selected {
+                    if self.path.is_some() || self.uhd_selected || self.pluto_selected || self.rtl_selected || self.net_selected {
                         self.stop_source();
                         self.path = None;
                         self.paused = false;
                     }
+                    self.net_selected = false;
                     #[cfg(all(windows, feature = "uhd"))]
                     { self.uhd_selected = false; }
                     #[cfg(all(windows, feature = "pluto"))]
@@ -587,7 +633,7 @@ impl App {
             }
         })
         .response
-        .on_hover_text("The source: the HackRF or an IQ file");
+        .on_hover_text("The source: a radio, a network IQ stream or an IQ file");
     }
 
     fn file_menu(&mut self, ui: &mut egui::Ui) {
