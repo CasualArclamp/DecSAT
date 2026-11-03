@@ -540,9 +540,7 @@ fn network(ui: &mut Ui, r: &TsReport) {
                                 .map_or("".into(), |s| format!("{s:.4} Msym/s")),
                         );
                         ui.label(t.system.unwrap_or(""));
-                        ui.label(t.orbital.map_or("".into(), |o| {
-                            format!("{:.1}°{}", o.abs(), if o >= 0.0 { "E" } else { "W" })
-                        }));
+                        ui.label(t.orbital.map_or("".into(), crate::orbit::label));
                         ui.end_row();
                     }
                 });

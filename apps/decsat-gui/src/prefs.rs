@@ -275,6 +275,31 @@ pub fn set_radar_internet(on: bool) {
     let _ = write_key("radar_internet", if on { "1" } else { "0" });
 }
 
+/// Minutes a PCAP file runs before the next part starts (0: one file per
+/// recording).
+pub fn pcap_rotate_minutes() -> u64 {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "pcap_rotate_min")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn set_pcap_rotate_minutes(minutes: u64) {
+    let _ = write_key("pcap_rotate_min", &minutes.to_string());
+}
+
+/// Keep a session log (`decsat-log-….csv` in the output folder).
+pub fn session_log() -> bool {
+    read_all()
+        .iter()
+        .any(|(k, v)| k == "session_log" && v == "1")
+}
+
+pub fn set_session_log(on: bool) {
+    let _ = write_key("session_log", if on { "1" } else { "0" });
+}
+
 /// Whose Ku beacons the waterfall marks: "auto" (the toolbar's
 /// satellite), "none", or a satellite's title from the beacon list.
 pub fn beacon_marks() -> String {
@@ -363,7 +388,10 @@ fn write_key(key: &str, value: &str) -> std::io::Result<()> {
 
 /// The last session's keys: the radio, the file source, the VFOs.
 fn is_session(key: &str) -> bool {
-    key.starts_with("radio.") || key.starts_with("source.") || key.starts_with("vfo.") || key.starts_with("device.")
+    key.starts_with("radio.")
+        || key.starts_with("source.")
+        || key.starts_with("vfo.")
+        || key.starts_with("device.")
 }
 
 /// The session saved last time, as key/value pairs.
@@ -383,12 +411,15 @@ pub fn save_session(pairs: &[(String, String)]) -> std::io::Result<()> {
 }
 
 /// Persist the StreamReader control bar and wideband overview settings.
-pub fn toolbar_settings() -> Vec<(String,String)> {
-    read_all().into_iter().filter(|(k,_)| k.starts_with("toolbar.")).collect()
+pub fn toolbar_settings() -> Vec<(String, String)> {
+    read_all()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("toolbar."))
+        .collect()
 }
-pub fn save_toolbars(pairs: &[(String,String)]) -> std::io::Result<()> {
-    let mut all=read_all();
-    all.retain(|(k,_)| !k.starts_with("toolbar."));
+pub fn save_toolbars(pairs: &[(String, String)]) -> std::io::Result<()> {
+    let mut all = read_all();
+    all.retain(|(k, _)| !k.starts_with("toolbar."));
     all.extend(pairs.iter().cloned());
     write_all(&all)
 }

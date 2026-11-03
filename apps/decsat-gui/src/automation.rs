@@ -29,6 +29,15 @@ pub struct Options {
     pub net: Option<String>,
     pub iq: Option<decsat_io::NetSample>,
     pub net_mhz: Option<f64>,
+    /// Start the Fobos SDR tuned here, MHz (receive only). `--rate`, `--lo`
+    /// and `--vga` (dB) apply to it too; `--lna` is its step, 0–3.
+    pub fobos_mhz: Option<f64>,
+    /// Start the Airspy tuned here, MHz (receive only). `--rate` and `--lo`
+    /// apply to it too, and `--vga` is its gain step, 0–21.
+    pub airspy_mhz: Option<f64>,
+    /// Write the session log for this run (in the output folder), even on
+    /// an unattended run that otherwise leaves the user's settings alone.
+    pub session_log: bool,
     /// HackRF sample rate, MS/s.
     pub rate_msps: Option<f64>,
     /// HackRF RF amplifier on (+14 dB).
@@ -158,13 +167,14 @@ impl Options {
                     o.biss_key = Some(v.to_string_lossy().into_owned());
                 }
                 Some("--wireshark") => o.wireshark = true,
+                Some("--session-log") => o.session_log = true,
                 Some("--amp") => o.amp = true,
                 Some("--lna") => {
                     let v = args.next().ok_or("--lna needs dB")?;
                     o.lna_db = Some(
                         v.to_str()
                             .and_then(|s| s.parse().ok())
-                            .ok_or("--lna takes 0–40 dB")?,
+                            .ok_or("--lna takes 0–40 dB (a Fobos: its step, 0–3)")?,
                     );
                 }
                 Some("--vga") => {
@@ -214,13 +224,17 @@ impl Options {
                             .ok_or("--iq: int8, uint8, int16, int32 or float32")?,
                     );
                 }
-                Some(flag @ ("--hackrf" | "--rate" | "--lo" | "--net-mhz")) => {
+                Some(
+                    flag @ ("--hackrf" | "--fobos" | "--airspy" | "--rate" | "--lo" | "--net-mhz"),
+                ) => {
                     let v: f64 = args
                         .next()
                         .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
                         .ok_or_else(|| format!("{flag} needs a number"))?;
                     match flag {
                         "--hackrf" => o.hackrf_mhz = Some(v),
+                        "--fobos" => o.fobos_mhz = Some(v),
+                        "--airspy" => o.airspy_mhz = Some(v),
                         "--rate" => o.rate_msps = Some(v),
                         "--net-mhz" => o.net_mhz = Some(v),
                         _ => o.lo_mhz = Some(v),
@@ -359,7 +373,9 @@ impl Automation {
         };
         let image = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                egui::Event::Screenshot {
+                    image, user_data, ..
+                } if !crate::snapshot::is_ours(user_data) => Some(image.clone()),
                 _ => None,
             })
         });

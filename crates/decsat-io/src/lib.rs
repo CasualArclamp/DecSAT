@@ -3,30 +3,44 @@
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
 //! (replay, and the only way to handle transponders wider than the HackRF),
-//! the live HackRF One, or IQ over the network ([`net`]: SDR++'s IQ Exporter,
-//! GNU Radio, rtl_tcp). Recording goes out through [`IqFileWriter`].
+//! the live HackRF One, Fobos SDR or Airspy, or IQ over the network
+//! ([`net`]: SDR++'s IQ Exporter, GNU Radio, rtl_tcp). Recording goes out
+//! through [`IqFileWriter`].
 
 pub mod file;
 pub mod net;
-pub mod wav;
-#[cfg(all(windows, feature = "uhd"))]
-pub mod uhd;
 #[cfg(all(windows, feature = "pluto"))]
 pub mod pluto;
-#[cfg(all(windows, feature = "pluto"))]
-pub use pluto::{PlutoSettings,PlutoSource,PlutoControl};
 #[cfg(all(windows, feature = "uhd"))]
-pub use uhd::{UhdSettings, UhdSource, UhdControl};
+pub mod uhd;
+pub mod wav;
+#[cfg(all(windows, feature = "pluto"))]
+pub use pluto::{PlutoControl, PlutoSettings, PlutoSource};
+#[cfg(all(windows, feature = "uhd"))]
+pub use uhd::{UhdControl, UhdSettings, UhdSource};
 
 #[cfg(feature = "hackrf")]
 pub mod hackrf;
 #[cfg(feature = "hackrf")]
 pub mod hackrf_tx;
 
+#[cfg(feature = "fobos")]
+pub mod fobos;
+
+#[cfg(feature = "airspy")]
+pub mod airspy;
+
 pub use file::{IqFileReader, IqFileWriter, format_from_path};
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
 
+#[cfg(feature = "airspy")]
+pub use airspy::{
+    AIRSPY_RATES, AirspyControl, AirspyGainMode, AirspyGains, AirspyInfo, AirspySettings,
+    AirspySource,
+};
+#[cfg(feature = "fobos")]
+pub use fobos::{FOBOS_RATES, FobosControl, FobosGains, FobosInfo, FobosSettings, FobosSource};
 #[cfg(feature = "hackrf")]
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};
 #[cfg(feature = "hackrf")]
@@ -74,4 +88,4 @@ pub trait IqSource: Send {
 #[cfg(all(windows, feature = "rtl"))]
 pub mod rtl;
 #[cfg(all(windows, feature = "rtl"))]
-pub use rtl::{RtlSettings,RtlSource,RtlControl};
+pub use rtl::{RtlControl, RtlSettings, RtlSource};

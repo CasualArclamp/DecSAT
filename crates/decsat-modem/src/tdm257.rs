@@ -216,7 +216,7 @@ impl Meter {
         let [c20, c4, ones] = self.sums.map(|s| s as f32 / n);
         let state = if self.filled < WINDOW {
             ChannelState::Unknown
-        } else if ones < 0.002 || ones > 0.998 {
+        } else if !(0.002..=0.998).contains(&ones) {
             ChannelState::Fixed(u8::from(ones > 0.5))
         } else if c4 < 0.01 {
             ChannelState::Pattern

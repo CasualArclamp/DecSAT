@@ -379,9 +379,18 @@ impl SignalMode {
     pub fn of(decoder: DecoderKind) -> Self {
         if matches!(decoder, DecoderKind::Tdma | DecoderKind::ReturnPool) {
             SignalMode::Tdma
-        } else if matches!(decoder, DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
-            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb | DecoderKind::Cw
-            | DecoderKind::AtvAm | DecoderKind::AtvFm) {
+        } else if matches!(
+            decoder,
+            DecoderKind::Am
+                | DecoderKind::Nfm
+                | DecoderKind::Wfm
+                | DecoderKind::Usb
+                | DecoderKind::Lsb
+                | DecoderKind::Dsb
+                | DecoderKind::Cw
+                | DecoderKind::AtvAm
+                | DecoderKind::AtvFm
+        ) {
             SignalMode::Analog
         } else {
             SignalMode::Scpc
@@ -427,11 +436,15 @@ impl DecoderKind {
         match self {
             DecoderKind::IqRecord | DecoderKind::Spectrum => mode != SignalMode::Analog,
             DecoderKind::Tdma | DecoderKind::ReturnPool => mode == SignalMode::Tdma,
-            DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
-            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb | DecoderKind::Cw
-            | DecoderKind::AtvAm | DecoderKind::AtvFm => {
-                mode == SignalMode::Analog
-            }
+            DecoderKind::Am
+            | DecoderKind::Nfm
+            | DecoderKind::Wfm
+            | DecoderKind::Usb
+            | DecoderKind::Lsb
+            | DecoderKind::Dsb
+            | DecoderKind::Cw
+            | DecoderKind::AtvAm
+            | DecoderKind::AtvFm => mode == SignalMode::Analog,
             _ => mode == SignalMode::Scpc,
         }
     }
@@ -1323,11 +1336,18 @@ impl Worker {
                 live: None,
             },
             DecoderKind::Spectrum => Decoder::Spectrum,
-            DecoderKind::Am | DecoderKind::Nfm | DecoderKind::Wfm
-            | DecoderKind::Usb | DecoderKind::Lsb | DecoderKind::Dsb
-            | DecoderKind::Cw | DecoderKind::AtvAm | DecoderKind::AtvFm
-            => Decoder::Analog(crate::analog::AnalogReceiver::new(
-                s.decoder, ddc.out_rate(), s.bandwidth_hz,
+            DecoderKind::Am
+            | DecoderKind::Nfm
+            | DecoderKind::Wfm
+            | DecoderKind::Usb
+            | DecoderKind::Lsb
+            | DecoderKind::Dsb
+            | DecoderKind::Cw
+            | DecoderKind::AtvAm
+            | DecoderKind::AtvFm => Decoder::Analog(crate::analog::AnalogReceiver::new(
+                s.decoder,
+                ddc.out_rate(),
+                s.bandwidth_hz,
             )),
             DecoderKind::IqRecord => {
                 // Named by the VFO's RF centre (when known), which is the
@@ -1640,9 +1660,7 @@ impl Worker {
                     // reads FEC statistics and sometimes calculates an FFT. None of
                     // that needs to run for every incoming sample block. Preserve
                     // uninterrupted DDC / decoder processing as the priority.
-                    if self.last_status_refresh.elapsed()
-                        >= std::time::Duration::from_millis(200)
-                    {
+                    if self.last_status_refresh.elapsed() >= std::time::Duration::from_millis(200) {
                         self.last_status_refresh = std::time::Instant::now();
                         self.publish(n);
                     }

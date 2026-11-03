@@ -18,6 +18,7 @@ mod filename;
 mod format;
 mod freq_display;
 mod freqplan;
+mod orbit;
 mod player;
 mod prefs;
 mod radar_airports;
@@ -25,10 +26,12 @@ mod radar_map;
 mod radar_scope;
 mod radio;
 mod session;
+mod session_log;
 mod side_panel;
+mod snapshot;
+mod streamreader_panel;
 mod survey;
 mod sweep_overview;
-mod streamreader_panel;
 mod top_bar;
 mod transmit;
 mod ts_viewer;
@@ -63,10 +66,10 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--hackrf MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -113,6 +116,11 @@ fn main() -> eframe::Result {
                 app.load_plan(p);
             }
             app.tx.open |= opts.tx_panel;
+            // PCAP parts and the session log, as last chosen.
+            decsat_engine::fec::set_pcap_rotate_minutes(prefs::pcap_rotate_minutes());
+            if (app.remember && prefs::session_log()) || opts.session_log {
+                app.log.start(&prefs::output_dir());
+            }
             app.beacon_window.open |= opts.beacons;
             // Claimed VFOs keep `VfoSettings::new`'s temp-dir output folder.
             if let Some(k) = opts.decoder {
@@ -138,7 +146,39 @@ fn main() -> eframe::Result {
                 // Rust note: `snapped` rounds the gains to the HackRF's own
                 // steps (8 dB for the LNA, 2 for the VGA).
                 app.radio.settings.gains = app.radio.settings.gains.snapped();
-                app.start_hackrf();
+                app.radio.device = radio::Device::HackRf;
+                app.start_radio();
+            }
+            #[cfg(feature = "fobos")]
+            if let Some(mhz) = opts.fobos_mhz {
+                let r = &mut app.radio;
+                r.device = radio::Device::Fobos;
+                r.settings.center_hz = (mhz * 1e6).round() as u64;
+                if let Some(v) = opts.rate_msps {
+                    r.fobos.sample_rate = (v * 1e6).round() as u32;
+                }
+                r.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                if let Some(g) = opts.lna_db {
+                    r.fobos.gains.lna = g.min(3) as u8;
+                }
+                if let Some(g) = opts.vga_db {
+                    r.fobos.gains.vga = (g / 2).min(31) as u8;
+                }
+                app.start_radio();
+            }
+            #[cfg(feature = "airspy")]
+            if let Some(mhz) = opts.airspy_mhz {
+                let r = &mut app.radio;
+                r.device = radio::Device::Airspy;
+                r.settings.center_hz = (mhz * 1e6).round() as u64;
+                if let Some(v) = opts.rate_msps {
+                    r.airspy.sample_rate = (v * 1e6).round() as u32;
+                }
+                r.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                if let Some(g) = opts.vga_db {
+                    r.airspy.gains.step = g.min(21) as u8;
+                }
+                app.start_radio();
             }
             if let Some(url) = opts.net.clone() {
                 app.net_url = url;
@@ -182,6 +222,12 @@ struct App {
     /// named, whether a plan or labels are kept for none named, and the
     /// name being typed for a new one.
     satellite: String,
+    /// The 📷 snapshot on its way, and where the band was drawn.
+    snapshot: snapshot::Snapshot,
+    /// The session log (off unless switched on).
+    log: session_log::SessionLog,
+    /// Orbital positions the carriers signal (NIT, RCS map), with names.
+    orbit_found: Vec<orbit::Found>,
     satellites: Vec<String>,
     unnamed_kept: bool,
     satellite_edit: String,
@@ -229,9 +275,9 @@ struct App {
     automation: automation::Automation,
     #[cfg(feature = "hackrf")]
     radio: radio::RadioPanel,
-    /// Live controls while the HackRF is the source.
+    /// Live controls while a radio (HackRF or Fobos) is the source.
     #[cfg(feature = "hackrf")]
-    hackrf: Option<decsat_io::HackRfControl>,
+    live: Option<radio::Live>,
     #[cfg(all(windows, feature = "uhd"))]
     uhd_settings: decsat_io::UhdSettings,
     #[cfg(all(windows, feature = "uhd"))]
@@ -317,6 +363,9 @@ impl Default for App {
             statuses: BTreeMap::new(),
             carrier_caps: carrier_caps::CarrierCaps::load(&prefs::satellite()),
             satellite: prefs::satellite(),
+            snapshot: snapshot::Snapshot::default(),
+            log: session_log::SessionLog::default(),
+            orbit_found: Vec::new(),
             satellites: prefs::satellites(),
             unnamed_kept: prefs::unnamed_kept(),
             satellite_edit: String::new(),
@@ -340,14 +389,34 @@ impl Default for App {
             radar_scope: Default::default(),
             tx: Default::default(),
             note: String::new(),
-            overview: { let mut o=sweep_overview::Overview::default();let settings=prefs::toolbar_settings();let get=|key:&str|settings.iter().find(|(k,_)|k==key).map(|(_,v)|v.as_str());o.visible=get("toolbar.overview.visible")==Some("1");o.scope=get("toolbar.overview.scope").and_then(|s|s.parse().ok()).unwrap_or(0);o.custom_lo=get("toolbar.overview.lo").and_then(|s|s.parse().ok()).unwrap_or(o.custom_lo);o.custom_hi=get("toolbar.overview.hi").and_then(|s|s.parse().ok()).unwrap_or(o.custom_hi);o },
+            overview: {
+                let mut o = sweep_overview::Overview::default();
+                let settings = prefs::toolbar_settings();
+                let get = |key: &str| {
+                    settings
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.as_str())
+                };
+                o.visible = get("toolbar.overview.visible") == Some("1");
+                o.scope = get("toolbar.overview.scope")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                o.custom_lo = get("toolbar.overview.lo")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(o.custom_lo);
+                o.custom_hi = get("toolbar.overview.hi")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(o.custom_hi);
+                o
+            },
             streamreader: Default::default(),
             toolbar_saved_at: std::time::Instant::now(),
             automation: automation::Automation::new(&automation::Options::default()),
             #[cfg(feature = "hackrf")]
             radio: radio::RadioPanel::default(),
             #[cfg(feature = "hackrf")]
-            hackrf: None,
+            live: None,
             #[cfg(all(windows, feature = "uhd"))]
             uhd_settings: decsat_io::UhdSettings::default(),
             #[cfg(all(windows, feature = "uhd"))]
@@ -470,52 +539,106 @@ impl App {
                     u8::from(r.settings.gains.amp).to_string(),
                 ),
                 ("radio.lnb_lo_mhz".to_string(), r.lnb_lo_mhz.to_string()),
+                ("radio.device".to_string(), r.device.key().to_string()),
+            ]);
+            #[cfg(feature = "fobos")]
+            p.extend([
+                ("fobos.rate".to_string(), r.fobos.sample_rate.to_string()),
+                ("fobos.lna".to_string(), r.fobos.gains.lna.to_string()),
+                ("fobos.vga".to_string(), r.fobos.gains.vga.to_string()),
+                (
+                    "fobos.ext_clock".to_string(),
+                    u8::from(r.fobos.external_clock).to_string(),
+                ),
+            ]);
+            #[cfg(feature = "airspy")]
+            p.extend([
+                ("airspy.rate".to_string(), r.airspy.sample_rate.to_string()),
+                ("airspy.gain".to_string(), r.airspy.gains.step.to_string()),
+                (
+                    "airspy.mode".to_string(),
+                    match r.airspy.gains.mode {
+                        decsat_io::AirspyGainMode::Linearity => "linearity",
+                        decsat_io::AirspyGainMode::Sensitivity => "sensitivity",
+                    }
+                    .to_string(),
+                ),
             ]);
         }
         // Persist the active hardware and all device-specific control-panel values.
-        let mut active="hackrf";
+        // Only reassigned by the Windows-only radio backends below.
+        #[allow(unused_mut)]
+        let mut active = "hackrf";
         #[cfg(all(windows, feature = "uhd"))]
-        if self.uhd_selected { active="uhd"; }
+        if self.uhd_selected {
+            active = "uhd";
+        }
         #[cfg(all(windows, feature = "pluto"))]
-        if self.pluto_selected { active="pluto"; }
+        if self.pluto_selected {
+            active = "pluto";
+        }
         #[cfg(all(windows, feature = "rtl"))]
-        if self.rtl_selected { active="rtl"; }
-        if self.net_selected { active="net"; }
+        if self.rtl_selected {
+            active = "rtl";
+        }
+        if self.net_selected {
+            active = "net";
+        }
         p.push(("device.selected".into(), active.into()));
         {
-            let u=&self.net_settings;
-            for (k,v) in [("url",self.net_url.clone()),("iq",u.sample.label().into()),
-                ("rate",u.sample_rate.to_string()),("center",u.center_hz.to_string()),
-                ("lo",self.net_lo_hz.to_string())] {
-                p.push((format!("device.net.{k}"),v));
+            let u = &self.net_settings;
+            for (k, v) in [
+                ("url", self.net_url.clone()),
+                ("iq", u.sample.label().into()),
+                ("rate", u.sample_rate.to_string()),
+                ("center", u.center_hz.to_string()),
+                ("lo", self.net_lo_hz.to_string()),
+            ] {
+                p.push((format!("device.net.{k}"), v));
             }
         }
         #[cfg(all(windows, feature = "uhd"))]
         {
-            let u=&self.uhd_settings;
-            for (k,v) in [("args",u.device_args.clone()),("center",u.center_hz.to_string()),
-                ("rate",u.rate.to_string()),("gain",u.gain.to_string()),
-                ("channel",u.channel.to_string()),("antenna",u.antenna.clone()),
-                ("bandwidth",u.bandwidth.to_string()),("lo",u.lnb_lo_hz.to_string())] {
-                p.push((format!("device.uhd.{k}"),v));
+            let u = &self.uhd_settings;
+            for (k, v) in [
+                ("args", u.device_args.clone()),
+                ("center", u.center_hz.to_string()),
+                ("rate", u.rate.to_string()),
+                ("gain", u.gain.to_string()),
+                ("channel", u.channel.to_string()),
+                ("antenna", u.antenna.clone()),
+                ("bandwidth", u.bandwidth.to_string()),
+                ("lo", u.lnb_lo_hz.to_string()),
+            ] {
+                p.push((format!("device.uhd.{k}"), v));
             }
         }
         #[cfg(all(windows, feature = "pluto"))]
         {
-            let u=&self.pluto_settings;
-            for (k,v) in [("uri",u.uri.clone()),("center",u.center_hz.to_string()),
-                ("rate",u.rate.to_string()),("gain",u.gain.to_string()),
-                ("bandwidth",u.bandwidth.to_string()),("lo",u.lnb_lo_hz.to_string())] {
-                p.push((format!("device.pluto.{k}"),v));
+            let u = &self.pluto_settings;
+            for (k, v) in [
+                ("uri", u.uri.clone()),
+                ("center", u.center_hz.to_string()),
+                ("rate", u.rate.to_string()),
+                ("gain", u.gain.to_string()),
+                ("bandwidth", u.bandwidth.to_string()),
+                ("lo", u.lnb_lo_hz.to_string()),
+            ] {
+                p.push((format!("device.pluto.{k}"), v));
             }
         }
         #[cfg(all(windows, feature = "rtl"))]
         {
-            let u=&self.rtl_settings;
-            for (k,v) in [("index",u.device_index.to_string()),("center",u.center_hz.to_string()),
-                ("rate",u.rate.to_string()),("gain",u.gain_tenths.to_string()),
-                ("manual",u.manual_gain.to_string()),("lo",u.lnb_lo_hz.to_string())] {
-                p.push((format!("device.rtl.{k}"),v));
+            let u = &self.rtl_settings;
+            for (k, v) in [
+                ("index", u.device_index.to_string()),
+                ("center", u.center_hz.to_string()),
+                ("rate", u.rate.to_string()),
+                ("gain", u.gain_tenths.to_string()),
+                ("manual", u.manual_gain.to_string()),
+                ("lo", u.lnb_lo_hz.to_string()),
+            ] {
+                p.push((format!("device.rtl.{k}"), v));
             }
         }
         let surveying = self.survey.vfo_ids();
@@ -595,6 +718,16 @@ impl App {
         };
         let mut chosen: Option<String> = None;
         let mut renamed: Option<String> = None;
+        // A satellite the carriers name that is not the one chosen: said
+        // beside the list, offered first in it.
+        let hint = self
+            .orbit_found
+            .iter()
+            .find(|f| {
+                let n = orbit::at(f.deg).map_or(String::new(), |s| s.name.clone());
+                n.is_empty() || !self.satellite.contains(&n)
+            })
+            .cloned();
         egui::ComboBox::from_id_salt("satellite")
             .width(110.0)
             .truncate()
@@ -602,6 +735,33 @@ impl App {
             // Typing a new name is a click inside: only one outside closes.
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show_ui(ui, |ui| {
+                // The satellites the carriers say they are on.
+                if !self.orbit_found.is_empty() {
+                    ui.label(egui::RichText::new("Signalled by the carriers").weak());
+                    for f in &self.orbit_found {
+                        let name = orbit::satellite_name(f.deg);
+                        let existing = self
+                            .satellites
+                            .iter()
+                            .find(|s| prefs::satellite_name_ok(&name, &[(*s).clone()]).is_none())
+                            .cloned();
+                        if ui
+                            .selectable_label(
+                                existing.as_deref() == Some(self.satellite.as_str()),
+                                format!("📡 {}", orbit::label(f.deg)),
+                            )
+                            .on_hover_text(format!(
+                                "{}: choose (or add) \"{}\"",
+                                f.source,
+                                existing.as_deref().unwrap_or(&name)
+                            ))
+                            .clicked()
+                        {
+                            chosen = Some(existing.unwrap_or(name));
+                        }
+                    }
+                    ui.separator();
+                }
                 // The labels from before satellites were named, while kept.
                 if (self.satellite.is_empty() || self.unnamed_kept)
                     && ui
@@ -658,6 +818,18 @@ impl App {
                  labels, shown only while it is chosen: another satellite's names at the same \
                  frequencies would be wrong.",
             );
+        if let Some(f) = hint {
+            ui.label(
+                egui::RichText::new(format!("📡 {}?", orbit::label(f.deg)))
+                    .color(egui::Color32::from_rgb(255, 196, 80)),
+            )
+            .on_hover_text(format!(
+                "{} says the carrier is on {} — the satellite list offers it by name. The \
+                 satellite chosen keeps the plan and carrier labels.",
+                f.source,
+                orbit::label(f.deg)
+            ));
+        }
         if let Some(name) = renamed {
             self.satellite_edit.clear();
             self.rename_satellite(&name);
@@ -720,52 +892,141 @@ impl App {
             if let Some(v) = get("radio.lnb_lo_mhz").and_then(|v| v.parse().ok()) {
                 r.lnb_lo_mhz = v;
             }
+            if let Some(d) = get("radio.device").and_then(radio::Device::from_key) {
+                r.device = d;
+            }
+            #[cfg(feature = "fobos")]
+            {
+                if let Some(v) = get("fobos.rate").and_then(|v| v.parse().ok()) {
+                    r.fobos.sample_rate = v;
+                }
+                if let Some(v) = get("fobos.lna").and_then(|v| v.parse().ok()) {
+                    r.fobos.gains.lna = v;
+                }
+                if let Some(v) = get("fobos.vga").and_then(|v| v.parse().ok()) {
+                    r.fobos.gains.vga = v;
+                }
+                if let Some(v) = get("fobos.ext_clock") {
+                    r.fobos.external_clock = v == "1";
+                }
+                r.fobos.gains = r.fobos.gains.snapped();
+            }
+            #[cfg(feature = "airspy")]
+            {
+                if let Some(v) = get("airspy.rate").and_then(|v| v.parse().ok()) {
+                    r.airspy.sample_rate = v;
+                }
+                if let Some(v) = get("airspy.gain").and_then(|v| v.parse().ok()) {
+                    r.airspy.gains.step = v;
+                }
+                if let Some(v) = get("airspy.mode") {
+                    r.airspy.gains.mode = if v == "sensitivity" {
+                        decsat_io::AirspyGainMode::Sensitivity
+                    } else {
+                        decsat_io::AirspyGainMode::Linearity
+                    };
+                }
+                r.airspy.gains = r.airspy.gains.snapped();
+            }
         }
         // Restore source preference without opening USB hardware automatically.
         // The next Start uses the selected source and the saved settings.
         #[cfg(all(windows, feature = "uhd"))]
         {
-            let u=&mut self.uhd_settings;
-            if let Some(v)=get("device.uhd.args") {u.device_args=v.into();}
-            if let Some(v)=get("device.uhd.center").and_then(|s|s.parse().ok()){u.center_hz=v;}
-            if let Some(v)=get("device.uhd.rate").and_then(|s|s.parse().ok()){u.rate=v;}
-            if let Some(v)=get("device.uhd.gain").and_then(|s|s.parse().ok()){u.gain=v;}
-            if let Some(v)=get("device.uhd.channel").and_then(|s|s.parse().ok()){u.channel=v;}
-            if let Some(v)=get("device.uhd.antenna"){u.antenna=v.into();}
-            if let Some(v)=get("device.uhd.bandwidth").and_then(|s|s.parse().ok()){u.bandwidth=v;}
-            if let Some(v)=get("device.uhd.lo").and_then(|s|s.parse().ok()){u.lnb_lo_hz=v;}
+            let u = &mut self.uhd_settings;
+            if let Some(v) = get("device.uhd.args") {
+                u.device_args = v.into();
+            }
+            if let Some(v) = get("device.uhd.center").and_then(|s| s.parse().ok()) {
+                u.center_hz = v;
+            }
+            if let Some(v) = get("device.uhd.rate").and_then(|s| s.parse().ok()) {
+                u.rate = v;
+            }
+            if let Some(v) = get("device.uhd.gain").and_then(|s| s.parse().ok()) {
+                u.gain = v;
+            }
+            if let Some(v) = get("device.uhd.channel").and_then(|s| s.parse().ok()) {
+                u.channel = v;
+            }
+            if let Some(v) = get("device.uhd.antenna") {
+                u.antenna = v.into();
+            }
+            if let Some(v) = get("device.uhd.bandwidth").and_then(|s| s.parse().ok()) {
+                u.bandwidth = v;
+            }
+            if let Some(v) = get("device.uhd.lo").and_then(|s| s.parse().ok()) {
+                u.lnb_lo_hz = v;
+            }
         }
         #[cfg(all(windows, feature = "pluto"))]
         {
-            let u=&mut self.pluto_settings;
-            if let Some(v)=get("device.pluto.uri"){u.uri=v.into();}
-            if let Some(v)=get("device.pluto.center").and_then(|s|s.parse().ok()){u.center_hz=v;}
-            if let Some(v)=get("device.pluto.rate").and_then(|s|s.parse().ok()){u.rate=v;}
-            if let Some(v)=get("device.pluto.gain").and_then(|s|s.parse().ok()){u.gain=v;}
-            if let Some(v)=get("device.pluto.bandwidth").and_then(|s|s.parse().ok()){u.bandwidth=v;}
-            if let Some(v)=get("device.pluto.lo").and_then(|s|s.parse().ok()){u.lnb_lo_hz=v;}
+            let u = &mut self.pluto_settings;
+            if let Some(v) = get("device.pluto.uri") {
+                u.uri = v.into();
+            }
+            if let Some(v) = get("device.pluto.center").and_then(|s| s.parse().ok()) {
+                u.center_hz = v;
+            }
+            if let Some(v) = get("device.pluto.rate").and_then(|s| s.parse().ok()) {
+                u.rate = v;
+            }
+            if let Some(v) = get("device.pluto.gain").and_then(|s| s.parse().ok()) {
+                u.gain = v;
+            }
+            if let Some(v) = get("device.pluto.bandwidth").and_then(|s| s.parse().ok()) {
+                u.bandwidth = v;
+            }
+            if let Some(v) = get("device.pluto.lo").and_then(|s| s.parse().ok()) {
+                u.lnb_lo_hz = v;
+            }
         }
         #[cfg(all(windows, feature = "rtl"))]
         {
-            let u=&mut self.rtl_settings;
-            if let Some(v)=get("device.rtl.index").and_then(|s|s.parse().ok()){u.device_index=v;}
-            if let Some(v)=get("device.rtl.center").and_then(|s|s.parse().ok()){u.center_hz=v;}
-            if let Some(v)=get("device.rtl.rate").and_then(|s|s.parse().ok()){u.rate=v;}
-            if let Some(v)=get("device.rtl.gain").and_then(|s|s.parse().ok()){u.gain_tenths=v;}
-            if let Some(v)=get("device.rtl.manual").and_then(|s|s.parse().ok()){u.manual_gain=v;}
-            if let Some(v)=get("device.rtl.lo").and_then(|s|s.parse().ok()){u.lnb_lo_hz=v;}
+            let u = &mut self.rtl_settings;
+            if let Some(v) = get("device.rtl.index").and_then(|s| s.parse().ok()) {
+                u.device_index = v;
+            }
+            if let Some(v) = get("device.rtl.center").and_then(|s| s.parse().ok()) {
+                u.center_hz = v;
+            }
+            if let Some(v) = get("device.rtl.rate").and_then(|s| s.parse().ok()) {
+                u.rate = v;
+            }
+            if let Some(v) = get("device.rtl.gain").and_then(|s| s.parse().ok()) {
+                u.gain_tenths = v;
+            }
+            if let Some(v) = get("device.rtl.manual").and_then(|s| s.parse().ok()) {
+                u.manual_gain = v;
+            }
+            if let Some(v) = get("device.rtl.lo").and_then(|s| s.parse().ok()) {
+                u.lnb_lo_hz = v;
+            }
         }
-        if let Some(v)=get("device.net.url"){self.net_url=v.to_string();}
-        if let Some(v)=get("device.net.iq").and_then(decsat_io::NetSample::parse){self.net_settings.sample=v;}
-        if let Some(v)=get("device.net.rate").and_then(|s|s.parse().ok()){self.net_settings.sample_rate=v;}
-        if let Some(v)=get("device.net.center").and_then(|s|s.parse().ok()){self.net_settings.center_hz=v;}
-        if let Some(v)=get("device.net.lo").and_then(|s|s.parse().ok()){self.net_lo_hz=v;}
+        if let Some(v) = get("device.net.url") {
+            self.net_url = v.to_string();
+        }
+        if let Some(v) = get("device.net.iq").and_then(decsat_io::NetSample::parse) {
+            self.net_settings.sample = v;
+        }
+        if let Some(v) = get("device.net.rate").and_then(|s| s.parse().ok()) {
+            self.net_settings.sample_rate = v;
+        }
+        if let Some(v) = get("device.net.center").and_then(|s| s.parse().ok()) {
+            self.net_settings.center_hz = v;
+        }
+        if let Some(v) = get("device.net.lo").and_then(|s| s.parse().ok()) {
+            self.net_lo_hz = v;
+        }
         match get("device.selected") {
-            Some("net")=>self.net_selected=true,
-            #[cfg(all(windows, feature = "uhd"))] Some("uhd")=>self.uhd_selected=true,
-            #[cfg(all(windows, feature = "pluto"))] Some("pluto")=>self.pluto_selected=true,
-            #[cfg(all(windows, feature = "rtl"))] Some("rtl")=>self.rtl_selected=true,
-            _=>{}
+            Some("net") => self.net_selected = true,
+            #[cfg(all(windows, feature = "uhd"))]
+            Some("uhd") => self.uhd_selected = true,
+            #[cfg(all(windows, feature = "pluto"))]
+            Some("pluto") => self.pluto_selected = true,
+            #[cfg(all(windows, feature = "rtl"))]
+            Some("rtl") => self.rtl_selected = true,
+            _ => {}
         }
         let dir = prefs::output_dir();
         for i in 0.. {
@@ -807,21 +1068,35 @@ impl App {
     /// centre) give it, before the LO trim.
     fn rf_untrimmed(&self) -> f64 {
         #[cfg(all(windows, feature = "uhd"))]
-        if self.path.is_none() && self.uhd_selected { return self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz; }
+        if self.path.is_none() && self.uhd_selected {
+            return self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz;
+        }
         #[cfg(all(windows, feature = "pluto"))]
-        if self.path.is_none() && self.pluto_selected {return self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz;}
+        if self.path.is_none() && self.pluto_selected {
+            return self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz;
+        }
         #[cfg(all(windows, feature = "rtl"))]
-        if self.path.is_none() && self.rtl_selected { return self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz; }
+        if self.path.is_none() && self.rtl_selected {
+            return self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz;
+        }
         if self.path.is_none() && self.net_selected {
-            // rtl_tcp may have been tuned since: the source knows.
-            let c=self.net_control.as_ref().filter(|c|c.is_rtl_tcp()).map(|_|self.net_settings.center_hz).unwrap_or(self.net_settings.center_hz);
-            return c + self.net_lo_hz;
+            return self.net_settings.center_hz + self.net_lo_hz;
         }
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
             return self.radio.rf_center();
         }
         self.rf_center_mhz * 1e6
+    }
+
+    /// Whether the span could hold the HackRF's own artefacts (Bluetooth in its
+    /// IF): a HackRF chosen as the radio, or a file (which may be from one).
+    fn source_is_hackrf(&self) -> bool {
+        #[cfg(feature = "hackrf")]
+        if self.path.is_none() {
+            return self.radio.device == radio::Device::HackRf;
+        }
+        true
     }
 
     /// What a HackRF would be tuned to for this span (no LO): the radio's
@@ -908,82 +1183,148 @@ impl App {
 
     /// Open the network stream with the panel's settings.
     fn start_net(&mut self) {
-        self.stop_source(); self.path=None;
-        let mut s=self.net_settings.clone();
+        self.stop_source();
+        self.path = None;
+        let mut s = self.net_settings.clone();
         match decsat_io::NetIqSettings::parse_url(&self.net_url) {
-            Ok((mode,addr))=>{s.mode=mode;s.addr=addr;}
-            Err(e)=>{self.note=format!("Network IQ: {e}");return;}
+            Ok((mode, addr)) => {
+                s.mode = mode;
+                s.addr = addr;
+            }
+            Err(e) => {
+                self.note = format!("Network IQ: {e}");
+                return;
+            }
         }
         match decsat_io::NetIqSource::open(s) {
-            Ok(src)=>{
-                self.net_control=Some(src.control());self.net_running=true;self.net_selected=true;
-                self.sample_rate=decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
-                self.note=format!("Network IQ: {}",decsat_io::IqSource::describe(&src));
+            Ok(src) => {
+                self.net_control = Some(src.control());
+                self.net_running = true;
+                self.net_selected = true;
+                self.sample_rate = decsat_io::IqSource::sample_rate(&src);
+                self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                self.note = format!("Network IQ: {}", decsat_io::IqSource::describe(&src));
                 self.start_engine(Box::new(src));
             }
-            Err(e)=>self.note=format!("Network IQ: {e}"),
+            Err(e) => self.note = format!("Network IQ: {e}"),
         }
     }
 
     /// Network IQ's settings. The stream carries neither rate nor frequency,
     /// so both are entered; an rtl_tcp server is recognised and tuned.
-    fn net_panel(&mut self,ctx:&egui::Context){
-        let mut open=self.net_open;
-        egui::Window::new("Network IQ (SDR++, GNU Radio, rtl_tcp)").open(&mut open).show(ctx,|ui|{
-            ui.horizontal(|ui|{ui.label("From");ui.add(egui::TextEdit::singleline(&mut self.net_url).desired_width(200.0));});
-            ui.label("tcp://HOST:PORT connects (SDR++ IQ Exporter: TCP (Server)); listen://0.0.0.0:PORT waits for a sender (TCP (Client)); udp://0.0.0.0:PORT takes UDP.");
-            ui.horizontal(|ui|{ui.label("Sample type");
-                egui::ComboBox::from_id_salt("net_iq").selected_text(self.net_settings.sample.label()).show_ui(ui,|ui|{
-                    for t in decsat_io::NetSample::ALL {ui.selectable_value(&mut self.net_settings.sample,t,t.label());}
+    fn net_panel(&mut self, ctx: &egui::Context) {
+        let mut open = self.net_open;
+        egui::Window::new("Network IQ (SDR++, GNU Radio, rtl_tcp)")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("From");
+                    ui.add(egui::TextEdit::singleline(&mut self.net_url).desired_width(200.0));
                 });
-            });
-            ui.horizontal(|ui|{ui.label("Sample rate MS/s");let mut f=self.net_settings.sample_rate/1e6;
-                if ui.add(egui::DragValue::new(&mut f).speed(0.01).range(0.001..=100.0).max_decimals(6)).changed(){self.net_settings.sample_rate=f*1e6;}
-            });
-            ui.horizontal(|ui|{ui.label("Sender's MHz");let mut f=self.net_settings.center_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(0.0..=30000.0).max_decimals(6)).changed(){
-                    self.net_settings.center_hz=(f*1e6).round();
-                    if let Some(c)=&self.net_control{let _=c.tune(self.net_settings.center_hz);}
-                    self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
+                ui.label(
+                    "tcp://HOST:PORT connects (SDR++ IQ Exporter: TCP (Server)); \
+                     listen://0.0.0.0:PORT waits for a sender (TCP (Client)); \
+                     udp://0.0.0.0:PORT takes UDP.",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Sample type");
+                    egui::ComboBox::from_id_salt("net_iq")
+                        .selected_text(self.net_settings.sample.label())
+                        .show_ui(ui, |ui| {
+                            for t in decsat_io::NetSample::ALL {
+                                ui.selectable_value(&mut self.net_settings.sample, t, t.label());
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Sample rate MS/s");
+                    let mut f = self.net_settings.sample_rate / 1e6;
+                    if ui
+                        .add(egui::DragValue::new(&mut f).speed(0.01).range(0.001..=100.0).max_decimals(6))
+                        .changed()
+                    {
+                        self.net_settings.sample_rate = f * 1e6;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Sender's MHz");
+                    let mut f = self.net_settings.center_hz / 1e6;
+                    if ui
+                        .add(egui::DragValue::new(&mut f).speed(0.1).range(0.0..=30000.0).max_decimals(6))
+                        .changed()
+                    {
+                        self.net_settings.center_hz = (f * 1e6).round();
+                        if let Some(c) = &self.net_control {
+                            let _ = c.tune(self.net_settings.center_hz);
+                        }
+                        self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("LNB LO MHz (0=direct)");
+                    let mut f = self.net_lo_hz / 1e6;
+                    if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed() {
+                        self.net_lo_hz = f * 1e6;
+                        self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                    }
+                });
+                if let Some(c) = &self.net_control {
+                    let rate = c
+                        .measured_rate()
+                        .map(|r| format!(", arriving at {:.3} MS/s", r / 1e6))
+                        .unwrap_or_default();
+                    let dropped = match c.overflows() {
+                        0 => String::new(),
+                        n => format!(", {n} buffers dropped"),
+                    };
+                    ui.label(format!("{}{rate}{dropped}", c.state()));
+                    if c.is_rtl_tcp() {
+                        ui.label("rtl_tcp server: the frequency is tuned from here.");
+                    } else {
+                        ui.label("Tune at the sender; the frequency here only labels the band.");
+                    }
+                }
+                ui.label("Main Start/Stop controls the stream. Address, type and rate changes need a restart.");
+                if self.net_running && ui.button("Apply settings (reconnect)").clicked() {
+                    self.start_net();
+                }
+                if self.note.starts_with("Network IQ") {
+                    ui.label(&self.note);
                 }
             });
-            ui.horizontal(|ui|{ui.label("LNB LO MHz (0=direct)");let mut f=self.net_lo_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){
-                    self.net_lo_hz=f*1e6;
-                    self.rf_center_mhz=(self.net_settings.center_hz+self.net_lo_hz)/1e6;
-                }
-            });
-            if let Some(c)=&self.net_control {
-                let rate=c.measured_rate().map(|r|format!(", arriving at {:.3} MS/s",r/1e6)).unwrap_or_default();
-                ui.label(format!("{}{rate}{}",c.state(),if c.overflows()>0 {format!(", {} buffers dropped",c.overflows())} else {String::new()}));
-                if c.is_rtl_tcp(){ui.label("rtl_tcp server: the frequency is tuned from here.");}
-                else {ui.label("Tune at the sender; the frequency here only labels the band.");}
-            }
-            ui.label("Main Start/Stop controls the stream. Address, type and rate changes need a restart.");
-            if self.net_running && ui.button("Apply settings (reconnect)").clicked(){self.start_net();}
-            if self.note.starts_with("Network IQ"){ui.label(&self.note);}
-        });self.net_open=open;
+        self.net_open = open;
     }
 
     #[cfg(all(windows, feature = "rtl"))]
     fn start_rtl(&mut self) {
-        self.stop_source(); self.path=None;
+        self.stop_source();
+        self.path = None;
         match decsat_io::RtlSource::open(self.rtl_settings.clone()) {
-            Ok(src)=>{ self.rtl_control=Some(src.control());self.rtl_running=true;self.rtl_selected=true;
-                self.sample_rate=decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz=(self.rtl_settings.center_hz as f64+self.rtl_settings.lnb_lo_hz)/1e6;
-                self.note=format!("RTL-SDR started @ {:.3} MS/s",self.sample_rate/1e6);
-                self.start_engine(Box::new(src));},
-            Err(e)=>self.note=format!("RTL-SDR: {e}"),
+            Ok(src) => {
+                self.rtl_control = Some(src.control());
+                self.rtl_running = true;
+                self.rtl_selected = true;
+                self.sample_rate = decsat_io::IqSource::sample_rate(&src);
+                self.rf_center_mhz =
+                    (self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz) / 1e6;
+                self.note = format!("RTL-SDR started @ {:.3} MS/s", self.sample_rate / 1e6);
+                self.start_engine(Box::new(src));
+            }
+            Err(e) => self.note = format!("RTL-SDR: {e}"),
         }
     }
     #[cfg(all(windows, feature = "rtl"))]
-    fn rtl_panel(&mut self,ctx:&egui::Context){
-        let mut open=self.rtl_open;
-        let tuner=self.rtl_control.as_ref().and_then(|c|c.tuner_info());
-        let min_mhz=tuner.as_ref().map(|t|t.min_hz as f64/1e6).unwrap_or(24.0);
-        let max_mhz=tuner.as_ref().map(|t|t.max_hz as f64/1e6).unwrap_or(2200.0);
+    fn rtl_panel(&mut self, ctx: &egui::Context) {
+        let mut open = self.rtl_open;
+        let tuner = self.rtl_control.as_ref().and_then(|c| c.tuner_info());
+        let min_mhz = tuner
+            .as_ref()
+            .map(|t| t.min_hz as f64 / 1e6)
+            .unwrap_or(24.0);
+        let max_mhz = tuner
+            .as_ref()
+            .map(|t| t.max_hz as f64 / 1e6)
+            .unwrap_or(2200.0);
         egui::Window::new("RTL-SDR USB dongle (RX)").open(&mut open).show(ctx,|ui|{
             if let Some(t)=&tuner { ui.label(format!("Tuner: {} · {:.0}–{:.0} MHz",t.name,min_mhz,max_mhz)); }
             else {ui.label("Tuner: detected at receiver start; upper range depends on tuner chip");}
@@ -1018,7 +1359,8 @@ impl App {
             ui.label("Frequency and gain apply live. Device index and sample rate require restart. LNB power is external.");
             if self.rtl_running && ui.button("Apply settings (restart RTL)").clicked(){self.start_rtl();}
             if self.note.starts_with("RTL-SDR"){ui.label(&self.note);}
-        });self.rtl_open=open;
+        });
+        self.rtl_open = open;
     }
 
     /// Stop whatever is running. The radio's control handle holds the USB
@@ -1026,15 +1368,25 @@ impl App {
     /// source); only then can the radio be opened again.
     fn stop_source(&mut self) {
         #[cfg(all(windows, feature = "uhd"))]
-        { self.uhd_running = false; self.uhd_control = None; }
+        {
+            self.uhd_running = false;
+            self.uhd_control = None;
+        }
         #[cfg(all(windows, feature = "pluto"))]
-        {self.pluto_running=false;self.pluto_control=None;}
+        {
+            self.pluto_running = false;
+            self.pluto_control = None;
+        }
         #[cfg(all(windows, feature = "rtl"))]
-        {self.rtl_running=false;self.rtl_control=None;}
-        self.net_running=false;self.net_control=None;
+        {
+            self.rtl_running = false;
+            self.rtl_control = None;
+        }
+        self.net_running = false;
+        self.net_control = None;
         #[cfg(feature = "hackrf")]
         {
-            self.hackrf = None;
+            self.live = None;
         }
         self.engine = None;
     }
@@ -1044,7 +1396,9 @@ impl App {
         self.stop_source();
         self.path = None;
         if !(50e6..=6e9).contains(&self.uhd_settings.center_hz) {
-            self.note="UHD: tuner frequency must be between 50 and 6000 MHz (RF minus LNB LO)".into();return;
+            self.note =
+                "UHD: tuner frequency must be between 50 and 6000 MHz (RF minus LNB LO)".into();
+            return;
         }
         match decsat_io::UhdSource::open(self.uhd_settings.clone()) {
             Ok(src) => {
@@ -1052,7 +1406,8 @@ impl App {
                 self.uhd_selected = true;
                 self.uhd_control = Some(src.control());
                 self.sample_rate = decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz = (self.uhd_settings.center_hz+self.uhd_settings.lnb_lo_hz) / 1e6;
+                self.rf_center_mhz =
+                    (self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz) / 1e6;
                 self.note = format!("UHD receiver started @ {:.2} MS/s", self.sample_rate / 1e6);
                 self.start_engine(Box::new(src));
             }
@@ -1062,58 +1417,119 @@ impl App {
 
     #[cfg(all(windows, feature = "uhd"))]
     fn uhd_panel(&mut self, ctx: &egui::Context) {
-        let mut open=self.uhd_open;
-        egui::Window::new("UHD B210 / LibreSDR (receive)").open(&mut open).show(ctx, |ui| {
-            ui.horizontal(|ui| {ui.label("UHD device args");ui.text_edit_singleline(&mut self.uhd_settings.device_args);});
-            ui.label("Verified LibreSDR: serial=3KO25DW. Other devices: type=b200 or serial=...");
-            ui.horizontal(|ui| {ui.label("Tuned MHz");let mut f=self.uhd_settings.center_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(50.0..=6000.0)).changed(){self.uhd_settings.center_hz=f*1e6;if let Some(c)=&self.uhd_control{c.tune(self.uhd_settings.center_hz);}}
-            });
-            ui.horizontal(|ui| {ui.label("LNB LO MHz (0 = direct)");let mut lo=self.uhd_settings.lnb_lo_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut lo).speed(1.0).range(0.0..=30000.0)).changed(){self.uhd_settings.lnb_lo_hz=lo*1e6; self.rf_center_mhz=(self.uhd_settings.center_hz+self.uhd_settings.lnb_lo_hz)/1e6;}
-            });
-            ui.label("Main frequency = tuner IF + LNB LO. LNB power is external.");
-            ui.horizontal(|ui| {ui.label("Sample rate MS/s");
-                let rate=&mut self.uhd_settings.rate;
-                egui::ComboBox::from_id_salt("uhd_rate").selected_text(format!("{:.2}",*rate/1e6)).show_ui(ui,|ui|{
-                    for mhz in [2.0,4.0,8.0,10.0,16.0,20.0,30.72,40.0,50.0] {
-                        ui.selectable_value(rate,mhz*1e6,format!("{mhz:.2}"));
+        let mut open = self.uhd_open;
+        egui::Window::new("UHD B210 / LibreSDR (receive)")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("UHD device args");
+                    ui.text_edit_singleline(&mut self.uhd_settings.device_args);
+                });
+                ui.label(
+                    "Verified LibreSDR: serial=3KO25DW. Other devices: type=b200 or serial=...",
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Tuned MHz");
+                    let mut f = self.uhd_settings.center_hz / 1e6;
+                    if ui
+                        .add(egui::DragValue::new(&mut f).speed(0.1).range(50.0..=6000.0))
+                        .changed()
+                    {
+                        self.uhd_settings.center_hz = f * 1e6;
+                        if let Some(c) = &self.uhd_control {
+                            c.tune(self.uhd_settings.center_hz);
+                        }
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("LNB LO MHz (0 = direct)");
+                    let mut lo = self.uhd_settings.lnb_lo_hz / 1e6;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut lo)
+                                .speed(1.0)
+                                .range(0.0..=30000.0),
+                        )
+                        .changed()
+                    {
+                        self.uhd_settings.lnb_lo_hz = lo * 1e6;
+                        self.rf_center_mhz =
+                            (self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz) / 1e6;
+                    }
+                });
+                ui.label("Main frequency = tuner IF + LNB LO. LNB power is external.");
+                ui.horizontal(|ui| {
+                    ui.label("Sample rate MS/s");
+                    let rate = &mut self.uhd_settings.rate;
+                    egui::ComboBox::from_id_salt("uhd_rate")
+                        .selected_text(format!("{:.2}", *rate / 1e6))
+                        .show_ui(ui, |ui| {
+                            for mhz in [2.0, 4.0, 8.0, 10.0, 16.0, 20.0, 30.72, 40.0, 50.0] {
+                                ui.selectable_value(rate, mhz * 1e6, format!("{mhz:.2}"));
+                            }
+                        });
+                });
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.uhd_settings.gain, 0.0..=76.0)
+                            .text("RX gain dB"),
+                    )
+                    .changed()
+                    && let Some(c) = &self.uhd_control
+                {
+                    c.gain(self.uhd_settings.gain);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("RX channel");
+                    ui.selectable_value(&mut self.uhd_settings.channel, 0, "A");
+                    ui.selectable_value(&mut self.uhd_settings.channel, 1, "B");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("RX antenna");
+                    ui.selectable_value(&mut self.uhd_settings.antenna, "RX2".into(), "RX2");
+                    ui.selectable_value(&mut self.uhd_settings.antenna, "TX/RX".into(), "TX/RX");
+                });
+                ui.label(
+                    "Frequency and gain apply live. Rate, antenna and RX channel require restart.",
+                );
+                ui.label("Use the main Start / Stop button to control the selected receiver.");
+                if self.uhd_running
+                    && ui
+                        .button("Apply rate / channel / antenna (restart UHD)")
+                        .clicked()
+                {
+                    self.start_uhd();
+                }
+                ui.label("LNB power must be supplied externally. This implementation is RX only.");
+                if self.note.starts_with("UHD") {
+                    ui.label(&self.note);
+                }
             });
-            if ui.add(egui::Slider::new(&mut self.uhd_settings.gain,0.0..=76.0).text("RX gain dB")).changed()&& let Some(c)=&self.uhd_control{c.gain(self.uhd_settings.gain);}
-            ui.horizontal(|ui| {ui.label("RX channel");ui.selectable_value(&mut self.uhd_settings.channel,0,"A");ui.selectable_value(&mut self.uhd_settings.channel,1,"B");});
-            ui.horizontal(|ui| {ui.label("RX antenna");ui.selectable_value(&mut self.uhd_settings.antenna,"RX2".into(),"RX2");ui.selectable_value(&mut self.uhd_settings.antenna,"TX/RX".into(),"TX/RX");});
-            ui.label("Frequency and gain apply live. Rate, antenna and RX channel require restart.");
-            ui.label("Use the main Start / Stop button to control the selected receiver.");
-            if self.uhd_running && ui.button("Apply rate / channel / antenna (restart UHD)").clicked() { self.start_uhd(); }
-            ui.label("LNB power must be supplied externally. This implementation is RX only.");
-            if self.note.starts_with("UHD") {ui.label(&self.note);}
-        });
-        self.uhd_open=open;
+        self.uhd_open = open;
     }
 
     #[cfg(all(windows, feature = "pluto"))]
     fn start_pluto(&mut self) {
         self.stop_source();
-        self.path=None;
+        self.path = None;
         match decsat_io::PlutoSource::open(self.pluto_settings.clone()) {
-            Ok(src)=>{
-                self.pluto_control=Some(src.control());
-                self.pluto_running=true;
-                self.pluto_selected=true;
-                self.sample_rate=decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz=(self.pluto_settings.center_hz+self.pluto_settings.lnb_lo_hz)/1e6;
-                self.note=format!("PlutoSDR started @ {:.3} MS/s",self.sample_rate/1e6);
+            Ok(src) => {
+                self.pluto_control = Some(src.control());
+                self.pluto_running = true;
+                self.pluto_selected = true;
+                self.sample_rate = decsat_io::IqSource::sample_rate(&src);
+                self.rf_center_mhz =
+                    (self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz) / 1e6;
+                self.note = format!("PlutoSDR started @ {:.3} MS/s", self.sample_rate / 1e6);
                 self.start_engine(Box::new(src));
             }
-            Err(e)=>self.note=format!("PlutoSDR: {e}"),
+            Err(e) => self.note = format!("PlutoSDR: {e}"),
         }
     }
 
     #[cfg(all(windows, feature = "pluto"))]
-    fn pluto_panel(&mut self,ctx:&egui::Context){
-        let mut open=self.pluto_open;
+    fn pluto_panel(&mut self, ctx: &egui::Context) {
+        let mut open = self.pluto_open;
         egui::Window::new("PlutoSDR / LibreSDR (RX)").open(&mut open).show(ctx,|ui|{
             ui.horizontal(|ui|{ui.label("IIO URI");ui.text_edit_singleline(&mut self.pluto_settings.uri);});
             ui.label("Typical: ip:192.168.2.1 (USB Ethernet); or ip:<device address>");
@@ -1145,20 +1561,44 @@ impl App {
             if self.pluto_running && ui.button("Apply rate/bandwidth (restart Pluto)").clicked(){self.start_pluto();}
             if self.note.starts_with("PlutoSDR"){ui.label(&self.note);}
         });
-        self.pluto_open=open;
+        self.pluto_open = open;
     }
 
-    /// Start the HackRF with the panel's settings.
+    /// Start the chosen radio (HackRF or Fobos) with the panel's settings.
     #[cfg(feature = "hackrf")]
-    fn start_hackrf(&mut self) {
+    fn start_radio(&mut self) {
         self.stop_source();
         self.path = None;
-        match decsat_io::HackRfSource::open(self.radio.settings) {
-            Ok(src) => {
-                self.hackrf = Some(src.control());
+        // Rust note: both arms yield the same pair — the live control and the
+        // source boxed as a trait object — so the engine need not know which.
+        let opened: decsat_core::Result<(radio::Live, Box<dyn decsat_io::IqSource>)> =
+            match self.radio.device {
+                radio::Device::HackRf => decsat_io::HackRfSource::open(self.radio.settings)
+                    .map(|src| (radio::Live::HackRf(src.control()), Box::new(src) as _)),
+                #[cfg(feature = "fobos")]
+                radio::Device::Fobos => {
+                    decsat_io::FobosSource::open(self.radio.fobos_settings()).map(|src| {
+                        let c = src.control();
+                        // The board's nearest rate is what runs.
+                        self.radio.fobos.sample_rate = c.settings().sample_rate;
+                        (radio::Live::Fobos(c), Box::new(src) as _)
+                    })
+                }
+                #[cfg(feature = "airspy")]
+                radio::Device::Airspy => {
+                    decsat_io::AirspySource::open(self.radio.airspy_settings()).map(|src| {
+                        let c = src.control();
+                        self.radio.airspy.sample_rate = c.settings().sample_rate;
+                        (radio::Live::Airspy(c), Box::new(src) as _)
+                    })
+                }
+            };
+        match opened {
+            Ok((live, src)) => {
+                self.live = Some(live);
                 self.radio.error = None;
-                self.note = "Live from the HackRF.".into();
-                self.start_engine(Box::new(src));
+                self.note = format!("Live from the {}.", self.radio.device.short());
+                self.start_engine(src);
                 self.applied = Some(self.source_key());
             }
             Err(e) => self.radio.error = Some(e.to_string()),
@@ -1199,12 +1639,18 @@ impl App {
     /// keeping the VFOs.
     fn restart(&mut self) {
         #[cfg(all(windows, feature = "uhd"))]
-        if self.uhd_running { self.start_uhd(); return; }
+        if self.uhd_running {
+            self.start_uhd();
+            return;
+        }
         #[cfg(all(windows, feature = "pluto"))]
-        if self.pluto_running {self.start_pluto();return;}
+        if self.pluto_running {
+            self.start_pluto();
+            return;
+        }
         #[cfg(feature = "hackrf")]
-        if self.hackrf.is_some() {
-            self.start_hackrf();
+        if self.live.is_some() {
+            self.start_radio();
             return;
         }
         let Some(path) = self.path.clone() else {
@@ -1583,18 +2029,116 @@ impl App {
         prefs::set_beacon_marks(&self.beacon_marks);
     }
 
+    /// Save the spectrum and waterfall (or the whole window) as a PNG in the
+    /// output folder, named by RF and UTC time, with a caption in it.
+    pub(crate) fn take_snapshot(&mut self, ctx: &egui::Context, area: snapshot::Area) {
+        if self.snapshot.busy() {
+            return;
+        }
+        let (when, stamp) = session_log::utc(std::time::SystemTime::now());
+        let rf = self.rf_center();
+        let sat = if self.satellite.is_empty() {
+            "unnamed".to_string()
+        } else {
+            self.satellite.clone()
+        };
+        let tag = if rf > 0.0 {
+            format!("{:.4}MHz", rf / 1e6)
+        } else {
+            "norf".into()
+        };
+        let what = match area {
+            snapshot::Area::Band => "band",
+            snapshot::Area::Window => "window",
+        };
+        let path = prefs::output_dir().join(format!(
+            "decsat-{}-{tag}-{stamp}-{what}.png",
+            sat.replace([' ', '/', '\\', ':'], "_")
+        ));
+        // Short lines: the band may be narrower than the window.
+        let mut caption = format!("DecSAT · {when} UTC\n{}\n", self.source_caption());
+        if rf > 0.0 {
+            caption += &format!("RF centre {} · ", format::freq(rf));
+        }
+        caption += &format!("span {}", format::rate(self.sample_rate));
+        #[cfg(feature = "hackrf")]
+        if self.path.is_none() {
+            caption += &format!(
+                "\ntuned {} · LNB LO {}",
+                format::freq(self.radio.settings.center_hz as f64),
+                format::freq(self.radio.lnb_lo_mhz * 1e6)
+            );
+        }
+        if self.lo_trim_hz != 0.0 {
+            caption += &format!(" · trim {:+.3} kHz", self.lo_trim_hz / 1e3);
+        }
+        caption += &format!("\nSatellite: {sat} · {} VFO", self.vfos.len());
+        self.snapshot.request(ctx, area, path.clone(), caption);
+        self.log
+            .note(&format!("snapshot ({what}): {}", path.display()));
+    }
+
+    /// The source in words, for captions.
+    fn source_caption(&self) -> String {
+        if let Some(p) = &self.path {
+            return p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+        }
+        #[cfg(feature = "hackrf")]
+        {
+            let live = if self.live.is_some() {
+                "live"
+            } else {
+                "stopped"
+            };
+            format!(
+                "{} {live}, {}",
+                self.radio.device.name(),
+                format::rate(self.radio.sample_rate() as f64)
+            )
+        }
+        #[cfg(not(feature = "hackrf"))]
+        "no source".to_string()
+    }
+
+    /// Switch the session log on or off (and remember the choice).
+    pub(crate) fn set_session_log(&mut self, on: bool) {
+        if on {
+            self.log.start(&prefs::output_dir());
+            self.note = match (&self.log.error, self.log.path()) {
+                (Some(e), _) => format!("Session log not started: {e}"),
+                (None, Some(p)) => format!("Session log: {}", p.display()),
+                (None, None) => String::new(),
+            };
+        } else {
+            self.log.stop();
+            self.note = "Session log stopped.".into();
+        }
+        prefs::set_session_log(on);
+    }
+
     /// The source is a running HackRF, so the view can tune it.
     fn can_retune(&self) -> bool {
         #[cfg(all(windows, feature = "uhd"))]
-        if self.uhd_running {return self.uhd_control.is_some();}
+        if self.uhd_running {
+            return self.uhd_control.is_some();
+        }
         #[cfg(all(windows, feature = "pluto"))]
-        if self.pluto_running {return self.pluto_control.is_some();}
+        if self.pluto_running {
+            return self.pluto_control.is_some();
+        }
         #[cfg(all(windows, feature = "rtl"))]
-        if self.rtl_running {return self.rtl_control.is_some();}
-        if self.net_running {return self.net_control.as_ref().is_some_and(|c|c.is_rtl_tcp());}
+        if self.rtl_running {
+            return self.rtl_control.is_some();
+        }
+        if self.net_running {
+            return self.net_control.as_ref().is_some_and(|c| c.is_rtl_tcp());
+        }
         #[cfg(feature = "hackrf")]
         {
-            self.path.is_none() && self.hackrf.is_some()
+            self.path.is_none() && self.live.is_some()
         }
         #[cfg(not(feature = "hackrf"))]
         {
@@ -1608,43 +2152,69 @@ impl App {
         // The readout shows the trimmed RF; the tuning is without the trim.
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
         if self.net_selected && self.path.is_none() {
-            let if_hz=(rf-self.net_lo_hz).max(0.0);
-            self.net_settings.center_hz=if_hz.round();
-            self.rf_center_mhz=rf/1e6;
-            self.note=match self.net_control.as_ref().map(|c|c.tune(if_hz)) {
-                Some(Ok(true))=>"Network IQ: rtl_tcp server retuned".into(),
-                Some(Err(e))=>format!("Network IQ: retune failed: {e}"),
-                _=>"Network IQ: band relabelled; tune the sender to match".into(),
+            let if_hz = (rf - self.net_lo_hz).max(0.0);
+            self.net_settings.center_hz = if_hz.round();
+            self.rf_center_mhz = rf / 1e6;
+            self.note = match self.net_control.as_ref().map(|c| c.tune(if_hz)) {
+                Some(Ok(true)) => "Network IQ: rtl_tcp server retuned".into(),
+                Some(Err(e)) => format!("Network IQ: retune failed: {e}"),
+                _ => "Network IQ: band relabelled; tune the sender to match".into(),
             };
             return;
         }
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected && self.path.is_none() {
-            let if_hz=rf-self.rtl_settings.lnb_lo_hz;
-            let info=self.rtl_control.as_ref().and_then(|c|c.tuner_info());
-            let (lo,hi)=info.as_ref().map(|t|(t.min_hz as f64,t.max_hz as f64)).unwrap_or((24e6,2200e6));
-            if !(lo..=hi).contains(&if_hz){self.note=format!("RTL-SDR {}: tuner IF outside {:.0}–{:.0} MHz",info.as_ref().map(|t|t.name).unwrap_or("unknown"),lo/1e6,hi/1e6);return;}
-            self.rtl_settings.center_hz=if_hz as u32;
-            self.rf_center_mhz=rf/1e6;
-            if let Some(c)=&self.rtl_control{c.tune(self.rtl_settings.center_hz);self.note="RTL-SDR live frequency tuning applied".into();}else{self.note="RTL-SDR frequency preset for next start".into();}
+            let if_hz = rf - self.rtl_settings.lnb_lo_hz;
+            let info = self.rtl_control.as_ref().and_then(|c| c.tuner_info());
+            let (lo, hi) = info
+                .as_ref()
+                .map(|t| (t.min_hz as f64, t.max_hz as f64))
+                .unwrap_or((24e6, 2200e6));
+            if !(lo..=hi).contains(&if_hz) {
+                self.note = format!(
+                    "RTL-SDR {}: tuner IF outside {:.0}–{:.0} MHz",
+                    info.as_ref().map(|t| t.name).unwrap_or("unknown"),
+                    lo / 1e6,
+                    hi / 1e6
+                );
+                return;
+            }
+            self.rtl_settings.center_hz = if_hz as u32;
+            self.rf_center_mhz = rf / 1e6;
+            if let Some(c) = &self.rtl_control {
+                c.tune(self.rtl_settings.center_hz);
+                self.note = "RTL-SDR live frequency tuning applied".into();
+            } else {
+                self.note = "RTL-SDR frequency preset for next start".into();
+            }
             return;
         }
         #[cfg(all(windows, feature = "pluto"))]
         if self.pluto_running || (self.pluto_selected && self.path.is_none()) {
-            let if_hz=rf-self.pluto_settings.lnb_lo_hz;
-            if !(70e6..=6e9).contains(&if_hz){self.note="Pluto IF must be within 70-6000 MHz".into();return;}
-            self.pluto_settings.center_hz=if_hz;
-            if let Some(c)=&self.pluto_control{c.tune(if_hz);}
-            self.rf_center_mhz=rf/1e6;
+            let if_hz = rf - self.pluto_settings.lnb_lo_hz;
+            if !(70e6..=6e9).contains(&if_hz) {
+                self.note = "Pluto IF must be within 70-6000 MHz".into();
+                return;
+            }
+            self.pluto_settings.center_hz = if_hz;
+            if let Some(c) = &self.pluto_control {
+                c.tune(if_hz);
+            }
+            self.rf_center_mhz = rf / 1e6;
             return;
         }
         #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_running {
-            let if_hz=rf-self.uhd_settings.lnb_lo_hz;
-            if !(50e6..=6e9).contains(&if_hz){self.note="UHD: requested RF/LO produces an IF outside 50-6000 MHz".into();return;}
-            self.uhd_settings.center_hz=if_hz;
-            if let Some(c)=&self.uhd_control{c.tune(if_hz);}
-            self.rf_center_mhz=rf/1e6;
+            let if_hz = rf - self.uhd_settings.lnb_lo_hz;
+            if !(50e6..=6e9).contains(&if_hz) {
+                self.note = "UHD: requested RF/LO produces an IF outside 50-6000 MHz".into();
+                return;
+            }
+            self.uhd_settings.center_hz = if_hz;
+            if let Some(c) = &self.uhd_control {
+                c.tune(if_hz);
+            }
+            self.rf_center_mhz = rf / 1e6;
             return;
         }
         #[cfg(all(windows, feature = "uhd"))]
@@ -1660,9 +2230,10 @@ impl App {
         }
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
-            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(1e6, 6e9).round() as u64;
+            let (min, max) = (self.radio.device.min_hz(), self.radio.device.max_hz());
+            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(min, max).round() as u64;
             self.radio.settings.center_hz = tuned;
-            if let Some(c) = &self.hackrf
+            if let Some(c) = &self.live
                 && let Err(e) = c.set_center(tuned)
             {
                 self.radio.error = Some(e.to_string());
@@ -1713,173 +2284,335 @@ impl App {
 }
 
 impl App {
-
-    fn overview_range(&self)->(f64,f64){
-        #[cfg(all(windows,feature="rtl"))]
-        if self.rtl_selected {return self.rtl_control.as_ref().and_then(|c|c.tuner_info()).map(|i|(i.min_hz as f64,i.max_hz as f64)).unwrap_or((24e6,1766e6));}
-        #[cfg(all(windows,feature="pluto"))]
-        if self.pluto_selected{return (70e6,6e9);}
-        #[cfg(all(windows,feature="uhd"))]
-        if self.uhd_selected{return (50e6,6e9);}
-        (1e6,6e9)
+    fn overview_range(&self) -> (f64, f64) {
+        #[cfg(all(windows, feature = "rtl"))]
+        if self.rtl_selected {
+            return self
+                .rtl_control
+                .as_ref()
+                .and_then(|c| c.tuner_info())
+                .map(|i| (i.min_hz as f64, i.max_hz as f64))
+                .unwrap_or((24e6, 1766e6));
+        }
+        #[cfg(all(windows, feature = "pluto"))]
+        if self.pluto_selected {
+            return (70e6, 6e9);
+        }
+        #[cfg(all(windows, feature = "uhd"))]
+        if self.uhd_selected {
+            return (50e6, 6e9);
+        }
+        (1e6, 6e9)
     }
-    fn start_overview(&mut self){
-        if self.overview.busy{return;}
-        let (min,max)=self.overview_range();
-        let (lo,hi)=match self.overview.scope {1=>{let center=self.rf_center();((center-250e6).max(min),(center+250e6).min(max))},2=>(self.overview.custom_lo*1e6,self.overview.custom_hi*1e6),_=>(min,max)};
-        if !lo.is_finite() || !hi.is_finite() || lo>=hi || lo<min || hi>max {
-            self.note=format!("Overview sweep range must lie within {:.3}–{:.3} MHz, with Start < Stop",min/1e6,max/1e6);
+    fn start_overview(&mut self) {
+        if self.overview.busy {
+            return;
+        }
+        let (min, max) = self.overview_range();
+        let (lo, hi) = match self.overview.scope {
+            1 => {
+                let center = self.rf_center();
+                ((center - 250e6).max(min), (center + 250e6).min(max))
+            }
+            2 => (self.overview.custom_lo * 1e6, self.overview.custom_hi * 1e6),
+            _ => (min, max),
+        };
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi || lo < min || hi > max {
+            self.note = format!(
+                "Overview sweep range must lie within {:.3}–{:.3} MHz, with Start < Stop",
+                min / 1e6,
+                max / 1e6
+            );
             return;
         }
         // Keep both visible frequency fields consistent with the actual selected span.
-        self.overview.custom_lo=lo/1e6;
-        self.overview.custom_hi=hi/1e6;
-        let was_running=self.engine.is_some();
+        self.overview.custom_lo = lo / 1e6;
+        self.overview.custom_hi = hi / 1e6;
+        let was_running = self.engine.is_some();
         self.stop_source();
         // Dedicated B210 route: do not run the generic retune/3-buffer flush.
         // One UHD device + streamer is held for the whole overview operation.
-        #[cfg(all(windows,feature="uhd"))]
+        #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_selected {
-            let mut settings=self.uhd_settings.clone();
-            settings.center_hz=(lo+hi)*0.5;
+            let mut settings = self.uhd_settings.clone();
+            settings.center_hz = (lo + hi) * 0.5;
             match decsat_io::UhdSource::open(settings) {
-                Ok(src)=>{
-                    self.overview.shared=std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
-                    self.overview.min=lo;self.overview.max=hi;
-                    self.overview.busy=true;self.overview.restart=was_running;
-                    sweep_overview::spawn_uhd(self.overview.shared.clone(),src,lo,hi);
-                    self.note="UHD B210 optimized wideband sweep running".into();
-                },
-                Err(e)=>{
-                    self.note=format!("UHD B210 overview: {e}");
+                Ok(src) => {
+                    self.overview.shared =
+                        std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
+                    self.overview.min = lo;
+                    self.overview.max = hi;
+                    self.overview.busy = true;
+                    self.overview.restart = was_running;
+                    sweep_overview::spawn_uhd(self.overview.shared.clone(), src, lo, hi);
+                    self.note = "UHD B210 optimized wideband sweep running".into();
+                }
+                Err(e) => {
+                    self.note = format!("UHD B210 overview: {e}");
                     self.restart_selected_overview(was_running);
                 }
             }
             return;
         }
-        let Some((src,tune))=self.open_overview_source((lo+hi)*0.5) else {
+        let Some((src, tune)) = self.open_overview_source((lo + hi) * 0.5) else {
             self.restart_selected_overview(was_running);
             return;
         };
-        self.overview.shared=std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
-        self.overview.min=lo;self.overview.max=hi;self.overview.busy=true;self.overview.restart=was_running;
-        sweep_overview::spawn(self.overview.shared.clone(),src,tune,lo,hi);
-        self.note="Wideband sweep running; reception temporarily paused".into();
+        self.overview.shared = std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
+        self.overview.min = lo;
+        self.overview.max = hi;
+        self.overview.busy = true;
+        self.overview.restart = was_running;
+        sweep_overview::spawn(self.overview.shared.clone(), src, tune, lo, hi);
+        self.note = "Wideband sweep running; reception temporarily paused".into();
     }
     #[allow(clippy::type_complexity)]
-    fn open_overview_source(&mut self, frequency:f64)->Option<(Box<dyn decsat_io::IqSource>,Box<dyn FnMut(f64)+Send>)>{
-        if self.net_selected {self.note="Network IQ: the wideband sweep needs a radio DecSAT tunes".into();return None;}
-        #[cfg(all(windows,feature="rtl"))]
+    fn open_overview_source(
+        &mut self,
+        frequency: f64,
+    ) -> Option<(Box<dyn decsat_io::IqSource>, Box<dyn FnMut(f64) + Send>)> {
+        if self.net_selected {
+            self.note = "Network IQ: the wideband sweep needs a radio DecSAT tunes".into();
+            return None;
+        }
+        #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected {
-            let mut settings=self.rtl_settings.clone();settings.center_hz=frequency as u32;
-            return match decsat_io::RtlSource::open(settings){Ok(source)=>{let control=source.control();Some((Box::new(source),Box::new(move |f|control.tune(f as u32))))},Err(e)=>{self.note=format!("RTL sweep: {e}");None}};
+            let mut settings = self.rtl_settings.clone();
+            settings.center_hz = frequency as u32;
+            return match decsat_io::RtlSource::open(settings) {
+                Ok(source) => {
+                    let control = source.control();
+                    Some((Box::new(source), Box::new(move |f| control.tune(f as u32))))
+                }
+                Err(e) => {
+                    self.note = format!("RTL sweep: {e}");
+                    None
+                }
+            };
         }
-        #[cfg(all(windows,feature="pluto"))]
+        #[cfg(all(windows, feature = "pluto"))]
         if self.pluto_selected {
-            let mut settings=self.pluto_settings.clone();settings.center_hz=frequency;
-            return match decsat_io::PlutoSource::open(settings){Ok(source)=>{let control=source.control();Some((Box::new(source),Box::new(move |f|control.tune(f))))},Err(e)=>{self.note=format!("Pluto sweep: {e}");None}};
+            let mut settings = self.pluto_settings.clone();
+            settings.center_hz = frequency;
+            return match decsat_io::PlutoSource::open(settings) {
+                Ok(source) => {
+                    let control = source.control();
+                    Some((Box::new(source), Box::new(move |f| control.tune(f))))
+                }
+                Err(e) => {
+                    self.note = format!("Pluto sweep: {e}");
+                    None
+                }
+            };
         }
-        #[cfg(all(windows,feature="uhd"))]
+        #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_selected {
-            let mut settings=self.uhd_settings.clone();settings.center_hz=frequency;
-            return match decsat_io::UhdSource::open(settings){Ok(source)=>{let control=source.control();Some((Box::new(source),Box::new(move |f|control.tune(f))))},Err(e)=>{self.note=format!("UHD sweep: {e}");None}};
+            let mut settings = self.uhd_settings.clone();
+            settings.center_hz = frequency;
+            return match decsat_io::UhdSource::open(settings) {
+                Ok(source) => {
+                    let control = source.control();
+                    Some((Box::new(source), Box::new(move |f| control.tune(f))))
+                }
+                Err(e) => {
+                    self.note = format!("UHD sweep: {e}");
+                    None
+                }
+            };
         }
-        #[cfg(feature="hackrf")]
+        #[cfg(feature = "hackrf")]
         {
-            let mut settings=self.radio.settings;settings.center_hz=frequency as u64;
-            return match decsat_io::HackRfSource::open(settings){Ok(source)=>{let control=source.control();Some((Box::new(source),Box::new(move |f|{let _=control.set_center(f as u64);})) )},Err(e)=>{self.note=format!("HackRF sweep: {e}");None}};
+            let mut settings = self.radio.settings;
+            settings.center_hz = frequency as u64;
+            return match decsat_io::HackRfSource::open(settings) {
+                Ok(source) => {
+                    let control = source.control();
+                    Some((
+                        Box::new(source),
+                        Box::new(move |f| {
+                            let _ = control.set_center(f as u64);
+                        }),
+                    ))
+                }
+                Err(e) => {
+                    self.note = format!("HackRF sweep: {e}");
+                    None
+                }
+            };
         }
         #[allow(unreachable_code)]
         None
     }
-    fn restart_selected_overview(&mut self,was_running:bool){if !was_running{return;}
-        if self.net_selected{self.start_net();return;}
-        #[cfg(all(windows,feature="rtl"))]
-        if self.rtl_selected{self.start_rtl();return;}
-        #[cfg(all(windows,feature="pluto"))]
-        if self.pluto_selected{self.start_pluto();return;}
-        #[cfg(all(windows,feature="uhd"))]
-        if self.uhd_selected{self.start_uhd();return;}
-        #[cfg(feature="hackrf")]
-        self.start_hackrf();
+    fn restart_selected_overview(&mut self, was_running: bool) {
+        if !was_running {
+            return;
+        }
+        if self.net_selected {
+            self.start_net();
+            return;
+        }
+        #[cfg(all(windows, feature = "rtl"))]
+        if self.rtl_selected {
+            self.start_rtl();
+            return;
+        }
+        #[cfg(all(windows, feature = "pluto"))]
+        if self.pluto_selected {
+            self.start_pluto();
+            return;
+        }
+        #[cfg(all(windows, feature = "uhd"))]
+        if self.uhd_selected {
+            self.start_uhd();
+            return;
+        }
+        #[cfg(feature = "hackrf")]
+        self.start_radio();
     }
-    fn poll_overview(&mut self,ctx:&egui::Context){if !self.overview.busy{return;}
+    fn poll_overview(&mut self, ctx: &egui::Context) {
+        if !self.overview.busy {
+            return;
+        }
         ctx.request_repaint_after(std::time::Duration::from_millis(120));
-        let done=self.overview.shared.lock().ok().map(|s|s.done).unwrap_or(false);
-        if done{self.overview.busy=false;let restart=self.overview.restart;self.overview.restart=false;self.restart_selected_overview(restart);}
+        let done = self
+            .overview
+            .shared
+            .lock()
+            .ok()
+            .map(|s| s.done)
+            .unwrap_or(false);
+        if done {
+            self.overview.busy = false;
+            let restart = self.overview.restart;
+            self.overview.restart = false;
+            self.restart_selected_overview(restart);
+        }
     }
-    fn show_overview(&mut self,ui:&mut egui::Ui){
-        ui.horizontal_wrapped(|ui|{
+    fn show_overview(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Wideband overview").strong());
-            ui.add_enabled_ui(!self.overview.busy,|ui|{
-                let previous_scope=self.overview.scope;
+            ui.add_enabled_ui(!self.overview.busy, |ui| {
+                let previous_scope = self.overview.scope;
                 egui::ComboBox::from_id_salt("overview_scope")
-                    .selected_text(match self.overview.scope{0=>"Full device",1=>"±250 MHz",_=>"Custom"})
-                    .show_ui(ui,|ui|{
-                        ui.selectable_value(&mut self.overview.scope,0,"Full device");
-                        ui.selectable_value(&mut self.overview.scope,1,"±250 MHz");
-                        ui.selectable_value(&mut self.overview.scope,2,"Custom");
+                    .selected_text(match self.overview.scope {
+                        0 => "Full device",
+                        1 => "±250 MHz",
+                        _ => "Custom",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.overview.scope, 0, "Full device");
+                        ui.selectable_value(&mut self.overview.scope, 1, "±250 MHz");
+                        ui.selectable_value(&mut self.overview.scope, 2, "Custom");
                     });
                 // Switching to a preset updates the editable bounds immediately.
                 // Switching to Custom retains the currently displayed bounds.
-                if previous_scope!=self.overview.scope && self.overview.scope!=2 {
-                    let (device_min,device_max)=self.overview_range();
-                    let (lo,hi)=if self.overview.scope==0 {(device_min,device_max)} else {
-                        let tuned=self.rf_center();
-                        ((tuned-250e6).max(device_min),(tuned+250e6).min(device_max))
+                if previous_scope != self.overview.scope && self.overview.scope != 2 {
+                    let (device_min, device_max) = self.overview_range();
+                    let (lo, hi) = if self.overview.scope == 0 {
+                        (device_min, device_max)
+                    } else {
+                        let tuned = self.rf_center();
+                        (
+                            (tuned - 250e6).max(device_min),
+                            (tuned + 250e6).min(device_max),
+                        )
                     };
-                    self.overview.custom_lo=lo/1e6;
-                    self.overview.custom_hi=hi/1e6;
+                    self.overview.custom_lo = lo / 1e6;
+                    self.overview.custom_hi = hi / 1e6;
                 }
                 ui.label("Start");
-                let start_changed=ui.add(egui::DragValue::new(&mut self.overview.custom_lo)
-                    .speed(0.1).range(0.0..=f64::MAX).fixed_decimals(3).suffix(" MHz"))
+                let start_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.overview.custom_lo)
+                            .speed(0.1)
+                            .range(0.0..=f64::MAX)
+                            .fixed_decimals(3)
+                            .suffix(" MHz"),
+                    )
                     .on_hover_text("Sweep start frequency in MHz; edit to select Custom range")
                     .changed();
                 ui.label("Stop");
-                let stop_changed=ui.add(egui::DragValue::new(&mut self.overview.custom_hi)
-                    .speed(0.1).range(0.0..=f64::MAX).fixed_decimals(3).suffix(" MHz"))
+                let stop_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.overview.custom_hi)
+                            .speed(0.1)
+                            .range(0.0..=f64::MAX)
+                            .fixed_decimals(3)
+                            .suffix(" MHz"),
+                    )
                     .on_hover_text("Sweep stop frequency in MHz; edit to select Custom range")
                     .changed();
-                if start_changed || stop_changed {self.overview.scope=2;}
+                if start_changed || stop_changed {
+                    self.overview.scope = 2;
+                }
             });
-            if ui.add_enabled(!self.overview.busy,egui::Button::new("⟳ Refresh sweep")).clicked(){
+            if ui
+                .add_enabled(!self.overview.busy, egui::Button::new("⟳ Refresh sweep"))
+                .clicked()
+            {
                 self.start_overview();
             }
             if self.overview.busy {
-                let value=self.overview.shared.lock().ok().map(|s|s.progress).unwrap_or(0.0);
+                let value = self
+                    .overview
+                    .shared
+                    .lock()
+                    .ok()
+                    .map(|s| s.progress)
+                    .unwrap_or(0.0);
                 ui.add(egui::ProgressBar::new(value).desired_width(130.0));
             }
-            if let Ok(s)=self.overview.shared.lock()
-                && !s.error.is_empty(){ui.colored_label(egui::Color32::LIGHT_RED,&s.error);}
+            if let Ok(s) = self.overview.shared.lock()
+                && !s.error.is_empty()
+            {
+                ui.colored_label(egui::Color32::LIGHT_RED, &s.error);
+            }
         });
-        let center=self.rf_center();let rate=self.sample_rate;
-        if let Some(target)=sweep_overview::draw(ui,&mut self.overview,center,rate)
-            && !self.overview.busy{self.set_rf_center(target);}
+        let center = self.rf_center();
+        let rate = self.sample_rate;
+        if let Some(target) = sweep_overview::draw(ui, &mut self.overview, center, rate)
+            && !self.overview.busy
+        {
+            self.set_rf_center(target);
+        }
     }
-
 }
 
 impl App {
     fn persist_toolbars(&mut self) {
-        if self.toolbar_saved_at.elapsed()<std::time::Duration::from_secs(2) {return;}
-        self.toolbar_saved_at=std::time::Instant::now();
-        let mut settings=self.streamreader.settings();
+        if self.toolbar_saved_at.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.toolbar_saved_at = std::time::Instant::now();
+        let mut settings = self.streamreader.settings();
         settings.extend([
-            ("toolbar.overview.visible".to_string(),(self.overview.visible as u8).to_string()),
-            ("toolbar.overview.scope".to_string(),self.overview.scope.to_string()),
-            ("toolbar.overview.lo".to_string(),self.overview.custom_lo.to_string()),
-            ("toolbar.overview.hi".to_string(),self.overview.custom_hi.to_string()),
+            (
+                "toolbar.overview.visible".to_string(),
+                (self.overview.visible as u8).to_string(),
+            ),
+            (
+                "toolbar.overview.scope".to_string(),
+                self.overview.scope.to_string(),
+            ),
+            (
+                "toolbar.overview.lo".to_string(),
+                self.overview.custom_lo.to_string(),
+            ),
+            (
+                "toolbar.overview.hi".to_string(),
+                self.overview.custom_hi.to_string(),
+            ),
         ]);
-        let current=crate::prefs::toolbar_settings();
-        let cur:std::collections::BTreeMap<_,_>=current.into_iter().collect();
-        let new:std::collections::BTreeMap<_,_>=settings.iter().cloned().collect();
-        if new!=cur { let _=crate::prefs::save_toolbars(&settings); }
+        let current = crate::prefs::toolbar_settings();
+        let cur: std::collections::BTreeMap<_, _> = current.into_iter().collect();
+        let new: std::collections::BTreeMap<_, _> = settings.iter().cloned().collect();
+        if new != cur {
+            let _ = crate::prefs::save_toolbars(&settings);
+        }
     }
 }
 
 impl eframe::App for App {
-
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // First, before anything reads a VFO's RF.
         #[cfg(feature = "hackrf")]
@@ -1890,6 +2623,42 @@ impl eframe::App for App {
         // Recordings are named by the RF they hold (tuning + LO + trim).
         decsat_engine::rf::set_rf_center(self.rf_center());
         self.keep_session();
+        self.log
+            .observe(&self.vfos, &self.statuses, self.rf_center());
+        let names: Vec<(VfoId, String)> = self
+            .vfos
+            .iter()
+            .map(|v| (v.id, v.settings.name.clone()))
+            .collect();
+        let found = orbit::found(&names, &self.statuses);
+        for f in &found {
+            if !self
+                .orbit_found
+                .iter()
+                .any(|o| (o.deg - f.deg).abs() < 0.05)
+            {
+                self.log
+                    .note(&format!("{} signals {}", f.source, orbit::label(f.deg)));
+            }
+        }
+        if !found.is_empty() {
+            self.orbit_found = found;
+        }
+        self.log.follow_note(&self.note);
+        if let Some(r) = self.snapshot.handle(ctx) {
+            self.note = match r {
+                Ok(p) => format!("Snapshot saved: {}", p.display()),
+                Err(e) => format!("Snapshot not saved: {e}"),
+            };
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+            let area = if ctx.input(|i| i.modifiers.shift) {
+                snapshot::Area::Window
+            } else {
+                snapshot::Area::Band
+            };
+            self.take_snapshot(ctx, area);
+        }
         if self.plan_keep
             && !self.plan.is_empty()
             && self.engine.is_some()
@@ -2167,16 +2936,18 @@ impl eframe::App for App {
         self.streamreader.show(ui);
         egui::Panel::top("freqbar").show(ui, |ui| self.freq_row(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        if self.overview.visible {egui::Panel::top("wideband_overview").show(ui,|ui|self.show_overview(ui));}
+        if self.overview.visible {
+            egui::Panel::top("wideband_overview").show(ui, |ui| self.show_overview(ui));
+        }
 
         #[cfg(feature = "hackrf")]
         {
-            let live = self.hackrf.clone();
+            let live = self.live.clone();
             match self.radio.show(ui.ctx(), live.as_ref()) {
-                Some(radio::RadioAction::Start) => self.start_hackrf(),
+                Some(radio::RadioAction::Start) => self.start_radio(),
                 Some(radio::RadioAction::Stop) => {
                     self.stop_source();
-                    self.note = "HackRF stopped.".into();
+                    self.note = format!("{} stopped.", self.radio.device.short());
                 }
                 None => {}
             }
@@ -2212,8 +2983,11 @@ impl eframe::App for App {
 
         // Where Bluetooth would leak in, were the source a HackRF tuned as it
         // is: live, its tuning; a file, the tuning its name gives.
-        let bluetooth =
-            decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0);
+        let bluetooth = if self.source_is_hackrf() {
+            decsat_engine::bursty::bluetooth_offsets(self.hackrf_tuning(), self.sample_rate / 2.0)
+        } else {
+            Vec::new()
+        };
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -2234,8 +3008,10 @@ impl eframe::App for App {
                     bluetooth: &bluetooth,
                     beacons: &self.beacon_scene,
                 };
+                self.snapshot.band_rect = Some(ui.max_rect());
                 actions.extend(self.band.show(ui, &inp));
             });
+        self.snapshot.overlay(ui.ctx());
 
         // The transmit panel; starting the HackRF takes it over from receive.
         let reqs = self.survey.show(
@@ -2263,7 +3039,10 @@ impl eframe::App for App {
             match req {
                 #[cfg(feature = "hackrf")]
                 transmit::TxRequest::StartHackRf => {
-                    if self.path.is_none() && self.engine.is_some() {
+                    if self.path.is_none()
+                        && self.engine.is_some()
+                        && self.live.as_ref().is_some_and(|l| l.is_hackrf())
+                    {
                         self.stop_source();
                         self.note = "Receive stopped: the HackRF is transmitting \
                                      (it cannot do both). Start it again after."

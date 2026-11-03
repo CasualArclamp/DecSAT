@@ -9,8 +9,8 @@
 //! rows, and whichever waterfall rows it has not seen yet.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -340,7 +340,8 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         let shared = Arc::clone(&shared);
         let fft_size = Arc::clone(&fft_size);
         let snr = opts.carrier_snr_db;
-        std::thread::Builder::new().name("decsat-spectrum".into())
+        std::thread::Builder::new()
+            .name("decsat-spectrum".into())
             .spawn(move || {
                 crate::thread_priority::set_display_priority();
                 run_spectrum(spectrum_rx, shared, rate, fft_size, snr)
@@ -514,8 +515,8 @@ fn run_spectrum(
             takes.clear();
         }
         let spacing = last_hop_secs;
-        let (row, hop) = spec.compute_max_with(&block, SEGMENTS_PER_ROW,
-            |p| bursts.push(p, rate, spacing));
+        let (row, hop) =
+            spec.compute_max_with(&block, SEGMENTS_PER_ROW, |p| bursts.push(p, rate, spacing));
         last_hop_secs = hop as f64 / rate;
         row_seq += 1;
         if avg_lin.len() != row.len() {
@@ -525,8 +526,10 @@ fn run_spectrum(
                 *a += 0.15 * (10f32.powf(d / 10.0) - *a);
             }
         }
-        let avg_db: Vec<f32> = avg_lin.iter()
-            .map(|&p| 10.0 * p.max(1e-20).log10()).collect();
+        let avg_db: Vec<f32> = avg_lin
+            .iter()
+            .map(|&p| 10.0 * p.max(1e-20).log10())
+            .collect();
         let carriers = (last_carriers.elapsed() >= Duration::from_millis(500)).then(|| {
             last_carriers = Instant::now();
             let mut found = detect_carriers(&avg_db, rate, carrier_snr_db);
@@ -535,7 +538,9 @@ fn run_spectrum(
                 let want = (spec.size() * 16).min(cap);
                 if want > spec.size() {
                     let f = fine.get_or_insert_with(|| Spectrum::new(want));
-                    if f.size() != want { *f = Spectrum::new(want); }
+                    if f.size() != want {
+                        *f = Spectrum::new(want);
+                    }
                     resolve_narrow(&mut found, &f.compute_max(&block, 64), rate);
                 }
             }
@@ -544,7 +549,9 @@ fn run_spectrum(
         let burst_bands = (last_bursts.elapsed() >= Duration::from_secs(2)).then(|| {
             last_bursts = Instant::now();
             takes.push_back(bursts.take());
-            if takes.len() > BURST_TAKES { takes.pop_front(); }
+            if takes.len() > BURST_TAKES {
+                takes.pop_front();
+            }
             crate::bursty::union(takes.make_contiguous())
         });
         {
@@ -552,13 +559,19 @@ fn run_spectrum(
             // This worker is the only producer: a row of another width than
             // those kept (the FFT size changed while it computed) starts the
             // backlog again, so the GUI never mixes widths.
-            if rows.back().is_some_and(|(_, r)| r.len() != row.len()) { rows.clear(); }
-            if rows.len() == ROW_BACKLOG { rows.pop_front(); }
+            if rows.back().is_some_and(|(_, r)| r.len() != row.len()) {
+                rows.clear();
+            }
+            if rows.len() == ROW_BACKLOG {
+                rows.pop_front();
+            }
             rows.push_back((row_seq, row));
         }
         let mut f = shared.front.lock().unwrap();
         f.spectrum_db = avg_db;
-        if let Some(c) = carriers { f.carriers = c; }
+        if let Some(c) = carriers {
+            f.carriers = c;
+        }
         if let Some(b) = burst_bands {
             f.burst_bands = b;
             f.burst_takes += 1;

@@ -180,6 +180,26 @@ pub struct InrouteTerminal {
     pub level_db: Option<f64>,
     /// Its latest data symbols, oldest first.
     pub symbols: Vec<Iq>,
+    /// Its latest burst's waveform, for the GUI's plot. Empty until something
+    /// fills it in.
+    pub wave: BurstWave,
+}
+
+/// One burst's waveform, for display.
+///
+/// Placeholder: the GUI's plot reads this, and hides itself while `samples` is
+/// empty. Nothing in the engine fills it in yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BurstWave {
+    /// The burst's samples with its own carrier taken out.
+    pub samples: Vec<Iq>,
+    /// Time between samples, µs.
+    pub step_us: f64,
+    /// Indices into `samples` of the burst's first and last symbol.
+    pub burst: (usize, usize),
+    /// The inroute (carrier) and slot the burst was in.
+    pub inroute: u16,
+    pub slot: u16,
 }
 
 /// What the inroute demodulator is doing, for display.
