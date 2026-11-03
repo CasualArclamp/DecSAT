@@ -6067,3 +6067,38 @@ waited_for`; `a_quit_fec_thread_leaves_its_queue` also checks pending.
 **Not done**: the CDM-570L Viterbi capture (VFO_10, 4.3 s) is too short to
 show the fallback live; a carrier whose DVB-S chain never finds the inner
 code still takes a fresh first look, as before.
+
+## The transmitter app, `decsat-tx` (2026-11-03)
+
+A transmitter of its own beside the receiver, as DecDVB-T has (DESIGN.md,
+"TX app"): `apps/decsat-tx` on `crates/decsat-tx`. Mockups first (a private
+canvas); the user chose layout A, AV1 to AOM's spec, GPU encoders first,
+pilots on and normal frames.
+
+- **Encoding:** ffmpeg 9.0.2 (gyan.dev full) as a child process. Encoders
+  tried at start-up; here: libx264, libx265, libvvenc, libsvtav1, mpeg2video,
+  h264/hevc_nvenc (RTX 3050 Laptop: no AV1 NVENC), h264/hevc_amf; no QSV.
+- **QO-100 presets** (`qo100.rs`): BATC/AMSAT-DL bandplan V3 (6 Feb 2021) and
+  BATC's conference page, every value cited; 2000 kS is not offered (V3:
+  1500 kS the routine maximum).
+- **AV1** (`decsat_ts::av1`): AOM "Carriage of AV1 in MPEG-2 TS" v1.0.1 on
+  transmit and in the player (IVF to ffmpeg on a second input). ffmpeg 9 can
+  neither mux nor demux it (checked: its demuxer ignores `AV01` too).
+- **Checked** from the webcam (640×360 or so, the net preset: 333 kS QPSK
+  2/3, 2.331 MS/s) into IQ files, decoded back by `decsat decode --decoder
+  ts`: every run 80 of 80 BBFRAMEs good, 0 CC errors; the TS decoded by
+  ffmpeg (AV1 through `av1_ivf`) with errors only before the first key frame
+  (the receiver joining). Pictures decoded in ~8 s: H.264 NVENC 179, x264
+  183, H.265 NVENC 182, x265 159, VVC 163 (480×270; 640×360 managed only
+  17.5 fps from the camera, so VVC is held to 480×270), AV1 174, MPEG-2 194.
+- **CPU** (% of one core, Ryzen 7 4800H; ffmpeg / this program, the
+  modulator in it, no window): H.264 NVENC 10/10, x264 21/9, H.265 NVENC
+  15/10, x265 31/10, VVC 177/10, SVT-AV1 40/13, MPEG-2 3/10; modulator 7.7
+  at 333 kS (2.33 MS/s), ~14 at 1500 kS (6 MS/s). The window adds ~4.
+- Tests: the AV1 mapping both ways (`av1::tests`), the player playing AV1
+  from the mapping (`plays_av1_from_aoms_ts_mapping`), presets, the command
+  line, the arm gate (`only_radio_rs_opens_the_hackrf`), sinks.
+
+**Not done**: nothing on the air or through a HackRF cable loop yet (the
+HackRF was not plugged in); the "encoded" picture (decoded back live) of the
+mockup is left out (it would cost a decoder).

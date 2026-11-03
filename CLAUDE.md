@@ -14,6 +14,13 @@ cargo run --release -p decsat-gui       # the GUI
 cargo run --release -p decsat-cli -- modcods
 cargo run --release -p decsat-io --example net_send -- FILE.cf32 8M tcp://127.0.0.1:7777 int16   # stand-in for SDR++'s IQ Exporter: plays a capture out over TCP (listens), connect:// or udp://
 cargo run --release -p decsat-cli -- decode --net tcp://127.0.0.1:7777 --iq int16 --rate 8000000 --decoder dvbs   # network IQ (SDR++, GNU Radio, rtl_tcp); also listen://, udp://
+# the transmitter app (decsat-tx): its own window and prefs (%APPDATA%\DecSAT-TX\prefs.txt). Tests and these hooks never reach the radio (DECSAT_TX_NO_RADIO is set for them)
+cargo run --release -p decsat-tx-app                                     # the TX window
+cargo run --release -p decsat-tx-app -- --source camera --codec h265 --sink iq:out/tx_2331000Sps.cs8 --start --run-secs 10   # a real session into a file: prints the CPU
+cargo run --release -p decsat-tx-app -- --source test --sink null --start --screenshot out/tx.png --after 9   # screenshots from the test pattern only (public repo)
+cargo run --release -p decsat-tx --example txrun -- --source camera --codec av1 --out out/tx.cs8 --seconds 8   # the library alone, a status line a second
+cargo run --release -p decsat-cli -- decode out/tx.cs8 --rate 2331000 --decoder ts --symbol-rate 333000 --fast --out out/rx.ts   # read a transmission back
+cargo run --release -p decsat-ts --example av1_ivf -- out/rx.ts/x.ts out/av1.ivf   # AV1 (AOM's TS mapping) out of a TS for ffmpeg
 cargo run --release -p decsat-gui -- --net tcp://127.0.0.1:7777 --iq int8 --rate 8 --net-mhz 1100 --lo 9750 --claim-carriers --screenshot out/x.png --after 10
 ```
 

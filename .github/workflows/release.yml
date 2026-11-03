@@ -53,7 +53,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: >-
-          cargo build --release --target x86_64-pc-windows-msvc -p decsat-gui -p decsat-cli
+          cargo build --release --target x86_64-pc-windows-msvc -p decsat-gui -p decsat-cli -p decsat-tx-app
       - name: Check (versions, no C runtime DLL, command-line smoke test)
         shell: bash
         run: |
@@ -61,11 +61,13 @@ jobs:
           bin=target/x86_64-pc-windows-msvc/release
           "$bin/decsat" --version
           "$bin/decsat-gui" --version
+          "$bin/decsat-tx" --version
           if [[ $TAG == v* ]]; then
             test "$("$bin/decsat" --version)" = "decsat ${TAG#v}"
             test "$("$bin/decsat-gui" --version)" = "decsat-gui ${TAG#v}"
+            test "$("$bin/decsat-tx" --version)" = "decsat-tx ${TAG#v}"
           fi
-          for exe in decsat decsat-gui; do
+          for exe in decsat decsat-gui decsat-tx; do
             if grep -a -q -i -e vcruntime140 -e api-ms-win-crt "$bin/$exe.exe"; then
               echo "$exe.exe imports a C runtime DLL: not a static build" >&2
               exit 1
@@ -89,15 +91,16 @@ jobs:
         run: |
           set -euo pipefail
           bin=target/x86_64-pc-windows-msvc/release
-          cp "$bin/decsat-gui.exe" "$bin/decsat.exe" .
+          cp "$bin/decsat-gui.exe" "$bin/decsat.exe" "$bin/decsat-tx.exe" .
           mv test-signals/decsat-scene_8Msps.cs8 test-signals/decsat-cid_3360000sps.cs8 .
-          files=(decsat-gui.exe decsat.exe decsat-scene_8Msps.cs8 decsat-cid_3360000sps.cs8)
+          files=(decsat-gui.exe decsat.exe decsat-tx.exe decsat-scene_8Msps.cs8 decsat-cid_3360000sps.cs8)
           cat > notes.md <<'EOF'
           Portable Windows executables for 64-bit Windows 10/11, nothing to install (static C runtime).
 
           | File | What |
           |---|---|
           | `decsat-gui.exe` | Desktop app: wideband waterfall with VFOs (DVB-S2/S2X → GSE/IP or MPEG-TS, DVB-S, satellite modems, DVB-CID, generic PSK/QAM, IQ record), IQ files or a HackRF One; a DVB-S2/S2X transmitter (MPEG-TS to the HackRF or a file) |
+          | `decsat-tx.exe` | Transmitter: a webcam and microphone (or a video file) encoded live in H.264, H.265, H.266, AV1 or MPEG-2 by ffmpeg, on a DVB-S2/S2X carrier with QO-100 presets, to the HackRF or an IQ file (needs ffmpeg) |
           | `decsat.exe` | Command line: `decsat scan`, `decsat decode`, `decsat analyse`, `decsat scene`, `decsat cid`, `decsat test-signals`, `decsat tx`, `decsat record`, `decsat modcods` |
           | `decsat-scene_8Msps.cs8` | Test signal, 8 MS/s, 4 s: DVB-S2 (IP over GSE, and an S2X ACM carrier with MPEG-TS), DVB-S, a TPC 2964 modem carrier and a CW tone |
           | `decsat-cid_3360000sps.cs8` | Test signal, 3.36 MS/s, 30 s: DVB-S2 QPSK 1/2 at +700 kHz with a DVB-CID under it (identifier and position decode) |
