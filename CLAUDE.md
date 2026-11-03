@@ -12,7 +12,13 @@ cargo test --workspace                  # unit tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p decsat-gui       # the GUI
 cargo run --release -p decsat-cli -- modcods
+cargo run --release -p decsat-io --example net_send -- FILE.cf32 8M tcp://127.0.0.1:7777 int16   # stand-in for SDR++'s IQ Exporter: plays a capture out over TCP (listens), connect:// or udp://
+cargo run --release -p decsat-cli -- decode --net tcp://127.0.0.1:7777 --iq int16 --rate 8000000 --decoder dvbs   # network IQ (SDR++, GNU Radio, rtl_tcp); also listen://, udp://
+cargo run --release -p decsat-gui -- --net tcp://127.0.0.1:7777 --iq int8 --rate 8 --net-mhz 1100 --lo 9750 --claim-carriers --screenshot out/x.png --after 10
 ```
+
+CMake for libopus: if `cmake` is not on PATH, Visual Studio's own is at
+`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
 
 libopus (Opus radio) is the `third_party/opus` submodule (tag v1.6.1), built
 by `decsat-opus-sys` with CMake, as in DecDRM; libxaac (AAC with SBR/PS,

@@ -79,6 +79,7 @@ real carriers stay put.
 | **Live Fobos SDR** (RigExpert), 8–50 MS/s, 14 bits: RigExpert's library loaded at run time (agile or stock firmware), the same waterfall, VFOs, retuning and decoders as the HackRF | ✅ used on a real board under Windows, DVB-S2 TS and IP carriers at 20 and 50 MS/s |
 | **Live Airspy Mini / R2**, 3/6 MS/s (2.5/10 on an R2), 12 bits, 24–1750 MHz: pure Rust over USB (`libairspy-rs`, no DLL), bias tee always off | ✅ tested live: a Mini at 6 MS/s (QO-100), an R2 at 10 MS/s |
 | **📷 Snapshots** of the spectrum and waterfall (or the window) to PNG, captioned; **session log** to CSV; **PCAP in parts** for tools that read finished captures; the **satellite named** from the orbital position a NIT or RCS map signals | ✅ |
+| **Network IQ**: raw IQ from another program, so any radio it drives works (an SDRplay RSPduo under SDR++, say), on Windows or Linux. SDR++'s IQ Exporter, GNU Radio's TCP/UDP sinks, rtl_tcp (recognised and tuned); `tcp://` connects, `listen://` waits for a sender, `udp://` binds; int8, uint8, int16, int32, float32; the rate, the sender's frequency and the LNB LO entered (the stream carries none) | ✅ on simulated carriers over TCP and UDP |
 | **LDPC + BCH → BBFRAMEs**: all 21 S2 and 31 S2X codes, BBHEADER, stream info, payload rate | ✅ |
 | **S2X**: 8-bit PLS code, all 55 normal/short MODCODs — 2+4+2 8APSK to 256APSK, the new interleavers | ✅ |
 | **S2X VL-SNR**: the VL-SNR header, pi/2-BPSK (and spread), medium FECFRAMEs, all 9 MODCODs — down to about 0 dB Es/N0 so far | ✅ |

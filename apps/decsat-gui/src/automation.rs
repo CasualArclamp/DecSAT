@@ -24,6 +24,11 @@ pub struct Options {
     pub select: Option<usize>,
     /// Start the HackRF tuned here, MHz (receive only).
     pub hackrf_mhz: Option<f64>,
+    /// `--net URL --iq TYPE [--net-mhz MHZ]`: open a network IQ stream at
+    /// start (with `--rate` and `--lo` as for the HackRF).
+    pub net: Option<String>,
+    pub iq: Option<decsat_io::NetSample>,
+    pub net_mhz: Option<f64>,
     /// Start the Fobos SDR tuned here, MHz (receive only). `--rate`, `--lo`
     /// and `--vga` (dB) apply to it too; `--lna` is its step, 0–3.
     pub fobos_mhz: Option<f64>,
@@ -207,7 +212,21 @@ impl Options {
                             .ok_or("--select needs a VFO number")?,
                     );
                 }
-                Some(flag @ ("--hackrf" | "--fobos" | "--airspy" | "--rate" | "--lo")) => {
+                Some("--net") => {
+                    let v = args.next().ok_or("--net needs a URL")?;
+                    o.net = Some(v.to_string_lossy().into_owned());
+                }
+                Some("--iq") => {
+                    let v = args.next().ok_or("--iq needs a sample type")?;
+                    o.iq = Some(
+                        v.to_str()
+                            .and_then(decsat_io::NetSample::parse)
+                            .ok_or("--iq: int8, uint8, int16, int32 or float32")?,
+                    );
+                }
+                Some(
+                    flag @ ("--hackrf" | "--fobos" | "--airspy" | "--rate" | "--lo" | "--net-mhz"),
+                ) => {
                     let v: f64 = args
                         .next()
                         .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
@@ -217,6 +236,7 @@ impl Options {
                         "--fobos" => o.fobos_mhz = Some(v),
                         "--airspy" => o.airspy_mhz = Some(v),
                         "--rate" => o.rate_msps = Some(v),
+                        "--net-mhz" => o.net_mhz = Some(v),
                         _ => o.lo_mhz = Some(v),
                     }
                 }
