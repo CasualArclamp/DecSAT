@@ -1,6 +1,8 @@
 <!-- made by CasualArclamp -->
 # DecSAT
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 A **satellite receiver** in Rust, for a **HackRF One** or recorded IQ, built
 like **SDR++**: a big waterfall over the whole span, and VFOs you drop on it,
 each running the decoder of your choice — including a blind **"what is
