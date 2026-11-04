@@ -27,12 +27,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use decsat_audio::{AudioHandle, AudioPlayer, OutputKind, PlayState};
 use decsat_ts::TS_LEN;
+use decsat_ts::av1::{Av1Extractor, Av1Unit, find_sequence_header, ivf_frame, ivf_header};
+use std::net::TcpListener;
 
 use crate::mkv::{Event, MkvReader};
 
@@ -74,6 +76,9 @@ pub struct Selection {
     /// Decode the video on the GPU (ffmpeg `-hwaccel auto`; software when
     /// the card cannot).
     pub gpu: bool,
+    /// The video is AV1 in AOM's TS mapping, which ffmpeg cannot demux: the
+    /// player takes it out itself and hands it over as IVF.
+    pub av1: bool,
 }
 
 /// One picture, RGBA.
@@ -181,6 +186,12 @@ struct Shared {
     status: Mutex<Status>,
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
+    /// AV1: the units waiting for ffmpeg's IVF input (while it is not
+    /// connected, from the newest with a sequence header), and whether a
+    /// writer is connected to it.
+    av1_queue: Mutex<VecDeque<Av1Unit>>,
+    av1_ready: Condvar,
+    av1_connected: AtomicBool,
 }
 
 /// The GUI side's clock state.
@@ -223,24 +234,24 @@ impl VideoPlayer {
             status: Mutex::new(Status::default()),
             stdin: Mutex::new(None),
             child: Mutex::new(None),
+            av1_queue: Mutex::new(VecDeque::new()),
+            av1_ready: Condvar::new(),
+            av1_connected: AtomicBool::new(false),
         });
         let mut threads = Vec::new();
         let (s, pids) = (sh.clone(), sel.pids.clone());
+        let av1_pid = sel.video.filter(|_| sel.av1);
         threads.push(
             std::thread::Builder::new()
                 .name("decsat-video-feed".into())
-                .spawn(move || feed(packets, &pids, &s))
+                .spawn(move || feed(packets, &pids, av1_pid, &s))
                 .map_err(|e| e.to_string())?,
         );
-        let (s, exe, args) = (
-            sh.clone(),
-            exe.to_path_buf(),
-            ffmpeg::args(sel.video, sel.audio, sel.deint, sel.gpu),
-        );
+        let (s, exe) = (sh.clone(), exe.to_path_buf());
         threads.push(
             std::thread::Builder::new()
                 .name("decsat-video".into())
-                .spawn(move || supervise(&exe, &args, &s, output))
+                .spawn(move || supervise(&exe, &sel, &s, output))
                 .map_err(|e| e.to_string())?,
         );
         Ok(VideoPlayer {
@@ -375,8 +386,38 @@ impl Drop for VideoPlayer {
     }
 }
 
-/// The feeder: the programme's packets to ffmpeg's stdin, while it runs.
-fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], sh: &Shared) {
+/// AV1 units held for ffmpeg's IVF input (a few seconds of pictures); the
+/// oldest go beyond it.
+const AV1_QUEUE: usize = 300;
+
+/// One AV1 unit to the queue for ffmpeg's IVF input (the writer thread,
+/// [`accept_av1`], sends it). The feeder never waits on ffmpeg here: ffmpeg
+/// reads its inputs only once all are open, and the TS one is probed first.
+fn send_av1(sh: &Shared, u: Av1Unit, last_pts: &mut u64) {
+    // A unit with no PTS (not shown) keeps the previous one's.
+    let pts = u.pts.unwrap_or(*last_pts);
+    *last_pts = pts;
+    let mut q = sh.av1_queue.lock().unwrap();
+    // Not connected: keep from the newest sequence header on, what ffmpeg
+    // can start decoding from.
+    if !sh.av1_connected.load(Ordering::Relaxed) && find_sequence_header(&u.tu).is_some() {
+        q.clear();
+    }
+    if q.len() >= AV1_QUEUE {
+        q.pop_front();
+    }
+    q.push_back(Av1Unit {
+        pts: Some(pts),
+        tu: u.tu,
+    });
+    sh.av1_ready.notify_one();
+}
+
+/// The feeder: the programme's packets to ffmpeg's stdin, while it runs
+/// (an AV1 video PID's to its IVF input instead).
+fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], av1_pid: Option<u16>, sh: &Shared) {
+    let mut av1 = av1_pid.map(|_| Av1Extractor::new());
+    let mut last_pts = 0u64;
     let mut buf = Vec::with_capacity(64 * TS_LEN);
     while !sh.quit.load(Ordering::Relaxed) {
         let batch = match rx.recv_timeout(Duration::from_millis(200)) {
@@ -392,6 +433,18 @@ fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], sh: &Shared) {
         buf.clear();
         for p in &batch {
             let pid = u16::from_be_bytes([p[1] & 0x1F, p[2]]);
+            if Some(pid) == av1_pid
+                && let Some(ex) = av1.as_mut()
+            {
+                if let Some(u) = ex.push(p) {
+                    send_av1(sh, u, &mut last_pts);
+                }
+                // Only its payload-less packets (the PCR, when it carries
+                // the clock) still go to the TS.
+                if (p[3] >> 4) & 3 != 2 {
+                    continue;
+                }
+            }
             if pids.is_empty() || pids.contains(&pid) {
                 buf.extend_from_slice(p);
             }
@@ -420,12 +473,78 @@ fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], sh: &Shared) {
     }
 }
 
+/// The writer for one ffmpeg run's IVF input: wait for it to connect, send
+/// the header, then the queued units as they come, until the run ends
+/// (`generation` moves on), a stop, or a write fails.
+fn accept_av1(l: TcpListener, sh: &Shared, generation: u64) {
+    let _ = l.set_nonblocking(true);
+    let t0 = Instant::now();
+    let this_run =
+        || !sh.quit.load(Ordering::Relaxed) && sh.generation.load(Ordering::Relaxed) == generation;
+    let mut conn = loop {
+        if !this_run() || t0.elapsed() > Duration::from_secs(30) {
+            return;
+        }
+        match l.accept() {
+            Ok((c, _)) => break c,
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let _ = conn.set_nonblocking(false);
+    let _ = conn.set_nodelay(true);
+    let (w, h) = sh
+        .av1_queue
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|u| find_sequence_header(&u.tu))
+        .map_or((0, 0), |s| (s.width as u16, s.height as u16));
+    if conn.write_all(&ivf_header(w, h)).is_err() {
+        return;
+    }
+    sh.av1_connected.store(true, Ordering::Relaxed);
+    let mut b = Vec::new();
+    while this_run() {
+        b.clear();
+        {
+            let mut q = sh.av1_queue.lock().unwrap();
+            if q.is_empty() {
+                q = sh
+                    .av1_ready
+                    .wait_timeout(q, Duration::from_millis(100))
+                    .unwrap()
+                    .0;
+            }
+            for u in q.drain(..) {
+                ivf_frame(u.pts.unwrap_or(0), &u.tu, &mut b);
+            }
+        }
+        // Rust: the queue's lock was dropped at the end of the block above,
+        // so the feeder goes on queueing while this write waits on ffmpeg.
+        if !b.is_empty() && conn.write_all(&b).is_err() {
+            break;
+        }
+    }
+    sh.av1_connected.store(false, Ordering::Relaxed);
+}
+
 /// The supervisor: run ffmpeg, read what it makes, start it again when it
 /// stops.
-fn supervise(exe: &Path, args: &[String], sh: &Arc<Shared>, output: OutputKind) {
+fn supervise(exe: &Path, sel: &Selection, sh: &Arc<Shared>, output: OutputKind) {
     while !sh.quit.load(Ordering::Relaxed) {
+        // AV1: a socket for ffmpeg's second input, new for each run.
+        let listener = if sel.av1 && sel.video.is_some() {
+            TcpListener::bind("127.0.0.1:0").ok()
+        } else {
+            None
+        };
+        let url = listener
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| format!("tcp://{a}"));
+        let args = ffmpeg::args(sel.video, sel.audio, sel.deint, sel.gpu, url.as_deref());
         let mut cmd = Command::new(exe);
-        cmd.args(args)
+        cmd.args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -441,7 +560,11 @@ fn supervise(exe: &Path, args: &[String], sh: &Arc<Shared>, output: OutputKind) 
         *sh.stdin.lock().unwrap() = child.stdin.take();
         *sh.child.lock().unwrap() = Some(child);
         sh.frames.lock().unwrap().clear();
-        sh.generation.fetch_add(1, Ordering::Relaxed);
+        let generation = sh.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let accept = listener.map(|l| {
+            let s = sh.clone();
+            std::thread::spawn(move || accept_av1(l, &s, generation))
+        });
         {
             let mut st = sh.status.lock().unwrap();
             st.running = true;
@@ -458,6 +581,9 @@ fn supervise(exe: &Path, args: &[String], sh: &Arc<Shared>, output: OutputKind) 
         }
         *sh.audio.lock().unwrap() = None;
         *sh.stdin.lock().unwrap() = None;
+        // AV1: this run's writer ends when its write fails or the next run
+        // starts; it is not waited for.
+        drop(accept);
         let status = sh.child.lock().unwrap().take().map(|mut c| c.wait());
         if let Some(l) = log {
             let _ = l.join();
@@ -723,6 +849,16 @@ mod tests {
     /// Start a player on the test stream, fed at its own pace (as a carrier
     /// delivers it) from a thread of its own.
     fn play(exe: &Path, packets: Vec<[u8; TS_LEN]>, audio: bool) -> VideoPlayer {
+        play_as(exe, packets, audio, false, 5.0)
+    }
+
+    fn play_as(
+        exe: &Path,
+        packets: Vec<[u8; TS_LEN]>,
+        audio: bool,
+        av1: bool,
+        secs: f64,
+    ) -> VideoPlayer {
         let (tap, rx) = decsat_ts::TsTap::new(packets.len());
         let sel = Selection {
             // ffmpeg's own PIDs: the PMT at 0x1000, video 0x100, audio 0x101.
@@ -731,10 +867,11 @@ mod tests {
             audio: audio.then_some(0x101),
             deint: Deinterlace::default(),
             gpu: false,
+            av1,
         };
         let p = VideoPlayer::start(exe, rx, sel, OutputKind::Null).unwrap();
         std::thread::spawn(move || {
-            let per = Duration::from_secs_f64(5.0 * 50.0 / packets.len() as f64);
+            let per = Duration::from_secs_f64(secs * 50.0 / packets.len() as f64);
             for chunk in packets.chunks(50) {
                 tap.send(chunk);
                 std::thread::sleep(per);
@@ -777,6 +914,54 @@ mod tests {
                 .iter()
                 .any(|(pid, d)| *pid == Some(0x100) && d.contains("mpeg2video"))
         );
+    }
+
+    /// AV1 as the transmitter sends it (AOM's mapping, made by
+    /// `decsat_ts::av1::Av1TsFixer` from ffmpeg's TS): pictures and sound
+    /// come out. Skipped without an ffmpeg that has SVT-AV1.
+    #[test]
+    fn plays_av1_from_aoms_ts_mapping() {
+        let Some(exe) = find_ffmpeg(None) else {
+            eprintln!("ffmpeg not found: skipped");
+            return;
+        };
+        let ts = std::env::temp_dir().join(format!("decsat-video-av1-{}.ts", std::process::id()));
+        let made = Command::new(&exe)
+            .args(["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("testsrc2=size=320x180:rate=25")
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"])
+            .args(["-t", "10", "-c:v", "libsvtav1", "-preset", "12"])
+            .args(["-svtav1-params", "pred-struct=1", "-g", "25"])
+            .args(["-c:a", "mp2", "-f", "mpegts", "-muxrate", "1000000"])
+            .arg(&ts)
+            .status();
+        let data = std::fs::read(&ts).ok();
+        let _ = std::fs::remove_file(&ts);
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("no SVT-AV1 in this ffmpeg: skipped");
+            return;
+        }
+        let mut fx = decsat_ts::av1::Av1TsFixer::new(0x1000, 0x100, 1e6);
+        let mut packets = Vec::new();
+        for p in data.unwrap().as_chunks::<TS_LEN>().0 {
+            fx.push(p, &mut packets);
+        }
+        assert!(fx.sequence().is_some(), "a sequence header was seen");
+        let mut p = play_as(&exe, packets, true, true, 10.0);
+        let t0 = Instant::now();
+        let mut shown = 0;
+        while shown < 25 && t0.elapsed() < Duration::from_secs(20) {
+            match p.poll() {
+                Some(f) => {
+                    assert_eq!((f.width, f.height), (960, 540));
+                    shown += 1;
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        let st = p.status();
+        assert!(shown >= 25, "{shown} pictures; {st:?}");
+        assert!(st.audio.as_ref().is_some_and(|a| a.decoded > 0), "{st:?}");
     }
 
     /// The sound reaches an audio player, decoded by ffmpeg.

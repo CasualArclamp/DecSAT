@@ -85,7 +85,19 @@ impl Deinterlace {
 /// audio to play PID `audio` (either may be absent). With `gpu`, the video
 /// is decoded by the graphics card's decoder (NVDEC / D3D11VA / VAAPI,
 /// whichever ffmpeg finds), which leaves the CPU to the demodulator and FEC.
-pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace, gpu: bool) -> Vec<String> {
+///
+/// `av1`: the video is AV1, which ffmpeg cannot read from a TS; the player
+/// takes it out itself (`decsat_ts::av1`) and gives it to ffmpeg as IVF at
+/// this URL, a second input. Both inputs keep their own timestamps
+/// (`-copyts`: the PES PTS in the IVF, the audio's in the TS, one 90 kHz
+/// clock), so picture and sound stay together.
+pub fn args(
+    video: Option<u16>,
+    audio: Option<u16>,
+    deint: Deinterlace,
+    gpu: bool,
+    av1: Option<&str>,
+) -> Vec<String> {
     let mut a: Vec<String> = [
         "-hide_banner",
         "-nostdin",
@@ -100,7 +112,10 @@ pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace, gpu: boo
     ]
     .map(String::from)
     .to_vec();
-    if gpu && video.is_some() {
+    if av1.is_some() {
+        a.push("-copyts".into());
+    }
+    if gpu && video.is_some() && av1.is_none() {
         // An input option, so it goes before `-i`. With no
         // `-hwaccel_output_format` the decoded pictures come back to system
         // memory for the filters below, and a codec or card the decoder
@@ -108,9 +123,21 @@ pub fn args(video: Option<u16>, audio: Option<u16>, deint: Deinterlace, gpu: boo
         a.extend(["-hwaccel", "auto"].map(String::from));
     }
     a.extend(["-f", "mpegts", "-i", "pipe:0"].map(String::from));
+    if let Some(url) = av1 {
+        if gpu && video.is_some() {
+            a.extend(["-hwaccel", "auto"].map(String::from));
+        }
+        a.extend(["-f".into(), "ivf".into(), "-i".into(), url.to_string()]);
+    }
     // By PID (`i:` matches an MPEG-TS stream's PID); `?`: no such stream is
-    // not an error.
-    for pid in [video, audio].into_iter().flatten() {
+    // not an error. AV1 comes from the second input.
+    if video.is_some() && av1.is_some() {
+        a.extend(["-map", "1:v:0"].map(String::from));
+    }
+    for pid in [video.filter(|_| av1.is_none()), audio]
+        .into_iter()
+        .flatten()
+    {
         a.push("-map".into());
         a.push(format!("0:i:{pid}?"));
     }
@@ -230,7 +257,7 @@ mod tests {
 
     #[test]
     fn maps_by_pid_and_fits_the_picture() {
-        let a = args(Some(0x21), Some(0x22), Deinterlace::Frame, false);
+        let a = args(Some(0x21), Some(0x22), Deinterlace::Frame, false, None);
         assert!(!a.iter().any(|x| x == "-hwaccel"));
         let maps: Vec<&String> = a
             .iter()
@@ -244,7 +271,7 @@ mod tests {
         assert!(vf.contains("pad=960:540"));
         assert!(a.ends_with(&["pipe:1".to_string()]));
         // Radio: no video options.
-        let r = args(None, Some(0x22), Deinterlace::Frame, true);
+        let r = args(None, Some(0x22), Deinterlace::Frame, true, None);
         assert!(!r.iter().any(|x| x == "-vf"));
         assert!(r.iter().any(|x| x == "pcm_f32le"));
         // Radio has nothing to decode on the GPU.
@@ -253,7 +280,7 @@ mod tests {
 
     #[test]
     fn gpu_decode_is_an_input_option() {
-        let a = args(Some(0x21), None, Deinterlace::Bob, true);
+        let a = args(Some(0x21), None, Deinterlace::Bob, true, None);
         let hw = a.iter().position(|x| x == "-hwaccel").unwrap();
         assert_eq!(a[hw + 1], "auto");
         assert!(hw < a.iter().position(|x| x == "-i").unwrap());
@@ -262,12 +289,41 @@ mod tests {
     #[test]
     fn bob_sends_each_field() {
         let vf = |d| {
-            let a = args(Some(0x21), None, d, false);
+            let a = args(Some(0x21), None, d, false, None);
             a[a.iter().position(|x| x == "-vf").unwrap() + 1].clone()
         };
         assert!(vf(Deinterlace::Bob).starts_with("yadif=mode=send_field:deint=interlaced,"));
         assert!(vf(Deinterlace::Frame).starts_with("yadif=mode=send_frame:deint=interlaced,"));
         assert_eq!(Deinterlace::default(), Deinterlace::Bob);
+    }
+
+    #[test]
+    fn av1_comes_as_a_second_input() {
+        let a = args(
+            Some(0x100),
+            Some(0x101),
+            Deinterlace::Bob,
+            true,
+            Some("tcp://127.0.0.1:9"),
+        );
+        assert!(a.iter().any(|x| x == "-copyts"));
+        let inputs: Vec<&String> = a
+            .iter()
+            .zip(a.iter().skip(1))
+            .filter(|(k, _)| *k == "-i")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(inputs, ["pipe:0", "tcp://127.0.0.1:9"]);
+        // The GPU decoder is the AV1 input's option, not the TS's.
+        let hw = a.iter().position(|x| x == "-hwaccel").unwrap();
+        assert!(hw > a.iter().position(|x| x == "pipe:0").unwrap());
+        let maps: Vec<&String> = a
+            .iter()
+            .zip(a.iter().skip(1))
+            .filter(|(k, _)| *k == "-map")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(maps, ["1:v:0", "0:i:257?"]);
     }
 
     #[test]

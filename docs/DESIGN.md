@@ -291,7 +291,8 @@ crates/
                   variants (header-len, split frag-id); label/protocol handling
   decsat-ts       TS-mode BBFRAME → MPEG-TS; null-packet reinsertion, sync,
                   Generic/Newtec CRC variants; PSI/SI analyser; outputs;
-                  DVB-CSA + BISS descrambling (csa, biss)
+                  DVB-CSA + BISS descrambling (csa, biss); AV1 in a TS
+                  (av1: AOM's mapping, both ways)
   decsat-video    the in-app TV player: ffmpeg as a child process (TS in,
                   Matroska of raw RGBA + float PCM out), the pictures timed
                   by the sound
@@ -322,9 +323,14 @@ crates/
                   (cs8/cs16/cf32), HackRF TX sink, ring buffers
   decsat-engine   orchestrates RX (and TX) chain; ACM state; multistream/ISI
                   filter; gold-code handling; metrics aggregation
+  decsat-tx       the transmitter app's engine: ffmpeg encoding a camera or
+                  file live (encode, feeder), QO-100 presets (qo100), the TS
+                  ring, the modulator as a sample pump, the arm gate and the
+                  sinks (HackRF / IQ file / null), TxSession
 apps/
   decsat-cli      headless decode / modulate
   decsat-gui      egui/glow: constellation, spectrum, ACM timeline, stream table
+  decsat-tx       (package decsat-tx-app) the transmitter's own window
 docs/ DESIGN.md, reference/ (git-ignored), samples/ (git-ignored), exe/, scripts/, .github/
 ```
 
@@ -389,6 +395,32 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
 - **M5 — S2X framing & ACM polish**: superframe (Annex E), multistream/ISI filtering, gold-code index, ACM/VCM across changing MODCODs, SNR estimate per frame. *(2026-10-15, from a live Newtec hub outbound on Eutelsat 172B: done — the S2X low roll-offs (RO alternating with `11`), GSE-HEM and GSE-Lite, every ISI to its own stage (TS, transport packets in a generic stream, GSE, GSE-HEM; `decsat-engine::streams`), super-frames found, read and stripped for formats 0 and 1 (`decsat-frame::superframe`, `decsat-engine::superframe`; formats 2–7 named only), a per-terminal ACM table from the GSE labels. Beyond the plan, Rory's choices the same day: a DVB-RCS signalling reader for a hub's outbound (`decsat-ts::rcs`) and a return-pool tracker (`tdma::pool`, its own TDMA-mode decoder *Return pool*) whose frame is matched against an outbound VFO's RCS timing, and the hub's private burst plan (D1h, `decsat-ts::newtec`, reverse-engineered 2026-10-16) read and lined up on the pool — in frequency, then in time (every VFO timed by the receiver's sample clock; the plan's arrivals fitted to a line; the lead found by correlating the plan with the pool slot by slot and bin by bin: 295 ms on 172B), each planned burst boxed on the pool's own waterfall and each terminal's C/N measured; then (Rory, 2026-10-16) every burst demodulated live in the pool VFO — the plan passed between VFOs inside the engine (`plan_feed`), bursts cut from a ring of the pool's baseband and demodulated on worker threads (`tdma::pool_bursts`, `tdma::burst_demod`), per terminal MER, carrier and timing on the Return pool card, `.rbursts` files on Record, `decsat decode --decoder pool --plan-from` for unattended checks. Not done: RCS2 tables over GSE (types named only), decoding the return bursts' waveform.)*
 - **M6 — modulator (TX)**: full encode chain → HackRF TX / IQ file; scripted ACM MODCOD schedules; end-to-end loopback test.
   *Started 2026-10-11 with Rory's choices:* DVB-S2/S2X **DATV from an MPEG-TS** first (a file paced by its PCRs, a UDP stream from ffmpeg/OBS, or the test stream; null packets fill the channel); output to the **HackRF live** and to **IQ files**; used **into a cable/dummy load only**; controlled from a **GUI transmit panel** (`decsat tx` for files). Safety: the HackRF transmits only when the panel is armed and Transmit pressed; TX VGA starts at 0 dB and the amplifier off every time; antenna power never; the radio is put back to off on Stop, closing or quitting; a HackRF receive session is stopped first (half duplex). Claude never keys the radio itself: checks are by IQ file and loopback through DecSAT's own receiver. ACM schedules and GSE/IP payloads come later.
+- **TX app** *(2026-11-03, with the user's choices: layout A of the
+  mockups, AV1 to AOM's spec, GPU encoders first, pilots on and normal
+  frames for QO-100)*: `decsat-tx`, a transmitter of its own beside the
+  receiver, laid out like DecDVB-T's (`apps/decsat-tx` on the library
+  `crates/decsat-tx`). A camera and microphone (DirectShow; V4L2/ALSA
+  elsewhere), a video file, a `.ts`, UDP or the test pattern; ffmpeg as a
+  child process encodes live (H.264, H.265, H.266/VVC, AV1, MPEG-2; NVENC,
+  AMF, Quick Sync or the CPU, each tried at start-up) into a TS at
+  `-muxrate` 0.2 % under the channel's rate, PIDs as BATC asks (PMT 4095,
+  video 256, audio 257); the reader keeps a live source's ring near 0.45 s
+  (nulls dropped above it) and the modulator sends nulls when it is empty.
+  QO-100 presets from BATC's 2021 bandplan V3 and its conference page, each
+  value cited in `qo100.rs`; the bandplan's limits checked. **AV1:** neither
+  ffmpeg's TS muxer nor its demuxer (9.0) knows AOM's "Carriage of AV1 in
+  MPEG-2 TS" (v1.0.1), so `decsat_ts::av1` does it: on transmit the PMT gets
+  the `AV01` registration and AV1 video descriptors, every OBU a start code
+  with emulation prevention, one temporal unit per PES (SVT-AV1 runs its
+  low-delay structure, one shown frame per unit), the PCR moved into
+  payload-less packets at its own place and corrected by the output's lead,
+  nulls giving way; on receive the player takes the PID out, undoes it, and
+  hands ffmpeg the video as IVF on a second input (localhost TCP, `-copyts`
+  for sync). The M6 safety rules are kept as they are, with DecDVB-T's arm
+  gate: one file (`radio.rs`) opens the radio, only with an `ArmedProof`
+  that only `arm.rs` makes (a test reads the sources); `DECSAT_TX_NO_RADIO`
+  refuses it. Checked by IQ file and DecSAT's receiver for every codec from
+  the webcam; not yet on the air.
 - **T — TDMA** *(2026-10-14, §3c)*: T1 analyser (bursts, layout, slots, frame, terminals) and T2 per-burst demodulation through the layout — done, on the live IS-19 group; T3 payload decoding next.
 - **N — network IQ** *(2026-11-03, copied from DecLAB's `declab_io::net`)*: `decsat_io::net`, raw IQ over TCP (connect or listen) or UDP, so radios DecSAT has no driver for come in through the program that drives them (the user's SDRplay RSPduo, through SDR++'s IQ Exporter). int8/int16/int32 scaled as SDR++ scales them; rtl_tcp recognised from its `RTL0` header and tuned through `NetIqControl::tune` (DecSAT's `IqSource` has no retune). The stream carries no rate or frequency: the GUI's *Network IQ* window takes the rate, the sender's frequency and the LNB LO; `describe()` shows the rate measured after 2 s. While nothing arrives a read returns 256 samples of silence every 100 ms, so the engine never blocks. The wideband sweep refuses it (DecSAT cannot tune the sender). `decsat decode --net URL --iq TYPE --rate HZ`. Checked on the simulated DVB-S carrier over TCP: QPSK 3/4 locks at Es/N0 14.2 dB, as from the file (14.1).
 - **M7 — GUI polish + release**: stream table, ACM timeline, per-MODCOD constellation, throughput; portable exe + first public release.

@@ -793,6 +793,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "decsat-tx"
+version = "0.10.18"
+dependencies = [
+ "decsat-core",
+ "decsat-io",
+ "decsat-mod",
+ "decsat-ts",
+ "decsat-video",
+ "rustfft",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "decsat-tx-app"
+version = "0.10.18"
+dependencies = [
+ "decsat-core",
+ "decsat-mod",
+ "decsat-tx",
+ "eframe",
+ "image",
+ "rfd",
+ "windows-sys 0.61.2",
+ "winit",
+]
+
+[[package]]
 name = "decsat-video"
 version = "0.10.18"
 dependencies = [

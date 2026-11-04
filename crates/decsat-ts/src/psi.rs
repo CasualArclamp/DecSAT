@@ -467,6 +467,11 @@ impl TsAnalyser {
                         es.kind = Some("teletext");
                         es.language = Some(dvb_text(&d[..3]));
                     }
+                    // Registration descriptor (ISO/IEC 13818-1 §2.6.8):
+                    // `AV01` is AOM's AV1 mapping (crate::av1).
+                    0x05 if d.len() >= 4 && d[..4] == crate::av1::FORMAT_ID => {
+                        es.kind = Some("AV1 video");
+                    }
                     0x6A => es.kind = Some("AC-3 audio"),
                     0x7A => es.kind = Some("E-AC-3 audio"),
                     0x7C => es.kind = Some("AAC audio"),

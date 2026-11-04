@@ -89,6 +89,10 @@ pub fn selection(p: &Programme, audio: Option<u16>) -> Selection {
         audio,
         deint: Deinterlace::default(),
         gpu: false,
+        av1: p
+            .streams
+            .iter()
+            .any(|e| Some(e.pid) == video && e.kind == Some("AV1 video")),
     }
 }
 

@@ -1,0 +1,26 @@
+# made by CasualArclamp
+[package]
+name = "decsat-tx"
+description = "DecSAT transmitter engine: camera or file, encoded live by ffmpeg, to a DVB-S2/S2X carrier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# The HackRF One as a sink (pure Rust over USB). Without it the radio sink
+# says so and the file and null sinks still work.
+hackrf = ["decsat-io/hackrf"]
+
+[dependencies]
+decsat-core = { path = "../decsat-core" }
+decsat-io = { path = "../decsat-io" }
+decsat-mod = { path = "../decsat-mod" }
+decsat-ts = { path = "../decsat-ts" }
+decsat-video = { path = "../decsat-video" }
+rustfft.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
