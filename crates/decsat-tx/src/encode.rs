@@ -339,6 +339,8 @@ pub fn find_ffmpeg(configured: Option<&Path>) -> Option<PathBuf> {
 
 /// A command for ffmpeg with no console window of its own.
 pub fn command(exe: &Path) -> Command {
+    // (Rust: the `mut` is only used on Windows, so other targets would warn.)
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut c = Command::new(exe);
     #[cfg(windows)]
     {
