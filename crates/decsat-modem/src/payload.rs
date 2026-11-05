@@ -622,6 +622,9 @@ fn n_beats(n: u64, best: u64) -> bool {
 pub struct PayloadRx {
     frame_len: usize,
     held: Vec<Vec<u8>>,
+    /// Beside each held frame: its FEC failed, so its bits are left out of
+    /// the fill share (one garbled frame on an idle link is no burst).
+    held_failed: Vec<bool>,
     chosen: Option<(Running, Format)>,
     hdlc: Hdlc,
     ts: TsAlign,
@@ -671,6 +674,7 @@ impl PayloadRx {
             e1_how: String::new(),
             lost_frames: 0,
             held: Vec::new(),
+            held_failed: Vec::new(),
             chosen: None,
             hdlc: Hdlc::default(),
             ts: TsAlign::default(),
@@ -707,6 +711,12 @@ impl PayloadRx {
     }
 
     pub fn push(&mut self, frame: &[u8], out: &mut PayloadOut) {
+        self.push_frame(frame, true, out);
+    }
+
+    /// As [`PayloadRx::push`], for a frame the FEC did (`decoded`) or did
+    /// not correct.
+    pub fn push_frame(&mut self, frame: &[u8], decoded: bool, out: &mut PayloadOut) {
         if self.chosen.is_some() {
             self.follow(frame.to_vec(), out, true);
             // Framing lost for whole modem frames: the rails may line up
@@ -715,15 +725,18 @@ impl PayloadRx {
             if self.lost_frames >= REPROBE_AFTER {
                 self.chosen = None;
                 self.held.clear();
+                self.held_failed.clear();
                 self.lost_frames = 0;
                 self.stats.reprobes += 1;
             }
             return;
         }
         self.held.push(frame.to_vec());
+        self.held_failed.push(!decoded);
         self.stats.probed += 1;
         if self.held.len() > PROBE_MAX {
             self.held.remove(0);
+            self.held_failed.remove(0);
         }
         // Unknown so far: pass the data on as it is.
         self.pack(frame, out);
@@ -741,6 +754,14 @@ impl PayloadRx {
         // checked on it.
         let mut slots_plain: Option<u64> = None;
         let held_bits: u64 = self.held.iter().map(|f| f.len() as u64).sum();
+        // The bits the fill share is counted over: decoded frames' only.
+        let fill_bits: u64 = self
+            .held
+            .iter()
+            .zip(&self.held_failed)
+            .filter(|&(_, &bad)| !bad)
+            .map(|(f, _)| f.len() as u64)
+            .sum();
         // The most idle-looking descrambling, should nothing frame.
         let mut idle: Option<(f64, Descrambler, bool)> = None;
         // The idle choice below: nothing but fill, rather than fill between
@@ -790,7 +811,8 @@ impl PayloadRx {
             // Bits equal to the one 1, 2 and 8 places before.
             let mut same = [0u64; 3];
             let mut prev: Vec<u8> = Vec::new();
-            for f in &self.held {
+            // `zip` walks the frames and their flags side by side.
+            for (f, &bad) in self.held.iter().zip(&self.held_failed) {
                 let mut bits = f.clone();
                 d.frame(&mut bits);
                 hdlc.push(&bits, &mut frames);
@@ -817,14 +839,14 @@ impl PayloadRx {
                 pee.clear();
                 prev.extend_from_slice(&bits);
                 let n = prev.len();
-                for (k, lag) in [1usize, 2, 8].into_iter().enumerate() {
+                for (k, lag) in [1usize, 2, 8].into_iter().enumerate().filter(|_| !bad) {
                     let from = (n - bits.len()).max(lag);
                     same[k] += (from..n).filter(|&i| prev[i] == prev[i - lag]).count() as u64;
                 }
                 let keep = prev.len().saturating_sub(8);
                 prev.drain(..keep);
             }
-            let share = same.iter().copied().max().unwrap_or(0) as f64 / held_bits.max(1) as f64;
+            let share = same.iter().copied().max().unwrap_or(0) as f64 / fill_bits.max(1) as f64;
             // A skew is only ever taken on a framing's word.
             if skew == 0 && idle.is_none_or(|(s, ..)| share > s) {
                 idle = Some((share, kind, diff));
@@ -995,6 +1017,7 @@ impl PayloadRx {
             self.raw_bits.clear();
             out.raw.clear();
             let held = std::mem::take(&mut self.held);
+            self.held_failed.clear();
             let last = held.len() - 1;
             for (i, f) in held.into_iter().enumerate() {
                 self.follow(f, out, i == last);
@@ -1546,6 +1569,37 @@ mod tests {
             found.starts_with("idle: nothing but its fill") && found.contains("taps 3, 20"),
             "{found}"
         );
+    }
+
+    #[test]
+    fn a_frame_the_fec_failed_on_does_not_make_an_idle_line_bursty() {
+        // As on a live Comtech TPC 7/8 carrier: flags throughout, but one
+        // frame the decoder could not correct came out garbled. Marked as
+        // failed, it leaves the line idle; taken as decoded, it reads as a
+        // burst between the fill.
+        const L: usize = 4096;
+        let bits = vec![1u8; 40 * L];
+        let kind = Descrambler::SelfSync(&[3, 20]);
+        let sent = scramble(kind, L, &bits);
+        let mut next = crate::tpc2964::tests::rng(4);
+        for failed in [true, false] {
+            let mut rx = PayloadRx::new(L);
+            let mut out = PayloadOut::default();
+            for (i, f) in sent.as_chunks::<L>().0.iter().enumerate() {
+                if i == 2 {
+                    let junk: Vec<u8> = (0..L).map(|_| (next() & 1) as u8).collect();
+                    rx.push_frame(&junk, !failed, &mut out);
+                } else {
+                    rx.push(f, &mut out);
+                }
+            }
+            let found = rx.stats.found.as_ref().unwrap();
+            assert_eq!(
+                found.starts_with("idle: nothing but its fill"),
+                failed,
+                "failed {failed}: {found}"
+            );
+        }
     }
 
     #[test]

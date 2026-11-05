@@ -701,6 +701,9 @@ pub struct TpcRx {
     /// Frames taken for identification so far (paces the search).
     ident_seen: usize,
     misses: u32,
+    /// Whether each frame the last [`TpcRx::push`] put out decoded (false:
+    /// its bits are as received, errors and all).
+    converged: Vec<bool>,
     pub stats: TpcStats,
 }
 
@@ -767,8 +770,15 @@ impl TpcRx {
             ident: Vec::new(),
             ident_seen: 0,
             misses: 0,
+            converged: Vec::new(),
             stats: TpcStats::default(),
         }
+    }
+
+    /// Whether each frame the last [`TpcRx::push`] put out decoded, in the
+    /// same order.
+    pub fn converged(&self) -> &[bool] {
+        &self.converged
     }
 
     /// The code found, once its UW has been.
@@ -848,6 +858,7 @@ impl TpcRx {
     /// Feed symbols; each decoded frame's data bits ([`Code::data`] of
     /// them, 0/1) go to `out`.
     pub fn push(&mut self, symbols: &[Iq], out: &mut Vec<Vec<u8>>) {
+        self.converged.clear();
         self.add(symbols);
         if self.lock.is_none() && !self.find_uw() {
             return;
@@ -1115,8 +1126,10 @@ impl TpcRx {
             if !uw_ok {
                 return None;
             }
+            self.converged.push(false);
         } else {
             self.stats.decoded += 1;
+            self.converged.push(true);
             // Data bits the decoder changed against the received ones: the
             // channel's errors, counted where decoding says what was sent.
             let (rk, rn) = (lay.code.row.k, lay.code.row.n);

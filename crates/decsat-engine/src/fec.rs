@@ -2987,6 +2987,8 @@ fn run(
     let mut conv: Option<decsat_modem::convblind::ConvRx> = None;
     let mut k7_stopped = false;
     let mut tpc_frames = Vec::new();
+    // Which TPC frames decoded (empty for the other chains: all count).
+    let mut tpc_ok: Vec<bool> = Vec::new();
     let mut payload: Option<decsat_modem::payload::PayloadRx> = None;
     let mut payload_out = decsat_modem::payload::PayloadOut::default();
     let mut raw = RawFile::default();
@@ -3054,6 +3056,7 @@ fn run(
                 // payload's format and scrambling.
                 use decsat_modem::payload::PayloadRx;
                 tpc_frames.clear();
+                tpc_ok.clear();
                 // Data bits a block, the data rate, and the raw file's tag.
                 let (secs, block, data_bps, tag) = match modem {
                     // A pattern in the field matches only that variant.
@@ -3078,6 +3081,7 @@ fn run(
                         use decsat_modem::tpc2964::{Code, TpcRx, bits_per_symbol};
                         let rx = tpc.get_or_insert_with(|| TpcRx::new(modulation));
                         rx.push(&symbols, &mut tpc_frames);
+                        tpc_ok.extend_from_slice(rx.converged());
                         let (data, frame) = (rx.data_bits(), rx.frame_bits());
                         let bps = symbol_rate * bits_per_symbol(modulation) as f64 * data as f64
                             / frame as f64;
@@ -3161,9 +3165,11 @@ fn run(
                     tdm_active_until = frames + 5000;
                 }
                 raw.follow(&o, tag, frames < tdm_active_until);
-                for data in &tpc_frames {
+                for (i, data) in tpc_frames.iter().enumerate() {
                     payload_out.clear();
-                    pay.push(data, &mut payload_out);
+                    // A frame the TPC failed on is not judged as fill.
+                    let decoded = tpc_ok.get(i).copied().unwrap_or(true);
+                    pay.push_frame(data, decoded, &mut payload_out);
                     raw.write(&payload_out.raw);
                     // Unknown format: look for text in every reading of
                     // the bits (once known, the TS or IP stage looks).
@@ -3644,7 +3650,11 @@ fn cdm8_stats(c: &decsat_modem::cdm8qam::Cdm8QamStats) -> decsat_modem::tpc2964:
     decsat_modem::tpc2964::TpcStats {
         code: Some(decsat_modem::tpc2964::Code::Comtech8Qam),
         uw_locked: c.uw_locked,
-        orientation: Some(format!("turned {:.0}°", c.turned_deg)),
+        // Whole degrees, 360 read as 0.
+        orientation: Some(format!(
+            "turned {}°",
+            (c.turned_deg.round() as i32).rem_euclid(360)
+        )),
         structure: Some(
             "52-symbol UW, 4896 data + 1224 parity bits a frame (rate 0.8); parity not checked"
                 .into(),

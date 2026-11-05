@@ -6158,3 +6158,22 @@ turn, follows_a_slipped_symbol, random_8qam_has_no_uw, uw_is_52_symbols}`,
 
 **Not done**: the parity (above); a mirrored carrier (the UW reads the same
 mirrored; labels 1 ↔ 2 and 5 ↔ 6 would swap); the shelf under the carrier.
+
+## A frame the TPC failed on no longer makes an idle link "bursty" (2026-11-05)
+
+Rory's 34.5°W 1770.2594 MHz capture (555 556 S/s cf32): QPSK 166.66 kBd,
+Comtech TPC 7/8 (spectrum inverted), 453 of 454 frames decoded, overhead
+27E89Fh (VFO_29's was 8CEA42h), the data nothing but HDLC flags under the
+per-frame (2, 3, 9, 12) sequence. Yet the payload said "idle fill between
+bursts": the one frame that failed to decode fell among the eight the
+search looks at, and its garbled bits pulled the fill share under
+`IDLE_ONLY` (0.99).
+
+Now `TpcRx::converged()` says which frames of the last push decoded, and
+`PayloadRx::push_frame(frame, decoded, out)` leaves failed frames out of
+the fill share (`held_failed`; framing searches still see them). The FEC
+thread passes it for the TPC chain; other chains push as before. The
+capture now reads "idle: nothing but its fill". Test:
+`a_frame_the_fec_failed_on_does_not_make_an_idle_line_bursty` (and the
+same frame taken as decoded still reads as a burst).
+
