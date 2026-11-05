@@ -2284,7 +2284,8 @@ impl App {
 }
 
 impl App {
-    fn overview_range(&self) -> (f64, f64) {
+    /// The radio's own tuning range (tuner frequencies, no LO), Hz.
+    fn overview_tuner_range(&self) -> (f64, f64) {
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected {
             return self
@@ -2302,24 +2303,74 @@ impl App {
         if self.uhd_selected {
             return (50e6, 6e9);
         }
+        #[cfg(feature = "hackrf")]
+        return (self.radio.device.min_hz(), self.radio.device.max_hz());
+        #[allow(unreachable_code)]
         (1e6, 6e9)
     }
+
+    /// What the overview adds to a tuner frequency to get RF: the LNB LO of
+    /// the chosen radio plus the LO trim, as [`Self::rf_center`] does.
+    fn overview_lo(&self) -> f64 {
+        #[allow(unused_mut)]
+        let mut lo = if self.net_selected {
+            self.net_lo_hz
+        } else {
+            0.0
+        };
+        #[cfg(feature = "hackrf")]
+        if !self.net_selected {
+            lo = self.radio.lnb_lo_mhz * 1e6;
+        }
+        #[cfg(all(windows, feature = "rtl"))]
+        if self.rtl_selected {
+            lo = self.rtl_settings.lnb_lo_hz;
+        }
+        #[cfg(all(windows, feature = "pluto"))]
+        if self.pluto_selected {
+            lo = self.pluto_settings.lnb_lo_hz;
+        }
+        #[cfg(all(windows, feature = "uhd"))]
+        if self.uhd_selected {
+            lo = self.uhd_settings.lnb_lo_hz;
+        }
+        if lo > 0.0 { lo + self.lo_trim_hz } else { lo }
+    }
+
+    /// The range the overview can sweep, in RF (the tuner's range plus LO), Hz.
+    fn overview_range(&self) -> (f64, f64) {
+        let (min, max) = self.overview_tuner_range();
+        let lo = self.overview_lo();
+        (min + lo, max + lo)
+    }
+
+    /// The RF range of the chosen preset, Hz; `None` for Custom.
+    fn overview_preset(&self, scope: usize) -> Option<(f64, f64)> {
+        let (min, max) = self.overview_range();
+        match scope {
+            0 => Some((min, max)),
+            1 => {
+                let center = self.rf_center();
+                Some(((center - 250e6).max(min), (center + 250e6).min(max)))
+            }
+            3 => Some(sweep_overview::KU_LOW_BAND),
+            4 => Some(sweep_overview::KU_HIGH_BAND),
+            _ => None,
+        }
+    }
+
     fn start_overview(&mut self) {
         if self.overview.busy {
             return;
         }
         let (min, max) = self.overview_range();
-        let (lo, hi) = match self.overview.scope {
-            1 => {
-                let center = self.rf_center();
-                ((center - 250e6).max(min), (center + 250e6).min(max))
-            }
-            2 => (self.overview.custom_lo * 1e6, self.overview.custom_hi * 1e6),
-            _ => (min, max),
-        };
+        let (lo, hi) = self
+            .overview_preset(self.overview.scope)
+            .unwrap_or((self.overview.custom_lo * 1e6, self.overview.custom_hi * 1e6));
         if !lo.is_finite() || !hi.is_finite() || lo >= hi || lo < min || hi > max {
             self.note = format!(
-                "Overview sweep range must lie within {:.3}–{:.3} MHz, with Start < Stop",
+                "Overview sweep range must lie within {:.3}–{:.3} MHz (the radio's range plus \
+                 the LNB LO), with Start < Stop",
                 min / 1e6,
                 max / 1e6
             );
@@ -2328,6 +2379,14 @@ impl App {
         // Keep both visible frequency fields consistent with the actual selected span.
         self.overview.custom_lo = lo / 1e6;
         self.overview.custom_hi = hi / 1e6;
+        // The sweep tunes the radio, so it works in tuner frequencies and puts
+        // its points back on the RF axis.
+        let rf_offset = self.overview_lo();
+        let span = sweep_overview::Span {
+            lo: lo - rf_offset,
+            hi: hi - rf_offset,
+            rf_offset,
+        };
         let was_running = self.engine.is_some();
         self.stop_source();
         // Dedicated B210 route: do not run the generic retune/3-buffer flush.
@@ -2335,7 +2394,7 @@ impl App {
         #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_selected {
             let mut settings = self.uhd_settings.clone();
-            settings.center_hz = (lo + hi) * 0.5;
+            settings.center_hz = (span.lo + span.hi) * 0.5;
             match decsat_io::UhdSource::open(settings) {
                 Ok(src) => {
                     self.overview.shared =
@@ -2344,7 +2403,7 @@ impl App {
                     self.overview.max = hi;
                     self.overview.busy = true;
                     self.overview.restart = was_running;
-                    sweep_overview::spawn_uhd(self.overview.shared.clone(), src, lo, hi);
+                    sweep_overview::spawn_uhd(self.overview.shared.clone(), src, span);
                     self.note = "UHD B210 optimized wideband sweep running".into();
                 }
                 Err(e) => {
@@ -2354,7 +2413,7 @@ impl App {
             }
             return;
         }
-        let Some((src, tune)) = self.open_overview_source((lo + hi) * 0.5) else {
+        let Some((src, tune)) = self.open_overview_source((span.lo + span.hi) * 0.5) else {
             self.restart_selected_overview(was_running);
             return;
         };
@@ -2363,7 +2422,7 @@ impl App {
         self.overview.max = hi;
         self.overview.busy = true;
         self.overview.restart = was_running;
-        sweep_overview::spawn(self.overview.shared.clone(), src, tune, lo, hi);
+        sweep_overview::spawn(self.overview.shared.clone(), src, tune, span);
         self.note = "Wideband sweep running; reception temporarily paused".into();
     }
     #[allow(clippy::type_complexity)]
@@ -2420,22 +2479,53 @@ impl App {
                 }
             };
         }
+        // The HackRF, Fobos and Airspy share the radio panel: open whichever
+        // it has chosen, tuned to the middle of the sweep.
         #[cfg(feature = "hackrf")]
         {
-            let mut settings = self.radio.settings;
-            settings.center_hz = frequency as u64;
-            return match decsat_io::HackRfSource::open(settings) {
-                Ok(source) => {
-                    let control = source.control();
-                    Some((
-                        Box::new(source),
-                        Box::new(move |f| {
-                            let _ = control.set_center(f as u64);
-                        }),
-                    ))
-                }
+            type Tune = Box<dyn FnMut(f64) + Send>;
+            let opened: decsat_core::Result<(Box<dyn decsat_io::IqSource>, Tune)> =
+                match self.radio.device {
+                    radio::Device::HackRf => {
+                        let mut settings = self.radio.settings;
+                        settings.center_hz = frequency as u64;
+                        decsat_io::HackRfSource::open(settings).map(|source| {
+                            let control = source.control();
+                            let tune: Tune = Box::new(move |f| {
+                                let _ = control.set_center(f as u64);
+                            });
+                            (Box::new(source) as _, tune)
+                        })
+                    }
+                    #[cfg(feature = "fobos")]
+                    radio::Device::Fobos => {
+                        let mut settings = self.radio.fobos_settings();
+                        settings.center_hz = frequency as u64;
+                        decsat_io::FobosSource::open(settings).map(|source| {
+                            let control = source.control();
+                            let tune: Tune = Box::new(move |f| {
+                                let _ = control.set_center(f as u64);
+                            });
+                            (Box::new(source) as _, tune)
+                        })
+                    }
+                    #[cfg(feature = "airspy")]
+                    radio::Device::Airspy => {
+                        let mut settings = self.radio.airspy_settings();
+                        settings.center_hz = frequency as u64;
+                        decsat_io::AirspySource::open(settings).map(|source| {
+                            let control = source.control();
+                            let tune: Tune = Box::new(move |f| {
+                                let _ = control.set_center(f as u64);
+                            });
+                            (Box::new(source) as _, tune)
+                        })
+                    }
+                };
+            return match opened {
+                Ok(pair) => Some(pair),
                 Err(e) => {
-                    self.note = format!("HackRF sweep: {e}");
+                    self.note = format!("{} sweep: {e}", self.radio.device.short());
                     None
                 }
             };
@@ -2497,26 +2587,27 @@ impl App {
                     .selected_text(match self.overview.scope {
                         0 => "Full device",
                         1 => "±250 MHz",
+                        3 => "Ku low band",
+                        4 => "Ku high band",
                         _ => "Custom",
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.overview.scope, 0, "Full device");
                         ui.selectable_value(&mut self.overview.scope, 1, "±250 MHz");
+                        ui.selectable_value(&mut self.overview.scope, 3, "Ku low band")
+                            .on_hover_text("10.70–11.70 GHz: needs the LNB's 9.75 GHz LO");
+                        ui.selectable_value(&mut self.overview.scope, 4, "Ku high band")
+                            .on_hover_text(
+                                "11.70–12.75 GHz: needs the LNB's 10.6 GHz LO (or a 9.75 GHz \
+                                 LO and a radio that tunes to 3 GHz)",
+                            );
                         ui.selectable_value(&mut self.overview.scope, 2, "Custom");
                     });
                 // Switching to a preset updates the editable bounds immediately.
                 // Switching to Custom retains the currently displayed bounds.
-                if previous_scope != self.overview.scope && self.overview.scope != 2 {
-                    let (device_min, device_max) = self.overview_range();
-                    let (lo, hi) = if self.overview.scope == 0 {
-                        (device_min, device_max)
-                    } else {
-                        let tuned = self.rf_center();
-                        (
-                            (tuned - 250e6).max(device_min),
-                            (tuned + 250e6).min(device_max),
-                        )
-                    };
+                if previous_scope != self.overview.scope
+                    && let Some((lo, hi)) = self.overview_preset(self.overview.scope)
+                {
                     self.overview.custom_lo = lo / 1e6;
                     self.overview.custom_hi = hi / 1e6;
                 }
@@ -2547,7 +2638,7 @@ impl App {
                 }
             });
             if ui
-                .add_enabled(!self.overview.busy, egui::Button::new("⟳ Refresh sweep"))
+                .add_enabled(!self.overview.busy, egui::Button::new("⟳ Sweep"))
                 .clicked()
             {
                 self.start_overview();
