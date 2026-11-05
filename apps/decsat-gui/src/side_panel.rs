@@ -2054,6 +2054,7 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
     let name = match code {
         Some(Code::Comtech78) => "Comtech TPC 7/8 (16K block)",
         Some(Code::Tpc2964) => "TPC 2964 (IESS-315)",
+        Some(Code::Comtech8Qam) => "Comtech 8QAM rate 0.8",
         None => "TPC 2964 (IESS-315) or Comtech TPC 7/8",
     };
     ui.add_space(6.0);
@@ -2080,6 +2081,7 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
                     "{} · {}{}",
                     match code {
                         Some(Code::Comtech78) => "F8DD4258h every 16 320 bits",
+                        Some(Code::Comtech8Qam) => "52 symbols every 2092",
                         _ => "F50B8h every 2964 bits",
                     },
                     t.orientation.as_deref().unwrap_or("?"),
@@ -2095,6 +2097,13 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
         ui.end_row();
         ui.label("Structure");
         match t {
+            Some(t) if t.code == Some(Code::Comtech8Qam) => {
+                ui.label(t.structure.as_deref().unwrap_or_default())
+                    .on_hover_text(
+                        "Measured from a live carrier: the data region obeys the V.35-scrambled \
+                     idle pattern's recurrence, the last 408 symbols of each frame do not.",
+                    );
+            }
             Some(t) if t.structure.is_some() => {
                 ui.label(t.structure.as_deref().unwrap_or_default())
                     .on_hover_text(format!(
@@ -2114,7 +2123,24 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
             }
         }
         ui.end_row();
-        if let Some(t) = t.filter(|t| t.structure.is_some()) {
+        if let Some(t) = t.filter(|t| t.code == Some(Code::Comtech8Qam)) {
+            // Framed only: the parity's code is not known, so the data go
+            // on as received.
+            ui.label("Decoding");
+            ui.colored_label(
+                wait,
+                format!(
+                    "{} frames · FEC not decoded (code unknown) · UW {:.1}% right",
+                    t.frames,
+                    t.fit * 100.0
+                ),
+            )
+            .on_hover_text(
+                "The parity bits' code could not be found from an idle carrier; the data \
+                 bits are passed on with the channel's errors.",
+            );
+            ui.end_row();
+        } else if let Some(t) = t.filter(|t| t.structure.is_some()) {
             ui.label("Decoding");
             ui.colored_label(
                 if t.failed == 0 { good } else { wait },

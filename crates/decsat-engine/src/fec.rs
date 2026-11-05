@@ -2976,6 +2976,8 @@ fn run(
     let mut dvbs: Option<decsat_modem::dvbs::DvbsRx> = None;
     let mut dvbs_out = Vec::new();
     let mut tpc: Option<decsat_modem::tpc2964::TpcRx> = None;
+    // Comtech's 8QAM rate-0.8 frame rides the TPC chain on 8QAM.
+    let mut cdm8: Option<decsat_modem::cdm8qam::Cdm8QamRx> = None;
     let mut fastlink: Option<decsat_modem::fastlink::FastLinkRx> = None;
     let mut tdm: Option<decsat_modem::tdm257::TdmRx> = None;
     let mut fast_tdm: Option<decsat_modem::tdmfast::FastRx> = None;
@@ -3054,6 +3056,19 @@ fn run(
                 tpc_frames.clear();
                 // Data bits a block, the data rate, and the raw file's tag.
                 let (secs, block, data_bps, tag) = match modem {
+                    // A pattern in the field matches only that variant.
+                    FecInput::Tpc {
+                        symbols,
+                        modulation: decsat_core::Modulation::Qam8,
+                    } => {
+                        // Comtech 8QAM rate 0.8: frame sync and the data
+                        // region; the parity is not decoded.
+                        use decsat_modem::cdm8qam::{Cdm8QamRx, DATA, FRAME_SYMBOLS};
+                        let rx = cdm8.get_or_insert_with(Cdm8QamRx::new);
+                        rx.push(&symbols, &mut tpc_frames);
+                        let bps = symbol_rate * DATA as f64 / FRAME_SYMBOLS as f64;
+                        (symbols.len() as f64 / symbol_rate, DATA, bps, "cdm8qam")
+                    }
                     FecInput::Tpc {
                         symbols,
                         modulation,
@@ -3310,7 +3325,10 @@ fn run(
                 } else if s.payload_bps == 0.0 && win_secs > 0.2 {
                     s.payload_bps = win_bits / win_secs;
                 }
-                s.tpc = tpc.as_ref().map(|r| r.stats.clone());
+                s.tpc = tpc
+                    .as_ref()
+                    .map(|r| r.stats.clone())
+                    .or_else(|| cdm8.as_ref().map(|r| cdm8_stats(&r.stats)));
                 s.fastlink = fastlink.as_ref().map(|r| r.stats.clone());
                 // Shown once it has locked at least once.
                 s.tdm = tdm
@@ -3619,6 +3637,26 @@ fn ts_output(o: &FecOutput, primary: bool) -> FecOutput {
     t
 }
 
+/// The 8QAM frame receiver's stats as the TPC chain shows them: frames
+/// framed, none decoded (the parity's code is not known), the UW's symbol
+/// agreement as the fit.
+fn cdm8_stats(c: &decsat_modem::cdm8qam::Cdm8QamStats) -> decsat_modem::tpc2964::TpcStats {
+    decsat_modem::tpc2964::TpcStats {
+        code: Some(decsat_modem::tpc2964::Code::Comtech8Qam),
+        uw_locked: c.uw_locked,
+        orientation: Some(format!("turned {:.0}°", c.turned_deg)),
+        structure: Some(
+            "52-symbol UW, 4896 data + 1224 parity bits a frame (rate 0.8); parity not checked"
+                .into(),
+        ),
+        fit: c.uw_fit(),
+        frames: c.frames,
+        uw_misses: c.uw_misses,
+        slips: c.slips,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3921,6 +3959,40 @@ mod tests {
             let v = cv.view();
             assert_eq!((v.playing, v.auto), (playing, auto), "{voice:?}");
         }
+    }
+
+    /// 8QAM on the TPC chain goes to the Comtech 8QAM frame receiver: its
+    /// frames are counted, none called decoded, and the data reach the
+    /// payload stage, which finds the V.35 descrambler under the flags.
+    #[test]
+    fn tpc_chain_frames_comtech_8qam() {
+        use decsat_modem::cdm8qam::{CODEWORD, DATA, modulate_frame};
+        use decsat_modem::payload::SelfSyncScrambler;
+        // HDLC flags, V.35-scrambled, as the payload's search reads them.
+        let mut flags: Vec<u8> = (0..DATA * 10)
+            .map(|i| [0, 1, 1, 1, 1, 1, 1, 0][i % 8])
+            .collect();
+        SelfSyncScrambler::new(&[3, 20]).scramble(&mut flags);
+        let mut syms = Vec::new();
+        for d in flags.chunks(DATA) {
+            modulate_frame(d, &vec![0; CODEWORD - DATA], &mut syms);
+        }
+        let pending = Pending::default();
+        let w = FecWorker::spawn(427_277.0, FecOutput::default(), pending.clone());
+        for c in syms.chunks(4096) {
+            w.offer_tpc(c.to_vec(), decsat_core::Modulation::Qam8);
+        }
+        let stats = Arc::clone(&w.stats);
+        drop(w);
+        let s = stats.lock().unwrap();
+        let t = s.tpc.as_ref().expect("TPC stats");
+        assert_eq!(t.code, Some(decsat_modem::tpc2964::Code::Comtech8Qam));
+        assert!(t.uw_locked && t.frames >= 8 && t.decoded == 0, "{t:?}");
+        let p = s.payload.as_ref().expect("payload stats");
+        assert!(
+            p.found.as_deref().is_some_and(|f| f.contains("taps 3, 20")),
+            "{p:?}"
+        );
     }
 
     /// A deleted VFO's FEC thread leaves its queue: told to quit, it

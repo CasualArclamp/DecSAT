@@ -6102,3 +6102,59 @@ pilots on and normal frames.
 **Not done**: nothing on the air or through a HackRF cable loop yet (the
 HackRF was not plugged in); the "encoded" picture (decoded back live) of the
 mockup is left out (it would cost a decoder).
+
+## Comtech 8QAM rate 0.8: frame sync, the data, no FEC yet (2026-11-04)
+
+Rory: "can you see if you can decode this 8QAM from a comtech modem" — a
+99.8 MB cf32 at 1 428 571 S/s, 24.5°W H 1868.8925 MHz (L-band), one carrier.
+
+**Found from the signal** (Python on soft symbols, the session's scratchpad):
+
+- 427 277 S/s, roll-off ~5 %, Es/N0 11 dB. A flat shelf ~13 dB down, ~760 kHz
+  wide, sits under it (another carrier on the same frequency?) and holds
+  the Es/N0 there.
+- Identify called it BPSK: this 8QAM (half a 4×4 grid, the RCV-20x points)
+  has a squared line — the points' squares sum to 16j, not 0.
+- Hard labels agree from frame to frame only in 52 symbols every 2092: a
+  BPSK unique word on the (3, 3) / (−3, −3) corners, `1D0AF1492C05A`h
+  (+ = 0, first symbol first). Sync held on all 1870 frames, no slips.
+- Parity checks found by GF(2) elimination on reliable windows held at
+  every symbol offset, and the window's code dimension stayed ~27 however
+  long: the stream is a linear recurrence. Per bit position it is
+  (x + 1)⁷ · (x²⁰ + x³ + x² + x + 1) (the 3-decimation); read serially, the
+  label's bits least significant first, (x + 1)⁷ · (1 + x³ + x²⁰): the V.35
+  self-synchronising scrambler over a period-8 pattern.
+- The recurrence holds on symbols 52…1683 of every frame and fails (50 %)
+  on the last 408: a systematic code, 4896 data + 1224 parity bits, rate
+  0.8. 4896 / 2092 × 427 277 = 1.000 Mbit/s.
+- The payload stage reads the descrambled data as HDLC idle flags on an
+  inverted line (it differentially decodes first).
+
+**The parity's code is not known.** Idle data span only a few dozen
+dimensions, so many codes give the same parity; LDPC, Reed–Solomon (765 =
+3 × 255 bytes) or a product code cannot be told apart. A capture with
+traffic (30–60 s: a 6120-bit block wants a few thousand frames) would let it
+be found blind.
+
+**Built**: `decsat-modem::cdm8qam` — `Cdm8QamRx` (differential UW search, so
+neither phase nor a small frequency error matters, three frames running;
+then a coherent UW match each frame within ±2 symbols, which measures the
+carrier's turn and the scale; nearest-point decisions; the data region's
+bits out, LSB first), `detect` for Identify, `modulate_frame` for tests.
+`tpc2964::Code::Comtech8Qam` (outside `Code::ALL`: `TpcRx` never looks for
+it) names it in the TPC chain's stats. The FEC thread sends 8QAM on the TPC
+chain to it (`cdm8_stats`: frames, none "decoded", UW agreement as the
+fit); the VFO's TPC modulation takes 8QAM; `code_locked` counts framed
+frames for it; Identify looks for the UW when no TPC UW is found, then calls
+it `ConstellationGuess::Qam8` (new) and locks again as 8QAM, and its hint
+beats the chance "DVB-S2-style PLHEADERs" one; `names_tpc` takes it. GUI:
+the TPC card names it, the UW, and "FEC not decoded (code unknown)".
+
+**Live** (`--decoder auto`): Identify names it, the TPC chain frames 1862
+frames, UW 95.5 % right (corner-point SER ~4.5 %), turned 182°, the payload
+finds V.35 and HDLC idle flags. Tests: `cdm8qam::{receives_frames_at_any_
+turn, follows_a_slipped_symbol, random_8qam_has_no_uw, uw_is_52_symbols}`,
+`identify::names_a_comtech_8qam_frame`, `fec::tpc_chain_frames_comtech_8qam`.
+
+**Not done**: the parity (above); a mirrored carrier (the UW reads the same
+mirrored; labels 1 ↔ 2 and 5 ↔ 6 would swap); the shelf under the carrier.

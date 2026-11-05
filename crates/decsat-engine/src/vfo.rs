@@ -1120,7 +1120,11 @@ fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
             .dvbs
             .as_ref()
             .is_some_and(|d| d.rate.is_some() && d.packets > 0),
-        DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| t.decoded > 0),
+        // The 8QAM frame's parity is not decoded: framed is as far as it goes.
+        DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| {
+            t.decoded > 0
+                || (t.code == Some(decsat_modem::tpc2964::Code::Comtech8Qam) && t.frames > 0)
+        }),
         DecoderKind::Viterbi => {
             f.viterbi.as_ref().is_some_and(|v| v.rate.is_some())
                 || f.conv.as_ref().is_some_and(|c| c.code.is_some())
@@ -1961,6 +1965,10 @@ impl Worker {
                                     ) => decsat_core::Modulation::Bpsk,
                                     Some(decsat_core::Modulation::Psk8) => {
                                         decsat_core::Modulation::Psk8
+                                    }
+                                    // Comtech's 8QAM rate-0.8 frame.
+                                    Some(decsat_core::Modulation::Qam8) => {
+                                        decsat_core::Modulation::Qam8
                                     }
                                     _ => decsat_core::Modulation::Qpsk,
                                 },
@@ -3069,6 +3077,15 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         .map_or("payload not recognised yet".to_string(), |p| {
             payload_format(p).to_string()
         });
+    // The 8QAM frame: framed, its data passed on as received.
+    if t.code == Some(decsat_modem::tpc2964::Code::Comtech8Qam) {
+        return format!(
+            "{lock} · Comtech 8QAM rate 0.8 · {} frames · UW {:.1}% right · FEC not \
+             decoded (code unknown) · {payload}",
+            t.frames,
+            t.fit * 100.0
+        );
+    }
     // Comtech's code is named; TPC 2964 is the one the decoder is known by.
     let code = match t.code {
         Some(decsat_modem::tpc2964::Code::Comtech78) => "TPC 7/8 · ",

@@ -64,6 +64,8 @@ pub enum ConstellationGuess {
     Bpsk,
     Qpsk,
     Psk8,
+    /// Comtech's 8QAM (half a 4×4 grid), named once its frame's UW is found.
+    Qam8,
     Apsk16,
     Apsk32,
     /// Constant envelope, but neither the 4th- nor 8th-power line is clear.
@@ -80,6 +82,7 @@ impl ConstellationGuess {
             ConstellationGuess::Bpsk => "BPSK".into(),
             ConstellationGuess::Qpsk => "QPSK".into(),
             ConstellationGuess::Psk8 => "8PSK".into(),
+            ConstellationGuess::Qam8 => "8QAM".into(),
             ConstellationGuess::Apsk16 => "16APSK".into(),
             ConstellationGuess::Apsk32 => "32APSK".into(),
             ConstellationGuess::PskUnclear => "PSK (order unclear)".into(),
@@ -95,6 +98,7 @@ impl ConstellationGuess {
         match self {
             ConstellationGuess::Bpsk => Modulation::Bpsk,
             ConstellationGuess::Psk8 => Modulation::Psk8,
+            ConstellationGuess::Qam8 => Modulation::Qam8,
             ConstellationGuess::Apsk16 => Modulation::Apsk16,
             ConstellationGuess::Apsk32 => Modulation::Apsk32,
             _ => Modulation::Qpsk,
@@ -225,7 +229,7 @@ pub fn names_beacon(hint: &str) -> bool {
 /// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
 /// or Comtech TPC 7/8's (the TPC decoder reads either).
 pub fn names_tpc(hint: &str) -> bool {
-    hint.contains("TPC 2964") || hint.contains("TPC 7/8")
+    hint.contains("TPC 2964") || hint.contains("TPC 7/8") || hint.contains("Comtech 8QAM frame")
 }
 
 /// Everything Identify measured.
@@ -1196,7 +1200,18 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         ))
     .then(|| decsat_modem::tpc2964::detect(&lock.symbols, cst.modulation()))
     .flatten();
-    let tpc = tpc_code.is_some();
+    // Comtech's 8QAM rate-0.8 frame: a 52-symbol UW every 2092 symbols,
+    // looked for differentially in the timed symbols. Its 8QAM has a
+    // squared line (the points' squares do not cancel), so it reads BPSK;
+    // found, the carrier is locked again as 8QAM.
+    let cdm8 = !is_s2 && tpc_code.is_none() && decsat_modem::cdm8qam::detect(&sym);
+    if cdm8 {
+        cst = ConstellationGuess::Qam8;
+        id.constellation = Some(cst);
+        lock = lock_carrier(&sym, cst, cfo.map(|hz| hz / rs), None);
+        id.set_lock(&lock, rs);
+    }
+    let tpc = tpc_code.is_some() || cdm8;
     // Paradise Q-Flex FastLink: its sync word every 11 538 symbols.
     let fastlink = !is_s2
         && !tpc
@@ -1320,6 +1335,11 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     } else {
         Verdict::NotDvbS2 {
             hint: match cst {
+                // A found UW beats PLHEADER-like chance hits in its data.
+                _ if cdm8 => "8QAM, Comtech 8QAM frame (52-symbol unique word every 2092 \
+                 symbols; 4896 data + 1224 parity bits, rate 0.8) — the TPC decoder \
+                 frames it and passes the data on; the parity's code is not known"
+                    .into(),
                 _ if s2.unconfirmed_spacing.is_some() => format!(
                     "{}, DVB-S2-style PLHEADERs every {} symbols that their own PLS codes \
                      do not explain — a proprietary DVB-S2 extension{}",
@@ -2042,6 +2062,43 @@ mod tests {
         }
         assert_eq!(id.constellation, Some(ConstellationGuess::Qpsk));
         assert_eq!(id.bursts, None);
+    }
+
+    /// Comtech's 8QAM rate-0.8 frame: its squared line makes it look BPSK,
+    /// but the UW every 2092 symbols names it, and it is locked as 8QAM.
+    #[test]
+    fn names_a_comtech_8qam_frame() {
+        use decsat_modem::cdm8qam::{CODEWORD, DATA, modulate_frame};
+        let mut nz = Noise(11);
+        let mut bit = || u8::from(nz.uniform() < 0.5);
+        let mut syms = Vec::new();
+        for _ in 0..12 {
+            let data: Vec<u8> = (0..DATA).map(|_| bit()).collect();
+            let parity: Vec<u8> = (0..CODEWORD - DATA).map(|_| bit()).collect();
+            modulate_frame(&data, &parity, &mut syms);
+        }
+        // Unit power: the grid's points average 10.
+        let k = 1.0 / 10f32.sqrt();
+        let syms: Vec<Iq> = syms[900..].iter().map(|&s| s * k).collect();
+        let mut sh = Shaper::new(4, 0.2, 16);
+        let mut x = Vec::new();
+        sh.process(&syms, &mut x);
+        let rate = 4.0 * 427_277.0;
+        let w = std::f64::consts::TAU * 700.0 / rate;
+        let x: Vec<Iq> = x
+            .iter()
+            .enumerate()
+            .map(|(n, &s)| s * Iq::from_polar(1.0, (w * n as f64) as f32) + nz.gauss() * 0.05)
+            .collect();
+        let id = identify(&x, rate);
+        match &id.verdict {
+            Verdict::NotDvbS2 { hint } => {
+                assert!(hint.contains("Comtech 8QAM frame"), "{hint}");
+                assert!(names_tpc(hint), "{hint}");
+            }
+            v => panic!("expected not-DVB-S2, got {v:?}"),
+        }
+        assert_eq!(id.constellation, Some(ConstellationGuess::Qam8));
     }
 
     /// The Intelsat 19 DAMA network: an outbound named by its sync word

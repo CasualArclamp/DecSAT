@@ -10,6 +10,8 @@
 //! - [`tpc`]: turbo product codes (extended Hamming products, Chase–Pyndiah).
 //! - [`tpc2964`]: `tpc_2964` frames, their structure found from the signal;
 //!   its receiver also takes [`tpc78`], Comtech's TPC 7/8 (16K block).
+//! - [`cdm8qam`]: a Comtech 8QAM rate-0.8 frame (52-symbol UW every 2092
+//!   symbols), its data passed on undecoded.
 //! - [`payload`]: what a modem's data carry (HDLC, MPEG-TS) and how they are
 //!   scrambled, found from the data.
 //! - [`edmac`]: Comtech EDMAC framing (21/20, its M&C channel);
@@ -33,6 +35,7 @@ pub mod aptx;
 pub mod asterix;
 pub mod bsc;
 pub mod ccsds;
+pub mod cdm8qam;
 pub mod cid;
 pub mod conv;
 pub mod convblind;

@@ -441,6 +441,17 @@ rest — exactly 7/8 of the frame — the user's (300 kbit/s at 171.43 kS/s).
 The data are scrambled by the same (2, 3, 9, 12) / 475h sequence, restarted
 every frame one bit earlier than on TPC 2964.
 
+**Comtech 8QAM, rate 0.8** also goes through the TPC decoder (Identify names
+it and switches the demodulator to 8QAM). Worked out from a live, idle
+427.28 kS/s carrier (no document): frames of 2092 symbols — a 52-symbol
+BPSK unique word on two opposite corners of the 8QAM, then a systematic
+codeword of 1632 data symbols (4896 bits, three a symbol, least significant
+first) and 408 parity symbols; 1.000 Mbit/s at that rate. The data are
+V.35-scrambled ahead of the encoder (HDLC idle flags on the carrier seen).
+**The parity is not decoded**: on an idle carrier its code cannot be told
+from the data, so the data bits pass on with the channel's errors. A
+capture carrying traffic would let the code be found.
+
 IP found in the HDLC frames (Cisco HDLC, PPP, Frame Relay as RFC 2427
 carries it, or anything with the packet after a short header) gets the same
 statistics, PCAP and multicast audio as GSE — a flow whose UDP checksums all

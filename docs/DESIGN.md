@@ -314,7 +314,9 @@ crates/
                   puncturing, RS(204,188), Forney interleaving, energy dispersal),
                   generic RS over GF(256); turbo product codes, IESS-315
                   tpc_2964 (structure found blind) and Comtech TPC 7/8
-                  (16K block, measured); modem payloads (HDLC,
+                  (16K block, measured); Comtech's 8QAM rate-0.8
+                  frame (UW sync and data, parity not decoded:
+                  cdm8qam); modem payloads (HDLC,
                   MPEG-TS, descramblers found blind); E1/D&I++ timeslots,
                   G.711, and G.728 LD-CELP (decoder from the Recommendation,
                   plus the robbed-sync-bit framing that finds it in a
