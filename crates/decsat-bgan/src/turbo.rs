@@ -21,7 +21,8 @@
 //! state 0, the interleaved one is not, so the two constituent decoders use
 //! different terminal beta conditions.
 
-const NEG: f32 = -1.0e30;
+/// Stand-in for -infinity: finite, so unreachable states cost nothing to test.
+const NEG: f32 = -1.0e4;
 
 /// (next state, parity) for `[state][input]`, built at compile time.
 const fn build_trellis() -> ([[u8; 2]; 16], [[u8; 2]; 16]) {
@@ -125,8 +126,15 @@ impl TurboDecoder {
     }
 
     /// One constituent max-log-MAP pass; writes extrinsic LLRs into `lext`.
+    ///
     /// The four branch metrics at each step are +-ls/2 +-lp/2, so only four
-    /// values are formed per step (not 32).
+    /// values are formed per step. The trellis is a shift register, so the
+    /// two branches into state `ns` come from states `(ns<<1)&15` and that
+    /// `|1`, with the input bit fixed by `ns`'s top bit: written as 16
+    /// unrolled gather-free updates (no per-branch table lookups or
+    /// reachability tests) it vectorises. Unreachable states start at a
+    /// large negative finite value rather than -inf, and each step is
+    /// renormalised, so nothing overflows.
     fn bcjr(&mut self, lsys: &[f32], lpar: &[f32], la: &[f32], terminated: bool, lext: &mut [f32]) {
         let n = lsys.len();
         self.alpha.resize(n + 1, [NEG; 16]);
@@ -150,68 +158,73 @@ impl TurboDecoder {
             [[a + b, a - b], [-a + b, -a - b]]
         }
 
-        // forward, renormalised each step so the metrics stay bounded
+        // Per state s, the branch (u, p) leaving it on input u: tables of
+        // which gamma it uses, as flat indices u*2+p.
+        const GI: [[usize; 2]; 16] = {
+            let mut t = [[0usize; 2]; 16];
+            let mut s = 0;
+            while s < 16 {
+                let mut u = 0;
+                while u < 2 {
+                    t[s][u] = u * 2 + PAR[s][u] as usize;
+                    u += 1;
+                }
+                s += 1;
+            }
+            t
+        };
+
         for k in 0..n {
             let g = gammas(lsys[k] + la[k], lpar[k]);
+            let gf = [g[0][0], g[0][1], g[1][0], g[1][1]];
             let a = alpha[k];
-            let mut nx = [NEG; 16];
-            for s in 0..16 {
-                let av = a[s];
-                if av <= NEG * 0.5 {
-                    continue;
-                }
-                for u in 0..2 {
-                    let ns = NXT[s][u] as usize;
-                    let v = av + g[u][PAR[s][u] as usize];
-                    if v > nx[ns] {
-                        nx[ns] = v;
-                    }
-                }
+            let mut nx = [NEG * 2.0; 16];
+            // for each next state, the two incoming branches
+            for ns in 0..16usize {
+                let s0 = (ns << 1) & 15;
+                let s1 = s0 | 1;
+                // the input that leads s -> ns
+                let u0 = usize::from(NXT[s0][1] as usize == ns);
+                let u1 = usize::from(NXT[s1][1] as usize == ns);
+                let v0 = a[s0] + gf[GI[s0][u0]];
+                let v1 = a[s1] + gf[GI[s1][u1]];
+                nx[ns] = if v0 > v1 { v0 } else { v1 };
             }
-            let m = nx.iter().cloned().fold(NEG, f32::max);
+            let m = nx.iter().cloned().fold(f32::MIN, f32::max);
             for v in &mut nx {
-                if *v > NEG * 0.5 {
-                    *v -= m;
-                }
+                *v = (*v - m).max(NEG);
             }
             alpha[k + 1] = nx;
         }
 
-        // backward fused with the extrinsic computation
         for k in (0..n).rev() {
             let ls_tot = lsys[k] + la[k];
             let g = gammas(ls_tot, lpar[k]);
+            let gf = [g[0][0], g[0][1], g[1][0], g[1][1]];
             let bn = beta[k + 1];
             let a = alpha[k];
-            let mut b = [NEG; 16];
-            let (mut m0, mut m1) = (NEG, NEG);
-            for s in 0..16 {
-                let mut best = NEG;
-                for u in 0..2 {
-                    let ns = NXT[s][u] as usize;
-                    let gv = g[u][PAR[s][u] as usize];
-                    let bv = bn[ns] + gv;
-                    if bv > best {
-                        best = bv;
-                    }
-                    if a[s] > NEG * 0.5 && bn[ns] > NEG * 0.5 {
-                        let v = a[s] + gv + bn[ns];
-                        if u == 0 {
-                            if v > m0 {
-                                m0 = v;
-                            }
-                        } else if v > m1 {
-                            m1 = v;
-                        }
-                    }
+            let mut b = [0.0f32; 16];
+            let (mut m0, mut m1) = (f32::MIN, f32::MIN);
+            for s in 0..16usize {
+                let n0 = NXT[s][0] as usize;
+                let n1 = NXT[s][1] as usize;
+                let g0 = gf[GI[s][0]];
+                let g1 = gf[GI[s][1]];
+                let b0 = bn[n0] + g0;
+                let b1 = bn[n1] + g1;
+                b[s] = if b0 > b1 { b0 } else { b1 };
+                let v0 = a[s] + b0;
+                let v1 = a[s] + b1;
+                if v0 > m0 {
+                    m0 = v0;
                 }
-                b[s] = best;
+                if v1 > m1 {
+                    m1 = v1;
+                }
             }
-            let m = b.iter().cloned().fold(NEG, f32::max);
+            let m = b.iter().cloned().fold(f32::MIN, f32::max);
             for v in &mut b {
-                if *v > NEG * 0.5 {
-                    *v -= m;
-                }
+                *v = (*v - m).max(NEG);
             }
             beta[k] = b;
             lext[k] = (m0 - m1) - lsys[k] - la[k];
@@ -350,6 +363,42 @@ mod tests {
         let mut dec = TurboDecoder::new();
         let (mut bits, mut post) = (Vec::new(), Vec::new());
         dec.decode(&ls, &lp, &lq, &perm, 8, 0.75, &mut bits, &mut post);
+        assert_eq!(&bits[..d], &data[..]);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// `cargo test --release -p decsat-bgan --lib bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decode_speed() {
+        let d = 4220usize;
+        let df = d + 4;
+        let perm: Vec<u16> = (0..df).map(|i| ((i * 37 + 11) % df) as u16).collect();
+        let data: Vec<u8> = (0..d).map(|i| ((i * 7 + i / 3) & 1) as u8).collect();
+        let (dfb, p, q) = turbo_encode(&data, &perm);
+        let l = |b: u8, i: usize| {
+            (if b == 0 { 1.5 } else { -1.5 }) + ((i * 2654435761) % 1000) as f32 / 500.0 - 1.0
+        };
+        let ls: Vec<f32> = dfb.iter().enumerate().map(|(i, &b)| l(b, i)).collect();
+        let lp: Vec<f32> = p.iter().enumerate().map(|(i, &b)| l(b, i + 7)).collect();
+        let lq: Vec<f32> = q.iter().enumerate().map(|(i, &b)| l(b, i + 13)).collect();
+        let mut dec = TurboDecoder::new();
+        let (mut bits, mut post) = (Vec::new(), Vec::new());
+        let t = std::time::Instant::now();
+        let mut its = 0;
+        for _ in 0..50 {
+            its += dec.decode(&ls, &lp, &lq, &perm, 8, 0.75, &mut bits, &mut post);
+        }
+        let dt = t.elapsed().as_secs_f64();
+        println!(
+            "{:.2} ms per iteration ({} iterations)",
+            1e3 * dt / its as f64,
+            its
+        );
         assert_eq!(&bits[..d], &data[..]);
     }
 }

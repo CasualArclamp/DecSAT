@@ -69,6 +69,23 @@ pub struct FrameOut {
     pub blocks: Vec<BlockOut>,
 }
 
+/// A block that failed, with the best any level could do (see
+/// [`BganRx::set_diag`]).
+#[derive(Debug, Clone)]
+pub struct DiagBlock {
+    pub frame: u64,
+    pub block: u8,
+    pub uw_level: &'static str,
+    pub esn0_db: f32,
+    pub best_level: &'static str,
+    pub best_agreement: f32,
+    pub lr_ok: bool,
+    /// Agreement at the best level after 1, 2, 3, 4, 6 iterations.
+    pub ag_iters: [f32; 5],
+    /// Highest agreement any other level reached after 3 iterations.
+    pub wrong_at_3: f32,
+}
+
 /// Receiver state for the UI.
 #[derive(Debug, Clone, Default)]
 pub struct RxStatus {
@@ -312,6 +329,8 @@ pub struct BganRx {
     tables_ok: Option<bool>,
     /// Drop the first symbols of the stream (filter/AGC transient).
     warm: bool,
+    diag: bool,
+    pub diag_log: Vec<DiagBlock>,
 }
 
 impl BganRx {
@@ -336,6 +355,8 @@ impl BganRx {
             debt_s: 0.0,
             tables_ok: None,
             warm: true,
+            diag: false,
+            diag_log: Vec::new(),
         }
     }
 
@@ -343,6 +364,12 @@ impl BganRx {
     /// rayon's global one.
     pub fn set_pool(&mut self, pool: Option<Arc<rayon::ThreadPool>>) {
         self.pool = pool;
+    }
+
+    /// Record, for every block that fails, the best any level could do. Slow;
+    /// for analysis only.
+    pub fn set_diag(&mut self, on: bool) {
+        self.diag = on;
     }
 
     pub fn status(&self) -> &RxStatus {
@@ -844,10 +871,54 @@ impl BganRx {
             if let Some(b) = r {
                 self.predictor.note(i + 1, b.0);
                 self.record(&mut out, i + 1, b);
+            } else if self.diag {
+                self.diagnose(index, i + 1, &blocks_sym[i + 1], uw_level, esn0 as f32);
             }
         }
         out.blocks.sort_by_key(|b| b.block);
         out
+    }
+
+    /// Diagnostics: for a block that failed, the best parity agreement over
+    /// every level at full iterations.
+    fn diagnose(&mut self, frame: u64, block: usize, sym: &[C32], uw: usize, esn0: f32) {
+        let mut best = (0usize, 0.0f32, false);
+        for (lv, name) in LEVELS.iter().enumerate() {
+            let Ok(t) = tables::tables(name) else {
+                continue;
+            };
+            let d = fec::decode_block(&mut self.scratch0, sym, &t, 8);
+            if d.agreement > best.1 {
+                best = (lv, d.agreement, d.lr_ok);
+            }
+        }
+        let mut ag_iters = [0.0f32; 5];
+        let mut wrong_at_3 = 0.0f32;
+        if let Ok(t) = tables::tables(LEVELS[best.0]) {
+            for (k, it) in [1usize, 2, 3, 4, 6].into_iter().enumerate() {
+                ag_iters[k] = fec::decode_block(&mut self.scratch0, sym, &t, it).agreement;
+            }
+        }
+        for (lv, name) in LEVELS.iter().enumerate() {
+            if lv == best.0 {
+                continue;
+            }
+            if let Ok(t) = tables::tables(name) {
+                wrong_at_3 =
+                    wrong_at_3.max(fec::decode_block(&mut self.scratch0, sym, &t, 3).agreement);
+            }
+        }
+        self.diag_log.push(DiagBlock {
+            ag_iters,
+            wrong_at_3,
+            frame,
+            block: block as u8,
+            uw_level: LEVELS[uw],
+            esn0_db: esn0,
+            best_level: LEVELS[best.0],
+            best_agreement: best.1,
+            lr_ok: best.2,
+        });
     }
 
     fn record(&mut self, out: &mut FrameOut, block: usize, b: (usize, fec::BlockDecode)) {
@@ -887,7 +958,7 @@ fn try_levels(
             }
             continue;
         }
-        let first = fec::decode_block(sc, sym, &t, if tight { 2 } else { 3 });
+        let first = fec::decode_block(sc, sym, &t, if tight { 3 } else { 6 });
         if first.accepted() {
             let full = fec::decode_block(sc, sym, &t, 8);
             return Some((lv, if full.accepted() { full } else { first }));
