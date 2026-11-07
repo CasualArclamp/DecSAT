@@ -14,7 +14,10 @@
 # cmake is not on PATH, Visual Studio's own is used. Builds in target\portable,
 # so the usual target directory and its cache stay as they are.
 
-param([string[]]$Apps = @("gui", "cli", "tx"))
+# Note: with -File, PowerShell binds only the first bare word to a
+# [string[]] parameter, so the names are taken from all remaining arguments.
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Apps)
+if (-not $Apps -or $Apps.Count -eq 0) { $Apps = @("gui", "cli", "tx") }
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
