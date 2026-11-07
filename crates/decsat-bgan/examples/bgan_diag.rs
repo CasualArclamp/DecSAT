@@ -23,7 +23,9 @@ fn main() {
     let mut raw = vec![0u8; n * 4];
     f.read_exact(&mut raw).unwrap();
     let iq: Vec<C32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| {
             C32::new(
                 i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0,

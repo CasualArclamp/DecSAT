@@ -135,6 +135,7 @@ impl TurboDecoder {
     /// reachability tests) it vectorises. Unreachable states start at a
     /// large negative finite value rather than -inf, and each step is
     /// renormalised, so nothing overflows.
+    #[allow(clippy::needless_range_loop)] // index arithmetic on the trellis states
     fn bcjr(&mut self, lsys: &[f32], lpar: &[f32], la: &[f32], terminated: bool, lext: &mut [f32]) {
         let n = lsys.len();
         self.alpha.resize(n + 1, [NEG; 16]);
