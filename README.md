@@ -812,15 +812,20 @@ beacon**:
   dragging the dashed **TLM** marks either side of the carrier on the
   waterfall. A subcarrier placed by hand snaps to its own line nearby.
 
-**Tools ▸ Beacons…** lists the Ku-band beacons of the satellites from
-110°E to 180°E — 54 satellites, 87 beacons, researched October 2026: the
+**Tools ▸ Beacons…** lists the Ku-band beacons of the geostationary arc,
+all the way round — 274 satellites, 238 of them with beacons, 110–180°E
+researched October 2026 and the rest of the arc November 2026: the
 operators' own figures where they publish them (Optus's payload documents,
-FCC grants for Intelsat 19 and Eutelsat 172B/174A), community lists
+FCC grants and STAs for Intelsat, SES, EchoStar, Telstar and Eutelsat
+satellites), community lists
 (satbeams, frequencyplansatellites, reception reports) marked
 *unconfirmed* otherwise, and the satellites whose beacons are not published
 at all. Click a frequency to retune the radio there and put a beacon VFO on
 it; the chosen satellite's beacons (by name, or by a position such as
-`160`) are marked on the waterfall. The list is
+`160` or `30W`) are marked on the waterfall. Type the dish's site
+(`-27.47, 153.03` or `51.5N 0.12W`) in the window and the list keeps to
+the satellites above your horizon, with their elevation, and **All
+beacons** marks only those. The list is
 `apps/decsat-gui/src/ku_beacons.csv`.
 
 **📡 All beacons** (beside the volume) marks every satellite's beacons at

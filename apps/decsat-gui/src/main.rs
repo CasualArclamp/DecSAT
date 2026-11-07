@@ -370,7 +370,7 @@ impl Default for App {
             unnamed_kept: prefs::unnamed_kept(),
             satellite_edit: String::new(),
             survey: Default::default(),
-            beacon_window: Default::default(),
+            beacon_window: beacon_list::BeaconWindow::new(),
             beacon_marks: prefs::beacon_marks(),
             beacon_marks_before: String::new(),
             beacon_scene: Default::default(),
@@ -3012,6 +3012,7 @@ impl eframe::App for App {
         self.beacon_scene = beacon_list::Scene::new(
             &self.beacon_marks,
             &self.satellite,
+            self.beacon_window.site(),
             self.rf_center(),
             &self.front.spectrum_db,
             self.band.span(),

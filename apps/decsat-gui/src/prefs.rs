@@ -313,6 +313,19 @@ pub fn set_beacon_marks(v: &str) {
     let _ = write_key("beacon_marks", v);
 }
 
+/// The dish's site for the Beacons window, as typed ("-27.47, 153.03"),
+/// or empty.
+pub fn beacon_site() -> String {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "beacon_site")
+        .map_or_else(String::new, |(_, v)| v)
+}
+
+pub fn set_beacon_site(v: &str) {
+    let _ = write_key("beacon_site", v);
+}
+
 /// The beacon card's pinned word plots, as the card writes them
 /// ("200,1,*;43,0,7": byte, 16 bits or not, minor frame or every one).
 pub fn beacon_pins() -> String {

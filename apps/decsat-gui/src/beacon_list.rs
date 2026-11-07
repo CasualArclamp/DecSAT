@@ -1,6 +1,7 @@
 // made by CasualArclamp
-//! Ku-band beacons of the satellites from 110°E to 180°E: a list to tune
-//! to, and marks on the waterfall for the satellite the dish is on.
+//! Ku-band beacons of the geostationary satellites all round the arc: a
+//! list to tune to, and marks on the waterfall for the satellite the dish
+//! is on. Positions are degrees east, west negative (30°W is -30).
 //!
 //! The figures are in `ku_beacons.csv` beside this file (embedded at build
 //! time), one beacon a row: the operator's own published figure where one
@@ -36,10 +37,71 @@ pub struct Satellite {
 }
 
 impl Satellite {
-    /// "166.0°E Intelsat 19".
+    /// "166.0°E Intelsat 19", "30.0°W Hispasat 30W-6".
     pub fn title(&self) -> String {
-        format!("{:.1}°E {}", self.position_e, self.name)
+        format!("{} {}", position_text(self.position_e), self.name)
     }
+
+    /// Whether a dish at `site` (latitude, longitude in degrees, east and
+    /// north positive) sees it above the horizon; with no site, every one
+    /// does.
+    pub fn visible(&self, site: Option<(f64, f64)>) -> bool {
+        site.is_none_or(|(lat, lon)| elevation(lat, lon, self.position_e) >= 0.0)
+    }
+}
+
+/// "166.0°E", "30.0°W" (0° and 180° are written east).
+pub fn position_text(position_e: f64) -> String {
+    if position_e < 0.0 {
+        format!("{:.1}°W", -position_e)
+    } else {
+        format!("{position_e:.1}°E")
+    }
+}
+
+/// Degrees between two longitudes the short way round (179°E to 179°W
+/// is 2°, not 358°).
+fn lon_gap(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+/// The elevation in degrees of a geostationary satellite at `sat_lon`
+/// seen from (`lat`, `lon`), on a spherical Earth: the textbook look
+/// angle. With γ the angle at the Earth's centre between the site and the
+/// sub-satellite point, cos γ = cos(lat)·cos(Δlon) and
+/// tan(el) = (cos γ − Re/r) / sin γ, Re/r = 6378/42164.
+pub fn elevation(lat: f64, lon: f64, sat_lon: f64) -> f64 {
+    const RATIO: f64 = 6378.137 / 42_164.2;
+    let cos_g = lat.to_radians().cos() * lon_gap(sat_lon, lon).to_radians().cos();
+    let sin_g = (1.0 - cos_g * cos_g).max(0.0).sqrt();
+    (cos_g - RATIO).atan2(sin_g).to_degrees()
+}
+
+/// "-27.47, 153.03" or "27.47S 153.03E" into (latitude, longitude), north
+/// and east positive. `None` if it is not two numbers in range.
+pub fn parse_site(text: &str) -> Option<(f64, f64)> {
+    let parts: Vec<&str> = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let [a, b] = parts.as_slice() else {
+        return None;
+    };
+    // A trailing hemisphere letter sets the sign: `strip_suffix` hands back
+    // the number without it, or `None` if it is not there.
+    let signed = |p: &str, neg: [char; 2], pos: [char; 2]| -> Option<f64> {
+        let p = p.trim_end_matches('°');
+        let (num, sign) = match (p.strip_suffix(neg), p.strip_suffix(pos)) {
+            (Some(n), _) => (n, -1.0),
+            (_, Some(n)) => (n, 1.0),
+            _ => (p, 1.0),
+        };
+        num.trim_end_matches('°').parse::<f64>().ok().map(|v| sign * v)
+    };
+    let lat = signed(a, ['S', 's'], ['N', 'n'])?;
+    let lon = signed(b, ['W', 'w'], ['E', 'e'])?;
+    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
 }
 
 /// The list, parsed once from the embedded CSV.
@@ -118,15 +180,18 @@ pub fn guess(choice: &str) -> Vec<&'static Satellite> {
     if c.is_empty() {
         return Vec::new();
     }
+    // "30W" is -30; "166", "166E" and "166.0°E" are 166.
+    let west = c.ends_with(['W', 'w']);
     let digits: String = c
-        .trim_end_matches(['E', 'e', '°'])
+        .trim_end_matches(['E', 'e', 'W', 'w', '°', ' '])
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect();
     if let Ok(pos) = digits.parse::<f64>() {
+        let pos = if west { -pos } else { pos };
         return catalogue()
             .iter()
-            .filter(|s| (s.position_e - pos).abs() <= 0.6)
+            .filter(|s| lon_gap(s.position_e, pos) <= 0.6)
             .collect();
     }
     let want = squash(c);
@@ -142,8 +207,8 @@ pub const ALL: &str = "all";
 /// [`ALL`] as the window's list shows it.
 const EVERY: &str = "every satellite";
 /// What marking them all does.
-pub const ALL_TIP: &str = "Mark every satellite's beacons on the waterfall (110–180°E), to find a \
-     satellite: a beacon with a line under it is marked bright, one without dim, and the \
+pub const ALL_TIP: &str = "Mark every satellite's beacons on the waterfall (every one above the \
+     horizon from the dish's site, when the Beacons window has one), to find a satellite: a beacon with a line under it is marked bright, one without dim, and the \
      satellite whose beacons have the lines is named beside the All beacons button. Most \
      satellites keep a beacon at 12.20–12.26 or 12.75 GHz; set the LNB's polarisation to \
      the beacon's.";
@@ -166,11 +231,13 @@ pub struct Mark {
 
 /// What the waterfall marks for the satellites chosen — `marks`: "auto"
 /// (from the toolbar's satellite), "none", [`ALL`], or a satellite's title.
-pub fn marks(marks: &str, toolbar_satellite: &str) -> Vec<Mark> {
+/// [`ALL`] is every satellite above the horizon from `site` (the dish's
+/// latitude and longitude), or every one in the list with no site.
+pub fn marks(marks: &str, toolbar_satellite: &str, site: Option<(f64, f64)>) -> Vec<Mark> {
     let list = catalogue();
     let chosen: Vec<usize> = match marks {
         "none" => Vec::new(),
-        ALL => (0..list.len()).collect(),
+        ALL => (0..list.len()).filter(|&i| list[i].visible(site)).collect(),
         "auto" | "" => {
             let guessed = guess(toolbar_satellite);
             // `ptr::eq` compares addresses: `guess` hands back references
@@ -358,11 +425,12 @@ impl Scene {
     pub fn new(
         marks_choice: &str,
         toolbar_satellite: &str,
+        site: Option<(f64, f64)>,
         rf_center: f64,
         spectrum_db: &[f32],
         span_hz: f64,
     ) -> Self {
-        let marks = marks(marks_choice, toolbar_satellite);
+        let marks = marks(marks_choice, toolbar_satellite, site);
         // A line counts for the beacons listed nearest it only: 172B's
         // line at 12250.0986 MHz is its 12250.1, not a neighbour's 12250.0
         // (still within reach of the LNB's error).
@@ -404,9 +472,26 @@ pub enum Request {
 pub struct BeaconWindow {
     pub open: bool,
     filter: String,
+    /// The dish's site as typed ("-27.47, 153.03"), kept in the prefs.
+    site_text: String,
+    /// List every satellite, not only the ones above the site's horizon.
+    show_all: bool,
 }
 
 impl BeaconWindow {
+    /// With the dish's site from the prefs.
+    pub fn new() -> Self {
+        BeaconWindow {
+            site_text: crate::prefs::beacon_site(),
+            ..Default::default()
+        }
+    }
+
+    /// The dish's (latitude, longitude), if one is set and parses.
+    pub fn site(&self) -> Option<(f64, f64)> {
+        parse_site(&self.site_text)
+    }
+
     /// Draw it; `marks_choice` is the waterfall marks setting (changed
     /// here), `toolbar_satellite` what the toolbar's satellite is called.
     pub fn show(
@@ -420,7 +505,7 @@ impl BeaconWindow {
         }
         let mut req = None;
         let mut open = self.open;
-        egui::Window::new("Ku-band beacons, 110–180°E")
+        egui::Window::new("Ku-band beacons")
             .open(&mut open)
             .default_width(620.0)
             .default_height(520.0)
@@ -442,7 +527,11 @@ impl BeaconWindow {
                     let auto = match guessed.as_slice() {
                         [] => "auto (no match)".to_string(),
                         [s] => format!("auto ({})", s.name),
-                        many => format!("auto ({} at {:.1}°E)", many.len(), many[0].position_e),
+                        many => format!(
+                            "auto ({} at {})",
+                            many.len(),
+                            position_text(many[0].position_e)
+                        ),
                     };
                     let shown = match marks_choice.as_str() {
                         "" | "auto" => auto.clone(),
@@ -467,10 +556,54 @@ impl BeaconWindow {
                              the toolbar's satellite (its name, or a position such as 166E)",
                         );
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Dish site");
+                    let edit = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.site_text)
+                                .hint_text("lat, lon  e.g. -27.47, 153.03")
+                                .desired_width(170.0),
+                        )
+                        .on_hover_text(
+                            "Your latitude and longitude (south and west negative, or with \
+                             N/S/E/W). With it the list shows the satellites above your \
+                             horizon with their elevation, and \"every satellite\" marks only \
+                             those. Left empty, the whole arc.",
+                        );
+                    if edit.changed()
+                        && (self.site_text.trim().is_empty() || self.site().is_some())
+                    {
+                        crate::prefs::set_beacon_site(self.site_text.trim());
+                    }
+                    match self.site() {
+                        Some(_) => {
+                            ui.checkbox(&mut self.show_all, "below the horizon too");
+                        }
+                        None if !self.site_text.trim().is_empty() => {
+                            ui.colored_label(Color32::from_rgb(240, 120, 80), "not a lat, lon");
+                        }
+                        None => {}
+                    }
+                });
                 ui.separator();
                 let want = self.filter.to_lowercase();
+                let site = self.site();
+                let shown: Vec<&Satellite> = catalogue()
+                    .iter()
+                    .filter(|s| self.show_all || s.visible(site))
+                    .collect();
+                if let Some((lat, lon)) = site {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} of {} satellites above the horizon from {lat:.2}, {lon:.2}",
+                            catalogue().iter().filter(|s| s.visible(site)).count(),
+                            catalogue().len()
+                        ))
+                        .weak(),
+                    );
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for s in catalogue() {
+                    for s in shown {
                         if !want.is_empty()
                             && !s.title().to_lowercase().contains(&want)
                             && !s.aliases.iter().any(|a| a.to_lowercase().contains(&want))
@@ -492,6 +625,12 @@ impl BeaconWindow {
                                 egui::Label::new(RichText::new(s.title()).strong()).truncate(),
                             )
                             .on_hover_text(tip);
+                            if let Some((lat, lon)) = site {
+                                let el = elevation(lat, lon, s.position_e);
+                                let text = RichText::new(format!("el {el:.0}°"));
+                                ui.label(if el < 0.0 { text.weak() } else { text })
+                                    .on_hover_text("Elevation from the dish's site");
+                            }
                             if s.confirmed {
                                 ui.colored_label(Color32::from_rgb(110, 220, 110), "operator");
                             } else {
@@ -552,12 +691,41 @@ mod tests {
     }
 
     #[test]
+    fn west_positions_sites_and_elevations() {
+        assert_eq!(position_text(-30.0), "30.0°W");
+        assert_eq!(position_text(166.0), "166.0°E");
+        assert!((lon_gap(179.5, -179.8) - 0.7).abs() < 1e-9);
+        // Straight overhead on the equator: 90°; 81.3° of longitude away,
+        // the horizon (arccos Re/r).
+        assert!((elevation(0.0, 10.0, 10.0) - 90.0).abs() < 1e-6);
+        assert!(elevation(0.0, 0.0, 81.0) > 0.0);
+        assert!(elevation(0.0, 0.0, 82.0) < 0.0);
+        // Brisbane to Intelsat 19 at 166°E: cos γ = cos 27.47°·cos 12.97°
+        // = 0.8646, so el = atan((0.8646 − 0.1513) / 0.5024) = 54.8°.
+        let el = elevation(-27.47, 153.03, 166.0);
+        assert!((el - 54.8).abs() < 0.1, "{el}");
+        assert_eq!(parse_site("-27.47, 153.03"), Some((-27.47, 153.03)));
+        assert_eq!(parse_site("27.47S 153.03E"), Some((-27.47, 153.03)));
+        assert_eq!(parse_site("51.5N, 0.12W"), Some((51.5, -0.12)));
+        assert_eq!(parse_site("Brisbane"), None);
+        assert_eq!(parse_site("95, 10"), None);
+        // "every satellite" from Brisbane leaves out the far side.
+        let site = Some((-27.47, 153.03));
+        let list = catalogue();
+        assert!(
+            marks(ALL, "", site)
+                .iter()
+                .all(|m| list[m.sat].visible(site))
+        );
+    }
+
+    #[test]
     fn the_embedded_list_parses() {
         // Every row of the file parses into a satellite in the arc, every
         // beacon in the Ku downlink band.
         let list = catalogue();
         assert!(list.len() > 40, "{} satellites", list.len());
-        assert!(list.iter().all(|s| (110.0..=180.0).contains(&s.position_e)));
+        assert!(list.iter().all(|s| (-180.0..=180.0).contains(&s.position_e)));
         assert!(
             list.iter()
                 .flat_map(|s| &s.beacons)
@@ -579,15 +747,15 @@ mod tests {
         assert!(is19[0].beacons.iter().any(|b| b.mhz == 12253.5));
         assert_eq!(guess("IS-19").len(), 1);
         assert!(guess("166E").iter().any(|s| s.name == "Intelsat 19"));
-        let m = marks("auto", "Intelsat 19");
+        let m = marks("auto", "Intelsat 19", None);
         assert!(m.iter().any(|m| (m.rf_hz - 12_253.5e6).abs() < 1.0));
         assert!(m.iter().all(|m| m.label.starts_with("beacon Intelsat 19")));
-        assert!(marks("none", "Intelsat 19").is_empty());
+        assert!(marks("none", "Intelsat 19", None).is_empty());
     }
 
     #[test]
     fn all_marks_every_satellite_once_a_frequency() {
-        let all = marks(ALL, "");
+        let all = marks(ALL, "", None);
         let list = catalogue();
         // Every satellite with a beacon is marked…
         for (i, s) in list.iter().enumerate() {
@@ -665,7 +833,7 @@ mod tests {
         // 7), not JSAT-136E's 12250.0, though that is within reach too.
         let (n, span, centre) = (4096, 2e6, 12_250.0e6);
         let s = spectrum(n, span, -60.0, &[(98.6e3, 25.0)]);
-        let scene = Scene::new(ALL, "", centre, &s, span);
+        let scene = Scene::new(ALL, "", None, centre, &s, span);
         let list = catalogue();
         let heard = |name: &str, mhz: f64| {
             scene
