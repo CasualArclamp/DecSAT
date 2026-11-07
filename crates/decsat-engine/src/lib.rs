@@ -31,10 +31,10 @@ pub mod wireshark;
 
 pub use carriers::{Carrier, detect_carriers};
 pub use cid::CidView;
-pub use decsat_modem::dvbs::qef_es_n0_db as dvbs_qef_es_n0_db;
-pub use decsat_modem::e1::Coding as E1Coding;
 /// The Intelsat 19 DAMA outbound's receiver and what it shows.
 pub use decsat_bgan as bgan;
+pub use decsat_modem::dvbs::qef_es_n0_db as dvbs_qef_es_n0_db;
+pub use decsat_modem::e1::Coding as E1Coding;
 pub use decsat_modem::is19;
 pub use decsat_modem::tdm257::{
     ChannelState as TdmChannelState, TdmStats, VoiceView as TdmVoiceView,

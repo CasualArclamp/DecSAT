@@ -52,12 +52,27 @@ impl Resampler {
         let mut table = vec![0.0f32; n];
         for (i, t) in table.iter_mut().enumerate() {
             let x = i as f64 / TAB as f64;
-            let s = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
-            let w = if x >= half { 0.0 } else { 0.5 * (1.0 + (PI * x / half).cos()) }; // Hann
+            let s = if x == 0.0 {
+                2.0 * fc
+            } else {
+                (2.0 * PI * fc * x).sin() / (PI * x)
+            };
+            let w = if x >= half {
+                0.0
+            } else {
+                0.5 * (1.0 + (PI * x / half).cos())
+            }; // Hann
             *t = (s * w) as f32;
         }
         // start far enough in that the first kernel has its history
-        Resampler { ratio, half, table, hist: Vec::new(), base: 0, pos: half.ceil() + 1.0 }
+        Resampler {
+            ratio,
+            half,
+            table,
+            hist: Vec::new(),
+            base: 0,
+            pos: half.ceil() + 1.0,
+        }
     }
 
     #[inline]
@@ -112,7 +127,10 @@ struct Fir {
 impl Fir {
     fn new(taps: Vec<f32>) -> Self {
         let n = taps.len();
-        Fir { taps, line: vec![C32::new(0.0, 0.0); n - 1] }
+        Fir {
+            taps,
+            line: vec![C32::new(0.0, 0.0); n - 1],
+        }
     }
     /// Filter `x` in place semantics: returns outputs aligned so the group
     /// delay (taps/2) is removed, i.e. output i corresponds to input i - (taps/2).
@@ -281,7 +299,9 @@ mod tests {
 
     fn run(sps_gen: usize, imp: Impair, nsym: usize) -> (f64, f64) {
         let mut rng = Rng(0x1234_5678_9abc_def1);
-        let syms: Vec<C32> = (0..nsym).map(|_| qam16()[(rng.next_u32() & 15) as usize]).collect();
+        let syms: Vec<C32> = (0..nsym)
+            .map(|_| qam16()[(rng.next_u32() & 15) as usize])
+            .collect();
         let iq = to_iq(&syms, sps_gen, &imp, &mut rng);
         let mut fe = FrontEnd::new(spec::F80T45X8B.rs * sps_gen as f64);
         let mut out = Vec::new();
@@ -296,7 +316,14 @@ mod tests {
     #[test]
     fn timing_loop_locks_clean() {
         for timing in [0.0, 0.3, 0.7] {
-            let (m, _) = run(4, Impair { timing, ..Default::default() }, 60_000);
+            let (m, _) = run(
+                4,
+                Impair {
+                    timing,
+                    ..Default::default()
+                },
+                60_000,
+            );
             assert!(m < 1.40, "timing {timing}: m4 = {m}");
         }
     }
@@ -304,14 +331,30 @@ mod tests {
     #[test]
     fn timing_loop_tracks_clock_error_and_resamples() {
         // 100 ppm fast, input at 8 samples per symbol (exercises the resampler)
-        let (m, ppm) = run(8, Impair { clock_ppm: 100.0, timing: 0.4, ..Default::default() }, 200_000);
+        let (m, ppm) = run(
+            8,
+            Impair {
+                clock_ppm: 100.0,
+                timing: 0.4,
+                ..Default::default()
+            },
+            200_000,
+        );
         assert!(m < 1.42, "m4 = {m}");
         assert!((ppm - 100.0).abs() < 40.0, "clock estimate {ppm}");
     }
 
     #[test]
     fn timing_loop_with_noise() {
-        let (m, _) = run(4, Impair { esn0_db: Some(12.0), timing: 0.2, ..Default::default() }, 100_000);
+        let (m, _) = run(
+            4,
+            Impair {
+                esn0_db: Some(12.0),
+                timing: 0.2,
+                ..Default::default()
+            },
+            100_000,
+        );
         // noise raises M4 a little (calibrated: ~1.45 at 12 dB), nowhere near 2.0
         assert!(m < 1.55, "m4 = {m}");
     }

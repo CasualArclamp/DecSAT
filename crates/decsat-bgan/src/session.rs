@@ -175,7 +175,9 @@ impl BganSession {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                let p = self.record_dir.join(format!("bgan-{}-{secs}_ipv4.pcap", self.tag));
+                let p = self
+                    .record_dir
+                    .join(format!("bgan-{}-{secs}_ipv4.pcap", self.tag));
                 let _ = std::fs::create_dir_all(&self.record_dir);
                 if let Ok(f) = File::create(&p) {
                     self.pcap = PcapWriter::new(BufWriter::new(f), DLT_RAW).ok();
@@ -199,7 +201,9 @@ impl BganSession {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let p = self.record_dir.join(format!("bgan-{}-{secs}_payload.bin", self.tag));
+            let p = self
+                .record_dir
+                .join(format!("bgan-{}-{secs}_payload.bin", self.tag));
             let _ = std::fs::create_dir_all(&self.record_dir);
             match File::create(&p) {
                 Ok(f) => self.payload = Some((p, BufWriter::new(f), 0)),

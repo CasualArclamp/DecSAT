@@ -54,7 +54,10 @@ const PAR: [[u8; 2]; 16] = TRELLIS.1;
 /// One SRCC step: (new state, parity).
 #[inline]
 fn step(state: u8, u: u8) -> (u8, u8) {
-    (NXT[state as usize][u as usize], PAR[state as usize][u as usize])
+    (
+        NXT[state as usize][u as usize],
+        PAR[state as usize][u as usize],
+    )
 }
 
 /// Encode `bits` from `state`; returns (parity, end state).

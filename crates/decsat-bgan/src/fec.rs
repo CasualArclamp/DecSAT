@@ -51,7 +51,13 @@ pub fn demap(sym: &[C32], n0: f32, out: &mut Vec<f32>) {
 
 /// Scatter slot LLRs into (Lsys, Lp, Lq), each length DF; punctured positions
 /// stay 0, the neutral LLR.
-pub fn deinterleave(slot_llr: &[f32], t: &LevelTables, ls: &mut Vec<f32>, lp: &mut Vec<f32>, lq: &mut Vec<f32>) {
+pub fn deinterleave(
+    slot_llr: &[f32],
+    t: &LevelTables,
+    ls: &mut Vec<f32>,
+    lp: &mut Vec<f32>,
+    lq: &mut Vec<f32>,
+) {
     for v in [&mut *ls, &mut *lp, &mut *lq] {
         v.clear();
         v.resize(t.df, 0.0);
@@ -114,10 +120,24 @@ impl BlockScratch {
 /// [`LR_MARGIN_NATS`]. Necessary but not sufficient, so it is paired with the
 /// parity-agreement threshold ([`ACCEPT_AGREEMENT`]); together they gave zero
 /// false accepts over 37281 impossible tries in DecBGAN.
-pub fn decode_block(sc: &mut BlockScratch, sym: &[C32], t: &LevelTables, niter: usize) -> BlockDecode {
+pub fn decode_block(
+    sc: &mut BlockScratch,
+    sym: &[C32],
+    t: &LevelTables,
+    niter: usize,
+) -> BlockDecode {
     demap(sym, N0, &mut sc.llr);
     deinterleave(&sc.llr, t, &mut sc.ls, &mut sc.lp, &mut sc.lq);
-    let iterations = sc.turbo.decode(&sc.ls, &sc.lp, &sc.lq, &t.perm, niter, 0.75, &mut sc.bits, &mut sc.post);
+    let iterations = sc.turbo.decode(
+        &sc.ls,
+        &sc.lp,
+        &sc.lq,
+        &t.perm,
+        niter,
+        0.75,
+        &mut sc.bits,
+        &mut sc.post,
+    );
     let bits = sc.bits[..t.d].to_vec();
 
     let (df2, p2, q2) = turbo_encode(&bits, &t.perm);
@@ -143,8 +163,17 @@ pub fn decode_block(sc: &mut BlockScratch, sym: &[C32], t: &LevelTables, niter: 
     }
     let ll_rand = sc.llr.len() as f64 * 0.5f64.ln();
     let lr_ok = flush_ok && (ll_ok - ll_rand) > LR_MARGIN_NATS;
-    let agreement = if par_total > 0 { par_match as f32 / par_total as f32 } else { 0.0 };
-    BlockDecode { bits, agreement, lr_ok, iterations }
+    let agreement = if par_total > 0 {
+        par_match as f32 / par_total as f32
+    } else {
+        0.0
+    };
+    BlockDecode {
+        bits,
+        agreement,
+        lr_ok,
+        iterations,
+    }
 }
 
 /// Descramble (clause 5.3.7) and pack information bits MSB first into bytes.
@@ -169,6 +198,9 @@ mod tests {
         // and 0101: hi bits 0 (positive LLR), mag bits 1 (negative)
         let s = frame::qam16()[0b0101];
         demap(&[s], 0.5, &mut out);
-        assert!(out[0] > 0.0 && out[1] < 0.0 && out[2] > 0.0 && out[3] < 0.0, "{out:?}");
+        assert!(
+            out[0] > 0.0 && out[1] < 0.0 && out[2] > 0.0 && out[3] < 0.0,
+            "{out:?}"
+        );
     }
 }

@@ -89,8 +89,12 @@ pub fn parse_tci(text: &str) -> Result<Vec<u16>, TableError> {
         let (Some(a), Some(b)) = (it.next(), it.next()) else {
             continue;
         };
-        let q: usize = a.parse().map_err(|_| TableError::Parse(format!("bad row {s:?}")))?;
-        let d: u16 = b.parse().map_err(|_| TableError::Parse(format!("bad row {s:?}")))?;
+        let q: usize = a
+            .parse()
+            .map_err(|_| TableError::Parse(format!("bad row {s:?}")))?;
+        let d: u16 = b
+            .parse()
+            .map_err(|_| TableError::Parse(format!("bad row {s:?}")))?;
         if q != perm.len() {
             return Err(TableError::Parse("Q-bit column is not 0..N-1".into()));
         }
@@ -100,7 +104,9 @@ pub fn parse_tci(text: &str) -> Result<Vec<u16>, TableError> {
     for &p in &perm {
         let p = p as usize;
         if p >= seen.len() || seen[p] {
-            return Err(TableError::Parse("data-bit column is not a permutation".into()));
+            return Err(TableError::Parse(
+                "data-bit column is not a permutation".into(),
+            ));
         }
         seen[p] = true;
     }
@@ -114,8 +120,7 @@ pub fn parse_cipm(text: &str) -> Result<(usize, usize, usize, Vec<u32>), TableEr
         for line in text.lines().take(8) {
             let mut rest = line;
             while let Some(i) = rest.find(name) {
-                let pre_ok = i == 0
-                    || !rest.as_bytes()[i - 1].is_ascii_alphanumeric();
+                let pre_ok = i == 0 || !rest.as_bytes()[i - 1].is_ascii_alphanumeric();
                 let after = &rest[i + name.len()..];
                 if pre_ok && after.trim_start().starts_with('=') {
                     let v: String = after
@@ -203,7 +208,11 @@ pub fn build_level(level: &str, tci: &str, cipm: &str) -> Result<LevelTables, Ta
 /// Does `root` hold both Annex C folders (directly, or under `work/`, `annex/`)?
 fn dirs_in(root: &Path) -> Option<(PathBuf, PathBuf)> {
     for sub in ["", "work", "annex"] {
-        let base = if sub.is_empty() { root.to_path_buf() } else { root.join(sub) };
+        let base = if sub.is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(sub)
+        };
         let (a, b) = (base.join(ANNEX_C1), base.join(ANNEX_C2));
         if a.is_dir() && b.is_dir() {
             return Some((a, b));
@@ -270,7 +279,8 @@ pub fn tables(level: &str) -> Result<Arc<LevelTables>, TableError> {
     let (c1, c2) = locate()?;
     let fl = file_level(level);
     let rd = |p: PathBuf| {
-        std::fs::read_to_string(&p).map_err(|e| TableError::NotFound(format!("{}: {e}", p.display())))
+        std::fs::read_to_string(&p)
+            .map_err(|e| TableError::NotFound(format!("{}: {e}", p.display())))
     };
     let tci = rd(c1.join(format!("F80T45X{fl}_TCI.TXT")))?;
     let cipm = rd(c2.join(format!("F80T45X{fl}_CIPM.TXT")))?;

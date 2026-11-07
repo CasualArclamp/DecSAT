@@ -9,5 +9,5 @@ pub mod rx;
 pub mod session;
 pub mod spec;
 pub mod tables;
-pub mod tx;
 pub mod turbo;
+pub mod tx;

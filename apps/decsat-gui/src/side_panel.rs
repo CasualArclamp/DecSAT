@@ -6374,7 +6374,10 @@ fn constellation_qam16(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
         .collect();
     // levels +-0.5 and +-1.5 over sqrt(2.5) (TS 102 744-2-1 Table 5.3)
     let lv = [-1.5f64, -0.5, 0.5, 1.5].map(|x| x / 2.5f64.sqrt());
-    let ideal: PlotPoints = lv.iter().flat_map(|&i| lv.iter().map(move |&q| [i, q])).collect();
+    let ideal: PlotPoints = lv
+        .iter()
+        .flat_map(|&i| lv.iter().map(move |&q| [i, q]))
+        .collect();
     Plot::new("constellation_qam16")
         .width(side)
         .height(side)

@@ -34,7 +34,8 @@ pub fn qam16() -> &'static [C32; 16] {
 /// Slots `[I1, I0, Q1, Q0]` (CIPM order) to a symbol: I1->b3, I0->b2, Q1->b1, Q0->b0.
 #[inline]
 pub fn bits4_to_symbol(s: [u8; 4]) -> C32 {
-    qam16()[((s[0] as usize) << 3) | ((s[1] as usize) << 2) | ((s[2] as usize) << 1) | s[3] as usize]
+    qam16()
+        [((s[0] as usize) << 3) | ((s[1] as usize) << 2) | ((s[2] as usize) << 1) | s[3] as usize]
 }
 
 /// Scrambling sequence, clause 5.3.7: 1 + X + X^15, reset per FEC block, so
@@ -46,7 +47,9 @@ pub fn pn_sequence(n: usize) -> &'static [u8] {
     static S: OnceLock<Vec<u8>> = OnceLock::new();
     let s = S.get_or_init(|| {
         const MAX: usize = 5200;
-        let mut seq: Vec<u8> = (0..15).map(|i| ((spec::SCRAMBLER_INIT >> i) & 1) as u8).collect();
+        let mut seq: Vec<u8> = (0..15)
+            .map(|i| ((spec::SCRAMBLER_INIT >> i) & 1) as u8)
+            .collect();
         for _ in 0..MAX {
             let k = seq.len();
             seq.push(seq[k - 1] ^ seq[k - 15]);

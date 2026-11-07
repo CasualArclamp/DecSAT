@@ -14,7 +14,9 @@ use std::io::Write;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let out = a.get(1).expect("usage: bgan_tx OUT.cf32 [seconds] [esn0_db] [cfo_hz] [levels] [sps]");
+    let out = a
+        .get(1)
+        .expect("usage: bgan_tx OUT.cf32 [seconds] [esn0_db] [cfo_hz] [levels] [sps]");
     let secs: f64 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
     let esn0: f64 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(14.0);
     let cfo: f64 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0);
@@ -34,12 +36,22 @@ fn main() {
         let pay = tx::random_payloads(&t, &b, &mut rng);
         syms.extend(tx::make_frame(&pay, &t, lv, &b));
     }
-    let imp = Impair { esn0_db: Some(esn0), cfo_hz: cfo, clock_ppm: 12.0, timing: 0.37 };
+    let imp = Impair {
+        esn0_db: Some(esn0),
+        cfo_hz: cfo,
+        clock_ppm: 12.0,
+        timing: 0.37,
+    };
     let iq = tx::to_iq(&syms, sps, &imp, &mut rng);
     let mut w = std::io::BufWriter::new(std::fs::File::create(out).expect("create"));
     for v in &iq {
         w.write_all(&v.re.to_le_bytes()).unwrap();
         w.write_all(&v.im.to_le_bytes()).unwrap();
     }
-    eprintln!("wrote {out}: {} frames, {} samples at {} S/s", nframes, iq.len(), b.rs * sps as f64);
+    eprintln!(
+        "wrote {out}: {} frames, {} samples at {} S/s",
+        nframes,
+        iq.len(),
+        b.rs * sps as f64
+    );
 }

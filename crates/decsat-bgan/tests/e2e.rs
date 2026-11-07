@@ -21,7 +21,13 @@ fn have_tables() -> bool {
 }
 
 /// Build `nframes` frames cycling through `levels`; returns (iq, payload set).
-fn make_signal(levels: &[&str], nframes: usize, sps: usize, imp: Impair, seed: u64) -> (Vec<C32>, HashSet<(usize, Vec<u8>)>) {
+fn make_signal(
+    levels: &[&str],
+    nframes: usize,
+    sps: usize,
+    imp: Impair,
+    seed: u64,
+) -> (Vec<C32>, HashSet<(usize, Vec<u8>)>) {
     let b = spec::F80T45X8B;
     let mut rng = Rng(seed);
     let mut syms = Vec::new();
@@ -32,7 +38,10 @@ fn make_signal(levels: &[&str], nframes: usize, sps: usize, imp: Impair, seed: u
         let pay = tx::random_payloads(&t, &b, &mut rng);
         syms.extend(tx::make_frame(&pay, &t, lv, &b));
         for (i, p) in pay.iter().enumerate() {
-            let bytes: Vec<u8> = p.chunks(8).map(|c| c.iter().fold(0u8, |a, &x| (a << 1) | x)).collect();
+            let bytes: Vec<u8> = p
+                .chunks(8)
+                .map(|c| c.iter().fold(0u8, |a, &x| (a << 1) | x))
+                .collect();
             want.insert((i, bytes));
         }
     }
@@ -64,7 +73,10 @@ fn run(levels: &[&str], nframes: usize, sps: usize, imp: Impair, min_frac: f64) 
     assert_eq!(bad, 0, "accepted blocks that do not match what was sent");
     // frames lost to acquisition (~11 of them) are not expected back
     let expected = ((nframes.saturating_sub(12)) * 8) as f64;
-    assert!(ok as f64 >= min_frac * expected, "only {ok} of ~{expected} blocks");
+    assert!(
+        ok as f64 >= min_frac * expected,
+        "only {ok} of ~{expected} blocks"
+    );
 }
 
 #[test]
@@ -80,7 +92,12 @@ fn offsets_clock_and_noise() {
     if !have_tables() {
         return;
     }
-    let imp = Impair { esn0_db: Some(14.0), cfo_hz: 3000.0, clock_ppm: 30.0, timing: 0.3 };
+    let imp = Impair {
+        esn0_db: Some(14.0),
+        cfo_hz: 3000.0,
+        clock_ppm: 30.0,
+        timing: 0.3,
+    };
     run(&["L3", "L2", "L1", "R"], 40, 4, imp, 0.9);
 }
 
@@ -89,7 +106,12 @@ fn resamples_from_a_higher_rate() {
     if !have_tables() {
         return;
     }
-    let imp = Impair { esn0_db: Some(16.0), cfo_hz: -1500.0, timing: 0.6, ..Default::default() };
+    let imp = Impair {
+        esn0_db: Some(16.0),
+        cfo_hz: -1500.0,
+        timing: 0.6,
+        ..Default::default()
+    };
     run(&["H1", "H3"], 36, 8, imp, 0.9);
 }
 
@@ -98,7 +120,11 @@ fn low_snr_lowest_rate() {
     if !have_tables() {
         return;
     }
-    let imp = Impair { esn0_db: Some(6.0), cfo_hz: 800.0, ..Default::default() };
+    let imp = Impair {
+        esn0_db: Some(6.0),
+        cfo_hz: 800.0,
+        ..Default::default()
+    };
     run(&["L3"], 44, 4, imp, 0.6);
 }
 
@@ -123,7 +149,11 @@ fn survives_dropped_samples() {
     if !have_tables() {
         return;
     }
-    let imp = Impair { esn0_db: Some(15.0), cfo_hz: 500.0, ..Default::default() };
+    let imp = Impair {
+        esn0_db: Some(15.0),
+        cfo_hz: 500.0,
+        ..Default::default()
+    };
     let (mut iq, want) = make_signal(&["R"], 48, 4, imp, 0xD40_0001);
     // drop 100 samples (25 symbols) at 40% and 130 at 70%
     let n = iq.len();

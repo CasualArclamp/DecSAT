@@ -7,9 +7,9 @@ pub mod files;
 pub mod findings;
 pub mod inflate;
 pub mod pcap;
+#[cfg(test)]
+mod realdata;
 pub mod rtp;
 pub mod sip;
 pub mod stream;
 pub mod terminals;
-#[cfg(test)]
-mod realdata;

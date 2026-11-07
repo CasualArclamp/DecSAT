@@ -26,7 +26,10 @@ pub fn show(ui: &mut Ui, v: &BganView, id: u32) {
     egui::Grid::new(("bgan", id)).num_columns(2).show(ui, |ui| {
         ui.label("Frame sync");
         if r.locked {
-            ui.colored_label(good, format!("locked · UW {} · {:.1}× floor", r.uw_level, r.uw_ratio));
+            ui.colored_label(
+                good,
+                format!("locked · UW {} · {:.1}× floor", r.uw_level, r.uw_ratio),
+            );
         } else {
             ui.colored_label(wait, "searching…");
         }
@@ -41,7 +44,13 @@ pub fn show(ui: &mut Ui, v: &BganView, id: u32) {
             ui.label("Blocks");
             let pct = 100.0 * r.blocks_ok as f32 / r.blocks_total.max(1) as f32;
             ui.colored_label(
-                if pct > 60.0 { good } else if pct > 10.0 { wait } else { bad },
+                if pct > 60.0 {
+                    good
+                } else if pct > 10.0 {
+                    wait
+                } else {
+                    bad
+                },
                 format!("{} of {} decoded ({pct:.0} %)", r.blocks_ok, r.blocks_total),
             );
             ui.end_row();
@@ -49,10 +58,19 @@ pub fn show(ui: &mut Ui, v: &BganView, id: u32) {
             ui.label(format::bytes(r.payload_bytes));
             ui.end_row();
             ui.label("Carrier");
-            ui.label(format!("{:+.0} Hz · clock {:+.1} ppm", r.carrier_hz, r.clock_ppm));
+            ui.label(format!(
+                "{:+.0} Hz · clock {:+.1} ppm",
+                r.carrier_hz, r.clock_ppm
+            ));
             ui.end_row();
             ui.label("CPU");
-            let c = if r.load > 0.9 { bad } else if r.load > 0.6 { wait } else { good };
+            let c = if r.load > 0.9 {
+                bad
+            } else if r.load > 0.6 {
+                wait
+            } else {
+                good
+            };
             ui.colored_label(
                 c,
                 format!(

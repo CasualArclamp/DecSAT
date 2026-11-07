@@ -234,7 +234,9 @@ impl Templates {
 
     /// Direct form on symbols (used for the noise-floor probe).
     fn corr(&self, level: usize, s: &[C32], pos: usize) -> f32 {
-        let d: Vec<C32> = (0..UWLEN - 1).map(|k| s[pos + k + 1] * s[pos + k].conj()).collect();
+        let d: Vec<C32> = (0..UWLEN - 1)
+            .map(|k| s[pos + k + 1] * s[pos + k].conj())
+            .collect();
         self.corr_d(level, &d, 0)
     }
 
@@ -423,7 +425,11 @@ impl BganRx {
             (mag[(k + 1) % n].max(1e-30) as f64).ln(),
         );
         let den = a - 2.0 * b + c;
-        let d = if den.abs() > 1e-12 { (0.5 * (a - c) / den).clamp(-0.5, 0.5) } else { 0.0 };
+        let d = if den.abs() > 1e-12 {
+            (0.5 * (a - c) / den).clamp(-0.5, 0.5)
+        } else {
+            0.0
+        };
         let mut kk = k as f64 + d;
         if kk > n as f64 / 2.0 {
             kk -= n as f64;
@@ -502,8 +508,15 @@ impl BganRx {
         // real carrier puts its UW in every frame, far above one frame's
         // noise mean (mean / nfr).
         let per_frame_mean = mean / nfr as f64;
-        let frames_hit = per_frame.iter().filter(|pf| pf[j] as f64 > 4.0 * per_frame_mean).count();
-        let psr = if frames_hit * 10 >= nfr * 6 { pk / mean } else { 0.0 };
+        let frames_hit = per_frame
+            .iter()
+            .filter(|pf| pf[j] as f64 > 4.0 * per_frame_mean)
+            .count();
+        let psr = if frames_hit * 10 >= nfr * 6 {
+            pk / mean
+        } else {
+            0.0
+        };
         let pos = j;
         if psr < ACQ_PSR {
             // nothing here: slide half a buffer and look again
@@ -524,7 +537,11 @@ impl BganRx {
         }
         let _ = nbuf;
         self.resid_hz = 0.0;
-        self.state = State::Locked { next: self.base + pos as u64, frame_no: 0, bad: 0 };
+        self.state = State::Locked {
+            next: self.base + pos as u64,
+            frame_no: 0,
+            bad: 0,
+        };
         self.status.locked = true;
         true
     }
@@ -532,13 +549,24 @@ impl BganRx {
     // --- tracking and decoding -------------------------------------------
 
     fn try_frame(&mut self) -> bool {
-        let State::Locked { next, frame_no, bad } = self.state else { return false };
+        let State::Locked {
+            next,
+            frame_no,
+            bad,
+        } = self.state
+        else {
+            return false;
+        };
         // symbols needed: window before, the frame, window after
         let rel = next as i64 - self.base as i64;
         let need = rel + WIN + MOS as i64 + UWLEN as i64 + 8;
         if rel < 0 {
             // behind the buffer start (we were starved): skip a frame
-            self.state = State::Locked { next: next + MOS as u64, frame_no, bad };
+            self.state = State::Locked {
+                next: next + MOS as u64,
+                frame_no,
+                bad,
+            };
             return true;
         }
         if (self.buf.len() as i64) < need {
@@ -563,7 +591,11 @@ impl BganRx {
             }
             if cnt > 0 { sum / cnt as f32 } else { f32::NAN }
         };
-        let ratio = if floor.is_finite() && floor > 0.0 { metric / floor } else { 0.0 };
+        let ratio = if floor.is_finite() && floor > 0.0 {
+            metric / floor
+        } else {
+            0.0
+        };
 
         let abs_pos = self.base + pos as u64;
         let mut fr: Vec<C32> = self.buf[pos..pos + MOS].to_vec();
@@ -602,7 +634,11 @@ impl BganRx {
             self.status.locked = false;
             self.buf.clear();
         } else {
-            self.state = State::Locked { next, frame_no: frame_no + 1, bad };
+            self.state = State::Locked {
+                next,
+                frame_no: frame_no + 1,
+                bad,
+            };
         }
         true
     }
@@ -667,7 +703,9 @@ impl BganRx {
         }
         // least-squares line through (gi*137 + 136, ph)
         let n = GROUPS_PER_BLOCK as f64;
-        let xs: Vec<f64> = (0..GROUPS_PER_BLOCK).map(|g| (g * GROUP + DATA_PER_GROUP) as f64).collect();
+        let xs: Vec<f64> = (0..GROUPS_PER_BLOCK)
+            .map(|g| (g * GROUP + DATA_PER_GROUP) as f64)
+            .collect();
         let (sx, sy) = (xs.iter().sum::<f64>(), ph.iter().sum::<f64>());
         let sxx: f64 = xs.iter().map(|x| x * x).sum();
         let sxy: f64 = xs.iter().zip(&ph).map(|(x, y)| x * y).sum();
@@ -687,7 +725,9 @@ impl BganRx {
     }
 
     fn decode_frame(&mut self, fr: &[C32], uw_level: usize, uw_ratio: f32, index: u64) -> FrameOut {
-        let blocks_sym: Vec<Vec<C32>> = (0..F80T45X8B.nblocks).map(|b| Self::prepare(fr, b)).collect();
+        let blocks_sym: Vec<Vec<C32>> = (0..F80T45X8B.nblocks)
+            .map(|b| Self::prepare(fr, b))
+            .collect();
 
         // Es/N0 from the data symbols' kurtosis (M4/M2^2 inversion, DecBGAN
         // `esn0_from_m4`, calibrated +-0.25 dB over 8..20 dB).
@@ -701,7 +741,7 @@ impl BganRx {
             }
         }
         let esn0 = esn0_from_m4((m4 / cnt as f64) / (m2 / cnt as f64).powi(2));
-                // Rolling cloud of the last ~4000 data symbols (every 5th of all
+        // Rolling cloud of the last ~4000 data symbols (every 5th of all
         // eight blocks), so the 16 clusters fill in at a glance.
         for blk in &blocks_sym {
             self.constellation.extend(blk.iter().step_by(5).copied());
@@ -744,8 +784,12 @@ impl BganRx {
             Some(b) => Some(b),
             // UW mis-picked? try the rest, in learned order
             None if !tight => {
-                let order: Vec<usize> =
-                    self.predictor.order(0, None).into_iter().filter(|&l| l != uw_level).collect();
+                let order: Vec<usize> = self
+                    .predictor
+                    .order(0, None)
+                    .into_iter()
+                    .filter(|&l| l != uw_level)
+                    .collect();
                 try_levels(&mut self.scratch0, &blocks_sym[0], &order, tight)
             }
             None => None,
@@ -818,7 +862,9 @@ fn try_levels(
     tight: bool,
 ) -> Option<(usize, fec::BlockDecode)> {
     for (rank, &lv) in order.iter().enumerate() {
-        let Ok(t) = tables::tables(LEVELS[lv]) else { continue };
+        let Ok(t) = tables::tables(LEVELS[lv]) else {
+            continue;
+        };
         if rank == 0 {
             // the expected level: decode it properly straight away
             let d = fec::decode_block(sc, sym, &t, 8);

@@ -85,7 +85,9 @@ impl Rng {
 
 /// Random payloads for one frame.
 pub fn random_payloads(t: &LevelTables, b: &Bearer, rng: &mut Rng) -> Vec<Vec<u8>> {
-    (0..b.nblocks).map(|_| (0..t.d).map(|_| rng.bit()).collect()).collect()
+    (0..b.nblocks)
+        .map(|_| (0..t.d).map(|_| rng.bit()).collect())
+        .collect()
 }
 
 /// Impairments for [`to_iq`].
@@ -103,7 +105,12 @@ pub struct Impair {
 
 impl Default for Impair {
     fn default() -> Self {
-        Impair { esn0_db: None, cfo_hz: 0.0, clock_ppm: 0.0, timing: 0.0 }
+        Impair {
+            esn0_db: None,
+            cfo_hz: 0.0,
+            clock_ppm: 0.0,
+            timing: 0.0,
+        }
     }
 }
 
