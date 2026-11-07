@@ -2611,9 +2611,9 @@ impl Worker {
             },
             Decoder::Bgan(b) => {
                 let v = b.view();
-                st.message = if self.ddc.out_rate() < 215_000.0 {
+                st.message = if self.ddc.out_rate() < 190_000.0 {
                     format!(
-                        "VFO too narrow ({:.0} kHz of IQ): the BGAN carrier is 189 kHz wide, widen it to 230 kHz or more",
+                        "VFO too narrow ({:.0} kHz of IQ): the BGAN carrier is 189 kHz wide, widen it to 200 kHz or more",
                         self.ddc.out_rate() / 1e3
                     )
                 } else {

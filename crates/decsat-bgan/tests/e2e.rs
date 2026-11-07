@@ -177,3 +177,41 @@ fn survives_dropped_samples() {
     assert_eq!(bad, 0);
     assert!(ok >= (48 - 12 - 4) * 8, "only {ok} blocks");
 }
+
+/// A slip bigger than the tracking window (here 700 symbols) must not leave
+/// the receiver parked on a noise sidelobe: it has to notice nothing decodes
+/// and acquire again (this happened on a real capture after ~2 minutes).
+#[test]
+fn reacquires_after_a_big_slip() {
+    if !have_tables() {
+        return;
+    }
+    let imp = Impair {
+        esn0_db: Some(15.0),
+        cfo_hz: 300.0,
+        ..Default::default()
+    };
+    let (mut iq, want) = make_signal(&["R"], 100, 4, imp, 0x5117_0001);
+    let n = iq.len();
+    iq.drain(n / 3..n / 3 + 2800);
+    let mut rx = BganRx::new(604_800.0);
+    let (mut ok_after, mut bad) = (0, 0);
+    let mut fed = 0usize;
+    for ch in iq.chunks(8192) {
+        rx.push(ch);
+        fed += ch.len();
+        for fr in rx.take_frames() {
+            for b in fr.blocks {
+                if want.contains(&(b.block as usize, b.payload.clone())) {
+                    if fed > n / 3 + 604_800 * 4 {
+                        ok_after += 1;
+                    }
+                } else {
+                    bad += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(bad, 0);
+    assert!(ok_after > 100, "only {ok_after} blocks after the slip");
+}

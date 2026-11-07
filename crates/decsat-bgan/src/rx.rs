@@ -41,7 +41,7 @@ const ACQ_N: usize = 1 << 17;
 /// Folded-UW peak-to-sidelobe ratio needed to call a lock.
 const ACQ_PSR: f64 = 7.0;
 /// Frames without a decoded block (and a weak UW) before searching again.
-const LOSS_FRAMES: u32 = 40;
+const LOSS_FRAMES: u32 = 25;
 
 /// One accepted FEC block.
 #[derive(Debug, Clone)]
@@ -105,7 +105,13 @@ struct Predictor {
 }
 
 impl Predictor {
-    fn order(&self, b: usize, hint: Option<usize>) -> Vec<usize> {
+    /// Candidate levels for block `b`: the hint, the last level seen there,
+    /// then the others by how often they have been seen. Only on an
+    /// `explore` frame (or while little has been learned) are levels never
+    /// seen at this block index tried too: a block that fails at its
+    /// expected level is usually just noisy, and ten blind turbo trials on
+    /// every noisy block is most of the receiver's CPU on a real capture.
+    fn order(&self, b: usize, hint: Option<usize>, explore: bool) -> Vec<usize> {
         let mut out: Vec<usize> = Vec::with_capacity(10);
         if let Some(h) = hint {
             out.push(h);
@@ -122,9 +128,12 @@ impl Predictor {
                 out.push(i);
             }
         }
-        for i in 0..10 {
-            if !out.contains(&i) {
-                out.push(i);
+        let learned: u32 = self.seen[b].iter().sum();
+        if explore || learned < 12 {
+            for i in 0..10 {
+                if !out.contains(&i) {
+                    out.push(i);
+                }
             }
         }
         out
@@ -618,7 +627,10 @@ impl BganRx {
         self.load += 0.1 * ((dt / 0.080) as f32 - self.load);
         self.status.decode_load = self.load;
 
-        let good = ok > 0 || ratio > 3.0;
+        // Lost = nothing decodes. (A UW-strength test alone is not enough: the best
+        // of ~13000 noise positions clears any small ratio, so a slipped tracker
+        // would otherwise sit on a sidelobe for ever.)
+        let good = ok > 0;
         let bad = if good { 0 } else { bad + 1 };
         self.frames.push(out);
         // advance
@@ -786,7 +798,7 @@ impl BganRx {
             None if !tight => {
                 let order: Vec<usize> = self
                     .predictor
-                    .order(0, None)
+                    .order(0, None, true)
                     .into_iter()
                     .filter(|&l| l != uw_level)
                     .collect();
@@ -806,7 +818,9 @@ impl BganRx {
             .map(|b| {
                 // Clause 5.7.16: with no AVP every block uses the UW's level.
                 let hint = Some(hints.and_then(|h| h[b]).unwrap_or(block0_level));
-                let mut o = self.predictor.order(b, hint);
+                // one frame in 16 per block index tries every level
+                let explore = (index as usize + b).is_multiple_of(16);
+                let mut o = self.predictor.order(b, hint, explore);
                 if tight {
                     o.truncate(2);
                 }
@@ -873,7 +887,7 @@ fn try_levels(
             }
             continue;
         }
-        let first = fec::decode_block(sc, sym, &t, if tight { 3 } else { 4 });
+        let first = fec::decode_block(sc, sym, &t, if tight { 2 } else { 3 });
         if first.accepted() {
             let full = fec::decode_block(sc, sym, &t, 8);
             return Some((lv, if full.accepted() { full } else { first }));
