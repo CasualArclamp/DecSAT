@@ -36,11 +36,11 @@ enum Play {
     StopRtl,
     #[cfg(all(windows, feature = "uhd"))]
     StartUhd,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
     StartPluto,
     #[cfg(all(windows, feature = "uhd"))]
     StopUhd,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
     StopPluto,
     #[cfg(feature = "hackrf")]
     StartRadio,
@@ -56,9 +56,9 @@ enum Play {
 
 impl App {
     /// Whether a radio other than the HackRF (UHD, Pluto, RTL-SDR) is the
-    /// selected source. Those backends are Windows-only and feature-gated, so
-    /// their `*_selected` fields exist only in such builds; elsewhere this is
-    /// always false.
+    /// selected source. Those backends are feature-gated (UHD and RTL-SDR
+    /// Windows-only too), so their `*_selected` fields exist only in such
+    /// builds; elsewhere this is always false.
     #[cfg(feature = "hackrf")]
     fn other_radio_selected(&self) -> bool {
         #[allow(unused_mut)]
@@ -67,7 +67,7 @@ impl App {
         {
             selected |= self.uhd_selected;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         {
             selected |= self.pluto_selected;
         }
@@ -267,7 +267,7 @@ impl App {
         } else {
             what
         };
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         let what = if self.path.is_none() && self.pluto_selected {
             if self.pluto_running {
                 Play::StopPluto
@@ -306,7 +306,7 @@ impl App {
             Play::StopRadio => true,
             #[cfg(all(windows, feature = "uhd"))]
             Play::StopUhd => true,
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Play::StopPluto => true,
             Play::TogglePause => !self.paused,
             _ => false,
@@ -330,9 +330,9 @@ impl App {
             Play::StopRtl => ("⏹ Stop", "Stop RTL-SDR dongle"),
             #[cfg(all(windows, feature = "uhd"))]
             Play::StartUhd => ("▶ Start", "Start the selected UHD receiver"),
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Play::StartPluto => ("▶ Start", "Start the selected PlutoSDR receiver"),
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Play::StopPluto => ("⏹ Stop", "Stop the PlutoSDR receiver"),
             #[cfg(all(windows, feature = "uhd"))]
             Play::StopUhd => ("⏹ Stop", "Stop the UHD receiver"),
@@ -380,9 +380,9 @@ impl App {
             }
             #[cfg(all(windows, feature = "uhd"))]
             Play::StartUhd => self.start_uhd(),
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Play::StartPluto => self.start_pluto(),
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Play::StopPluto => {
                 self.stop_source();
                 self.note = "PlutoSDR stopped".into();
@@ -605,7 +605,7 @@ impl App {
                     self.rtl_running,
                 )
             }
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             None if self.pluto_selected => {
                 let live = self.pluto_running;
                 let dot = if live { "● " } else { "" };
@@ -655,7 +655,7 @@ impl App {
                 {
                     self.rtl_selected = false;
                 }
-                #[cfg(all(windows, feature = "pluto"))]
+                #[cfg(feature = "pluto")]
                 {
                     self.pluto_selected = false;
                 }
@@ -686,7 +686,7 @@ impl App {
                     self.path = None;
                     self.rtl_selected = true;
                     self.net_selected = false;
-                    #[cfg(all(windows, feature = "pluto"))]
+                    #[cfg(feature = "pluto")]
                     {
                         self.pluto_selected = false;
                     }
@@ -703,12 +703,12 @@ impl App {
                 }
                 ui.separator();
             }
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             {
                 if ui
                     .selectable_label(
                         self.path.is_none() && self.pluto_selected,
-                        "📡 PlutoSDR / LibreSDR",
+                        "📡 PlutoSDR / Pluto+ / LibreSDR",
                     )
                     .clicked()
                 {
@@ -756,7 +756,7 @@ impl App {
                     {
                         self.rtl_selected = false;
                     }
-                    #[cfg(all(windows, feature = "pluto"))]
+                    #[cfg(feature = "pluto")]
                     {
                         self.pluto_selected = false;
                     }
@@ -792,7 +792,7 @@ impl App {
                         {
                             self.uhd_selected = false;
                         }
-                        #[cfg(all(windows, feature = "pluto"))]
+                        #[cfg(feature = "pluto")]
                         {
                             self.pluto_selected = false;
                         }

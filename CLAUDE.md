@@ -21,6 +21,9 @@ cargo run --release -p decsat-tx-app -- --source test --sink null --start --scre
 cargo run --release -p decsat-tx --example txrun -- --source camera --codec av1 --out out/tx.cs8 --seconds 8   # the library alone, a status line a second
 cargo run --release -p decsat-cli -- decode out/tx.cs8 --rate 2331000 --decoder ts --symbol-rate 333000 --fast --out out/rx.ts   # read a transmission back
 cargo run --release -p decsat-ts --example av1_ivf -- out/rx.ts/x.ts out/av1.ivf   # AV1 (AOM's TS mapping) out of a TS for ffmpeg
+cargo run --release -p decsat-cli -- decode --pluto 1450 --rate 4e6 --pluto-gain 40 --decoder id   # live ADALM-PLUTO / Pluto+ (--pluto-uri auto|usb|ip:ADDR, --pluto-gain agc, --pluto-16bit); receive only
+cargo test -p decsat-io --features pluto pluto                                     # the Pluto driver against a fake IIOD server
+PLUTO_URI=ip:192.168.2.1 cargo test -p decsat-io --features pluto live_pluto -- --ignored --nocapture   # a real Pluto (PLUTO_URI defaults to auto); receive only
 cargo run --release -p decsat-gui -- --net tcp://127.0.0.1:7777 --iq int8 --rate 8 --net-mhz 1100 --lo 9750 --claim-carriers --screenshot out/x.png --after 10
 ```
 
@@ -42,6 +45,10 @@ nothing extra. `DECSAT_FOBOS_LIB=/path/to/lib cargo test -p decsat-io
 (or a stand-in library).
 The Airspy Mini / R2 is behind `--features airspy` (on by default in both
 apps): pure Rust over USB through `libairspy-rs`, no DLL.
+The ADALM-PLUTO / Pluto+ / LibreSDR is behind `--features pluto` (on by
+default in both apps): its IIOD protocol in pure Rust over USB (nusb, ADI's
+WinUSB driver) or TCP 30431, no libiio, no DLL; receive only (TX LO powered
+down, the DDS device never opened). Ported from DecDVB-T's driver.
 
 ## House rules
 

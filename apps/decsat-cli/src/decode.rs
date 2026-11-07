@@ -5,7 +5,7 @@
 //! E1 timeslots, text, frame structure).
 //!
 //! With `--hackrf <MHz>` the source is the HackRF instead (receive only, its
-//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy: a status line every 30 s, a report at the end
+//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy, with `--pluto <MHz>` an ADALM-PLUTO / Pluto+: a status line every 30 s, a report at the end
 //! (`--seconds`) — for watching a carrier unattended, e.g. a FastLink link
 //! with `--record-on-activity` until a voice channel speaks. With `--net
 //! URL` it is raw IQ from another program (SDR++'s IQ Exporter, GNU Radio,
@@ -41,6 +41,15 @@ pub struct DecodeArgs {
     pub airspy_gain: u8,
     #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
     pub airspy_sensitivity: bool,
+    /// Live: the Pluto's centre frequency, MHz, how to reach it, its gain
+    /// (dB or `agc`) and whether to refuse 8-bit IQ.
+    pub pluto: Option<f64>,
+    #[cfg_attr(not(feature = "pluto"), allow(dead_code))]
+    pub pluto_uri: String,
+    #[cfg_attr(not(feature = "pluto"), allow(dead_code))]
+    pub pluto_gain: String,
+    #[cfg_attr(not(feature = "pluto"), allow(dead_code))]
+    pub pluto_16bit: bool,
     /// Stop after this long.
     pub seconds: Option<f64>,
     /// fastlink: record while a TDM channel is active.
@@ -185,6 +194,45 @@ fn airspy_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f
     bail!("this build has no Airspy support (the `airspy` feature)")
 }
 
+/// The ADALM-PLUTO / Pluto+ at `mhz`, `rate` samples a second.
+#[cfg(feature = "pluto")]
+fn pluto_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    use decsat_io::{EightBit, PlutoGain, PlutoSettings, PlutoSource, PlutoUri};
+    let uri: PlutoUri = a
+        .pluto_uri
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("--pluto-uri: {e}"))?;
+    let gain = if a.pluto_gain.eq_ignore_ascii_case("agc") {
+        PlutoGain::Agc
+    } else {
+        PlutoGain::Manual(
+            a.pluto_gain
+                .parse()
+                .with_context(|| format!("--pluto-gain {}: dB or agc", a.pluto_gain))?,
+        )
+    };
+    let src = PlutoSource::open(PlutoSettings {
+        uri,
+        center_hz: mhz * 1e6,
+        sample_rate: rate,
+        bandwidth: None,
+        gain,
+        eight_bit: if a.pluto_16bit {
+            EightBit::Off
+        } else {
+            EightBit::Auto
+        },
+    })?;
+    let rate = src.sample_rate();
+    println!("{}", src.describe());
+    Ok((Box::new(src), rate))
+}
+
+#[cfg(not(feature = "pluto"))]
+fn pluto_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    bail!("this build has no ADALM-PLUTO support (the `pluto` feature)")
+}
+
 #[cfg(not(feature = "fobos"))]
 fn fobos_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
     bail!("this build has no Fobos SDR support (the `fobos` feature)")
@@ -192,7 +240,11 @@ fn fobos_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f6
 
 pub fn decode(a: DecodeArgs) -> Result<()> {
     let kind = decoder_by_name(&a.decoder)?;
-    let live = a.hackrf.is_some() || a.fobos.is_some() || a.airspy.is_some() || a.net.is_some();
+    let live = a.hackrf.is_some()
+        || a.fobos.is_some()
+        || a.airspy.is_some()
+        || a.pluto.is_some()
+        || a.net.is_some();
     let (source, rate): (Box<dyn IqSource>, f64) = if a.net.is_some() {
         use decsat_io::{NetIqSettings, NetIqSource, NetSample};
         let url = a.net.as_deref().unwrap_or_default();
@@ -211,6 +263,13 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
         })?;
         println!("live from {}", src.describe());
         (Box::new(src), rate)
+    } else if let Some(mhz) = a.pluto {
+        let (src, rate) = pluto_source(&a, mhz, a.rate.unwrap_or(4e6))?;
+        println!(
+            "live from the Pluto at {mhz:.4} MHz, {:.3} MS/s (receive only)",
+            rate / 1e6
+        );
+        (src, rate)
     } else if let Some(mhz) = a.airspy {
         let (src, rate) = airspy_source(&a, mhz, a.rate.unwrap_or(6e6))?;
         println!(
@@ -248,7 +307,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 (Box::new(reader), rate)
             }
             (None, None) => bail!(
-                "give a capture, --hackrf / --fobos / --airspy <MHz> or --net tcp://HOST:PORT"
+                "give a capture, --hackrf / --fobos / --airspy / --pluto <MHz> or --net tcp://HOST:PORT"
             ),
         }
     };

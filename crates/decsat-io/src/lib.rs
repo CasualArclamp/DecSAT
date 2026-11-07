@@ -3,19 +3,21 @@
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
 //! (replay, and the only way to handle transponders wider than the HackRF),
-//! the live HackRF One, Fobos SDR or Airspy, or IQ over the network
+//! the live HackRF One, Fobos SDR, Airspy or ADALM-PLUTO, or IQ over the network
 //! ([`net`]: SDR++'s IQ Exporter, GNU Radio, rtl_tcp). Recording goes out
 //! through [`IqFileWriter`].
 
 pub mod file;
 pub mod net;
-#[cfg(all(windows, feature = "pluto"))]
+#[cfg(feature = "pluto")]
 pub mod pluto;
 #[cfg(all(windows, feature = "uhd"))]
 pub mod uhd;
 pub mod wav;
-#[cfg(all(windows, feature = "pluto"))]
-pub use pluto::{PlutoControl, PlutoSettings, PlutoSource};
+#[cfg(feature = "pluto")]
+pub use pluto::{
+    EightBit, PlutoControl, PlutoGain, PlutoInfo, PlutoSettings, PlutoSource, PlutoUri,
+};
 #[cfg(all(windows, feature = "uhd"))]
 pub use uhd::{UhdControl, UhdSettings, UhdSource};
 

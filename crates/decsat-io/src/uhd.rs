@@ -5,11 +5,12 @@
 //! environment variable), so no UHD headers, Boost, CMake or import library are
 //! needed to build, and the portable exe starts on a machine without UHD.
 //!
-//! Unlike the RTL-SDR and Pluto backends (`LoadLibraryExW` with explicit search
-//! flags) this uses plain `LoadLibraryW` on the DLL's absolute path, so UHD's own
+//! Unlike the RTL-SDR backend (`LoadLibraryExW` with explicit search flags)
+//! this uses plain `LoadLibraryW` on the DLL's absolute path, so UHD's own
 //! dependencies (libusb and friends) are found by the default Windows search
-//! order. That order includes the executable's directory, which is why the other
-//! two backends keep their runtime DLLs in sub-folders rather than beside the exe.
+//! order. That order includes the executable's directory, which is why the
+//! RTL-SDR backend keeps its runtime DLLs in a sub-folder rather than beside
+//! the exe. (The Pluto needs no DLL: it is pure Rust.)
 //!
 //! Samples are requested as `fc32` (host complex `f32`, the same layout as
 //! [`Iq`]) over the wire as `sc16`.

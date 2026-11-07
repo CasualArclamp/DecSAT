@@ -6177,3 +6177,32 @@ capture now reads "idle: nothing but its fill". Test:
 `a_frame_the_fec_failed_on_does_not_make_an_idle_line_bursty` (and the
 same frame taken as decoded still reads as a burst).
 
+## ADALM-PLUTO / Pluto+ in pure Rust, and on the command line (2026-11-08)
+
+The Pluto source from the VMA snapshot (libiio.dll loaded at run time from a
+`Pluto` folder or `LIBIIO_DLL`, Windows only, never tried on a radio) is
+replaced by DecDVB-T's pure-Rust driver (its commit ba1a150): the IIOD text
+protocol of libiio 0.26 — what ADI's v0.39 and the Tezuka firmware serve —
+over USB (nusb on the Pluto's FunctionFS "IIO" interface, ADI's WinUSB
+driver) or TCP 30431 (USB Ethernet, a Pluto+'s Gigabit Ethernet). Tezuka's
+8-bit IQ is detected and used unless switched off; 0.26–61.44 MS/s (the
+FPGA's ×8 decimator below 2.083 MS/s); receive only: the TX LO is powered
+down at every open and the DDS device never opened. Feature `pluto` is now
+`["dep:nusb", "dep:futures-lite"]` (nusb 0.1.14, the copy the HackRF and
+Airspy already pull in) and no longer Windows-only.
+
+- `decsat-io`: `pluto.rs` + `pluto/{iiod,usb,tests}.rs`. DecSAT's
+  `IqSource` has no retune, so `PlutoSource::retune` (retune and throw away
+  the stale blocks) is an inherent method; the GUI retunes through
+  `PlutoControl::set_center`.
+- GUI: the window (now *PlutoSDR / Pluto+ / LibreSDR*, in `pluto_panel.rs`)
+  takes auto / usb / ip:ADDRESS, rate, bandwidth, gain dB or AGC, the 8-bit
+  box, and shows link, firmware, 8/16-bit and overflows. The LNB LO stays
+  in the GUI (IF = RF − LO). The libiio text is gone.
+- CLI: `decsat decode --pluto <MHz>` (alias `--plutoplus`), `--pluto-uri`,
+  `--pluto-gain DB|agc`, `--pluto-16bit`; 4 MS/s unless `--rate`.
+
+Tested against the fake IIOD server (11 tests, over TCP loopback too); no
+Pluto has been on the machine yet: `PLUTO_URI=… cargo test -p decsat-io
+--features pluto live_pluto -- --ignored --nocapture` is the first step
+when one is.

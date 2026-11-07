@@ -34,6 +34,9 @@ struct Cli {
     command: Command,
 }
 
+// Parsed once at start-up, so the size of its biggest variant (Decode's
+// many options) costs nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Command {
     /// Print the modulation and coding table.
@@ -138,10 +141,10 @@ enum Command {
         #[arg(long)]
         decode: bool,
     },
-    /// Run one decoder over a capture — or live from a HackRF or Fobos — and report
+    /// Run one decoder over a capture — or live from a radio — and report
     /// what it finds.
     Decode {
-        /// The capture (not needed with --hackrf, --fobos or --airspy).
+        /// The capture (not needed with --hackrf, --fobos, --airspy or --pluto).
         file: Option<PathBuf>,
         /// Live from the HackRF instead: its centre frequency, MHz (as it
         /// tunes: L-band behind an LNB). Receive only, antenna power off.
@@ -189,6 +192,25 @@ enum Command {
         /// Use the Airspy's sensitivity gain table.
         #[arg(long)]
         airspy_sensitivity: bool,
+        /// Live from an ADALM-PLUTO, Pluto+ or LibreSDR instead: its centre
+        /// frequency, MHz (70–6000; an AD9363 Pluto that was not unlocked
+        /// takes 325–3800). Pure Rust over USB or the network. Receive only:
+        /// the transmitter stays off.
+        #[arg(long, alias = "plutoplus", conflicts_with_all = ["hackrf", "fobos", "airspy", "net"])]
+        pluto: Option<f64>,
+        /// How to reach the Pluto: auto (USB if one is plugged in, else
+        /// 192.168.2.1), usb (needs ADI's Pluto USB driver, WinUSB, on
+        /// Windows) or ip:ADDRESS (a Pluto+ on Ethernet, or the Pluto's USB
+        /// Ethernet).
+        #[arg(long, default_value = "auto")]
+        pluto_uri: String,
+        /// Pluto receive gain: dB (about 0–71), or `agc` for its slow-attack
+        /// AGC.
+        #[arg(long, default_value = "40")]
+        pluto_gain: String,
+        /// Always 16-bit IQ, even when the firmware (Tezuka) offers 8-bit.
+        #[arg(long)]
+        pluto_16bit: bool,
         /// While a PCAP records (--out with an IP decoder), start a new
         /// file every this many minutes; each closed part is whole, for
         /// tools that read finished captures (BruteShark, NetworkMiner).
@@ -205,6 +227,7 @@ enum Command {
         #[arg(long, value_parser = parse_format)]
         format: Option<SampleFormat>,
         /// Sample rate; taken from the file name (…_320000Sps…) when omitted.
+        /// Live radios default to HackRF 2, Airspy 6, Fobos 8, Pluto 4 MS/s.
         #[arg(long)]
         rate: Option<f64>,
         /// Decoder: id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19.
@@ -397,6 +420,10 @@ fn main() -> Result<()> {
             airspy,
             airspy_gain,
             airspy_sensitivity,
+            pluto,
+            pluto_uri,
+            pluto_gain,
+            pluto_16bit,
             pcap_rotate,
             seconds,
             record_on_activity,
@@ -438,6 +465,10 @@ fn main() -> Result<()> {
                 airspy,
                 airspy_gain,
                 airspy_sensitivity,
+                pluto,
+                pluto_uri,
+                pluto_gain,
+                pluto_16bit,
                 seconds,
                 record_on_activity,
                 format,

@@ -20,6 +20,8 @@ mod freq_display;
 mod freqplan;
 mod orbit;
 mod player;
+#[cfg(feature = "pluto")]
+mod pluto_panel;
 mod prefs;
 mod radar_airports;
 mod radar_map;
@@ -288,15 +290,15 @@ struct App {
     uhd_running: bool,
     #[cfg(all(windows, feature = "uhd"))]
     uhd_control: Option<decsat_io::UhdControl>,
-    #[cfg(all(windows, feature = "pluto"))]
-    pluto_settings: decsat_io::PlutoSettings,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
+    pluto_settings: pluto_panel::PlutoUi,
+    #[cfg(feature = "pluto")]
     pluto_open: bool,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
     pluto_selected: bool,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
     pluto_running: bool,
-    #[cfg(all(windows, feature = "pluto"))]
+    #[cfg(feature = "pluto")]
     pluto_control: Option<decsat_io::PlutoControl>,
     #[cfg(all(windows, feature = "rtl"))]
     rtl_settings: decsat_io::RtlSettings,
@@ -427,15 +429,15 @@ impl Default for App {
             uhd_running: false,
             #[cfg(all(windows, feature = "uhd"))]
             uhd_control: None,
-            #[cfg(all(windows, feature = "pluto"))]
-            pluto_settings: decsat_io::PlutoSettings::default(),
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
+            pluto_settings: pluto_panel::PlutoUi::default(),
+            #[cfg(feature = "pluto")]
             pluto_open: false,
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             pluto_selected: false,
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             pluto_running: false,
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             pluto_control: None,
             #[cfg(all(windows, feature = "rtl"))]
             rtl_settings: decsat_io::RtlSettings::default(),
@@ -573,7 +575,7 @@ impl App {
         if self.uhd_selected {
             active = "uhd";
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_selected {
             active = "pluto";
         }
@@ -613,7 +615,7 @@ impl App {
                 p.push((format!("device.uhd.{k}"), v));
             }
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         {
             let u = &self.pluto_settings;
             for (k, v) in [
@@ -621,6 +623,8 @@ impl App {
                 ("center", u.center_hz.to_string()),
                 ("rate", u.rate.to_string()),
                 ("gain", u.gain.to_string()),
+                ("agc", u.agc.to_string()),
+                ("eightbit", u.eight_bit.to_string()),
                 ("bandwidth", u.bandwidth.to_string()),
                 ("lo", u.lnb_lo_hz.to_string()),
             ] {
@@ -959,7 +963,7 @@ impl App {
                 u.lnb_lo_hz = v;
             }
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         {
             let u = &mut self.pluto_settings;
             if let Some(v) = get("device.pluto.uri") {
@@ -973,6 +977,12 @@ impl App {
             }
             if let Some(v) = get("device.pluto.gain").and_then(|s| s.parse().ok()) {
                 u.gain = v;
+            }
+            if let Some(v) = get("device.pluto.agc").and_then(|s| s.parse().ok()) {
+                u.agc = v;
+            }
+            if let Some(v) = get("device.pluto.eightbit").and_then(|s| s.parse().ok()) {
+                u.eight_bit = v;
             }
             if let Some(v) = get("device.pluto.bandwidth").and_then(|s| s.parse().ok()) {
                 u.bandwidth = v;
@@ -1022,7 +1032,7 @@ impl App {
             Some("net") => self.net_selected = true,
             #[cfg(all(windows, feature = "uhd"))]
             Some("uhd") => self.uhd_selected = true,
-            #[cfg(all(windows, feature = "pluto"))]
+            #[cfg(feature = "pluto")]
             Some("pluto") => self.pluto_selected = true,
             #[cfg(all(windows, feature = "rtl"))]
             Some("rtl") => self.rtl_selected = true,
@@ -1071,7 +1081,7 @@ impl App {
         if self.path.is_none() && self.uhd_selected {
             return self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.path.is_none() && self.pluto_selected {
             return self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz;
         }
@@ -1372,7 +1382,7 @@ impl App {
             self.uhd_running = false;
             self.uhd_control = None;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         {
             self.pluto_running = false;
             self.pluto_control = None;
@@ -1508,62 +1518,6 @@ impl App {
         self.uhd_open = open;
     }
 
-    #[cfg(all(windows, feature = "pluto"))]
-    fn start_pluto(&mut self) {
-        self.stop_source();
-        self.path = None;
-        match decsat_io::PlutoSource::open(self.pluto_settings.clone()) {
-            Ok(src) => {
-                self.pluto_control = Some(src.control());
-                self.pluto_running = true;
-                self.pluto_selected = true;
-                self.sample_rate = decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz =
-                    (self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz) / 1e6;
-                self.note = format!("PlutoSDR started @ {:.3} MS/s", self.sample_rate / 1e6);
-                self.start_engine(Box::new(src));
-            }
-            Err(e) => self.note = format!("PlutoSDR: {e}"),
-        }
-    }
-
-    #[cfg(all(windows, feature = "pluto"))]
-    fn pluto_panel(&mut self, ctx: &egui::Context) {
-        let mut open = self.pluto_open;
-        egui::Window::new("PlutoSDR / LibreSDR (RX)").open(&mut open).show(ctx,|ui|{
-            ui.horizontal(|ui|{ui.label("IIO URI");ui.text_edit_singleline(&mut self.pluto_settings.uri);});
-            ui.label("Typical: ip:192.168.2.1 (USB Ethernet); or ip:<device address>");
-            ui.horizontal(|ui|{ui.label("Tuner MHz");let mut f=self.pluto_settings.center_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(70.0..=6000.0)).changed(){
-                    self.pluto_settings.center_hz=f*1e6;
-                    if let Some(c)=&self.pluto_control{c.tune(self.pluto_settings.center_hz);}
-                    self.rf_center_mhz=(self.pluto_settings.center_hz+self.pluto_settings.lnb_lo_hz)/1e6;
-                }
-            });
-            ui.horizontal(|ui|{ui.label("LNB LO MHz (0=direct)");let mut f=self.pluto_settings.lnb_lo_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){
-                    self.pluto_settings.lnb_lo_hz=f*1e6;
-                    self.rf_center_mhz=(self.pluto_settings.center_hz+self.pluto_settings.lnb_lo_hz)/1e6;
-                }
-            });
-            ui.horizontal(|ui|{ui.label("Sample rate MS/s");
-                egui::ComboBox::from_id_salt("pluto_rate").selected_text(format!("{:.3}",self.pluto_settings.rate/1e6)).show_ui(ui,|ui|{
-                    for mhz in [1.0,2.0,4.0,8.0,12.0,16.0,20.0] {ui.selectable_value(&mut self.pluto_settings.rate,mhz*1e6,format!("{mhz:.1}"));}
-                });
-            });
-            ui.horizontal(|ui|{ui.label("RF bandwidth MHz");let mut bw=self.pluto_settings.bandwidth/1e6;
-                if ui.add(egui::DragValue::new(&mut bw).range(0.2..=56.0)).changed(){self.pluto_settings.bandwidth=bw*1e6;}
-            });
-            if ui.add(egui::Slider::new(&mut self.pluto_settings.gain,0.0..=73.0).text("Manual RX gain dB")).changed()
-                && let Some(c)=&self.pluto_control{c.gain(self.pluto_settings.gain);}
-            ui.label("Main Start/Stop controls the selected receiver. Rate and bandwidth changes require restart.");
-            ui.label("LNB power is external. libiio 0.x DLL required on Windows.");
-            if self.pluto_running && ui.button("Apply rate/bandwidth (restart Pluto)").clicked(){self.start_pluto();}
-            if self.note.starts_with("PlutoSDR"){ui.label(&self.note);}
-        });
-        self.pluto_open = open;
-    }
-
     /// Start the chosen radio (HackRF or Fobos) with the panel's settings.
     #[cfg(feature = "hackrf")]
     fn start_radio(&mut self) {
@@ -1643,7 +1597,7 @@ impl App {
             self.start_uhd();
             return;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_running {
             self.start_pluto();
             return;
@@ -2125,7 +2079,7 @@ impl App {
         if self.uhd_running {
             return self.uhd_control.is_some();
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_running {
             return self.pluto_control.is_some();
         }
@@ -2189,7 +2143,7 @@ impl App {
             }
             return;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_running || (self.pluto_selected && self.path.is_none()) {
             let if_hz = rf - self.pluto_settings.lnb_lo_hz;
             if !(70e6..=6e9).contains(&if_hz) {
@@ -2197,8 +2151,10 @@ impl App {
                 return;
             }
             self.pluto_settings.center_hz = if_hz;
-            if let Some(c) = &self.pluto_control {
-                c.tune(if_hz);
+            if let Some(c) = &self.pluto_control
+                && let Err(e) = c.set_center(if_hz)
+            {
+                self.note = format!("PlutoSDR: {e}");
             }
             self.rf_center_mhz = rf / 1e6;
             return;
@@ -2295,7 +2251,7 @@ impl App {
                 .map(|i| (i.min_hz as f64, i.max_hz as f64))
                 .unwrap_or((24e6, 1766e6));
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_selected {
             return (70e6, 6e9);
         }
@@ -2326,7 +2282,7 @@ impl App {
         if self.rtl_selected {
             lo = self.rtl_settings.lnb_lo_hz;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_selected {
             lo = self.pluto_settings.lnb_lo_hz;
         }
@@ -2449,14 +2405,25 @@ impl App {
                 }
             };
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_selected {
             let mut settings = self.pluto_settings.clone();
             settings.center_hz = frequency;
-            return match decsat_io::PlutoSource::open(settings) {
+            return match settings
+                .settings()
+                .map_err(decsat_core::Error::Other)
+                .and_then(decsat_io::PlutoSource::open)
+            {
                 Ok(source) => {
                     let control = source.control();
-                    Some((Box::new(source), Box::new(move |f| control.tune(f))))
+                    Some((
+                        Box::new(source),
+                        // A refused step leaves the radio where it was;
+                        // the sweep just sees that span again.
+                        Box::new(move |f| {
+                            let _ = control.set_center(f);
+                        }),
+                    ))
                 }
                 Err(e) => {
                     self.note = format!("Pluto sweep: {e}");
@@ -2546,7 +2513,7 @@ impl App {
             self.start_rtl();
             return;
         }
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         if self.pluto_selected {
             self.start_pluto();
             return;
@@ -3020,7 +2987,7 @@ impl eframe::App for App {
         egui::Panel::top("menubar").show(ui, |ui| self.menu_bar(ui));
         #[cfg(all(windows, feature = "uhd"))]
         self.uhd_panel(ui.ctx());
-        #[cfg(all(windows, feature = "pluto"))]
+        #[cfg(feature = "pluto")]
         self.pluto_panel(ui.ctx());
         #[cfg(all(windows, feature = "rtl"))]
         self.rtl_panel(ui.ctx());

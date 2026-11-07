@@ -80,6 +80,7 @@ real carriers stay put.
 | **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
 | **Live Fobos SDR** (RigExpert), 8–50 MS/s, 14 bits: RigExpert's library loaded at run time (agile or stock firmware), the same waterfall, VFOs, retuning and decoders as the HackRF | ✅ used on a real board under Windows, DVB-S2 TS and IP carriers at 20 and 50 MS/s |
 | **Live Airspy Mini / R2**, 3/6 MS/s (2.5/10 on an R2), 12 bits, 24–1750 MHz: pure Rust over USB (`libairspy-rs`, no DLL), bias tee always off | ✅ tested live: a Mini at 6 MS/s (QO-100), an R2 at 10 MS/s |
+| **Live ADALM-PLUTO / Pluto+ / LibreSDR**, 0.26–61.44 MS/s, 70 MHz–6 GHz: pure Rust over USB or the network (no libiio, no DLL), 8-bit IQ on the Tezuka firmware, receive only | ⚠️ tested against a simulated Pluto only; not yet tried on hardware |
 | **📷 Snapshots** of the spectrum and waterfall (or the window) to PNG, captioned; **session log** to CSV; **PCAP in parts** for tools that read finished captures; the **satellite named** from the orbital position a NIT or RCS map signals | ✅ |
 | **Network IQ**: raw IQ from another program, so any radio it drives works (an SDRplay RSPduo under SDR++, say), on Windows or Linux. SDR++'s IQ Exporter, GNU Radio's TCP/UDP sinks, rtl_tcp (recognised and tuned); `tcp://` connects, `listen://` waits for a sender, `udp://` binds; int8, uint8, int16, int32, float32; the rate, the sender's frequency and the LNB LO entered (the stream carries none) | ✅ on simulated carriers over TCP and UDP |
 | **LDPC + BCH → BBFRAMEs**: all 21 S2 and 31 S2X codes, BBHEADER, stream info, payload rate | ✅ |
@@ -1267,6 +1268,43 @@ decsat-gui --airspy 1450 --rate 6 --lo 10600 --vga 10    # --vga is the gain ste
 decsat decode --airspy 1450 --airspy-gain 10 --decoder id --offset 200e3 --bandwidth 300e3
 ```
 
+### ADALM-PLUTO, Pluto+ and LibreSDR
+
+Another live receiver: ADI's ADALM-PLUTO, the Pluto+ and clones such as
+the LibreSDR (same firmware), 70 MHz–6 GHz (an AD9363 Pluto that was not
+unlocked: 325–3800 MHz), 0.26–61.44 MS/s. Like the HackRF and the Airspy
+it needs no DLL: DecSAT speaks the radio's own IIOD protocol (the one
+libiio 0.26 uses, served by every Pluto firmware) in pure Rust, over USB or
+the network:
+
+- **USB** (`usb`): on Windows the Pluto's IIO interface needs ADI's Pluto
+  USB driver (WinUSB; the PlutoSDR-M2k driver package, or Zadig).
+- **Network** (`ip:ADDRESS`): the Pluto's own USB Ethernet at
+  `ip:192.168.2.1`, or a **Pluto+ on Gigabit Ethernet** at its address —
+  the way to the high rates, where a plain Pluto's USB 2.0 tops out near
+  6.8 MS/s of 16-bit IQ.
+- `auto` (the default) takes USB when a Pluto is plugged in, else
+  192.168.2.1.
+
+On F5OEO's **Tezuka** firmware the Pluto sends **8-bit IQ** when asked,
+halving the link's load (about 13 MS/s over a plain Pluto's USB); DecSAT
+uses it whenever the firmware offers it, unless the 8-bit box is unticked
+(`--pluto-16bit` on the command line). Gain is manual (dB) or the AD9361's
+slow-attack AGC. **Receive only:** every open powers the transmit LO down,
+and the transmit data path is never opened. The Pluto does not power its
+antenna port: feed an LNB from an inserter, and enter its LO in the window
+(RF = tuner IF + LO).
+
+Pick **PlutoSDR / Pluto+ / LibreSDR** in the source menu; its settings
+window shows the link, the firmware, 8- or 16-bit IQ and dropped blocks.
+Tested against a simulated Pluto (a fake IIOD server, over TCP too); not
+yet tried on hardware.
+
+```
+decsat decode --pluto 1450 --rate 4e6 --pluto-gain 40 --decoder id --offset 200e3 --bandwidth 300e3
+decsat decode --plutoplus 1450 --pluto-uri ip:192.168.1.50 --rate 20e6 --pluto-gain agc --decoder ts --offset -1.2e6
+```
+
 ### Snapshots, the session log and PCAP parts
 
 **📷** beside the input level (or **F12**) saves the spectrum and
@@ -1334,6 +1372,10 @@ algorithms studied from and credited to:
   (both GPL-2.0-or-later) — the DVB-CSA tables and round structure for BISS
   descrambling, checked bit-exact against VLC
 - DecDRM — the waterfall's GPU ring texture
+- [libiio](https://github.com/analogdevicesinc/libiio) v0.25/0.26 (Analog
+  Devices, LGPL-2.1) — the IIOD protocol and context XML the Pluto driver
+  speaks, re-implemented in Rust; F5OEO's Tezuka firmware and
+  SoapyPlutoPAPR — the 8-bit IQ mode and how to detect it
 
 The in-app TV player runs [FFmpeg](https://ffmpeg.org) as a separate
 program, when it is installed; DecSAT does not include it.

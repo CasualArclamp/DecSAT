@@ -1,7 +1,7 @@
 # made by CasualArclamp
 [package]
 name = "decsat-io"
-description = "DecSAT I/O: IQ file replay/record and the HackRF, Fobos SDR and Airspy front ends"
+description = "DecSAT I/O: IQ file replay/record and the HackRF, Fobos SDR, Airspy and ADALM-PLUTO front ends"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,7 +22,9 @@ fobos = ["dep:libloading"]
 # nusb): no libairspy, no DLLs; on Windows the WinUSB driver.
 airspy = ["dep:libairspy-rs"]
 uhd = []
-pluto = []
+# Live ADALM-PLUTO / Pluto+ / LibreSDR front end, receive only: its IIOD
+# protocol in pure Rust over USB (nusb, WinUSB) or TCP. No libiio, no DLLs.
+pluto = ["dep:nusb", "dep:futures-lite"]
 rtl = []
 
 [dependencies]
@@ -33,3 +35,7 @@ tracing.workspace = true
 seify-hackrfone = { version = "0.2.2", optional = true }
 libloading = { version = "0.8", optional = true }
 libairspy-rs = { version = "0.2.1", optional = true }
+# The versions seify-hackrfone and libairspy-rs already use, so the exe
+# carries one copy.
+nusb = { version = "0.1.14", optional = true }
+futures-lite = { version = "2", optional = true }

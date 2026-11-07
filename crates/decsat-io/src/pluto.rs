@@ -1,557 +1,686 @@
-//! ADALM-PLUTO (PlutoSDR, AD9361) receive-only source, over the libiio 0.x C ABI.
+// made by CasualArclamp
+//! Live ADALM-PLUTO and Pluto+ (AD9363/AD9361/AD9364) front end, receive
+//! only, in pure Rust: the radio's own IIOD protocol ([`iiod`]) over USB
+//! ([`usb`], WinUSB) or the network (TCP 30431: the Pluto's USB Ethernet at
+//! 192.168.2.1, or a Pluto+'s Gigabit Ethernet). No libiio, no DLLs.
 //!
-//! `libiio.dll` is loaded at run time rather than linked, so no import library,
-//! C++ compiler or extra crate is needed to build, and the portable exe starts
-//! on a machine without the Pluto runtime. The DLL is looked for in a `Pluto`
-//! folder beside the executable (with its dependent DLLs), or at the absolute
-//! path in the `LIBIIO_DLL` environment variable. It has to be libiio 0.x:
-//! 1.x renamed most of the calls used here.
+//! **8-bit IQ.** F5OEO's Tezuka firmware (Pluto and Pluto+) can send 8-bit
+//! I/Q instead of 16-bit, halving the link's load: a plain Pluto's USB then
+//! carries ~13 MS/s instead of ~6.8. It is switched on by enabling `voltage0`
+//! alone on `cf-ad9361-lpc`; each 16-bit word then holds I (byte 0) and Q
+//! (byte 1), the 12-bit samples rounded to 8 bits on the FPGA (F5OEO/maia-sdr
+//! `cs12_cs8.v`; detection as SoapyPlutoPAPR does it, `fw_version` starting
+//! "tezuka"). [`EightBit::Auto`] uses it whenever the firmware has it.
 //!
-//! libiio model, as used below: a *context* (the connection, opened from a URI
-//! such as `ip:192.168.2.1` or `usb:`) holds *devices*, which hold *channels*
-//! with named *attributes*. The AD9361 shows up as two devices: `ad9361-phy`
-//! (the radio's control: sample rate, bandwidth, gain, LO) and
-//! `cf-ad9361-lpc` (the ADC data path). Samples come through a *buffer* on the
-//! data device that is refilled one block at a time.
+//! **Rates.** 2.084–61.44 MS/s straight from the AD9361; 260 kS/s–2.083 MS/s
+//! with the FPGA's ×8 decimator (the phy runs at 8× the rate and
+//! `cf-ad9361-lpc`'s `sampling_frequency` asks for the decimated rate: the
+//! sequence of libad9361 / SoapyPlutoSDR).
 //!
-//! Provenance: merged in from the "VMA" snapshot, see `docs/STATUS.md`
-//! (2026-10-25). Not tested against real hardware by whoever restyled it.
-#![cfg(windows)]
+//! **Receive only.** Nothing here opens the transmit data device
+//! (`cf-ad9361-dds-core-lpc`), and every open powers the TX LO down.
+//!
+//! The reader thread keeps two `READBUF` requests in flight (so the round
+//! trip costs no throughput), converts each block to IQ and hands it over a
+//! bounded channel, dropping whole blocks if the consumer falls behind.
 
-use std::ffi::{CString, c_char, c_void};
-use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
-use std::ptr;
+pub mod iiod;
+pub mod usb;
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use decsat_core::{Error, Iq, Result};
 
+use self::iiod::{Client, Context, Link};
 use crate::IqSource;
 
-/// An opaque libiio object (`struct iio_context *`, `iio_device *`,
-/// `iio_channel *`, `iio_buffer *`) or a Win32 `HMODULE`. Null means "none".
-type Handle = *mut c_void;
+const PHY: &str = "ad9361-phy";
+const RX: &str = "cf-ad9361-lpc";
+/// IIOD's TCP port.
+pub const IIOD_PORT: u16 = 30431;
+/// The Pluto's own address on its USB Ethernet.
+pub const DEFAULT_IP: &str = "192.168.2.1";
 
-// Win32 loader calls (kernel32), declared by hand so no crate is needed.
-//
-// Rust note: since edition 2024 an `extern` block must be written
-// `unsafe extern`, because the compiler cannot check that the declared
-// signatures match the real functions. `"system"` is the platform's system
-// calling convention (stdcall on 32-bit Windows, the usual one on 64-bit).
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn LoadLibraryExW(name: *const u16, file: Handle, flags: u32) -> Handle;
-    fn GetProcAddress(module: Handle, name: *const u8) -> Handle;
-    fn FreeLibrary(module: Handle) -> i32;
+/// The AD9361's tuning range; an AD9363 Pluto that was not unlocked refuses
+/// outside 325–3800 MHz, and that refusal is passed on.
+pub const FREQ_MIN_HZ: f64 = 70e6;
+pub const FREQ_MAX_HZ: f64 = 6e9;
+/// Lowest rate (with the ×8 decimator) and highest.
+pub const RATE_MIN: f64 = 260_417.0;
+pub const RATE_MAX: f64 = 61_440_000.0;
+/// Below this the AD9361 needs its FIR, so the FPGA's ×8 decimator is used
+/// instead (25 MHz / 12).
+const DECIM_BELOW: f64 = 25e6 / 12.0;
+
+/// Blocks queued for the consumer before dropping.
+const QUEUE: usize = 32;
+
+fn err(what: impl std::fmt::Display) -> Error {
+    Error::Other(format!("Pluto: {what}"))
 }
 
-/// `LoadLibraryExW` flag (libloaderapi.h): search the DLL's own directory for
-/// its dependencies. Avoids modifying the process-wide `PATH`.
-const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
-/// `LoadLibraryExW` flag (libloaderapi.h): keep System32 and the other safe
-/// standard search locations as well.
-const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x0000_1000;
+/// How to reach the radio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlutoUri {
+    /// USB if a Pluto is enumerated there, else the network at 192.168.2.1.
+    Auto,
+    Usb,
+    /// `host` or `host:port`.
+    Ip(String),
+}
 
-// Names fixed by the Pluto's Linux IIO drivers (ad9361 and its AXI ADC core).
-/// Control device: sample rate, RF bandwidth, gain, LO.
-const DEVICE_PHY: &str = "ad9361-phy";
-/// Data device the RX buffer is created on.
-const DEVICE_RX_DATA: &str = "cf-ad9361-lpc";
-/// RX local oscillator: an *output* channel of the phy whose `frequency`
-/// attribute is the tuning frequency in Hz.
-const CHANNEL_RX_LO: &str = "altvoltage0";
-/// RX path settings (`sampling_frequency`, `rf_bandwidth`, `hardwaregain`,
-/// `gain_control_mode`): *input* channel 0 of the phy.
-const CHANNEL_RX_PATH: &str = "voltage0";
-/// The I and Q data channels on the data device.
-const CHANNEL_RX_I: &str = "voltage0";
-const CHANNEL_RX_Q: &str = "voltage1";
+impl std::str::FromStr for PlutoUri {
+    type Err = String;
 
-/// Complex samples per `iio_buffer_refill`.
-const BUFFER_SAMPLES: usize = 16384;
-
-/// The AD9361's ADC is 12 bits, delivered sign-extended in an `i16`, so full
-/// scale is ±2048.
-const ADC_FULL_SCALE: f32 = 2048.0;
-
-/// Bytes in one complex sample of the buffer: an `i16` I followed by an `i16` Q.
-const IQ_BYTES: usize = 4;
-
-/// Tuning and sample-rate limits accepted here (Hz and S/s): the AD9361's
-/// 70 MHz–6 GHz tuning range and 61.44 MS/s top rate. The firmware has the final
-/// say, and may refuse values near the edges.
-const MIN_CENTER_HZ: f64 = 70e6;
-const MAX_CENTER_HZ: f64 = 6e9;
-const MIN_SAMPLE_RATE: f64 = 520_834.0;
-const MAX_SAMPLE_RATE: f64 = 61_440_000.0;
-
-/// A loaded module, freed when dropped.
-struct Module(Handle);
-
-impl Drop for Module {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: the handle came from a successful `LoadLibraryExW` and is
-            // freed exactly once, here.
-            unsafe {
-                FreeLibrary(self.0);
+    /// `auto`, `usb`, `usb:`, `ip:192.168.2.1`, `192.168.2.1`, `pluto.local:30431`.
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        let s = s.trim();
+        match s.to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(PlutoUri::Auto),
+            u if u == "usb" || u.starts_with("usb:") => Ok(PlutoUri::Usb),
+            _ => {
+                let host = s.strip_prefix("ip:").unwrap_or(s).trim();
+                if host.is_empty() || host.contains(char::is_whitespace) {
+                    return Err(format!("not a Pluto address: {s:?}"));
+                }
+                Ok(PlutoUri::Ip(host.to_string()))
             }
         }
     }
 }
 
-/// Look up the exported function `name` and reinterpret it as the function
-/// pointer type `T`. `name` must include its terminating NUL.
-///
-/// # Safety
-///
-/// `module` must be a live module handle, and `T` must be the real signature of
-/// the export (the compiler cannot check that).
-unsafe fn symbol<T: Copy>(module: Handle, name: &'static [u8]) -> Result<T> {
-    // SAFETY: `module` is valid (caller) and `name` is NUL-terminated.
-    let address = unsafe { GetProcAddress(module, name.as_ptr()) };
-    if address.is_null() {
-        return Err(Error::Other(format!(
-            "libiio missing export {} (requires libiio 0.x, not 1.x)",
-            String::from_utf8_lossy(&name[..name.len() - 1])
-        )));
+impl std::fmt::Display for PlutoUri {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlutoUri::Auto => write!(f, "auto"),
+            PlutoUri::Usb => write!(f, "usb"),
+            PlutoUri::Ip(h) => write!(f, "ip:{h}"),
+        }
     }
-    // Rust note: `transmute_copy` reads the pointer's bytes as a `T`. It is the
-    // usual way to turn a raw `GetProcAddress` result into a typed `extern "C"`
-    // function pointer, which `as` casts cannot do generically.
-    //
-    // SAFETY: `T` is a function-pointer type (pointer-sized, caller's contract).
-    Ok(unsafe { std::mem::transmute_copy(&address) })
 }
 
-/// The libiio 0.x entry points DecSAT uses (`iio.h`), resolved once from the
-/// loaded DLL. Return codes: negative is an errno-style failure unless noted.
-struct Api {
-    /// Keeps the DLL loaded for as long as the function pointers below are used.
-    _dll: Module,
-    /// `iio_create_context_from_uri(uri)`: null on failure.
-    create: unsafe extern "C" fn(*const c_char) -> Handle,
-    /// `iio_context_destroy(ctx)`.
-    destroy: unsafe extern "C" fn(Handle),
-    /// `iio_context_find_device(ctx, name)`: null if absent.
-    find_device: unsafe extern "C" fn(Handle, *const c_char) -> Handle,
-    /// `iio_device_find_channel(dev, name, is_output)`: null if absent.
-    find_channel: unsafe extern "C" fn(Handle, *const c_char, bool) -> Handle,
-    /// `iio_channel_attr_write_longlong(chn, attr, value)`.
-    write_ll: unsafe extern "C" fn(Handle, *const c_char, i64) -> i32,
-    /// `iio_channel_attr_write(chn, attr, text)`: returns bytes written.
-    write_str: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> isize,
-    /// `iio_channel_attr_read_longlong(chn, attr, &value)`.
-    read_ll: unsafe extern "C" fn(Handle, *const c_char, *mut i64) -> i32,
-    /// `iio_channel_enable(chn)`: include the channel in buffer data.
-    enable: unsafe extern "C" fn(Handle),
-    /// `iio_device_create_buffer(dev, samples, cyclic)`: null on failure.
-    create_buffer: unsafe extern "C" fn(Handle, usize, bool) -> Handle,
-    /// `iio_buffer_destroy(buf)`.
-    destroy_buffer: unsafe extern "C" fn(Handle),
-    /// `iio_buffer_refill(buf)`: blocks for a full buffer, returns bytes read.
-    refill: unsafe extern "C" fn(Handle) -> isize,
-    /// `iio_buffer_first(buf, chn)`: address of the channel's first sample.
-    first: unsafe extern "C" fn(Handle, Handle) -> Handle,
-    /// `iio_buffer_end(buf)`: address one past the last sample.
-    end: unsafe extern "C" fn(Handle) -> Handle,
-    /// `iio_buffer_step(buf)`: bytes between one sample and the next.
-    step: unsafe extern "C" fn(Handle) -> isize,
+/// Whether to stream 8-bit IQ (see the module comment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EightBit {
+    /// When the firmware offers it (Tezuka).
+    #[default]
+    Auto,
+    Off,
 }
 
-impl Api {
-    /// Load `libiio.dll` and resolve every export.
-    fn load() -> Result<Self> {
-        // Always resolve Pluto's DLL relative to DecSAT's executable, not the current working
-        // directory. Keeping Pluto's runtime files outside the executable directory avoids
-        // shadowing the libusb DLL expected by UHD.
-        let exe_dir = std::env::current_exe()
-            .map_err(|e| Error::Other(format!("Cannot determine DecSAT executable path: {e}")))?
-            .parent()
-            .ok_or_else(|| Error::Other("DecSAT executable has no parent directory".into()))?
-            .to_path_buf();
-        let path = std::env::var_os("LIBIIO_DLL")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| exe_dir.join("Pluto").join("libiio.dll"));
-        if !path.is_absolute() {
-            return Err(Error::Other(format!(
-                "LIBIIO_DLL must be an absolute path (received {})",
-                path.display()
-            )));
-        }
-        if !path.is_file() {
-            return Err(Error::Other(format!(
-                "Pluto runtime missing: {}. Place libiio.dll and its dependent DLLs in the Pluto \
-                 subfolder beside decsat-gui.exe.",
-                path.display()
-            )));
-        }
-        // Win32 wants a NUL-terminated UTF-16 string.
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        // SAFETY: `wide` is NUL-terminated and outlives the call.
-        let dll = unsafe {
-            LoadLibraryExW(
-                wide.as_ptr(),
-                ptr::null_mut(),
-                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
-            )
-        };
-        if dll.is_null() {
-            return Err(Error::Other(format!(
-                "Cannot load Pluto runtime {} (or a dependent DLL): {}. \
-                 Keep all matching libiio 0.x runtime DLLs together inside Pluto.",
-                path.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        // From here `module` owns the DLL, so an early `?` frees it.
-        let module = Module(dll);
-        // Rust note: the target type of `symbol` is inferred from the struct
-        // field each result is assigned to, so each signature is written once,
-        // in `Api` above.
-        macro_rules! sym {
-            ($name:literal) => {
-                // SAFETY: `dll` is live (held by `module`) and every field type
-                // is the C signature of the export it is filled from.
-                unsafe { symbol(dll, concat!($name, "\0").as_bytes())? }
-            };
-        }
-        Ok(Self {
-            create: sym!("iio_create_context_from_uri"),
-            destroy: sym!("iio_context_destroy"),
-            find_device: sym!("iio_context_find_device"),
-            find_channel: sym!("iio_device_find_channel"),
-            write_ll: sym!("iio_channel_attr_write_longlong"),
-            write_str: sym!("iio_channel_attr_write"),
-            read_ll: sym!("iio_channel_attr_read_longlong"),
-            enable: sym!("iio_channel_enable"),
-            create_buffer: sym!("iio_device_create_buffer"),
-            destroy_buffer: sym!("iio_buffer_destroy"),
-            refill: sym!("iio_buffer_refill"),
-            first: sym!("iio_buffer_first"),
-            end: sym!("iio_buffer_end"),
-            step: sym!("iio_buffer_step"),
-            _dll: module,
-        })
+/// The receiver's gain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlutoGain {
+    /// Manual, dB (the AD9361 takes about −3 to 71 dB, depending on the band).
+    Manual(f64),
+    /// The AD9361's slow-attack AGC.
+    Agc,
+}
+
+impl Default for PlutoGain {
+    fn default() -> Self {
+        PlutoGain::Manual(50.0)
     }
 }
 
 /// What a live session is set to.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlutoSettings {
-    /// libiio URI, e.g. `ip:192.168.2.1` or `usb:`.
-    pub uri: String,
+    pub uri: PlutoUri,
     pub center_hz: f64,
-    /// Sample rate in S/s; the radio may pick a nearby value (see
-    /// [`PlutoSource::sample_rate`]).
-    pub rate: f64,
-    /// Hardware gain in dB (manual gain control).
-    pub gain: f64,
-    /// RF filter bandwidth in Hz.
-    pub bandwidth: f64,
-    /// LNB local-oscillator frequency in Hz. The GUI adds it to `center_hz` to
-    /// show the satellite-band frequency; the driver never sees it.
-    pub lnb_lo_hz: f64,
+    /// Complex samples per second.
+    pub sample_rate: f64,
+    /// RF filter bandwidth, Hz; `None` follows the rate.
+    pub bandwidth: Option<f64>,
+    pub gain: PlutoGain,
+    pub eight_bit: EightBit,
 }
 
 impl Default for PlutoSettings {
     fn default() -> Self {
-        Self {
-            uri: "ip:192.168.2.1".into(),
-            center_hz: 1_100_000_000.0,
-            rate: 4_000_000.0,
-            gain: 35.0,
-            bandwidth: 3_000_000.0,
-            lnb_lo_hz: 0.0,
+        PlutoSettings {
+            uri: PlutoUri::Auto,
+            center_hz: 546e6,
+            sample_rate: 64e6 / 7.0,
+            bandwidth: None,
+            gain: PlutoGain::default(),
+            eight_bit: EightBit::Auto,
         }
     }
 }
 
-/// Changes requested from another thread, applied by the source thread at the
-/// start of its next read.
-#[derive(Default)]
-struct Pending {
-    freq: Option<f64>,
-    gain: Option<f64>,
+/// What the radio said about itself at open.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlutoInfo {
+    /// "usb" or "ip:…".
+    pub link: String,
+    /// `fw_version`, e.g. "v0.39" or "tezuka-…".
+    pub firmware: String,
+    /// `hw_model`, e.g. "Analog Devices PlutoSDR Rev.C (Z7010-AD9363A)".
+    pub model: String,
+    /// Whether samples arrive as 8-bit IQ.
+    pub eight_bit: bool,
+}
+
+/// The IIO names a session needs, resolved once from the context.
+#[derive(Debug, Clone)]
+struct Ids {
+    phy: String,
+    rx: String,
+    /// Channels of the RX data device (mask length).
+    rx_words: usize,
+    /// Mask bits of I and Q (`voltage0`, `voltage1`).
+    i_bit: u32,
+    q_bit: u32,
+    /// `cf-ad9361-lpc` voltage0 has `sampling_frequency` (the ×8 decimator).
+    has_decimator: bool,
+    /// The TX LO channel exists (powered down at open).
+    has_tx_lo: bool,
+}
+
+impl Ids {
+    fn from(ctx: &Context) -> Result<Ids> {
+        let phy = ctx
+            .device(PHY)
+            .ok_or_else(|| err("no ad9361-phy: is this a Pluto?"))?;
+        let rx = ctx
+            .device(RX)
+            .ok_or_else(|| err("no cf-ad9361-lpc: is this a Pluto?"))?;
+        let bit = |id: &str| {
+            rx.channel(id, false)
+                .and_then(|c| c.scan_index)
+                .ok_or_else(|| err(format!("cf-ad9361-lpc has no {id} scan element")))
+        };
+        Ok(Ids {
+            phy: phy.id.clone(),
+            rx: rx.id.clone(),
+            rx_words: rx.mask_words(),
+            i_bit: bit("voltage0")?,
+            q_bit: bit("voltage1")?,
+            has_decimator: rx
+                .channel("voltage0", false)
+                .is_some_and(|c| c.attrs.iter().any(|a| a == "sampling_frequency")),
+            has_tx_lo: phy.channel("altvoltage1", true).is_some(),
+        })
+    }
+
+    fn mask(&self, eight_bit: bool) -> Vec<u32> {
+        let mut m = vec![0u32; self.rx_words];
+        let mut set = |b: u32| m[(b / 32) as usize] |= 1 << (b % 32);
+        set(self.i_bit);
+        if !eight_bit {
+            set(self.q_bit);
+        }
+        m
+    }
+}
+
+/// The attribute writes for a rate: (phy rate, decimated rate if the ×8
+/// decimator is used).
+fn rate_plan(rate: f64) -> Result<(u64, Option<u64>)> {
+    if !(RATE_MIN..=RATE_MAX).contains(&rate) {
+        return Err(err(format!(
+            "{:.3} MS/s is outside 0.26–61.44 MS/s",
+            rate / 1e6
+        )));
+    }
+    let r = rate.round() as u64;
+    Ok(if rate < DECIM_BELOW {
+        (r * 8, Some(r))
+    } else {
+        (r, None)
+    })
+}
+
+fn check_freq(hz: f64) -> Result<()> {
+    if (FREQ_MIN_HZ..=FREQ_MAX_HZ).contains(&hz) {
+        Ok(())
+    } else {
+        Err(err(format!(
+            "{:.3} MHz is outside the AD9361's 70–6000 MHz",
+            hz / 1e6
+        )))
+    }
+}
+
+/// Program the receiver (and power the TX LO down) on the control link.
+fn configure(c: &mut Client, ids: &Ids, s: &PlutoSettings) -> Result<()> {
+    let (phy_rate, decimated) = rate_plan(s.sample_rate)?;
+    let rx_path = Some(("voltage0", false));
+    if ids.has_tx_lo {
+        // Receive only: the transmit LO stays off.
+        c.write_attr(&ids.phy, Some(("altvoltage1", true)), "powerdown", "1")?;
+    }
+    c.write_attr(
+        &ids.phy,
+        rx_path,
+        "sampling_frequency",
+        &phy_rate.to_string(),
+    )?;
+    if ids.has_decimator {
+        // The FPGA decimates ×8 when asked for an eighth of the phy's rate,
+        // and passes the phy's rate straight through otherwise.
+        let r = decimated.unwrap_or(phy_rate);
+        c.write_attr(
+            &ids.rx,
+            Some(("voltage0", false)),
+            "sampling_frequency",
+            &r.to_string(),
+        )?;
+    } else if decimated.is_some() {
+        return Err(err(
+            "this firmware has no ×8 decimator: use 2.084 MS/s or more",
+        ));
+    }
+    let bw = s
+        .bandwidth
+        .unwrap_or(s.sample_rate)
+        .clamp(200e3, 56e6)
+        .round() as u64;
+    c.write_attr(&ids.phy, rx_path, "rf_bandwidth", &bw.to_string())?;
+    set_gain(c, ids, s.gain)?;
+    c.write_attr(
+        &ids.phy,
+        Some(("altvoltage0", true)),
+        "frequency",
+        &(s.center_hz.round() as u64).to_string(),
+    )?;
+    Ok(())
+}
+
+fn set_gain(c: &mut Client, ids: &Ids, g: PlutoGain) -> Result<()> {
+    let rx_path = Some(("voltage0", false));
+    match g {
+        PlutoGain::Agc => c.write_attr(&ids.phy, rx_path, "gain_control_mode", "slow_attack"),
+        PlutoGain::Manual(db) => {
+            c.write_attr(&ids.phy, rx_path, "gain_control_mode", "manual")?;
+            c.write_attr(
+                &ids.phy,
+                rx_path,
+                "hardwaregain",
+                &format!("{:.0}", db.clamp(-3.0, 73.0)),
+            )
+        }
+    }
+}
+
+/// Complex samples per `READBUF` block: about 1/30 s, a multiple of 4096,
+/// 16 k–1 M.
+fn block_samples(rate: f64) -> usize {
+    ((rate / 30.0) as usize)
+        .next_multiple_of(4096)
+        .clamp(16_384, 1 << 20)
+}
+
+/// Kernel buffers behind the stream: enough to ride out ~0.25 s on the host.
+fn kernel_buffers(rate: f64) -> usize {
+    let block_s = block_samples(rate) as f64 / rate;
+    ((0.25 / block_s).ceil() as usize).clamp(4, 16)
+}
+
+/// Convert one block of raw samples to IQ (12-bit samples in i16, or
+/// Tezuka's I8/Q8 pairs), full scale ±1.
+fn convert(raw: &[u8], eight_bit: bool, out: &mut Vec<Iq>) {
+    out.clear();
+    if eight_bit {
+        const S: f32 = 1.0 / 128.0;
+        out.extend(
+            raw.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[i, q]| Iq::new(i as i8 as f32 * S, q as i8 as f32 * S)),
+        );
+    } else {
+        // 12 bits sign-extended in little-endian i16 (`le:S12/16>>0`).
+        const S: f32 = 1.0 / 2048.0;
+        out.extend(raw.as_chunks::<4>().0.iter().map(|&[a, b, c, d]| {
+            Iq::new(
+                i16::from_le_bytes([a, b]) as f32 * S,
+                i16::from_le_bytes([c, d]) as f32 * S,
+            )
+        }));
+    }
+}
+
+/// Opens links: the real ones, or a test's fakes.
+pub(crate) trait Connector: Send + Sync {
+    /// `pipe` 0 is the control link; 1 carries samples.
+    fn link(&self, pipe: usize) -> Result<Box<dyn Link>>;
+    fn describe(&self) -> String;
+}
+
+struct Tcp(String);
+
+impl Connector for Tcp {
+    fn link(&self, _pipe: usize) -> Result<Box<dyn Link>> {
+        use std::net::ToSocketAddrs;
+        let addr = if self.0.contains(':') {
+            self.0.clone()
+        } else {
+            format!("{}:{IIOD_PORT}", self.0)
+        };
+        let sock = addr
+            .to_socket_addrs()
+            .map_err(|e| err(format!("cannot resolve {addr}: {e}")))?
+            .next()
+            .ok_or_else(|| err(format!("cannot resolve {addr}")))?;
+        let s = std::net::TcpStream::connect_timeout(&sock, Duration::from_secs(3))
+            .map_err(|e| err(format!("no Pluto at {addr} ({e})")))?;
+        let _ = s.set_nodelay(true);
+        s.set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(err)?;
+        Ok(Box::new(s))
+    }
+    fn describe(&self) -> String {
+        format!("ip:{}", self.0)
+    }
+}
+
+struct Usb(usb::UsbIio);
+
+impl Connector for Usb {
+    fn link(&self, pipe: usize) -> Result<Box<dyn Link>> {
+        let l = if pipe == 0 {
+            self.0.pipe(0, 16 << 10, 2)?
+        } else {
+            self.0.pipe(pipe, 256 << 10, 8)?
+        };
+        Ok(Box::new(l))
+    }
+    fn describe(&self) -> String {
+        "usb".into()
+    }
+}
+
+fn connector(uri: &PlutoUri) -> Result<Arc<dyn Connector>> {
+    Ok(match uri {
+        PlutoUri::Usb => Arc::new(Usb(usb::UsbIio::open()?)),
+        PlutoUri::Ip(h) => Arc::new(Tcp(h.clone())),
+        PlutoUri::Auto => {
+            if usb::present() {
+                match usb::UsbIio::open() {
+                    Ok(u) => Arc::new(Usb(u)),
+                    // No WinUSB driver on the IIO interface: its network
+                    // link still works.
+                    Err(e) => {
+                        tracing::info!("{e}; trying the network link");
+                        Arc::new(Tcp(DEFAULT_IP.into()))
+                    }
+                }
+            } else {
+                Arc::new(Tcp(DEFAULT_IP.into()))
+            }
+        }
+    })
 }
 
 /// Live controls on a running Pluto, usable from the GUI thread while the
 /// engine reads samples.
-///
-/// Rust note: the `Arc<Mutex<..>>` is shared between this handle and the
-/// source. A poisoned lock (a thread panicked holding it) is simply ignored
-/// here, since losing one tune request is harmless.
 #[derive(Clone)]
-pub struct PlutoControl(Arc<Mutex<Pending>>);
+pub struct PlutoControl {
+    ctl: Arc<Mutex<Client>>,
+    ids: Arc<Ids>,
+    settings: Arc<Mutex<PlutoSettings>>,
+    info: Arc<PlutoInfo>,
+    overflows: Arc<AtomicU64>,
+}
 
 impl PlutoControl {
-    /// Retune; applied before the next block is read.
-    pub fn tune(&self, hz: f64) {
-        if let Ok(mut p) = self.0.lock() {
-            p.freq = Some(hz);
-        }
+    pub fn settings(&self) -> PlutoSettings {
+        self.settings.lock().unwrap().clone()
     }
 
-    /// Set the hardware gain in dB.
-    pub fn gain(&self, db: f64) {
-        if let Ok(mut p) = self.0.lock() {
-            p.gain = Some(db);
-        }
+    pub fn info(&self) -> &PlutoInfo {
+        &self.info
+    }
+
+    pub fn set_center(&self, hz: f64) -> Result<()> {
+        check_freq(hz)?;
+        self.ctl.lock().unwrap().write_attr(
+            &self.ids.phy,
+            Some(("altvoltage0", true)),
+            "frequency",
+            &(hz.round() as u64).to_string(),
+        )?;
+        self.settings.lock().unwrap().center_hz = hz;
+        Ok(())
+    }
+
+    pub fn set_gain(&self, g: PlutoGain) -> Result<()> {
+        set_gain(&mut self.ctl.lock().unwrap(), &self.ids, g)?;
+        self.settings.lock().unwrap().gain = g;
+        Ok(())
+    }
+
+    /// The gain the AD9361 is at now (the AGC's choice when it runs), dB.
+    pub fn read_gain(&self) -> Result<f64> {
+        let v = self.ctl.lock().unwrap().read_attr(
+            &self.ids.phy,
+            Some(("voltage0", false)),
+            "hardwaregain",
+        )?;
+        v.split_whitespace()
+            .next()
+            .and_then(|x| x.parse().ok())
+            .ok_or_else(|| err(format!("unreadable gain {v:?}")))
+    }
+
+    /// Blocks dropped because the consumer fell behind.
+    pub fn overflows(&self) -> u64 {
+        self.overflows.load(Ordering::Relaxed)
     }
 }
 
-/// A live PlutoSDR receive stream.
-///
-/// The libiio handles start null and are filled in by `init`; `Drop` releases
-/// whichever were created, so a failed `init` does not leak.
+/// A live Pluto receive stream.
 pub struct PlutoSource {
-    api: Api,
-    ctx: Handle,
-    buf: Handle,
-    /// I and Q data channels, and the LO and gain/rate channels, found by name.
-    rx_i: Handle,
-    rx_q: Handle,
-    lo: Handle,
-    gain_chan: Handle,
-    controls: PlutoControl,
-    settings: PlutoSettings,
-    /// The sample rate the radio reports after being asked for `settings.rate`.
-    actual_rate: f64,
-}
-
-// SAFETY: every libiio handle is owned and used exclusively by the source
-// thread; the engine moves the source there once and never shares it.
-unsafe impl Send for PlutoSource {}
-
-/// `s` as a C string, for libiio's `const char *` arguments. Fails only if `s`
-/// has an interior NUL.
-fn cstring(s: &str) -> Result<CString> {
-    CString::new(s).map_err(|e| Error::Other(e.to_string()))
+    rx: Receiver<Vec<Iq>>,
+    recycle: SyncSender<Vec<Iq>>,
+    control: PlutoControl,
+    /// Blocks still to throw away after a retune.
+    skip: u32,
+    flush_blocks: u32,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    done: Receiver<()>,
 }
 
 impl PlutoSource {
-    /// Connect to the radio and start filling its RX buffer.
+    /// Connect, configure and start receiving.
     pub fn open(settings: PlutoSettings) -> Result<Self> {
-        if !(MIN_CENTER_HZ..=MAX_CENTER_HZ).contains(&settings.center_hz)
-            || !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&settings.rate)
-        {
-            return Err(Error::Other(
-                "Pluto tuning must be 70–6000 MHz and sample rate >= 520834 S/s; \
-                 actual supported limits depend on firmware"
-                    .into(),
-            ));
-        }
-        let api = Api::load()?;
-        let mut src = Self {
-            api,
-            ctx: ptr::null_mut(),
-            buf: ptr::null_mut(),
-            rx_i: ptr::null_mut(),
-            rx_q: ptr::null_mut(),
-            lo: ptr::null_mut(),
-            gain_chan: ptr::null_mut(),
-            controls: PlutoControl(Arc::new(Mutex::new(Pending::default()))),
-            actual_rate: 0.0,
-            settings,
-        };
-        // On failure `src` drops here and `Drop` releases the partial setup.
-        src.init()?;
-        Ok(src)
+        check_freq(settings.center_hz)?;
+        rate_plan(settings.sample_rate)?;
+        let conn = connector(&settings.uri)?;
+        Self::start(conn, settings)
     }
 
+    pub(crate) fn start(conn: Arc<dyn Connector>, settings: PlutoSettings) -> Result<Self> {
+        let mut ctl = Client::new(conn.link(0)?);
+        let ctx = iiod::parse_context(&ctl.print()?)?;
+        let ids = Ids::from(&ctx)?;
+        let firmware = ctx.attr("fw_version").unwrap_or_default().to_string();
+        let eight_bit = settings.eight_bit == EightBit::Auto
+            && firmware.to_ascii_lowercase().starts_with("tezuka");
+        configure(&mut ctl, &ids, &settings)?;
+        let info = PlutoInfo {
+            link: conn.describe(),
+            firmware,
+            model: ctx.attr("hw_model").unwrap_or_default().to_string(),
+            eight_bit,
+        };
+        tracing::info!(
+            "Pluto on {}: {} {}, {}-bit IQ",
+            info.link,
+            info.model,
+            info.firmware,
+            if eight_bit { 8 } else { 16 }
+        );
+
+        // The sample link: its own connection (TCP) or pipe (USB).
+        let mut data = Client::new(conn.link(1)?);
+        let samples = block_samples(settings.sample_rate);
+        let bytes = samples * if eight_bit { 2 } else { 4 };
+        let kbufs = kernel_buffers(settings.sample_rate);
+        let _ = data.exec("TIMEOUT 5000\r\n");
+        // Older iiods do not know SET; the default count (4) then stands.
+        if let Err(e) = data.exec(&format!("SET {} BUFFERS_COUNT {kbufs}\r\n", ids.rx)) {
+            tracing::debug!("{e}");
+        }
+        let mask = ids.mask(eight_bit);
+        data.open(&ids.rx, samples, &mask)?;
+
+        let (tx, rx) = mpsc::sync_channel::<Vec<Iq>>(QUEUE);
+        let (recycle_tx, recycle_rx) = mpsc::sync_channel::<Vec<Iq>>(QUEUE + 4);
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let overflows = Arc::new(AtomicU64::new(0));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            let overflows = Arc::clone(&overflows);
+            let dev = ids.rx.clone();
+            let words = ids.rx_words;
+            std::thread::Builder::new()
+                .name("pluto-rx".into())
+                .spawn(move || {
+                    let r = reader(
+                        &mut data,
+                        &dev,
+                        bytes,
+                        words,
+                        eight_bit,
+                        &tx,
+                        &recycle_rx,
+                        &stop,
+                        &overflows,
+                    );
+                    if let Err(e) = r
+                        && !stop.load(Ordering::Relaxed)
+                    {
+                        tracing::warn!("Pluto read failed: {e}");
+                    }
+                    let _ = data.close(&dev);
+                    let _ = done_tx.send(());
+                })
+                .map_err(|e| err(format!("cannot start the reader: {e}")))?
+        };
+        Ok(PlutoSource {
+            rx,
+            recycle: recycle_tx,
+            control: PlutoControl {
+                ctl: Arc::new(Mutex::new(ctl)),
+                ids: Arc::new(ids),
+                settings: Arc::new(Mutex::new(settings)),
+                info: Arc::new(info),
+                overflows,
+            },
+            skip: 0,
+            // What may already sit in the kernel's buffers and our pipeline.
+            flush_blocks: kbufs as u32 + 2,
+            stop,
+            thread: Some(thread),
+            done: done_rx,
+        })
+    }
+
+    /// A handle for retuning and gain changes while the engine reads.
     pub fn control(&self) -> PlutoControl {
-        self.controls.clone()
+        self.control.clone()
     }
 
-    /// Open the context, find the channels, configure the RX path and create the
-    /// buffer, in that order.
-    fn init(&mut self) -> Result<()> {
-        // SAFETY (every libiio call in this function): the handle arguments are
-        // either the non-null results of earlier calls (checked) or `self.ctx`,
-        // and each `cstring(..).as_ptr()` lives to the end of its statement.
-        self.ctx = unsafe { (self.api.create)(cstring(&self.settings.uri)?.as_ptr()) };
-        if self.ctx.is_null() {
-            return Err(Error::Other(format!(
-                "Pluto libiio context could not open URI {}",
-                self.settings.uri
-            )));
+    /// Moves the centre and throws away what was captured before it took
+    /// effect. (DecSAT's [`IqSource`] has no retune, so this is an inherent
+    /// method for whoever holds the source itself; the GUI retunes through
+    /// [`PlutoControl::set_center`], and the decoder rides out the few stale
+    /// blocks.)
+    pub fn retune(&mut self, hz: f64) -> Result<bool> {
+        self.control.set_center(hz)?;
+        while let Ok(b) = self.rx.try_recv() {
+            let _ = self.recycle.try_send(b);
         }
-        let phy = unsafe { (self.api.find_device)(self.ctx, cstring(DEVICE_PHY)?.as_ptr()) };
-        let rx = unsafe { (self.api.find_device)(self.ctx, cstring(DEVICE_RX_DATA)?.as_ptr()) };
-        if phy.is_null() || rx.is_null() {
-            return Err(Error::Other(
-                "Pluto missing ad9361-phy or cf-ad9361-lpc device".into(),
-            ));
-        }
-        self.lo = unsafe { (self.api.find_channel)(phy, cstring(CHANNEL_RX_LO)?.as_ptr(), true) };
-        self.gain_chan =
-            unsafe { (self.api.find_channel)(phy, cstring(CHANNEL_RX_PATH)?.as_ptr(), false) };
-        self.rx_i = unsafe { (self.api.find_channel)(rx, cstring(CHANNEL_RX_I)?.as_ptr(), false) };
-        self.rx_q = unsafe { (self.api.find_channel)(rx, cstring(CHANNEL_RX_Q)?.as_ptr(), false) };
-        if [self.lo, self.gain_chan, self.rx_i, self.rx_q]
-            .iter()
-            .any(|v| v.is_null())
-        {
-            return Err(Error::Other("Pluto RX channel not found".into()));
-        }
-
-        // Ask for the sample rate, then read back what the radio settled on.
-        self.write_ll(
-            self.gain_chan,
-            "sampling_frequency",
-            self.settings.rate as i64,
-        )?;
-        let mut actual = 0i64;
-        let rc = unsafe {
-            (self.api.read_ll)(
-                self.gain_chan,
-                cstring("sampling_frequency")?.as_ptr(),
-                &mut actual,
-            )
-        };
-        if rc < 0 {
-            return Err(Error::Other("Pluto sampling_frequency read failed".into()));
-        }
-        self.actual_rate = actual as f64;
-
-        self.write_ll(
-            self.gain_chan,
-            "rf_bandwidth",
-            self.settings.bandwidth as i64,
-        )?;
-        self.write_str(self.gain_chan, "gain_control_mode", "manual")?;
-        // `hardwaregain` takes a whole number of dB; some firmware only accepts
-        // the text form, so fall back to that if the integer write is refused.
-        self.write_ll(
-            self.gain_chan,
-            "hardwaregain",
-            self.settings.gain.round() as i64,
-        )
-        .or_else(|_| {
-            self.write_str(
-                self.gain_chan,
-                "hardwaregain",
-                &format!("{:.0}", self.settings.gain),
-            )
-        })?;
-        self.write_ll(self.lo, "frequency", self.settings.center_hz as i64)?;
-
-        unsafe {
-            (self.api.enable)(self.rx_i);
-            (self.api.enable)(self.rx_q);
-        }
-        self.buf = unsafe { (self.api.create_buffer)(rx, BUFFER_SAMPLES, false) };
-        if self.buf.is_null() {
-            return Err(Error::Other(
-                "Pluto create RX buffer failed (is device busy?)".into(),
-            ));
-        }
-        Ok(())
+        self.skip = self.flush_blocks;
+        Ok(true)
     }
+}
 
-    /// Write an integer channel attribute.
-    fn write_ll(&self, ch: Handle, attr: &str, value: i64) -> Result<()> {
-        // SAFETY: `ch` is a non-null channel of the open context (checked in
-        // `init`); the C string lives to the end of the statement.
-        let n = unsafe { (self.api.write_ll)(ch, cstring(attr)?.as_ptr(), value) };
-        if n < 0 {
-            Err(Error::Other(format!("Pluto {attr} write failed: {n}")))
-        } else {
-            Ok(())
+/// The reader thread: two `READBUF`s in flight, convert, hand over.
+#[allow(clippy::too_many_arguments)]
+fn reader(
+    data: &mut Client,
+    dev: &str,
+    bytes: usize,
+    words: usize,
+    eight_bit: bool,
+    tx: &SyncSender<Vec<Iq>>,
+    recycle: &Receiver<Vec<Iq>>,
+    stop: &AtomicBool,
+    overflows: &AtomicU64,
+) -> Result<()> {
+    let mut raw = Vec::with_capacity(bytes);
+    data.readbuf_request(dev, bytes)?;
+    while !stop.load(Ordering::Relaxed) {
+        data.readbuf_request(dev, bytes)?;
+        data.readbuf_reply(&mut raw, bytes, words)?;
+        let mut v = recycle.try_recv().unwrap_or_default();
+        convert(&raw, eight_bit, &mut v);
+        match tx.try_send(v) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                overflows.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(TrySendError::Disconnected(_)) => break,
         }
     }
-
-    /// Write a text channel attribute.
-    fn write_str(&self, ch: Handle, attr: &str, value: &str) -> Result<()> {
-        // SAFETY: as `write_ll`; both C strings live to the end of the statement.
-        let n =
-            unsafe { (self.api.write_str)(ch, cstring(attr)?.as_ptr(), cstring(value)?.as_ptr()) };
-        if n < 0 {
-            Err(Error::Other(format!("Pluto {attr} write failed: {n}")))
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Apply any retune or gain change queued by [`PlutoControl`].
-    fn apply(&mut self) -> Result<()> {
-        // Take the requests and drop the lock before touching the hardware.
-        let (freq, gain) = {
-            let mut p = self
-                .controls
-                .0
-                .lock()
-                .map_err(|_| Error::Other("Pluto control lock poisoned".into()))?;
-            (p.freq.take(), p.gain.take())
-        };
-        if let Some(f) = freq {
-            self.write_ll(self.lo, "frequency", f as i64)?;
-            self.settings.center_hz = f;
-        }
-        if let Some(g) = gain {
-            self.write_str(self.gain_chan, "hardwaregain", &format!("{g:.0}"))?;
-            self.settings.gain = g;
-        }
-        Ok(())
-    }
+    // The request still in flight.
+    data.readbuf_reply(&mut raw, bytes, words)
 }
 
 impl IqSource for PlutoSource {
     fn read(&mut self, out: &mut Vec<Iq>) -> Result<usize> {
-        self.apply()?;
-        // SAFETY (every libiio call here): `self.buf` is the buffer made in
-        // `init`, and `rx_i` is a channel enabled on it.
-        let n = unsafe { (self.api.refill)(self.buf) };
-        if n < 0 {
-            return Err(Error::Other(format!("Pluto RX buffer refill failed: {n}")));
+        loop {
+            match self.rx.recv_timeout(Duration::from_secs(3)) {
+                Ok(spent) if self.skip > 0 => {
+                    self.skip -= 1;
+                    let _ = self.recycle.try_send(spent);
+                }
+                Ok(mut buf) => {
+                    std::mem::swap(out, &mut buf);
+                    let _ = self.recycle.try_send(buf);
+                    return Ok(out.len());
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(err("stopped delivering samples"));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(err("the stream stopped (unplugged?)"));
+                }
+            }
         }
-        // The step is the bytes per sample across all enabled channels: 4 for I
-        // and Q as two `i16`.
-        let step = unsafe { (self.api.step)(self.buf) };
-        if step < IQ_BYTES as isize {
-            return Err(Error::Other(format!(
-                "Pluto unexpected sample stride: {step}"
-            )));
-        }
-        let mut p = unsafe { (self.api.first)(self.buf, self.rx_i) } as *const u8;
-        let end = unsafe { (self.api.end)(self.buf) } as usize;
-        out.clear();
-        // Walk from the first sample to the end of the buffer, one stride at a
-        // time. The comparison is done on addresses (as `usize`) so no pointer
-        // is ever formed past the end.
-        while (p as usize).saturating_add(IQ_BYTES) <= end {
-            // The data is little-endian `i16`s and not necessarily aligned, so
-            // `read_unaligned` rather than a plain dereference.
-            //
-            // SAFETY: the loop condition keeps the four bytes at `p` inside the
-            // buffer libiio just filled.
-            let i = unsafe { i16::from_le(ptr::read_unaligned(p as *const i16)) };
-            let q = unsafe { i16::from_le(ptr::read_unaligned(p.add(2) as *const i16)) };
-            out.push(Iq::new(
-                i as f32 / ADC_FULL_SCALE,
-                q as f32 / ADC_FULL_SCALE,
-            ));
-            // SAFETY: `step` is the buffer's own stride; the loop condition
-            // re-checks the bounds before the next read.
-            p = unsafe { p.add(step as usize) };
-        }
-        Ok(out.len())
     }
 
     fn sample_rate(&self) -> f64 {
-        self.actual_rate
+        self.control.settings.lock().unwrap().sample_rate
     }
 
     fn center_freq(&self) -> f64 {
-        self.settings.center_hz
+        self.control.settings.lock().unwrap().center_hz
     }
 
     fn describe(&self) -> String {
+        let s = self.control.settings();
+        let i = &self.control.info;
         format!(
-            "PlutoSDR {} @ {:.3} MHz, {:.3} MS/s",
-            self.settings.uri,
-            self.settings.center_hz / 1e6,
-            self.actual_rate / 1e6
+            "Pluto ({}) @ {:.4} MHz, {:.3} MS/s, {}, {}-bit",
+            i.link,
+            s.center_hz / 1e6,
+            s.sample_rate / 1e6,
+            match s.gain {
+                PlutoGain::Agc => "AGC".to_string(),
+                PlutoGain::Manual(db) => format!("{db:.0} dB"),
+            },
+            if i.eight_bit { 8 } else { 16 }
         )
     }
 
@@ -562,18 +691,18 @@ impl IqSource for PlutoSource {
 
 impl Drop for PlutoSource {
     fn drop(&mut self) {
-        // Buffer first, then the context it belongs to. The DLL is unloaded
-        // afterwards, when the `api` field drops.
-        //
-        // SAFETY: each handle is released at most once, here, and only if `init`
-        // got far enough to create it.
-        unsafe {
-            if !self.buf.is_null() {
-                (self.api.destroy_buffer)(self.buf);
+        self.stop.store(true, Ordering::Relaxed);
+        // Keep the reader from blocking on a full queue while it stops.
+        while self.rx.try_recv().is_ok() {}
+        if self.done.recv_timeout(Duration::from_secs(3)).is_ok() {
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
             }
-            if !self.ctx.is_null() {
-                (self.api.destroy)(self.ctx);
-            }
+        } else {
+            tracing::warn!("Pluto reader did not stop; detaching it");
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
