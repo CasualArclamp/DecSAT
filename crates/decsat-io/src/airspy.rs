@@ -1,5 +1,13 @@
 // Airspy support for DecSAT (OM5NA, 2026-10-19)
-//! Live Airspy Mini (and R2) front end, in pure Rust over USB.
+//! Live Airspy Mini (and R2) front end, in pure Rust over USB. Also runs
+//! the HydraSDR RFOne: it shares the R2's USB ID (1D50:60A1), board id and
+//! vendor protocol, and is told apart only by its firmware version string
+//! (see [`model_name`]). Two details checked against its firmware (rfone_fw,
+//! `m0/usb_req.c`, `common/core.h`): the bias tee hangs off the same GPIO
+//! (port 1 pin 13), so `set_rf_bias(false)` switches it off there too; and
+//! `SET_FREQ` takes a u64 where the library sends libairspy's u32 — the
+//! firmware keeps the upper four bytes zero, and a live retune of an RFOne
+//! tracks a broadcast FM carrier to the kHz, so the short write tunes right.
 //!
 //! Uses `libairspy-rs` (BSD-3-Clause and MIT; a faithful port of Airspy's
 //! own libairspy, its IQ converter bit-exact against the C library), which
@@ -44,10 +52,22 @@ pub const AIRSPY_MIN_HZ: u64 = 24_000_000;
 pub const AIRSPY_MAX_HZ: u64 = 1_750_000_000;
 
 /// Sample rates an Airspy offers: 3 and 6 MS/s on a Mini, 2.5 and 10 MS/s
-/// on an R2. All four are offered; at open time the board's own list
-/// decides, and a rate the board lacks becomes its nearest (10 → 6 on a
-/// Mini, 3 → 2.5 on an R2).
-pub const AIRSPY_RATES: [u32; 4] = [2_500_000, 3_000_000, 6_000_000, 10_000_000];
+/// on an R2, 2.5, 5 and 10 MS/s on a HydraSDR RFOne. All are offered; at
+/// open time the board's own list decides, and a rate the board lacks
+/// becomes its nearest (10 → 6 on a Mini, 3 → 2.5 on an R2, 6 → 5 on a
+/// HydraSDR).
+pub const AIRSPY_RATES: [u32; 5] = [2_500_000, 3_000_000, 5_000_000, 6_000_000, 10_000_000];
+
+/// The radio's name from its firmware version string: a HydraSDR RFOne
+/// reports "HydraSDR RFOne v1.0.0-rc2 2024-09-15" (read off a real one);
+/// anything else here is an Airspy.
+pub fn model_name(firmware: &str) -> &'static str {
+    if firmware.to_ascii_lowercase().contains("hydrasdr") {
+        "HydraSDR RFOne"
+    } else {
+        "Airspy"
+    }
+}
 
 /// Which of libairspy's gain tables the single gain step drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,6 +132,8 @@ fn map_err(what: &str, e: impl std::fmt::Display) -> Error {
 /// The board the session opened.
 #[derive(Debug, Clone, Default)]
 pub struct AirspyInfo {
+    /// "Airspy" or "HydraSDR RFOne" (see [`model_name`]).
+    pub model: &'static str,
     pub serial: String,
     pub firmware: String,
     /// The sample rates the board offers, Hz, ascending.
@@ -209,7 +231,7 @@ impl AirspySource {
         check_freq(settings.center_hz)?;
         let mut dev = Device::open().map_err(|e| {
             Error::Other(format!(
-                "no Airspy found ({e}). Is it plugged in, not in use by another program \
+                "no Airspy or HydraSDR found ({e}). Is it plugged in, not in use by another program \
                  (SDR#, SDR++), and on the WinUSB driver?"
             ))
         })?;
@@ -232,15 +254,23 @@ impl AirspySource {
         let gains = settings.gains.snapped();
         apply_gains(&dev, gains)?;
 
+        let firmware = dev.version_string().unwrap_or_default();
         let info = AirspyInfo {
+            model: model_name(&firmware),
             serial: dev
                 .partid_serialno()
                 .map(|p| format!("{p:?}"))
                 .unwrap_or_default(),
-            firmware: dev.version_string().unwrap_or_default(),
+            firmware,
             rates,
         };
-        tracing::info!("Airspy {} ({}) at {} S/s", info.serial, info.firmware, rate);
+        tracing::info!(
+            "{} {} ({}) at {} S/s",
+            info.model,
+            info.serial,
+            info.firmware,
+            rate
+        );
 
         let (tx, rx) = mpsc::sync_channel::<Vec<Iq>>(QUEUE);
         let (spare_tx, spare_rx) = mpsc::sync_channel::<Vec<Iq>>(8);
@@ -322,7 +352,8 @@ impl IqSource for AirspySource {
     fn describe(&self) -> String {
         let s = self.control.settings();
         format!(
-            "Airspy @ {:.4} MHz, {:.2} MS/s, {} gain {}",
+            "{} @ {:.4} MHz, {:.2} MS/s, {} gain {}",
+            self.control.info.model,
             s.center_hz as f64 / 1e6,
             s.sample_rate as f64 / 1e6,
             match s.gains.mode {
@@ -373,7 +404,23 @@ mod tests {
         assert_eq!(nearest_rate(&r2, 10_000_000), 10_000_000);
         assert_eq!(nearest_rate(&r2, 3_000_000), 2_500_000);
         assert_eq!(nearest_rate(&r2, 6_000_000), 2_500_000);
+        let hydra = [2_500_000, 5_000_000, 10_000_000];
+        assert_eq!(nearest_rate(&hydra, 6_000_000), 5_000_000);
+        assert_eq!(nearest_rate(&hydra, 5_000_000), 5_000_000);
         assert!(AIRSPY_RATES.contains(&10_000_000));
+    }
+
+    #[test]
+    fn names_the_model_from_the_firmware_string() {
+        assert_eq!(
+            model_name("HydraSDR RFOne v1.0.0-rc2 2024-09-15"),
+            "HydraSDR RFOne"
+        );
+        assert_eq!(
+            model_name("AirSpy MINI v1.0.0-rc10-6-g4008185 2020-05-08"),
+            "Airspy"
+        );
+        assert_eq!(model_name(""), "Airspy");
     }
 
     #[test]

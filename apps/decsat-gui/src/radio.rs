@@ -45,7 +45,7 @@ impl Device {
             #[cfg(feature = "fobos")]
             Device::Fobos => "Fobos SDR",
             #[cfg(feature = "airspy")]
-            Device::Airspy => "Airspy Mini / R2",
+            Device::Airspy => "Airspy Mini / R2 / HydraSDR",
         }
     }
 
@@ -325,7 +325,7 @@ impl RadioPanel {
                     if let Live::Airspy(a) = c {
                         let i = a.info();
                         ui.label(
-                            RichText::new(format!("Airspy {} · {}", i.serial, i.firmware))
+                            RichText::new(format!("{} {} · {}", i.model, i.serial, i.firmware))
                                 .small()
                                 .weak(),
                         );
@@ -480,7 +480,7 @@ impl RadioPanel {
                 });
         })
         .response
-        .on_hover_text("A Mini runs at 3 or 6 MS/s, an R2 at 2.5 or 10; another choice becomes the board's nearest rate.")
+        .on_hover_text("A Mini runs at 3 or 6 MS/s, an R2 at 2.5 or 10, a HydraSDR at 2.5, 5 or 10; another choice becomes the board's nearest rate.")
         .on_disabled_hover_text("Stop the radio to change the sample rate.");
         ui.end_row();
 

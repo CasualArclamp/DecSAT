@@ -177,9 +177,10 @@ enum Command {
         /// Fobos IF VGA gain, dB: 0–62 in 2 dB steps.
         #[arg(long, default_value_t = 16)]
         fobos_vga: u16,
-        /// Live from an Airspy Mini / R2 instead: its centre frequency, MHz
-        /// (24–1750). Pure Rust over USB; the bias tee stays off.
-        #[arg(long, conflicts_with_all = ["hackrf", "fobos"])]
+        /// Live from an Airspy Mini / R2 or a HydraSDR RFOne instead: its
+        /// centre frequency, MHz (24–1750). Pure Rust over USB; the bias tee
+        /// stays off.
+        #[arg(long, alias = "hydrasdr", conflicts_with_all = ["hackrf", "fobos"])]
         airspy: Option<f64>,
         /// Airspy gain step, 0–21 (libairspy's linearity table; add
         /// --airspy-sensitivity for its sensitivity table).

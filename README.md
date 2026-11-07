@@ -1248,6 +1248,12 @@ up. One gain step 0–21 on libairspy's *linearity* table (for an LNB's
 output) or its *sensitivity* table. The bias tee is switched off on every
 open and never on: 4.5 V cannot power an LNB.
 
+A **HydraSDR RFOne** (2.5, 5 or 10 MS/s, R828D tuner) works the same way:
+it speaks the R2's USB protocol and is picked as **Airspy Mini / R2 /
+HydraSDR**, or `--airspy` (alias `--hydrasdr`) on the command line; the
+radio panel names it from its firmware. Tested live on an RFOne at 5 and
+10 MS/s.
+
 ```
 decsat-gui --airspy 1450 --rate 6 --lo 10600 --vga 10    # --vga is the gain step here
 decsat decode --airspy 1450 --airspy-gain 10 --decoder id --offset 200e3 --bandwidth 300e3
