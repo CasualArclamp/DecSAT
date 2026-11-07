@@ -822,10 +822,13 @@ satellites), community lists
 *unconfirmed* otherwise, and the satellites whose beacons are not published
 at all. Click a frequency to retune the radio there and put a beacon VFO on
 it; the chosen satellite's beacons (by name, or by a position such as
-`160` or `30W`) are marked on the waterfall. Type the dish's site
-(`-27.47, 153.03` or `51.5N 0.12W`) in the window and the list keeps to
-the satellites above your horizon, with their elevation, and **All
-beacons** marks only those. The list is
+`160` or `30W`) are marked on the waterfall. Type **My location**
+(`-27.47, 153.03`, `51.5N 0.12W`, or just a longitude such as `153`) in
+the window and the list keeps to the satellites within its limits — at
+least **min el** up (10° by default) and no more than **max az ±** off due
+south, or due north below the equator (75° by default; 90° is off) — with
+their elevation and azimuth, and **All beacons** marks only those, so a
+beacon on the same frequency on the far side of the world is never matched. The list is
 `apps/decsat-gui/src/ku_beacons.csv`.
 
 **📡 All beacons** (beside the volume) marks every satellite's beacons at

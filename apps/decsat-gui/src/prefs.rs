@@ -326,6 +326,24 @@ pub fn set_beacon_site(v: &str) {
     let _ = write_key("beacon_site", v);
 }
 
+/// The Beacons window's (min elevation, max azimuth off the meridian),
+/// degrees, or the defaults given.
+pub fn beacon_limits(min_el: f64, max_az: f64) -> (f64, f64) {
+    let all = read_all();
+    let get = |k: &str, d: f64| {
+        all.iter()
+            .find(|(key, _)| key == k)
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(d)
+    };
+    (get("beacon_min_el", min_el), get("beacon_max_az", max_az))
+}
+
+pub fn set_beacon_limits(min_el: f64, max_az: f64) {
+    let _ = write_key("beacon_min_el", &format!("{min_el:.1}"));
+    let _ = write_key("beacon_max_az", &format!("{max_az:.1}"));
+}
+
 /// The beacon card's pinned word plots, as the card writes them
 /// ("200,1,*;43,0,7": byte, 16 bits or not, minor frame or every one).
 pub fn beacon_pins() -> String {

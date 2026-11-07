@@ -3012,7 +3012,7 @@ impl eframe::App for App {
         self.beacon_scene = beacon_list::Scene::new(
             &self.beacon_marks,
             &self.satellite,
-            self.beacon_window.site(),
+            self.beacon_window.sky(),
             self.rf_center(),
             &self.front.spectrum_db,
             self.band.span(),

@@ -42,12 +42,92 @@ impl Satellite {
         format!("{} {}", position_text(self.position_e), self.name)
     }
 
-    /// Whether a dish at `site` (latitude, longitude in degrees, east and
-    /// north positive) sees it above the horizon; with no site, every one
-    /// does.
-    pub fn visible(&self, site: Option<(f64, f64)>) -> bool {
-        site.is_none_or(|(lat, lon)| elevation(lat, lon, self.position_e) >= 0.0)
+    /// Whether a dish under `sky` can see it; with no location set, every
+    /// one counts.
+    pub fn visible(&self, sky: Option<Sky>) -> bool {
+        sky.is_none_or(|k| k.sees(self.position_e))
     }
+}
+
+/// Where the dish is and how much of the arc it is allowed to look at:
+/// a satellite outside it is never marked by "every satellite", so a
+/// beacon on the same frequency on the far side of the world cannot take a
+/// line that belongs to one in view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sky {
+    /// Degrees north; `None` when only a longitude was given.
+    pub lat: Option<f64>,
+    /// Degrees east.
+    pub lon: f64,
+    /// Lowest elevation counted, degrees.
+    pub min_el: f64,
+    /// Furthest a satellite's azimuth may be from the meridian (due south
+    /// in the northern hemisphere, due north in the southern), degrees;
+    /// [`NO_AZ_LIMIT`] or more is no limit.
+    pub max_az: f64,
+}
+
+/// A default elevation floor: below about 10° a dish looks through a lot
+/// of atmosphere and usually at trees and roofs.
+pub const DEFAULT_MIN_EL: f64 = 10.0;
+/// A default azimuth limit: ±75° off the meridian keeps about ±40° to ±65°
+/// of longitude either side at mid latitudes — every satellite a fixed
+/// dish there is likely to be on, and none from the other side of the
+/// world.
+pub const DEFAULT_MAX_AZ: f64 = 75.0;
+/// An azimuth limit this wide limits nothing (every satellite above the
+/// horizon is within 90° of the meridian).
+pub const NO_AZ_LIMIT: f64 = 90.0;
+/// The latitude assumed for the azimuth limit when only a longitude is
+/// given, and the least used near the equator: there every satellite but
+/// the one overhead is due east or due west, so azimuth says nothing about
+/// how far round the arc it is, and the limit would shrink to a few degrees
+/// of longitude. Measured at 15° instead it still allows about ±45°.
+const AZ_LAT_FLOOR: f64 = 15.0;
+const LON_ONLY_LAT: f64 = 35.0;
+
+impl Sky {
+    /// (elevation, azimuth from north) of a satellite at `sat_lon`, both in
+    /// degrees, at the latitude given or [`LON_ONLY_LAT`].
+    pub fn look(&self, sat_lon: f64) -> (f64, f64) {
+        let lat = self.lat.unwrap_or(LON_ONLY_LAT);
+        (
+            elevation(lat, self.lon, sat_lon),
+            azimuth(lat, self.lon, sat_lon),
+        )
+    }
+
+    /// Whether a satellite at `sat_lon` is within the limits.
+    pub fn sees(&self, sat_lon: f64) -> bool {
+        let (el, _) = self.look(sat_lon);
+        if el < self.min_el {
+            return false;
+        }
+        if self.max_az >= NO_AZ_LIMIT {
+            return true;
+        }
+        // Measured at least AZ_LAT_FLOOR from the equator (see there); the
+        // hemisphere does not matter, the angle off the meridian is the
+        // same either side.
+        let lat = self.lat.unwrap_or(LON_ONLY_LAT).abs().max(AZ_LAT_FLOOR);
+        let az = azimuth(lat, self.lon, sat_lon);
+        (az - 180.0).abs() <= self.max_az
+    }
+}
+
+/// The azimuth in degrees from true north (0–360, clockwise) of a
+/// geostationary satellite at `sat_lon` from (`lat`, `lon`): the
+/// great-circle bearing to the sub-satellite point,
+/// atan2(sin Δlon, −sin(lat)·cos Δlon) — the satellite lies in the plane
+/// through the site, the Earth's centre and that point.
+pub fn azimuth(lat: f64, lon: f64, sat_lon: f64) -> f64 {
+    // `rem_euclid` keeps Δlon signed the short way round in −180..180.
+    let d = ((sat_lon - lon + 180.0).rem_euclid(360.0) - 180.0).to_radians();
+    let phi = lat.to_radians();
+    d.sin()
+        .atan2(-phi.sin() * d.cos())
+        .to_degrees()
+        .rem_euclid(360.0)
 }
 
 /// "166.0°E", "30.0°W" (0° and 180° are written east).
@@ -79,15 +159,13 @@ pub fn elevation(lat: f64, lon: f64, sat_lon: f64) -> f64 {
 }
 
 /// "-27.47, 153.03" or "27.47S 153.03E" into (latitude, longitude), north
-/// and east positive. `None` if it is not two numbers in range.
-pub fn parse_site(text: &str) -> Option<(f64, f64)> {
+/// and east positive; a single number ("153.03", "0.12W") is a longitude
+/// alone. `None` if it is not that, in range.
+pub fn parse_site(text: &str) -> Option<(Option<f64>, f64)> {
     let parts: Vec<&str> = text
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|p| !p.is_empty())
         .collect();
-    let [a, b] = parts.as_slice() else {
-        return None;
-    };
     // A trailing hemisphere letter sets the sign: `strip_suffix` hands back
     // the number without it, or `None` if it is not there.
     let signed = |p: &str, neg: [char; 2], pos: [char; 2]| -> Option<f64> {
@@ -99,9 +177,16 @@ pub fn parse_site(text: &str) -> Option<(f64, f64)> {
         };
         num.trim_end_matches('°').parse::<f64>().ok().map(|v| sign * v)
     };
-    let lat = signed(a, ['S', 's'], ['N', 'n'])?;
-    let lon = signed(b, ['W', 'w'], ['E', 'e'])?;
-    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
+    let (lat, lon) = match parts.as_slice() {
+        [b] => (None, signed(b, ['W', 'w'], ['E', 'e'])?),
+        [a, b] => (
+            Some(signed(a, ['S', 's'], ['N', 'n'])?),
+            signed(b, ['W', 'w'], ['E', 'e'])?,
+        ),
+        _ => return None,
+    };
+    (lat.is_none_or(|l| (-90.0..=90.0).contains(&l)) && (-180.0..=180.0).contains(&lon))
+        .then_some((lat, lon))
 }
 
 /// The list, parsed once from the embedded CSV.
@@ -208,7 +293,7 @@ pub const ALL: &str = "all";
 const EVERY: &str = "every satellite";
 /// What marking them all does.
 pub const ALL_TIP: &str = "Mark every satellite's beacons on the waterfall (every one above the \
-     horizon from the dish's site, when the Beacons window has one), to find a satellite: a beacon with a line under it is marked bright, one without dim, and the \
+     dish's limits, when the Beacons window has your location), to find a satellite: a beacon with a line under it is marked bright, one without dim, and the \
      satellite whose beacons have the lines is named beside the All beacons button. Most \
      satellites keep a beacon at 12.20–12.26 or 12.75 GHz; set the LNB's polarisation to \
      the beacon's.";
@@ -231,13 +316,13 @@ pub struct Mark {
 
 /// What the waterfall marks for the satellites chosen — `marks`: "auto"
 /// (from the toolbar's satellite), "none", [`ALL`], or a satellite's title.
-/// [`ALL`] is every satellite above the horizon from `site` (the dish's
-/// latitude and longitude), or every one in the list with no site.
-pub fn marks(marks: &str, toolbar_satellite: &str, site: Option<(f64, f64)>) -> Vec<Mark> {
+/// [`ALL`] is every satellite `sky` allows, or every one in the list with
+/// no location set.
+pub fn marks(marks: &str, toolbar_satellite: &str, sky: Option<Sky>) -> Vec<Mark> {
     let list = catalogue();
     let chosen: Vec<usize> = match marks {
         "none" => Vec::new(),
-        ALL => (0..list.len()).filter(|&i| list[i].visible(site)).collect(),
+        ALL => (0..list.len()).filter(|&i| list[i].visible(sky)).collect(),
         "auto" | "" => {
             let guessed = guess(toolbar_satellite);
             // `ptr::eq` compares addresses: `guess` hands back references
@@ -425,12 +510,12 @@ impl Scene {
     pub fn new(
         marks_choice: &str,
         toolbar_satellite: &str,
-        site: Option<(f64, f64)>,
+        sky: Option<Sky>,
         rf_center: f64,
         spectrum_db: &[f32],
         span_hz: f64,
     ) -> Self {
-        let marks = marks(marks_choice, toolbar_satellite, site);
+        let marks = marks(marks_choice, toolbar_satellite, sky);
         // A line counts for the beacons listed nearest it only: 172B's
         // line at 12250.0986 MHz is its 12250.1, not a neighbour's 12250.0
         // (still within reach of the LNB's error).
@@ -472,24 +557,38 @@ pub enum Request {
 pub struct BeaconWindow {
     pub open: bool,
     filter: String,
-    /// The dish's site as typed ("-27.47, 153.03"), kept in the prefs.
+    /// My location as typed ("-27.47, 153.03", or a longitude alone),
+    /// kept in the prefs.
     site_text: String,
-    /// List every satellite, not only the ones above the site's horizon.
+    /// The lowest elevation counted and the furthest azimuth off the
+    /// meridian, degrees (kept in the prefs).
+    min_el: f64,
+    max_az: f64,
+    /// List every satellite, not only the ones within the limits.
     show_all: bool,
 }
 
 impl BeaconWindow {
-    /// With the dish's site from the prefs.
+    /// With my location and the limits from the prefs.
     pub fn new() -> Self {
+        let (min_el, max_az) = crate::prefs::beacon_limits(DEFAULT_MIN_EL, DEFAULT_MAX_AZ);
         BeaconWindow {
             site_text: crate::prefs::beacon_site(),
+            min_el,
+            max_az,
             ..Default::default()
         }
     }
 
-    /// The dish's (latitude, longitude), if one is set and parses.
-    pub fn site(&self) -> Option<(f64, f64)> {
-        parse_site(&self.site_text)
+    /// The dish's location and limits, if a location is set and parses.
+    pub fn sky(&self) -> Option<Sky> {
+        let (lat, lon) = parse_site(&self.site_text)?;
+        Some(Sky {
+            lat,
+            lon,
+            min_el: self.min_el,
+            max_az: self.max_az,
+        })
     }
 
     /// Draw it; `marks_choice` is the waterfall marks setting (changed
@@ -557,46 +656,103 @@ impl BeaconWindow {
                         );
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Dish site");
+                    ui.label("My location");
                     let edit = ui
                         .add(
                             egui::TextEdit::singleline(&mut self.site_text)
-                                .hint_text("lat, lon  e.g. -27.47, 153.03")
-                                .desired_width(170.0),
+                                .hint_text("lat, lon  or my longitude")
+                                .desired_width(160.0),
                         )
                         .on_hover_text(
                             "Your latitude and longitude (south and west negative, or with \
-                             N/S/E/W). With it the list shows the satellites above your \
-                             horizon with their elevation, and \"every satellite\" marks only \
-                             those. Left empty, the whole arc.",
+                             N/S/E/W), e.g. -27.47, 153.03 — or just your longitude, e.g. \
+                             153 or 0.12W. With it the list keeps to the satellites within \
+                             the limits beside, with their elevation and azimuth, and \
+                             \"every satellite\" marks only those, so a beacon on the same \
+                             frequency on the far side of the world is never matched. Left \
+                             empty, the whole arc.",
                         );
-                    if edit.changed()
-                        && (self.site_text.trim().is_empty() || self.site().is_some())
+                    if edit.changed() && (self.site_text.trim().is_empty() || self.sky().is_some())
                     {
                         crate::prefs::set_beacon_site(self.site_text.trim());
                     }
-                    match self.site() {
+                    let mut limits = false;
+                    ui.label("min el");
+                    limits |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.min_el)
+                                .range(0.0..=60.0)
+                                .speed(0.5)
+                                .suffix("°"),
+                        )
+                        .on_hover_text("The lowest elevation counted")
+                        .changed();
+                    ui.label("max az ±");
+                    limits |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.max_az)
+                                .range(10.0..=NO_AZ_LIMIT)
+                                .speed(0.5)
+                                // Shown as "off" at 90°; typed back as a
+                                // number, with or without the degree sign.
+                                .custom_formatter(|v, _| {
+                                    if v >= NO_AZ_LIMIT {
+                                        "off".into()
+                                    } else {
+                                        format!("{v:.0}°")
+                                    }
+                                })
+                                .custom_parser(|t| {
+                                    let t = t.trim().trim_end_matches('°');
+                                    if t.eq_ignore_ascii_case("off") {
+                                        Some(NO_AZ_LIMIT)
+                                    } else {
+                                        t.parse().ok()
+                                    }
+                                }),
+                        )
+                        .on_hover_text(
+                            "How far the satellite's azimuth may be from due south (due \
+                             north in the southern hemisphere); 90° is no limit. Near the \
+                             equator, where every satellite is due east or west, it is taken \
+                             as at 15° latitude, and with a longitude alone as at 35°.",
+                        )
+                        .changed();
+                    if limits {
+                        crate::prefs::set_beacon_limits(self.min_el, self.max_az);
+                    }
+                    if ui
+                        .small_button("defaults")
+                        .on_hover_text(format!(
+                            "min el {DEFAULT_MIN_EL}°, max az ±{DEFAULT_MAX_AZ}°"
+                        ))
+                        .clicked()
+                    {
+                        (self.min_el, self.max_az) = (DEFAULT_MIN_EL, DEFAULT_MAX_AZ);
+                        crate::prefs::set_beacon_limits(self.min_el, self.max_az);
+                    }
+                    match self.sky() {
                         Some(_) => {
-                            ui.checkbox(&mut self.show_all, "below the horizon too");
+                            ui.checkbox(&mut self.show_all, "list all");
                         }
                         None if !self.site_text.trim().is_empty() => {
-                            ui.colored_label(Color32::from_rgb(240, 120, 80), "not a lat, lon");
+                            ui.colored_label(Color32::from_rgb(240, 120, 80), "not a location");
                         }
                         None => {}
                     }
                 });
                 ui.separator();
                 let want = self.filter.to_lowercase();
-                let site = self.site();
+                let sky = self.sky();
                 let shown: Vec<&Satellite> = catalogue()
                     .iter()
-                    .filter(|s| self.show_all || s.visible(site))
+                    .filter(|s| self.show_all || s.visible(sky))
                     .collect();
-                if let Some((lat, lon)) = site {
+                if sky.is_some() {
                     ui.label(
                         RichText::new(format!(
-                            "{} of {} satellites above the horizon from {lat:.2}, {lon:.2}",
-                            catalogue().iter().filter(|s| s.visible(site)).count(),
+                            "{} of {} satellites within the limits",
+                            catalogue().iter().filter(|s| s.visible(sky)).count(),
                             catalogue().len()
                         ))
                         .weak(),
@@ -625,11 +781,16 @@ impl BeaconWindow {
                                 egui::Label::new(RichText::new(s.title()).strong()).truncate(),
                             )
                             .on_hover_text(tip);
-                            if let Some((lat, lon)) = site {
-                                let el = elevation(lat, lon, s.position_e);
-                                let text = RichText::new(format!("el {el:.0}°"));
-                                ui.label(if el < 0.0 { text.weak() } else { text })
-                                    .on_hover_text("Elevation from the dish's site");
+                            if let Some(k) = sky {
+                                let (el, az) = k.look(s.position_e);
+                                let text = RichText::new(format!("el {el:.0}° az {az:.0}°"));
+                                ui.label(if k.sees(s.position_e) { text } else { text.weak() })
+                                    .on_hover_text(if k.lat.is_some() {
+                                        "Elevation and azimuth (from true north) from my location"
+                                    } else {
+                                        "Elevation and azimuth (from true north) as at 35° N, \
+                                         with no latitude given"
+                                    });
                             }
                             if s.confirmed {
                                 ui.colored_label(Color32::from_rgb(110, 220, 110), "operator");
@@ -704,19 +865,66 @@ mod tests {
         // = 0.8646, so el = atan((0.8646 − 0.1513) / 0.5024) = 54.8°.
         let el = elevation(-27.47, 153.03, 166.0);
         assert!((el - 54.8).abs() < 0.1, "{el}");
-        assert_eq!(parse_site("-27.47, 153.03"), Some((-27.47, 153.03)));
-        assert_eq!(parse_site("27.47S 153.03E"), Some((-27.47, 153.03)));
-        assert_eq!(parse_site("51.5N, 0.12W"), Some((51.5, -0.12)));
+        assert_eq!(parse_site("-27.47, 153.03"), Some((Some(-27.47), 153.03)));
+        assert_eq!(parse_site("27.47S 153.03E"), Some((Some(-27.47), 153.03)));
+        assert_eq!(parse_site("51.5N, 0.12W"), Some((Some(51.5), -0.12)));
+        assert_eq!(parse_site("0.12W"), Some((None, -0.12)));
+        assert_eq!(parse_site("153"), Some((None, 153.0)));
         assert_eq!(parse_site("Brisbane"), None);
         assert_eq!(parse_site("95, 10"), None);
-        // "every satellite" from Brisbane leaves out the far side.
-        let site = Some((-27.47, 153.03));
+        assert_eq!(parse_site("190"), None);
+    }
+
+    #[test]
+    fn azimuths_and_the_limits() {
+        // Due south from the north, due north from the south.
+        assert!((azimuth(51.5, 0.0, 0.0) - 180.0).abs() < 1e-9);
+        assert!(azimuth(-27.5, 153.0, 153.0).abs() < 1e-9);
+        // London to Astra 19.2°E: about 155° (east of south), and to
+        // Hispasat 30°W 216° (180° + atan(tan 29.88° / sin 51.5°)). Brisbane
+        // to Intelsat 19 at 166°E: a little east of north, about 26°.
+        let a = azimuth(51.5, -0.12, 19.2);
+        assert!((a - 155.0).abs() < 2.0, "{a}");
+        let a = azimuth(51.5, -0.12, -30.0);
+        assert!((a - 216.3).abs() < 0.1, "{a}");
+        let a = azimuth(-27.47, 153.03, 166.0);
+        assert!((a - 26.0).abs() < 2.0, "{a}");
+        // Across the 180° line: from Fiji (178°E) 175°W is east.
+        assert!(azimuth(-18.0, 178.0, -175.0) < 90.0);
+
+        let sky = |lat, lon| Sky {
+            lat,
+            lon,
+            min_el: DEFAULT_MIN_EL,
+            max_az: DEFAULT_MAX_AZ,
+        };
+        // From Brisbane, the Pacific and Australian arc is in; Europe and
+        // the Americas east of 150°W are not.
+        let bne = sky(Some(-27.47), 153.03);
+        assert!(bne.sees(166.0) && bne.sees(122.0) && bne.sees(-172.0));
+        assert!(!bne.sees(19.2) && !bne.sees(-101.0) && !bne.sees(80.0));
+        // From London, Europe and the Atlantic but not Asia or the
+        // American west.
+        let lon = sky(Some(51.5), -0.12);
+        assert!(lon.sees(19.2) && lon.sees(-30.0) && lon.sees(42.0));
+        assert!(!lon.sees(105.5) && !lon.sees(-101.0));
+        // Near the equator the limit does not shrink to nothing.
+        let sg = sky(Some(1.35), 103.8);
+        assert!(sg.sees(146.0) && sg.sees(68.5) && !sg.sees(-30.0));
+        // A longitude alone works.
+        let lon_only = sky(None, 153.0);
+        assert!(lon_only.sees(166.0) && !lon_only.sees(19.2));
+        // No azimuth limit: the elevation floor alone.
+        let open = Sky {
+            max_az: NO_AZ_LIMIT,
+            ..bne
+        };
+        assert!(open.sees(80.0) == (elevation(-27.47, 153.03, 80.0) >= DEFAULT_MIN_EL));
+        // "every satellite" marks only those within the limits.
         let list = catalogue();
-        assert!(
-            marks(ALL, "", site)
-                .iter()
-                .all(|m| list[m.sat].visible(site))
-        );
+        let m = marks(ALL, "", Some(bne));
+        assert!(!m.is_empty() && m.iter().all(|m| list[m.sat].visible(Some(bne))));
+        assert!(m.len() < marks(ALL, "", None).len());
     }
 
     #[test]
