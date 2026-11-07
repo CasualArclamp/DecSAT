@@ -175,7 +175,10 @@ pub fn parse_site(text: &str) -> Option<(Option<f64>, f64)> {
             (_, Some(n)) => (n, 1.0),
             _ => (p, 1.0),
         };
-        num.trim_end_matches('°').parse::<f64>().ok().map(|v| sign * v)
+        num.trim_end_matches('°')
+            .parse::<f64>()
+            .ok()
+            .map(|v| sign * v)
     };
     let (lat, lon) = match parts.as_slice() {
         [b] => (None, signed(b, ['W', 'w'], ['E', 'e'])?),
@@ -784,13 +787,19 @@ impl BeaconWindow {
                             if let Some(k) = sky {
                                 let (el, az) = k.look(s.position_e);
                                 let text = RichText::new(format!("el {el:.0}° az {az:.0}°"));
-                                ui.label(if k.sees(s.position_e) { text } else { text.weak() })
-                                    .on_hover_text(if k.lat.is_some() {
+                                ui.label(if k.sees(s.position_e) {
+                                    text
+                                } else {
+                                    text.weak()
+                                })
+                                .on_hover_text(
+                                    if k.lat.is_some() {
                                         "Elevation and azimuth (from true north) from my location"
                                     } else {
                                         "Elevation and azimuth (from true north) as at 35° N, \
                                          with no latitude given"
-                                    });
+                                    },
+                                );
                             }
                             if s.confirmed {
                                 ui.colored_label(Color32::from_rgb(110, 220, 110), "operator");
@@ -933,7 +942,10 @@ mod tests {
         // beacon in the Ku downlink band.
         let list = catalogue();
         assert!(list.len() > 40, "{} satellites", list.len());
-        assert!(list.iter().all(|s| (-180.0..=180.0).contains(&s.position_e)));
+        assert!(
+            list.iter()
+                .all(|s| (-180.0..=180.0).contains(&s.position_e))
+        );
         assert!(
             list.iter()
                 .flat_map(|s| &s.beacons)
