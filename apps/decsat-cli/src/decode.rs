@@ -104,9 +104,10 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "tdma" => DecoderKind::Tdma,
         "pool" | "return-pool" => DecoderKind::ReturnPool,
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
+        "bgan" | "inmarsat" => DecoderKind::Bgan,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, beacon)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon)"
         ),
     })
 }

@@ -103,6 +103,7 @@ IqSource (HackRF 20 MS/s, or a wideband file)
 | **TDMA bursts** | One carrier or an MF-TDMA group: bursts found and demodulated one by one, their layout (preamble, pilots, fixed fields, idle fill) read blind, slot grid, frame and terminals; data symbols to a `.bursts` file. See §3c. | T1–T2 done |
 | **IS-19 DAMA outbound** | The 102.4 kBd outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown, everything measured): frame sync, pilots, descrambling, the packet stream, the call signalling (request acks, channel assignments) named; packets to a `.csv` on Record. See `decsat-modem::is19` and STATUS 2026-10-15. | done |
 | **Satellite beacon** | The carrier tracked and measured (frequency, drift, C/N0) and any telemetry decoded blind: PCM/PSK/PM subcarrier, PCM/PM or suppressed-carrier BPSK/QPSK; NRZ/bi-phase; IRIG-style minor frames (known or blind sync word, counter, major-frame map, word plots) or CCSDS (RS dual basis, randomiser, K = 7, TM/AOS frames); pointing tone. See §3d. | done |
+| **Inmarsat BGAN forward** | The F80T4.5X-8B bearer (16-QAM, 151.2 kBd, ETSI TS 102 744): real-time carrier/timing/frame sync, ten-level turbo FEC with a re-encode acceptance test, bearer control, IP carving, findings. A port of DecBGAN; needs the free ETSI Annex C tables. See `docs/BGAN.md`. | done (physical layer) |
 | **IQ recorder** | That VFO's narrowband IQ to a file | M1 |
 | **Spectrum only** | Zoomed spectrum, level, occupied bandwidth; no decode | done |
 

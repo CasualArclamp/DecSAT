@@ -1120,6 +1120,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         crate::beacon_card::show(ui, b, inp.rf_center, v.id);
     }
 
+    if v.settings.decoder == DecoderKind::Bgan
+        && let Some(b) = &st.bgan
+    {
+        crate::bgan_card::show(ui, b, v.id);
+    }
+
     if v.settings.decoder == DecoderKind::Is19Outbound
         && let Some(o) = &st.is19
     {
@@ -1442,7 +1448,11 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         }
     } else if !st.scatter.is_empty() {
         ui.label(RichText::new("Constellation").strong());
-        constellation(ui, &st.scatter, side);
+        if v.settings.decoder == DecoderKind::Bgan {
+            constellation_qam16(ui, &st.scatter, side);
+        } else {
+            constellation(ui, &st.scatter, side);
+        }
     }
     if !st.spectrum_db.is_empty() {
         ui.label(RichText::new("VFO spectrum").strong());
@@ -6349,6 +6359,48 @@ fn modcod_table(ui: &mut Ui, counts: &BTreeMap<u8, u64>) {
                 ui.add(egui::ProgressBar::new(n as f32 / total.max(1) as f32).desired_width(80.0));
                 ui.end_row();
             }
+        });
+}
+
+/// A 16-QAM cloud: tiny dots (a few thousand of them), the 16 ideal points
+/// marked faintly, since the constellation is known (BGAN's F80T4.5X-8B).
+fn constellation_qam16(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
+    let rms = (pts.iter().map(|s| s.norm_sqr()).sum::<f32>() / pts.len().max(1) as f32)
+        .sqrt()
+        .max(1e-9);
+    let p: PlotPoints = pts
+        .iter()
+        .map(|s| [(s.re / rms) as f64, (s.im / rms) as f64])
+        .collect();
+    // levels +-0.5 and +-1.5 over sqrt(2.5) (TS 102 744-2-1 Table 5.3)
+    let lv = [-1.5f64, -0.5, 0.5, 1.5].map(|x| x / 2.5f64.sqrt());
+    let ideal: PlotPoints = lv.iter().flat_map(|&i| lv.iter().map(move |&q| [i, q])).collect();
+    Plot::new("constellation_qam16")
+        .width(side)
+        .height(side)
+        .data_aspect(1.0)
+        .include_x(-1.4)
+        .include_x(1.4)
+        .include_y(-1.4)
+        .include_y(1.4)
+        .show_axes(false)
+        .show_grid(false)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .allow_boxed_zoom(false)
+        .show(ui, |pl| {
+            pl.points(
+                Points::new("ideal", ideal)
+                    .radius(5.0)
+                    .shape(egui_plot::MarkerShape::Plus)
+                    .color(Color32::from_rgba_unmultiplied(255, 255, 255, 110)),
+            );
+            pl.points(
+                Points::new("symbols", p)
+                    .radius(0.5)
+                    .color(Color32::from_rgba_unmultiplied(120, 200, 255, 170)),
+            );
         });
 }
 

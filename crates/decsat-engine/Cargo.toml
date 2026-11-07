@@ -19,6 +19,7 @@ decsat-ts = { path = "../decsat-ts" }
 decsat-ip = { path = "../decsat-ip" }
 decsat-audio = { path = "../decsat-audio" }
 decsat-modem = { path = "../decsat-modem" }
+decsat-bgan = { path = "../decsat-bgan" }
 decsat-mod = { path = "../decsat-mod" }
 num-complex.workspace = true
 rustfft.workspace = true

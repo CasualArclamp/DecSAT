@@ -428,6 +428,18 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             (_, Some(c)) => format!("I19 {} · sync?", if c.locked { "LOCK" } else { "no lock" }),
             _ => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "BGAN 12.4 dB · 87 %": Es/N0 and the share of blocks that decoded.
+        DecoderKind::Bgan => match &st.bgan {
+            Some(b) if b.rx.locked && b.rx.blocks_total > 0 => format!(
+                "BGAN {:.1} dB · {:.0} %{}",
+                b.rx.esn0_db,
+                100.0 * b.rx.blocks_ok as f32 / b.rx.blocks_total as f32,
+                if st.recording_active { " ● REC" } else { "" }
+            ),
+            Some(b) if b.rx.locked => "BGAN sync".into(),
+            Some(b) if b.rx.tables_missing => "BGAN: no ETSI tables".into(),
+            _ => "BGAN searching".into(),
+        },
         DecoderKind::PskSymbols => match &st.carrier {
             Some(c) => {
                 let lock = if c.locked { "LOCK" } else { "no lock" };

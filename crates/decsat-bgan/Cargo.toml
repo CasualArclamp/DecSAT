@@ -1,0 +1,16 @@
+# made by CasualArclamp
+[package]
+name = "decsat-bgan"
+description = "Inmarsat BGAN forward-link receiver (ETSI TS 102 744, F80T4.5X-8B): real-time front end, turbo FEC, bearer control, payload findings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+decsat-core = { path = "../decsat-core" }
+num-complex.workspace = true
+rustfft.workspace = true
+rayon.workspace = true
+flate2 = "1"

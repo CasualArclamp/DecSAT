@@ -88,6 +88,11 @@ pub enum DecoderKind {
     /// frames (Reed–Solomon, randomiser, the K = 7 code). See
     /// [`crate::beacon`].
     Beacon,
+    /// Inmarsat BGAN forward link (F80T4.5X-8B, 16-QAM, 151.2 kBd, ETSI TS
+    /// 102 744): carrier and frame sync, turbo decoding of every block at any
+    /// of ten coding levels, then the bearer-control, IP and payload layers.
+    /// Needs the free ETSI Annex C tables (see [`decsat_bgan::tables`]).
+    Bgan,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -120,7 +125,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 28] = [
+    pub const ALL: [DecoderKind; 29] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -135,6 +140,7 @@ impl DecoderKind {
         DecoderKind::CarrierId,
         DecoderKind::Is19Outbound,
         DecoderKind::Beacon,
+        DecoderKind::Bgan,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::ReturnPool,
@@ -169,6 +175,7 @@ impl DecoderKind {
                 "IS-19 DAMA outbound (102.4 kBd) → packets, call signalling"
             }
             DecoderKind::Beacon => "Satellite beacon (carrier, PCM/PM telemetry, CCSDS)",
+            DecoderKind::Bgan => "Inmarsat BGAN forward (16-QAM turbo) → payload, IP, findings",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
@@ -204,6 +211,7 @@ impl DecoderKind {
             DecoderKind::CarrierId => "carrier-id",
             DecoderKind::Is19Outbound => "is19-outbound",
             DecoderKind::Beacon => "beacon",
+            DecoderKind::Bgan => "bgan",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::ReturnPool => "return-pool",
@@ -322,6 +330,7 @@ impl DecoderKind {
                 | DecoderKind::PskSymbols
                 | DecoderKind::Is19Outbound
                 | DecoderKind::Beacon
+                | DecoderKind::Bgan
         )
     }
 
@@ -341,6 +350,7 @@ impl DecoderKind {
             DecoderKind::CarrierId => "CID",
             DecoderKind::Is19Outbound => "I19",
             DecoderKind::Beacon => "BCN",
+            DecoderKind::Bgan => "BGAN",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::ReturnPool => "POOL",
@@ -682,6 +692,8 @@ pub struct VfoStatus {
     pub is19: Option<decsat_modem::is19::OutboundView>,
     /// A satellite beacon: its carrier, telemetry and frames.
     pub beacon: Option<crate::beacon::BeaconView>,
+    /// Inmarsat BGAN forward link: lock, blocks, payload, findings.
+    pub bgan: Option<decsat_bgan::session::BganView>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -1018,6 +1030,8 @@ enum Decoder {
         rx: Option<Box<decsat_modem::is19::OutboundRx>>,
         file: Is19File,
     },
+    /// An Inmarsat BGAN forward carrier: the whole receiver and its recording.
+    Bgan(Box<decsat_bgan::session::BganSession>),
     /// A satellite beacon: the receiver, and its files while recording.
     Beacon {
         rx: Box<crate::beacon::BeaconRx>,
@@ -1401,6 +1415,9 @@ impl Worker {
                 rx: None,
                 file: Is19File::default(),
             },
+            DecoderKind::Bgan => Decoder::Bgan(Box::new(decsat_bgan::session::BganSession::new(
+                ddc.out_rate(),
+            ))),
             DecoderKind::Beacon => Decoder::Beacon {
                 rx: {
                     let mut rx = Box::new(crate::beacon::BeaconRx::new(
@@ -1552,6 +1569,11 @@ impl Worker {
             // A beacon's carrier: followed once well off the VFO's centre
             // (the loop tracks the rest, and each move is a step it must
             // take).
+            // A BGAN carrier: followed like a beacon's, once well off centre.
+            Decoder::Bgan(b) if b.locked() => match b.carrier_offset_hz() {
+                f if f.abs() > 0.02 * self.ddc.bandwidth() => (f, 0.0),
+                _ => return,
+            },
             Decoder::Beacon { rx, .. } => match rx.carrier_offset_hz() {
                 Some(f) if f.abs() > 0.02 * self.ddc.bandwidth() => (f, 0.0),
                 _ => return,
@@ -1572,6 +1594,7 @@ impl Worker {
             Decoder::Modem { demod: Some(d), .. }
             | Decoder::Psk { demod: Some(d), .. }
             | Decoder::Is19 { demod: Some(d), .. } => d.retune_hz(f),
+            Decoder::Bgan(b) => b.retune_hz(f),
             Decoder::Beacon { rx, .. } => rx.retune_hz(f),
             _ => {}
         }
@@ -2121,6 +2144,15 @@ impl Worker {
                 file.follow(&self.settings, self.ddc.offset_hz());
                 file.write(&packets);
             }
+            Decoder::Bgan(b) => {
+                let tag = format!(
+                    "{}-{}",
+                    self.settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(self.settings.offset_hz)
+                );
+                b.set_recording(self.settings.record, &self.settings.record_dir, &tag);
+                b.push(&self.bb);
+            }
             Decoder::Beacon { rx, files } => {
                 rx.push(&self.bb, self.ddc.offset_hz());
                 let tag = format!(
@@ -2337,6 +2369,7 @@ impl Worker {
         st.tdma = None;
         st.is19 = None;
         st.beacon = None;
+        st.bgan = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2576,6 +2609,25 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Bgan(b) => {
+                let v = b.view();
+                st.message = if self.ddc.out_rate() < 215_000.0 {
+                    format!(
+                        "VFO too narrow ({:.0} kHz of IQ): the BGAN carrier is 189 kHz wide, widen it to 230 kHz or more",
+                        self.ddc.out_rate() / 1e3
+                    )
+                } else {
+                    v.message.clone()
+                };
+                st.scatter = v.constellation.clone();
+                st.frames = v.rx.frames;
+                st.symbol_rate = Some(decsat_bgan::spec::F80T45X8B.rs);
+                if let Some((p, n)) = &v.recording {
+                    st.recording = Some((p.clone(), *n));
+                    st.recording_active = true;
+                }
+                st.bgan = Some(v);
+            }
             Decoder::Beacon { rx, files } => {
                 let v = rx.view();
                 st.progress = if rx.progress() < 1.0 {

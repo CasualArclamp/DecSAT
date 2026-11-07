@@ -192,7 +192,7 @@ impl Options {
                     for name in v.split(',') {
                         o.decoders.push(decoder_by_name(name.trim()).ok_or(
                             "--decoder takes id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, \
-                             viterbi, cid, psk, tdma, is19, rec or spec (or a comma-separated list of them, \
+                             viterbi, cid, psk, tdma, is19, bgan, rec or spec (or a comma-separated list of them, \
                              one a claimed carrier)",
                         )?);
                     }
@@ -270,6 +270,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "tdma" => Tdma,
         "pool" | "return-pool" => ReturnPool,
         "is19" | "is19-outbound" | "i19" => Is19Outbound,
+        "bgan" | "inmarsat" => Bgan,
         "beacon" | "tlm" | "telemetry" => Beacon,
         "rec" | "iq" => IqRecord,
         "spec" | "spectrum" => Spectrum,
