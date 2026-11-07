@@ -238,7 +238,18 @@ impl App {
                     if !i.model.is_empty() {
                         ui.label(&i.model);
                     }
-                    ui.label(format!("Overflows: {}", c.overflows()));
+                    ui.label(format!(
+                        "Lost: {} blocks ({} on the link, {} here) · link {:.2} MS/s",
+                        c.lost(),
+                        c.link_lost(),
+                        c.overflows(),
+                        c.delivered_rate() / 1e6
+                    ))
+                    .on_hover_text(
+                        "The link's share is what the Pluto never sent: the rate is more than \
+                         USB or the network carries (16-bit: about 7 MS/s on USB). Use a lower \
+                         rate, 8-bit IQ (Tezuka firmware) or a Pluto+ on Ethernet.",
+                    );
                 }
                 ui.separator();
                 ui.label("Frequency and gain apply live; rate, bandwidth and 8-bit at Start.");

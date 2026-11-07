@@ -30,6 +30,7 @@ pub const PID: u16 = 0xb673;
 
 const REQ_RESET_PIPES: u8 = 0;
 const REQ_OPEN_PIPE: u8 = 1;
+const REQ_CLOSE_PIPE: u8 = 2;
 
 fn err(e: impl std::fmt::Display) -> Error {
     Error::Other(format!("Pluto USB: {e}"))
@@ -69,12 +70,27 @@ impl UsbIio {
                 "cannot open the device ({e}). Is ADI's Pluto USB driver (WinUSB) installed?"
             ))
         })?;
-        let interface = device.claim_interface(number).map_err(|e| {
-            err(format!(
-                "cannot claim the IIO interface {number} ({e}). Install ADI's Pluto USB driver, \
-                 or use the network link (ip:192.168.2.1)"
-            ))
-        })?;
+        // Windows lets go of an interface only once its last transfers have
+        // finished, a moment after the previous session closed it (a restart
+        // for a new rate does exactly that): try again for a second or two
+        // before calling it taken.
+        let mut tries = 0;
+        let interface = loop {
+            match device.claim_interface(number) {
+                Ok(i) => break i,
+                Err(_) if tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return Err(err(format!(
+                        "cannot claim the IIO interface {number} ({e}). Is another program \
+                         using the Pluto? Is ADI's Pluto USB driver installed? The network \
+                         link (ip:192.168.2.1) works without it"
+                    )));
+                }
+            }
+        };
         let mut ins = Vec::new();
         let mut outs = Vec::new();
         if let Some(alt) = interface.descriptors().next() {
@@ -105,22 +121,18 @@ impl UsbIio {
     }
 
     fn vendor(&self, request: u8, value: u16) -> Result<()> {
-        block_on(self.interface.control_out(ControlOut {
-            control_type: ControlType::Vendor,
-            recipient: Recipient::Interface,
-            request,
-            value,
-            index: self.number as u16,
-            data: &[],
-        }))
-        .into_result()
-        .map_err(err)?;
-        Ok(())
+        vendor(&self.interface, self.number, request, value)
     }
 
     /// Open pipe `id` and return it as a byte stream. `transfer` is the size
-    /// of each bulk IN request and `depth` how many are kept queued: small
-    /// for the control pipe, large for samples.
+    /// of each bulk IN request and `depth` how many are kept queued.
+    ///
+    /// A bulk IN request ends when it is full or the device sends a short
+    /// packet, and iiod sends none after a write that is a whole number of
+    /// 512-byte packets. So a pipe whose replies must each arrive on their
+    /// own (the control pipe) reads one packet per request (`transfer` 512);
+    /// the sample pipe can use large requests because the next reply always
+    /// follows, and it is never waited on at the end (see `reader`).
     pub fn pipe(&self, id: usize, transfer: usize, depth: usize) -> Result<UsbLink> {
         let &(ep_in, ep_out) = self
             .pairs
@@ -135,6 +147,8 @@ impl UsbIio {
         }
         Ok(UsbLink {
             interface: Arc::clone(&self.interface),
+            number: self.number,
+            pipe: id as u16,
             ep_out,
             rx,
             transfer,
@@ -144,10 +158,27 @@ impl UsbIio {
     }
 }
 
+/// A vendor request to the IIO interface (`wIndex` its number).
+fn vendor(interface: &nusb::Interface, number: u8, request: u8, value: u16) -> Result<()> {
+    block_on(interface.control_out(ControlOut {
+        control_type: ControlType::Vendor,
+        recipient: Recipient::Interface,
+        request,
+        value,
+        index: number as u16,
+        data: &[],
+    }))
+    .into_result()
+    .map_err(err)?;
+    Ok(())
+}
+
 /// One pipe: bulk OUT for commands, a queue of bulk IN requests kept full
 /// for replies and samples.
 pub struct UsbLink {
     interface: Arc<nusb::Interface>,
+    number: u8,
+    pipe: u16,
     ep_out: u8,
     rx: Queue<RequestBuffer>,
     transfer: usize,
@@ -186,6 +217,14 @@ impl Link for UsbLink {
 
 impl Drop for UsbLink {
     fn drop(&mut self) {
+        // Cancel, then wait for the cancelled transfers to come back, so the
+        // interface is free when this returns (they complete at once).
         self.rx.cancel_all();
+        while self.rx.pending() > 0 {
+            let _ = block_on(self.rx.next_complete());
+        }
+        // Tell iiod the pipe is closed: it drops whatever it was doing on it
+        // (an open buffer, a READBUF still being answered).
+        let _ = vendor(&self.interface, self.number, REQ_CLOSE_PIPE, self.pipe);
     }
 }

@@ -347,7 +347,9 @@ fn sixteen_bit_session() {
         st.attrs["iio:device0 INPUT voltage0 gain_control_mode"],
         "slow_attack"
     );
-    assert!(log.contains("CLOSE iio:device4"), "{log}");
+    // The session ends by dropping the link (a READBUF is still in flight):
+    // no CLOSE that would wait behind it.
+    assert!(!log.contains("CLOSE"), "{log}");
 }
 
 /// Tezuka firmware: voltage0 alone, I8/Q8 pairs.
@@ -503,10 +505,13 @@ fn live_pluto() {
         n += src.read(&mut buf).expect("read");
     }
     let rate = n as f64 / t0.elapsed().as_secs_f64();
+    let c = src.control();
     eprintln!(
-        "{} — {:.2} MS/s delivered, overflows {}",
+        "{} — {:.2} MS/s read, {:.2} MS/s delivered by the link, overflows {}, lost on the link {} blocks",
         src.describe(),
         rate / 1e6,
-        src.control().overflows()
+        c.delivered_rate() / 1e6,
+        c.overflows(),
+        c.link_lost()
     );
 }

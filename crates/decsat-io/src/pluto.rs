@@ -385,7 +385,8 @@ struct Usb(usb::UsbIio);
 impl Connector for Usb {
     fn link(&self, pipe: usize) -> Result<Box<dyn Link>> {
         let l = if pipe == 0 {
-            self.0.pipe(0, 16 << 10, 2)?
+            // One packet per request: see `UsbIio::pipe`.
+            self.0.pipe(0, 512, 4)?
         } else {
             self.0.pipe(pipe, 256 << 10, 8)?
         };
@@ -418,6 +419,20 @@ fn connector(uri: &PlutoUri) -> Result<Arc<dyn Connector>> {
     })
 }
 
+/// What the reader thread counts.
+#[derive(Default)]
+struct Counters {
+    /// Blocks dropped because the consumer fell behind.
+    overflows: AtomicU64,
+    /// Blocks' worth of samples the radio never sent: IIOD gives no sign of
+    /// an overrun on the Pluto, so this is the shortfall of what arrived
+    /// against the time gone at the set rate (a link that cannot carry the
+    /// rate shows here).
+    link_lost: AtomicU64,
+    /// Samples per second delivered since the start (f64 bits).
+    delivered: AtomicU64,
+}
+
 /// Live controls on a running Pluto, usable from the GUI thread while the
 /// engine reads samples.
 #[derive(Clone)]
@@ -426,7 +441,7 @@ pub struct PlutoControl {
     ids: Arc<Ids>,
     settings: Arc<Mutex<PlutoSettings>>,
     info: Arc<PlutoInfo>,
-    overflows: Arc<AtomicU64>,
+    counters: Arc<Counters>,
 }
 
 impl PlutoControl {
@@ -471,7 +486,23 @@ impl PlutoControl {
 
     /// Blocks dropped because the consumer fell behind.
     pub fn overflows(&self) -> u64 {
-        self.overflows.load(Ordering::Relaxed)
+        self.counters.overflows.load(Ordering::Relaxed)
+    }
+
+    /// Blocks' worth of samples that never came over the link (see
+    /// [`Counters::link_lost`]).
+    pub fn link_lost(&self) -> u64 {
+        self.counters.link_lost.load(Ordering::Relaxed)
+    }
+
+    /// Everything lost: the figure the apps show as drops.
+    pub fn lost(&self) -> u64 {
+        self.overflows() + self.link_lost()
+    }
+
+    /// Samples per second the link has delivered since the start.
+    pub fn delivered_rate(&self) -> f64 {
+        f64::from_bits(self.counters.delivered.load(Ordering::Relaxed))
     }
 }
 
@@ -536,10 +567,11 @@ impl PlutoSource {
         let (recycle_tx, recycle_rx) = mpsc::sync_channel::<Vec<Iq>>(QUEUE + 4);
         let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
         let stop = Arc::new(AtomicBool::new(false));
-        let overflows = Arc::new(AtomicU64::new(0));
+        let counters = Arc::new(Counters::default());
+        let rate = settings.sample_rate;
         let thread = {
             let stop = Arc::clone(&stop);
-            let overflows = Arc::clone(&overflows);
+            let counters = Arc::clone(&counters);
             let dev = ids.rx.clone();
             let words = ids.rx_words;
             std::thread::Builder::new()
@@ -554,14 +586,17 @@ impl PlutoSource {
                         &tx,
                         &recycle_rx,
                         &stop,
-                        &overflows,
+                        &counters,
+                        rate,
                     );
                     if let Err(e) = r
                         && !stop.load(Ordering::Relaxed)
                     {
                         tracing::warn!("Pluto read failed: {e}");
                     }
-                    let _ = data.close(&dev);
+                    // No CLOSE: a READBUF is still being answered on this
+                    // link. Dropping it ends the session on the radio (the
+                    // socket closes; a USB pipe is closed by a request).
                     let _ = done_tx.send(());
                 })
                 .map_err(|e| err(format!("cannot start the reader: {e}")))?
@@ -574,7 +609,7 @@ impl PlutoSource {
                 ids: Arc::new(ids),
                 settings: Arc::new(Mutex::new(settings)),
                 info: Arc::new(info),
-                overflows,
+                counters,
             },
             skip: 0,
             // What may already sit in the kernel's buffers and our pipeline.
@@ -616,25 +651,62 @@ fn reader(
     tx: &SyncSender<Vec<Iq>>,
     recycle: &Receiver<Vec<Iq>>,
     stop: &AtomicBool,
-    overflows: &AtomicU64,
+    counters: &Counters,
+    rate: f64,
 ) -> Result<()> {
     let mut raw = Vec::with_capacity(bytes);
+    let block = bytes / if eight_bit { 2 } else { 4 };
     data.readbuf_request(dev, bytes)?;
+    // The clock starts at the first block (the kernel's buffers were
+    // filling before it, so the count runs ahead at first: never a loss).
+    let mut t0: Option<std::time::Instant> = None;
+    let mut got = 0f64;
+    let mut warned = false;
     while !stop.load(Ordering::Relaxed) {
         data.readbuf_request(dev, bytes)?;
         data.readbuf_reply(&mut raw, bytes, words)?;
         let mut v = recycle.try_recv().unwrap_or_default();
         convert(&raw, eight_bit, &mut v);
+        match t0 {
+            None => t0 = Some(std::time::Instant::now()),
+            Some(t) => {
+                got += v.len() as f64;
+                let secs = t.elapsed().as_secs_f64();
+                let short = (secs * rate - got) / block as f64;
+                // Two blocks of slack for the timing of one reply.
+                let lost = (short - 2.0).max(0.0) as u64;
+                counters.link_lost.fetch_max(lost, Ordering::Relaxed);
+                if secs > 0.0 {
+                    let delivered = got / secs;
+                    counters
+                        .delivered
+                        .store(delivered.to_bits(), Ordering::Relaxed);
+                    if !warned && secs > 2.0 && delivered < 0.97 * rate {
+                        warned = true;
+                        tracing::warn!(
+                            "Pluto: the link carries only {:.2} of {:.2} MS/s ({}); \
+                             samples are being lost on the radio. Use a lower rate, or 8-bit \
+                             IQ (Tezuka firmware), or a Pluto+ on Ethernet",
+                            delivered / 1e6,
+                            rate / 1e6,
+                            if eight_bit { "8-bit" } else { "16-bit" }
+                        );
+                    }
+                }
+            }
+        }
         match tx.try_send(v) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                overflows.fetch_add(1, Ordering::Relaxed);
+                counters.overflows.fetch_add(1, Ordering::Relaxed);
             }
             Err(TrySendError::Disconnected(_)) => break,
         }
     }
-    // The request still in flight.
-    data.readbuf_reply(&mut raw, bytes, words)
+    // The request still in flight is not waited for: its reply may never
+    // finish arriving over USB (see `usb::UsbIio::pipe`), and the link is
+    // dropped next anyway.
+    Ok(())
 }
 
 impl IqSource for PlutoSource {
