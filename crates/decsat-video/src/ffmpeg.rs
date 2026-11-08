@@ -81,6 +81,11 @@ impl Deinterlace {
     }
 }
 
+/// AV1 video with no audio: ffmpeg gets the IVF input alone, no TS on stdin.
+pub fn uses_no_ts(audio: Option<u16>, av1: Option<&str>) -> bool {
+    av1.is_some() && audio.is_none()
+}
+
 /// ffmpeg's arguments for a programme whose video is PID `video` and the
 /// audio to play PID `audio` (either may be absent). With `gpu`, the video
 /// is decoded by the graphics card's decoder (NVDEC / D3D11VA / VAAPI,
@@ -122,7 +127,13 @@ pub fn args(
         // cannot take (MPEG-2 on some, 4:2:2) falls back to software.
         a.extend(["-hwaccel", "auto"].map(String::from));
     }
-    a.extend(["-f", "mpegts", "-i", "pipe:0"].map(String::from));
+    // AV1 with no sound: nothing in the TS for ffmpeg to play, and it would
+    // sit probing it (only PSI and the PCR come through, ~1 kbit/s, against
+    // a 2 MB probe) before it ever opened the IVF input. So no TS input.
+    let ts = !uses_no_ts(audio, av1);
+    if ts {
+        a.extend(["-f", "mpegts", "-i", "pipe:0"].map(String::from));
+    }
     if let Some(url) = av1 {
         if gpu && video.is_some() {
             a.extend(["-hwaccel", "auto"].map(String::from));
@@ -132,7 +143,7 @@ pub fn args(
     // By PID (`i:` matches an MPEG-TS stream's PID); `?`: no such stream is
     // not an error. AV1 comes from the second input.
     if video.is_some() && av1.is_some() {
-        a.extend(["-map", "1:v:0"].map(String::from));
+        a.extend(["-map", if ts { "1:v:0" } else { "0:v:0" }].map(String::from));
     }
     for pid in [video.filter(|_| av1.is_none()), audio]
         .into_iter()
@@ -324,6 +335,26 @@ mod tests {
             .map(|(_, v)| v)
             .collect();
         assert_eq!(maps, ["1:v:0", "0:i:257?"]);
+    }
+
+    #[test]
+    fn silent_av1_is_the_ivf_input_alone() {
+        let a = args(
+            Some(0x100),
+            None,
+            Deinterlace::Bob,
+            true,
+            Some("tcp://127.0.0.1:9"),
+        );
+        let inputs: Vec<&String> = a
+            .iter()
+            .zip(a.iter().skip(1))
+            .filter(|(k, _)| *k == "-i")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(inputs, ["tcp://127.0.0.1:9"]);
+        let m = a.iter().position(|x| x == "-map").unwrap();
+        assert_eq!(a[m + 1], "0:v:0");
     }
 
     #[test]
