@@ -40,8 +40,16 @@ use crate::mkv::{Event, MkvReader};
 
 /// Pictures held waiting for their time; beyond this the oldest go (a
 /// stall in the sound, or a clock that has lost the pictures). Sized for
-/// bob ×2 of 50 i: 1.6 s of pictures.
-const MAX_QUEUE: usize = 80;
+/// bob ×2 of 50 i held for the deeper sound cushion below: 2.4 s of pictures.
+const MAX_QUEUE: usize = 120;
+/// Sound buffered before the TV starts playing (and after it runs dry), ms.
+/// The pictures follow the sound, so this is also the delay behind live. VLC
+/// and PotPlayer hold about this much; at 400 ms a hiccup in ffmpeg (a heavy
+/// HEVC frame, a burst of the GUI) ran the sound dry and stalled the picture.
+const SOUND_START_MS: u32 = 1000;
+/// Sound level beyond which it is cut back to [`SOUND_START_MS`], ms (ffmpeg
+/// hands over a start-up backlog in one go).
+const SOUND_MAX_MS: u32 = 2400;
 /// The sound card's own delay past the buffer, ms (WASAPI shared mode).
 const AUDIO_LATENCY_MS: i64 = 40;
 /// With no sound: pictures are held this long before they are shown, ms.
@@ -635,7 +643,12 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
                     }
                 }
                 if audio.is_some() {
-                    match AudioPlayer::start_pcm("decoded by ffmpeg", output) {
+                    match AudioPlayer::start_pcm_buffered(
+                        "decoded by ffmpeg",
+                        output,
+                        SOUND_START_MS,
+                        SOUND_MAX_MS,
+                    ) {
                         Ok(p) => {
                             p.handle()
                                 .set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));

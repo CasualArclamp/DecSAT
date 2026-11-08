@@ -18,7 +18,7 @@ use eframe::egui::{
     self, Color32, ColorImage, Rect, RichText, Sense, TextureHandle, TextureOptions, pos2, vec2,
 };
 
-use crate::prefs;
+use crate::{prefs, tv_info};
 
 /// What the window asks of the app.
 pub enum TvRequest {
@@ -401,39 +401,14 @@ impl TvWindow {
     fn details(&self, ui: &mut egui::Ui) {
         let Some(p) = &self.player else { return };
         let st = p.status();
-        for (pid, d) in &st.streams {
-            let pid = pid.map_or(String::new(), |p| format!("{p:#06x}  "));
-            ui.label(RichText::new(format!("{pid}{d}")).small().weak());
-        }
-        let mut bits = vec![format!(
-            "{} pictures shown, {} dropped",
-            st.frames_shown, st.frames_dropped
-        )];
-        if st.frames_skipped > 0 {
-            bits.push(format!("{} skipped to catch up", st.frames_skipped));
-        }
-        if self.tap_dropped > 0 {
-            bits.push(format!(
-                "{} packets lost before the player (it fell behind)",
-                self.tap_dropped
-            ));
-        }
-        if let Some(a) = &st.audio {
-            bits.push(format!("sound buffered {} ms", a.buffer_ms));
-            if a.underruns > 0 {
-                bits.push(format!("{} underruns", a.underruns));
-            }
-        }
-        if st.errors > 0 {
-            bits.push(format!("{} decoder complaints", st.errors));
-        }
-        if st.starts > 1 {
-            bits.push(format!("ffmpeg started {} times", st.starts));
-        }
-        ui.label(RichText::new(bits.join("  ·  ")).small());
-        if let Some(e) = &st.last_error {
-            ui.label(RichText::new(format!("last: {e}")).small().weak());
-        }
+        let size = self.texture.as_ref().map(|t| t.size());
+        let streams: Vec<_> = st
+            .streams
+            .iter()
+            .map(|(pid, d)| tv_info::parse_stream(*pid, d, size))
+            .collect();
+        ui.add_space(4.0);
+        tv_info::show(ui, &st, &streams, self.tap_dropped);
     }
 }
 

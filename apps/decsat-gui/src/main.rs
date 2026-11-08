@@ -41,6 +41,7 @@ mod top_bar;
 mod transmit;
 mod ts_viewer;
 mod tv;
+mod tv_info;
 mod waterfall;
 
 use std::collections::BTreeMap;

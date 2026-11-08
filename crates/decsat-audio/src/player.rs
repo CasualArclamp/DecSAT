@@ -182,7 +182,9 @@ struct Shared {
     level: [AtomicU32; 2],
     /// Stereo frames handed to the output (counted for the null output).
     played: AtomicU64,
-    /// Buffer level beyond which audio is cut back to `START_MS`.
+    /// Buffered before play starts (and after running dry), ms.
+    start_ms: u32,
+    /// Buffer level beyond which audio is cut back to `start_ms`.
     max_ms: u32,
     /// This player's own volume, 0..=1 as a slider position (f32 bits),
     /// on top of the app's: the in-app TV player's slider.
@@ -292,19 +294,32 @@ impl AudioPlayer {
             return Err("an MPEG-TS stream: open it in VLC".into());
         }
         let carriage = depay.carriage.clone();
-        Self::spawn(Some(depay), carriage, output, MAX_MS)
+        Self::spawn(Some(depay), carriage, output, START_MS, MAX_MS)
     }
 
     /// Start a player for audio decoded elsewhere, handed over with
     /// [`AudioPlayer::push_pcm`]; `label` says what it is ("from ffmpeg").
     pub fn start_pcm(label: &str, output: OutputKind) -> Result<AudioPlayer, String> {
-        Self::spawn(None, label.to_string(), output, PCM_MAX_MS)
+        Self::spawn(None, label.to_string(), output, START_MS, PCM_MAX_MS)
+    }
+
+    /// As [`AudioPlayer::start_pcm`] with its own buffer sizes: play starts
+    /// once `start_ms` is buffered, and a level over `max_ms` is cut back
+    /// (the in-app TV player's, which wants a deeper cushion than radio).
+    pub fn start_pcm_buffered(
+        label: &str,
+        output: OutputKind,
+        start_ms: u32,
+        max_ms: u32,
+    ) -> Result<AudioPlayer, String> {
+        Self::spawn(None, label.to_string(), output, start_ms, max_ms.max(start_ms * 2))
     }
 
     fn spawn(
         depay: Option<Depacketizer>,
         carriage: String,
         output: OutputKind,
+        start_ms: u32,
         max_ms: u32,
     ) -> Result<AudioPlayer, String> {
         let shared = Arc::new(Shared {
@@ -322,6 +337,7 @@ impl AudioPlayer {
             }),
             level: [AtomicU32::new(0), AtomicU32::new(0)],
             played: AtomicU64::new(0),
+            start_ms,
             max_ms,
             volume: AtomicU32::new(1.0f32.to_bits()),
         });
@@ -470,7 +486,7 @@ fn callback<T>(
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
-    let start = (rate as usize * START_MS as usize / 1000) * 2;
+    let start = (rate as usize * sh.start_ms as usize / 1000) * 2;
     move |data: &mut [T], _| {
         let g = gain() * f32::from_bits(sh.volume.load(Ordering::Relaxed)).powi(3);
         let paused = sh.paused.load(Ordering::Relaxed);
@@ -540,7 +556,8 @@ fn run(
     let mut block = Block::default();
     let mut resampler: Option<Resampler> = None;
     let mut resampled = Vec::new();
-    let mut fill_ms = START_MS as f64;
+    let start_ms = sh.start_ms as f64;
+    let mut fill_ms = start_ms;
     let mut was_paused = false;
     loop {
         // Another output device chosen: move to it. The old stream closes
@@ -554,7 +571,7 @@ fn run(
                     out = o;
                     per_ms = out.rate as f64 * 2.0 / 1000.0;
                     resampler = None;
-                    fill_ms = START_MS as f64;
+                    fill_ms = start_ms;
                     let mut ring = sh.ring.lock().unwrap();
                     ring.per_ms = per_ms;
                     ring.buf.clear();
@@ -622,7 +639,7 @@ fn run(
             let rs = resampler.as_mut().unwrap();
             // Hold the buffer near the start level: over it, consume input
             // a touch faster.
-            rs.set_ratio(1.0 + 0.01 * (fill_ms - START_MS as f64) / START_MS as f64);
+            rs.set_ratio(1.0 + 0.01 * (fill_ms - start_ms) / start_ms);
             resampled.clear();
             rs.process(&block.samples, &mut resampled);
             if null {
@@ -637,14 +654,14 @@ fn run(
             }
             let level_ms = ring.buf.len() as f64 / per_ms;
             if level_ms > sh.max_ms as f64 {
-                let cut = (ring.buf.len() - (START_MS as f64 * per_ms) as usize) & !1;
+                let cut = (ring.buf.len() - (start_ms * per_ms) as usize) & !1;
                 ring.buf.drain(..cut);
             }
             let level_ms = ring.buf.len() as f64 / per_ms;
             if ring.primed {
                 fill_ms += 0.05 * (level_ms - fill_ms);
             } else {
-                fill_ms = START_MS as f64;
+                fill_ms = start_ms;
             }
         }
         let buffered = sh.ring.lock().unwrap().buf.len() as f64 / per_ms;
