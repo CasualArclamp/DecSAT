@@ -3063,8 +3063,8 @@ fn run(
                     FecInput::Tpc {
                         symbols,
                         modulation:
-                            modulation @ (decsat_core::Modulation::Qam8
-                            | decsat_core::Modulation::Qam16),
+                            modulation
+                            @ (decsat_core::Modulation::Qam8 | decsat_core::Modulation::Qam16),
                     } => {
                         // Comtech 8QAM rate 0.8: frame sync and the data
                         // region; the parity is not decoded. The same frame
