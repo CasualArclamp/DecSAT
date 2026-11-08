@@ -1234,6 +1234,11 @@ struct Worker {
     modcods: BTreeMap<u8, u64>,
     last_modcod: Option<u8>,
     identification: Option<Identification>,
+    /// BGAN: Wireshark fed the carved IPv4 live (`crate::wireshark`), the
+    /// ask it answers (`VfoSettings::wireshark`) and why it did not start.
+    bgan_wireshark: Option<crate::wireshark::Live>,
+    bgan_wireshark_ask: Option<u32>,
+    bgan_wireshark_error: Option<String>,
     /// Wait for the FEC thread rather than dropping its input.
     lossless: bool,
     /// Input samples dropped before reaching this thread, and how many of
@@ -1334,6 +1339,9 @@ impl Worker {
             modcods: BTreeMap::new(),
             last_modcod: None,
             identification: None,
+            bgan_wireshark: None,
+            bgan_wireshark_ask: None,
+            bgan_wireshark_error: None,
             lossless: false,
             followed: 0.0,
             follow_samples: 0,
@@ -2151,7 +2159,38 @@ impl Worker {
                     crate::rf::freq_tag(self.settings.offset_hz)
                 );
                 b.set_recording(self.settings.record, &self.settings.record_dir, &tag);
+                // Same ask protocol as the IP decoders: each new number is a
+                // new Wireshark, `None` stops feeding.
+                if self.settings.wireshark != self.bgan_wireshark_ask {
+                    self.bgan_wireshark_ask = self.settings.wireshark;
+                    self.bgan_wireshark = None;
+                    self.bgan_wireshark_error = None;
+                    if self.settings.wireshark.is_some() {
+                        let title = format!(
+                            "DecSAT {} {}",
+                            self.settings.name,
+                            crate::rf::freq_tag(self.settings.offset_hz)
+                        );
+                        match crate::wireshark::Live::start(&title) {
+                            Ok(w) => self.bgan_wireshark = Some(w),
+                            Err(e) => self.bgan_wireshark_error = Some(e),
+                        }
+                    }
+                }
+                b.set_live(self.bgan_wireshark.is_some());
                 b.push(&self.bb);
+                if let Some(w) = &mut self.bgan_wireshark {
+                    let now = std::time::SystemTime::now();
+                    for p in b.take_live() {
+                        if !w.send(now, &p) {
+                            break;
+                        }
+                    }
+                    // Wireshark's window closed.
+                    if !w.alive() {
+                        self.bgan_wireshark = None;
+                    }
+                }
             }
             Decoder::Beacon { rx, files } => {
                 rx.push(&self.bb, self.ddc.offset_hz());
@@ -2626,6 +2665,12 @@ impl Worker {
                     st.recording = Some((p.clone(), *n));
                     st.recording_active = true;
                 }
+                let mut v = v;
+                v.wireshark = self
+                    .bgan_wireshark
+                    .as_ref()
+                    .map(|w| (w.written(), w.dropped));
+                v.wireshark_error = self.bgan_wireshark_error.clone();
                 st.bgan = Some(v);
             }
             Decoder::Beacon { rx, files } => {

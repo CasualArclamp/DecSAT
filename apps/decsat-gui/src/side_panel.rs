@@ -1034,6 +1034,54 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
+            // BGAN: the checksum-gated IPv4 carve, live to Wireshark. (Its
+            // PCAP file is written by the VFO's ● recording.)
+            if s.decoder == DecoderKind::Bgan {
+                let bg = st.bgan.as_ref();
+                ui.label("Wireshark");
+                ui.horizontal(|ui| {
+                    let live = bg.and_then(|b| b.wireshark);
+                    let feeding = s.wireshark.is_some() && live.is_some();
+                    let (label, tip) = if feeding {
+                        (
+                            "⏹ Stop",
+                            "Stop feeding Wireshark: its capture stops, the packets it has stay",
+                        )
+                    } else {
+                        (
+                            "▶ Live",
+                            "Open Wireshark and feed it the IPv4 packets carved from the BGAN payload as they are decoded (a carve, not a demux: see the card)",
+                        )
+                    };
+                    let b = egui::Button::new(label).selected(feeding);
+                    if ui.add(b).on_hover_text(tip).clicked() {
+                        // Each ▶ is a new ask, so a closed Wireshark can be
+                        // opened again.
+                        s.wireshark = if feeding {
+                            None
+                        } else {
+                            Some(s.wireshark.map_or(1, |n| n.wrapping_add(1)))
+                        };
+                    }
+                    let note = if let Some(e) = bg.and_then(|b| b.wireshark_error.as_ref()) {
+                        RichText::new(e).color(Color32::from_rgb(230, 110, 110))
+                    } else if let Some((n, dropped)) = live {
+                        let lost = if dropped > 0 {
+                            format!(", {dropped} dropped")
+                        } else {
+                            String::new()
+                        };
+                        RichText::new(format!("{n} packets{lost}")).weak()
+                    } else if s.wireshark.is_some() {
+                        RichText::new("closed").weak()
+                    } else {
+                        RichText::new("")
+                    };
+                    ui.label(note.small());
+                });
+                ui.end_row();
+            }
+
             ui.label("");
             ui.horizontal(|ui| {
                 ui.checkbox(&mut s.enabled, "enabled");

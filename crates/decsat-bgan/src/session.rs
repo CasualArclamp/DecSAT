@@ -33,6 +33,11 @@ pub struct BganView {
     pub hosts: Vec<(String, usize)>,
     /// The latest findings, newest last.
     pub recent: Vec<String>,
+    /// Wireshark capturing the carved IPv4 live: packets written to it and
+    /// dropped. Filled in by the engine, which owns the Wireshark process
+    /// (this crate only hands over the packets, see `take_live`).
+    pub wireshark: Option<(u64, u64)>,
+    pub wireshark_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -63,6 +68,9 @@ pub struct BganSession {
     pcap: Option<PcapWriter<BufWriter<File>>>,
     layers: Layers,
     open_failed: bool,
+    /// Hand the carved packets over as they appear (`take_live`).
+    live: bool,
+    live_out: Vec<Vec<u8>>,
 }
 
 impl BganSession {
@@ -86,7 +94,26 @@ impl BganSession {
                 ..Default::default()
             },
             open_failed: false,
+            live: false,
+            live_out: Vec::new(),
         }
+    }
+
+    /// Keep the carved IPv4 packets for `take_live` (a live Wireshark wants
+    /// them as they are found) or stop keeping them.
+    pub fn set_live(&mut self, on: bool) {
+        self.live = on;
+        if !on {
+            self.live_out.clear();
+        }
+    }
+
+    /// The IPv4 packets carved since the last call, oldest first. The
+    /// carve is checksum-gated and not a demux (see `layers::pcap`), so
+    /// packets split across FEC blocks or lost with a failed block are
+    /// missing.
+    pub fn take_live(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.live_out)
     }
 
     pub fn set_pool(&mut self, pool: Option<Arc<rayon::ThreadPool>>) {
@@ -169,6 +196,9 @@ impl BganSession {
             carved = c.push(bytes);
             l.n_packets += carved.len() as u64;
         }
+        if self.live {
+            self.live_out.extend(carved.iter().map(|p| p.data.clone()));
+        }
         if self.record && !carved.is_empty() {
             if self.pcap.is_none() && !self.open_failed {
                 let secs = std::time::SystemTime::now()
@@ -250,6 +280,8 @@ impl BganSession {
                 .map(|t| t.most_common().into_iter().take(10).collect())
                 .unwrap_or_default(),
             recent: self.layers.recent.iter().rev().take(12).cloned().collect(),
+            wireshark: None,
+            wireshark_error: None,
         }
     }
 }
@@ -259,5 +291,56 @@ impl Drop for BganSession {
         if let Some((_, w, _)) = &mut self.payload {
             let _ = w.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 20-byte-header UDP packet with a valid header checksum.
+    fn packet(n: usize) -> Vec<u8> {
+        let mut h = vec![0u8; 20];
+        h[0] = 0x45;
+        h[2..4].copy_from_slice(&((20 + n) as u16).to_be_bytes());
+        h[8] = 64;
+        h[9] = 17;
+        h[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        h[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        let mut s: u32 = h
+            .chunks(2)
+            .map(|c| u32::from(c[0]) << 8 | u32::from(c[1]))
+            .sum();
+        while s >> 16 != 0 {
+            s = (s & 0xFFFF) + (s >> 16);
+        }
+        h[10..12].copy_from_slice(&(!(s as u16)).to_be_bytes());
+        h.extend((0..n).map(|i| i as u8));
+        h
+    }
+
+    /// With live on, the carved packets come out of `take_live` once each,
+    /// even when a packet straddles two pushes; with it off nothing is kept.
+    #[test]
+    fn live_hands_over_each_carved_packet_once() {
+        let mut stream = vec![0u8; 37];
+        stream.extend(packet(100));
+        stream.extend([0xFF; 5]);
+        stream.extend(packet(200));
+        stream.extend([0u8; 9]);
+
+        let mut s = BganSession::new(192_000.0);
+        s.set_live(true);
+        let mut got = Vec::new();
+        for c in stream.chunks(64) {
+            s.feed_layers(c);
+            got.extend(s.take_live());
+        }
+        assert_eq!(got, vec![packet(100), packet(200)]);
+        assert!(s.take_live().is_empty());
+
+        let mut off = BganSession::new(192_000.0);
+        off.feed_layers(&stream);
+        assert!(off.take_live().is_empty());
     }
 }

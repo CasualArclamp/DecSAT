@@ -288,7 +288,7 @@ enum Command {
         #[arg(long)]
         bbframes: Option<PathBuf>,
         /// Open Wireshark and feed it the IP packets as they are decoded
-        /// (it captures from its standard input); closing it ends the run.
+        /// (bgan: the IPv4 carved from the payload; it captures from its standard input); closing it ends the run.
         #[arg(long)]
         wireshark: bool,
         /// pool: also run a VFO at OFFSET_HZ:BW_HZ on the hub's outbound,
