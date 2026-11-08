@@ -312,7 +312,13 @@ impl AudioPlayer {
         start_ms: u32,
         max_ms: u32,
     ) -> Result<AudioPlayer, String> {
-        Self::spawn(None, label.to_string(), output, start_ms, max_ms.max(start_ms * 2))
+        Self::spawn(
+            None,
+            label.to_string(),
+            output,
+            start_ms,
+            max_ms.max(start_ms * 2),
+        )
     }
 
     fn spawn(
