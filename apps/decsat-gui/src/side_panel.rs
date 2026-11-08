@@ -5805,6 +5805,48 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus, vfo_rf: Option<f6
     let carrier_lock = st.carrier.filter(|c| c.locked);
     let space_hz = vfo_rf.map(|f| f + carrier_lock.map_or(0.0, |c| c.offset_hz));
     let strong = ui.visuals().strong_text_color();
+
+    // ---- the NIT: the satellite (or network) as a title over the bar. The
+    // carrier's own row is the one whose TS id the PAT gave. Rust note:
+    // `filter` keeps the Option only while its closure is true, so no NIT
+    // (or one with no network id yet) leaves `nit` as None and nothing shows.
+    let report = st
+        .fec
+        .as_ref()
+        .and_then(|f| f.ts.as_ref())
+        .map(|t| &t.report);
+    let nit = report
+        .map(|r| &r.network)
+        .filter(|n| n.network_id.is_some());
+    let mine = report.and_then(|r| {
+        r.network
+            .transponders
+            .iter()
+            .find(|t| Some(t.ts_id) == r.ts_id)
+    });
+    if let (Some(n), Some(r)) = (nit, report) {
+        let title = match mine.and_then(|t| t.orbital) {
+            Some(deg) => crate::orbit::satellite_name(deg),
+            None => match &n.name {
+                Some(name) => name.clone(),
+                None => format!("Network {}", n.network_id.unwrap_or(0)),
+            },
+        };
+        ui.label(RichText::new(title).size(15.0).strong());
+        let mut ids = vec![format!(
+            "NID {}{}",
+            n.network_id.unwrap_or(0),
+            if n.name.is_none() { " (unnamed)" } else { "" }
+        )];
+        if let Some(t) = mine {
+            ids.push(format!("ONID {}", t.onid));
+        }
+        if let Some(id) = r.ts_id {
+            ids.push(format!("TS {id}"));
+        }
+        ui.label(RichText::new(ids.join(" · ")).monospace().size(11.0).weak());
+        ui.add_space(2.0);
+    }
     let bar = egui::Frame::new()
         .fill(colour.gamma_multiply(0.15))
         .corner_radius(CornerRadius {
@@ -5940,7 +5982,68 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus, vfo_rf: Option<f6
         }
     });
 
+    // ---- the NIT's transponders, folded: the carrier's own entry on the
+    // header line, the whole table open, its row in the standard's colour.
+    if let Some(n) = nit {
+        let head = match mine {
+            Some(t) => format!(
+                "NIT · {} transponder{}  ·  {}",
+                n.transponders.len(),
+                if n.transponders.len() == 1 { "" } else { "s" },
+                nit_row_summary(t)
+            ),
+            None => format!("NIT · {} transponders", n.transponders.len()),
+        };
+        egui::CollapsingHeader::new(RichText::new(head).monospace().size(11.0))
+            .id_salt("nit_card")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::Grid::new("nit_card_grid")
+                    .num_columns(5)
+                    .spacing([10.0, 2.0])
+                    .show(ui, |ui| {
+                        for h in ["TS", "GHz", "Pol", "Msym/s", "System"] {
+                            ui.label(RichText::new(h).size(10.0).weak());
+                        }
+                        ui.end_row();
+                        for t in &n.transponders {
+                            let is_mine = mine.is_some_and(|m| m.ts_id == t.ts_id);
+                            let cell = |s: String| {
+                                let r = RichText::new(s).monospace().size(11.0);
+                                if is_mine { r.color(standard) } else { r }
+                            };
+                            ui.label(cell(t.ts_id.to_string()));
+                            ui.label(cell(
+                                t.frequency_ghz.map_or(String::new(), |f| format!("{f:.4}")),
+                            ));
+                            ui.label(cell(t.polarization.map_or(String::new(), String::from)));
+                            ui.label(cell(
+                                t.symbol_rate_msps
+                                    .map_or(String::new(), |s| format!("{s:.4}")),
+                            ));
+                            ui.label(cell(t.system.unwrap_or("").to_string()));
+                            ui.end_row();
+                        }
+                    });
+            });
+    }
+
     dvb_chain(ui, st, dvbs, es_n0, standard)
+}
+
+/// A NIT row in one line for the folded header: "12.567 GHz V · 1.250 M".
+fn nit_row_summary(t: &decsat_ts::psi::Transponder) -> String {
+    let mut parts = Vec::new();
+    if let Some(f) = t.frequency_ghz {
+        parts.push(format!(
+            "{f:.3} GHz{}",
+            t.polarization.map_or(String::new(), |p| format!(" {p}"))
+        ));
+    }
+    if let Some(s) = t.symbol_rate_msps {
+        parts.push(format!("{s:.3} M"));
+    }
+    parts.join(" · ")
 }
 
 /// A link margin's colour: red below 0 dB, amber within 1 dB, else green.
