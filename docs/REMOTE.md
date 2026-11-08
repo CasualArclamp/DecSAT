@@ -50,7 +50,7 @@ On `tests/decdvb-scene_8Msps.cs8` (8 MS/s, four carriers), over loopback:
 | Dumb, 8 bits | 128 Mbit/s | Es/N0 25.0 dB, 401 of 401 frames |
 | Dumb, 4 bits | 64 Mbit/s | Es/N0 21.9 dB, 400 of 400 frames |
 
-The dumb figures are the arithmetic for 8 MS/s at that width; zstd was on and
+The Es/N0 and MER values are single readings at the end of each run, on whichever MODCOD the last frame used, so do not read the 8-bit and 4-bit difference as the cost of 4 bits. The dumb link figures are the arithmetic for 8 MS/s at that width; zstd was on and
 its saving on this capture was not measured. Not yet measured on a real
 capture or on ARM64.
 

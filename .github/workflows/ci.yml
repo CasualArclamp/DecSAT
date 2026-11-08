@@ -3,7 +3,7 @@ name: CI
 
 on:
   push:
-    branches: [main, worktree-remote-server]
+    branches: [main]
     paths-ignore: ["**/*.md", "docs/**"]
   pull_request:
     paths-ignore: ["**/*.md", "docs/**"]
