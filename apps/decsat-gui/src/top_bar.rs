@@ -28,6 +28,8 @@ const AMBER: Color32 = Color32::from_rgb(255, 196, 80);
 
 /// What the play button does now.
 enum Play {
+    StartRemote,
+    StopRemote,
     StartNet,
     StopNet,
     #[cfg(all(windows, feature = "rtl"))]
@@ -76,6 +78,7 @@ impl App {
             selected |= self.rtl_selected;
         }
         selected |= self.net_selected;
+        selected |= self.remote.selected;
         selected
     }
 
@@ -298,7 +301,17 @@ impl App {
         } else {
             what
         };
+        let what = if self.path.is_none() && self.remote.selected {
+            if self.remote.running || self.remote.connecting() {
+                Play::StopRemote
+            } else {
+                Play::StartRemote
+            }
+        } else {
+            what
+        };
         let running = match what {
+            Play::StopRemote => true,
             Play::StopNet => true,
             #[cfg(all(windows, feature = "rtl"))]
             Play::StopRtl => true,
@@ -319,6 +332,11 @@ impl App {
             format!("Stop the {radio}"),
         );
         let (text, tip): (&str, &str) = match what {
+            Play::StartRemote => (
+                "▶ Start",
+                "Connect to the server (Source ▸ Remote server settings…)",
+            ),
+            Play::StopRemote => ("⏹ Stop", "Disconnect from the server"),
             Play::StartNet => (
                 "▶ Start",
                 "Open the network IQ stream (Source ▸ Network IQ settings…)",
@@ -366,6 +384,11 @@ impl App {
             return;
         }
         match what {
+            Play::StartRemote => self.start_remote(ui.ctx()),
+            Play::StopRemote => {
+                self.stop_source();
+                self.note = "Remote server: disconnected".into();
+            }
             Play::StartNet => self.start_net(),
             Play::StopNet => {
                 self.stop_source();
@@ -499,6 +522,17 @@ impl App {
     fn freq_note(&self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.add_space(8.0);
+            if self.path.is_none() && self.remote.selected {
+                ui.label(
+                    RichText::new(format!(
+                        "remote tuner {}  ·  LO {}",
+                        format::freq(self.remote.center_hz),
+                        format::freq(self.remote.lo_hz),
+                    ))
+                    .weak(),
+                );
+                return;
+            }
             if self.path.is_none() && self.net_selected {
                 let tunes = self.net_control.as_ref().is_some_and(|c| c.is_rtl_tcp());
                 ui.label(
@@ -584,6 +618,17 @@ impl App {
                     self.engine.is_some() && !self.paused,
                 )
             }
+            None if self.remote.selected => {
+                let dot = if self.remote.running { "● " } else { "" };
+                (
+                    format!(
+                        "{dot}Remote · {} · {}",
+                        self.remote.addr,
+                        if self.remote.smart { "smart" } else { "dumb" }
+                    ),
+                    self.remote.running,
+                )
+            }
             None if self.net_selected => {
                 let dot = if self.net_running { "● " } else { "" };
                 (
@@ -641,6 +686,39 @@ impl App {
         ui.menu_button(text, |ui| {
             if ui
                 .selectable_label(
+                    self.path.is_none() && self.remote.selected,
+                    "🌐 Remote DecSAT server",
+                )
+                .clicked()
+            {
+                if self.path.is_some() || !self.remote.selected {
+                    self.stop_source();
+                }
+                self.path = None;
+                self.remote.selected = true;
+                self.net_selected = false;
+                #[cfg(all(windows, feature = "rtl"))]
+                {
+                    self.rtl_selected = false;
+                }
+                #[cfg(feature = "pluto")]
+                {
+                    self.pluto_selected = false;
+                }
+                #[cfg(all(windows, feature = "uhd"))]
+                {
+                    self.uhd_selected = false;
+                }
+                self.paused = false;
+                ui.close();
+            }
+            if ui.button("Remote server settings…").clicked() {
+                self.remote.open = true;
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .selectable_label(
                     self.path.is_none() && self.net_selected,
                     "🖧 Network IQ (SDR++, GNU Radio, rtl_tcp)",
                 )
@@ -650,6 +728,7 @@ impl App {
                     self.stop_source();
                 }
                 self.path = None;
+                self.remote.selected = false;
                 self.net_selected = true;
                 #[cfg(all(windows, feature = "rtl"))]
                 {
@@ -686,6 +765,7 @@ impl App {
                     self.path = None;
                     self.rtl_selected = true;
                     self.net_selected = false;
+                    self.remote.selected = false;
                     #[cfg(feature = "pluto")]
                     {
                         self.pluto_selected = false;
@@ -718,6 +798,7 @@ impl App {
                     self.path = None;
                     self.pluto_selected = true;
                     self.net_selected = false;
+                    self.remote.selected = false;
                     #[cfg(all(windows, feature = "rtl"))]
                     {
                         self.rtl_selected = false;
@@ -752,6 +833,7 @@ impl App {
                     self.path = None;
                     self.uhd_selected = true;
                     self.net_selected = false;
+                    self.remote.selected = false;
                     #[cfg(all(windows, feature = "rtl"))]
                     {
                         self.rtl_selected = false;
@@ -801,6 +883,7 @@ impl App {
                             self.rtl_selected = false;
                         }
                         self.net_selected = false;
+                        self.remote.selected = false;
                         self.radio.device = d;
                         ui.close();
                     }

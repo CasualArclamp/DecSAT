@@ -331,6 +331,7 @@ crates/
                   ring, the modulator as a sample pump, the arm gate and the
                   sinks (HackRF / IQ file / null), TxSession
 apps/
+  decsat-server   headless remote server (crates/decsat-remote; docs/REMOTE.md)
   decsat-cli      headless decode / modulate
   decsat-gui      egui/glow: constellation, spectrum, ACM timeline, stream table
   decsat-tx       (package decsat-tx-app) the transmitter's own window
@@ -379,6 +380,7 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
 
 - **Input:** HackRF live via `libhackrf` FFI (preferred; a `libhackrf.dll` is already present on this PC) — optionally SoapySDR later. *(2026-10-18: a second live receiver, the RigExpert **Fobos SDR** — `decsat-io::fobos`, feature `fobos`, on by default — through RigExpert's C library loaded at run time with `libloading`: `fobos_sdr_*` (agile firmware) or `fobos_rx_*` (stock). Not SoapySDR: the PothosSDR module is built with MSVC and a MinGW host cannot load it. The GUI's live radio is an enum (`radio::Live`) over the two; both share the tuning and LNB LO.)* *(2026-10-19: a third, the Airspy Mini / R2 — `decsat-io::airspy`, feature `airspy`, pure Rust through `libairspy-rs` on `nusb`, bias tee forced off. With it: 📷 snapshots of the band, a CSV session log, PCAP rotation (`fec::set_pcap_rotate_minutes`, a process-wide setting), and satellite names from NIT/RCS orbital positions (`apps/decsat-gui/src/orbit.rs`).)* IQ files: HackRF `cs8` (int8 I/Q), `cs16`, `cf32`. Center-freq / sample-rate / gain in config; LNB LO offset handling for Ku.
 - **Output:** `.pcap` for IP; `.ts` for transport; GUI panels; CSV/JSON metrics.
+- **Remote (decided 2026-11-08):** a radio on one machine, DecSAT on another, in `crates/decsat-remote` and `apps/decsat-server`; wire format in [REMOTE.md](REMOTE.md). Dumb mode (IQ) and smart mode (decoding on the server), one client at a time, or shared mode (fixed radio, users add decoders and camp on others'). One TCP connection with priority queues. Own protocol, not SDR++'s. Smart mode runs Identify, DVB-S2 → TS and DVB-S → TS for now; `served()` in `hub.rs` is the list. Password optional and no encryption: VPN or SSH tunnel over the internet.
 
 ## 8. Platform, build, release
 

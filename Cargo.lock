@@ -687,6 +687,7 @@ dependencies = [
  "decsat-ip",
  "decsat-mod",
  "decsat-modem",
+ "decsat-remote",
  "decsat-ts",
 ]
 
@@ -773,6 +774,7 @@ dependencies = [
  "decsat-io",
  "decsat-ip",
  "decsat-mod",
+ "decsat-remote",
  "decsat-ts",
  "decsat-video",
  "eframe",

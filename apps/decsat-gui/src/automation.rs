@@ -27,6 +27,12 @@ pub struct Options {
     /// `--net URL --iq TYPE [--net-mhz MHZ]`: open a network IQ stream at
     /// start (with `--rate` and `--lo` as for the HackRF).
     pub net: Option<String>,
+    /// `--remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]`: connect
+    /// to a decsat-server at start (`--rate`, `--net-mhz` and `--lo` as for
+    /// network IQ; `DECSAT_PASSWORD` if it needs one).
+    pub remote: Option<String>,
+    pub remote_radio: Option<String>,
+    pub remote_dumb: bool,
     pub iq: Option<decsat_io::NetSample>,
     pub net_mhz: Option<f64>,
     /// Start the Fobos SDR tuned here, MHz (receive only). `--rate`, `--lo`
@@ -212,6 +218,15 @@ impl Options {
                             .ok_or("--select needs a VFO number")?,
                     );
                 }
+                Some("--remote") => {
+                    let v = args.next().ok_or("--remote needs an address")?;
+                    o.remote = Some(v.to_string_lossy().into_owned());
+                }
+                Some("--remote-radio") => {
+                    let v = args.next().ok_or("--remote-radio needs a name")?;
+                    o.remote_radio = Some(v.to_string_lossy().into_owned());
+                }
+                Some("--remote-dumb") => o.remote_dumb = true,
                 Some("--net") => {
                     let v = args.next().ok_or("--net needs a URL")?;
                     o.net = Some(v.to_string_lossy().into_owned());

@@ -39,6 +39,21 @@ in the clear. Over the internet, use a VPN or an SSH tunnel. On a shared
 server BISS keys are ignored, since campers would receive the descrambled
 stream.
 
+## Measured
+
+On `tests/decdvb-scene_8Msps.cs8` (8 MS/s, four carriers), over loopback:
+
+| | link | carrier at +1.2 MHz (0.9 Mbit/s TS) |
+|---|---|---|
+| Smart, no VFO but Identify | 0.3–0.6 Mbit/s | |
+| Smart, DVB-S2 → TS | 1.5 Mbit/s | 25.1 dB MER, 0 frames lost |
+| Dumb, 8 bits | 128 Mbit/s | Es/N0 25.0 dB, 401 of 401 frames |
+| Dumb, 4 bits | 64 Mbit/s | Es/N0 21.9 dB, 400 of 400 frames |
+
+The dumb figures are the arithmetic for 8 MS/s at that width; zstd was on and
+its saving on this capture was not measured. Not yet measured on a real
+capture or on ARM64.
+
 ## Framing
 
 All integers little-endian.

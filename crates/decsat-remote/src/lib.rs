@@ -23,5 +23,7 @@ pub mod wire;
 mod hub;
 mod outq;
 
+pub use hub::served;
+
 /// The port a server listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 5262;

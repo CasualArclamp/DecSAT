@@ -21,6 +21,11 @@ cargo run --release -p decsat-tx-app -- --source test --sink null --start --scre
 cargo run --release -p decsat-tx --example txrun -- --source camera --codec av1 --out out/tx.cs8 --seconds 8   # the library alone, a status line a second
 cargo run --release -p decsat-cli -- decode out/tx.cs8 --rate 2331000 --decoder ts --symbol-rate 333000 --fast --out out/rx.ts   # read a transmission back
 cargo run --release -p decsat-ts --example av1_ivf -- out/rx.ts/x.ts out/av1.ivf   # AV1 (AOM's TS mapping) out of a TS for ffmpeg
+cargo run --release -p decsat-server -- --bind 0.0.0.0:5262 --password-file pw.txt   # a radio for a client elsewhere (docs/REMOTE.md); receive only
+cargo run --release -p decsat-server -- --file capture.cs8 --file-rate 8e6 --file-center 1100e6 --only file --bind 127.0.0.1:5262   # a capture as a remote radio
+cargo run --release -p decsat-cli -- remote 127.0.0.1:5262 --radio file --mhz 1100 --rate 8e6 --decoder dvbs2-ts --offset=1200000 --bandwidth=700000 --out out/   # smart mode: decodes on the server
+cargo run --release -p decsat-cli -- decode --remote 127.0.0.1:5262 --remote-radio file --remote-mhz 1100 --rate 8e6 --remote-bits 8 --decoder ts --offset=1200000 --bandwidth=700000   # dumb mode: IQ over the link
+cargo test --release -p decsat-remote                                     # codecs, and server + clients over loopback on a fake radio
 cargo run --release -p decsat-cli -- decode --pluto 1450 --rate 4e6 --pluto-gain 40 --decoder id   # live ADALM-PLUTO / Pluto+ (--pluto-uri auto|usb|ip:ADDR, --pluto-gain agc, --pluto-16bit); receive only
 cargo test -p decsat-io --features pluto pluto                                     # the Pluto driver against a fake IIOD server
 PLUTO_URI=ip:192.168.2.1 cargo test -p decsat-io --features pluto live_pluto -- --ignored --nocapture   # a real Pluto (PLUTO_URI defaults to auto); receive only

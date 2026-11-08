@@ -28,6 +28,7 @@ $all = [ordered]@{
     gui = @("decsat-gui", "decsat-gui.exe")
     cli = @("decsat-cli", "decsat.exe")
     tx  = @("decsat-tx-app", "decsat-tx.exe")
+    server = @("decsat-server", "decsat-server.exe")
 }
 foreach ($a in $Apps) {
     if (-not $all.Contains($a)) { throw "unknown app '$a' (gui, cli, tx)" }
