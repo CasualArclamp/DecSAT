@@ -113,6 +113,7 @@ impl App {
         });
         let radios = Devices {
             file: file.clone(),
+            net: None,
             only: None,
         }
         .list();
@@ -150,6 +151,7 @@ impl App {
             .filter(|r| !self.s.hidden.contains(&r.key));
         Devices {
             file: self.file.clone(),
+            net: None,
             only: Some(offered.map(|r| r.key.clone()).collect()),
         }
     }

@@ -106,10 +106,26 @@ pub struct FileRadio {
     pub center_hz: f64,
 }
 
-/// The radios this build can drive, plus any capture given to the server.
+/// A network IQ stream (SDR++'s IQ Exporter, GNU Radio, rtl_tcp…) offered as
+/// a radio. The stream cannot say its rate or centre, so the operator does.
+/// It is opened when a client asks and closed when that client leaves, so the
+/// stream is read only while someone is using it. Like a capture, it cannot
+/// be retuned from the client.
+#[derive(Debug, Clone)]
+pub struct NetRadio {
+    /// `tcp://HOST:PORT`, `listen://ADDR:PORT` or `udp://ADDR:PORT`.
+    pub url: String,
+    pub sample: decsat_io::NetSample,
+    pub sample_rate: f64,
+    pub center_hz: f64,
+}
+
+/// The radios this build can drive, plus any capture or network stream given
+/// to the server.
 #[derive(Default)]
 pub struct Devices {
     pub file: Option<FileRadio>,
+    pub net: Option<NetRadio>,
     /// When set, only these keys are offered.
     pub only: Option<Vec<String>>,
 }
@@ -124,6 +140,16 @@ impl Devices {
                 min_hz: f.center_hz,
                 max_hz: f.center_hz,
                 rates: vec![f.sample_rate],
+                gains: vec![],
+            });
+        }
+        if let Some(n) = &self.net {
+            v.push(RadioInfo {
+                key: "net".into(),
+                name: format!("Network IQ: {}", n.url),
+                min_hz: n.center_hz,
+                max_hz: n.center_hz,
+                rates: vec![n.sample_rate],
                 gains: vec![],
             });
         }
@@ -306,6 +332,22 @@ impl RadioProvider for Devices {
                 let source =
                     decsat_io::IqFileReader::open(&f.path, f.format, f.sample_rate, block)?
                         .with_center_freq(f.center_hz);
+                Ok(OpenRadio {
+                    source: Box::new(source),
+                    control: None,
+                    gains,
+                })
+            }
+            "net" => {
+                let n = self.net.as_ref().ok_or_else(|| bad("no network stream"))?;
+                let (mode, addr) = decsat_io::NetIqSettings::parse_url(&n.url)?;
+                let source = decsat_io::NetIqSource::open(decsat_io::NetIqSettings {
+                    mode,
+                    addr,
+                    sample: n.sample,
+                    sample_rate: n.sample_rate,
+                    center_hz: n.center_hz,
+                })?;
                 Ok(OpenRadio {
                     source: Box::new(source),
                     control: None,

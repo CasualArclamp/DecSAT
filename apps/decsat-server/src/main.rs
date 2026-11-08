@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use decsat_remote::msg::SmartParams;
-use decsat_remote::radios::{Devices, FileRadio, RadioProvider, RadioRequest};
+use decsat_remote::radios::{Devices, FileRadio, NetRadio, RadioProvider, RadioRequest};
 use decsat_remote::server::{Server, ServerConfig, SharedConfig};
 
 #[derive(Parser)]
@@ -33,7 +33,7 @@ struct Args {
     #[arg(long)]
     allow_takeover: bool,
     /// Offer only these radios (comma separated: hackrf, airspy, fobos,
-    /// pluto, file).
+    /// pluto, file, net).
     #[arg(long, value_delimiter = ',')]
     only: Option<Vec<String>>,
     /// Offer a capture as a radio: for trying things out.
@@ -45,6 +45,19 @@ struct Args {
     /// The capture's centre frequency, Hz.
     #[arg(long, default_value_t = 0.0)]
     file_center: f64,
+    /// Offer a network IQ stream as a radio: tcp://HOST:PORT (connect, e.g.
+    /// SDR++'s IQ Exporter), listen://ADDR:PORT or udp://ADDR:PORT.
+    #[arg(long, value_name = "URL")]
+    net: Option<String>,
+    /// The stream's sample format: int8, uint8, int16, int32 or float32.
+    #[arg(long, default_value = "int16")]
+    net_format: String,
+    /// The stream's sample rate, Hz (the stream does not say).
+    #[arg(long, default_value_t = 8e6)]
+    net_rate: f64,
+    /// The stream's centre frequency, Hz.
+    #[arg(long, default_value_t = 0.0)]
+    net_center: f64,
 
     /// Shared mode: run this radio for everyone. They see the band, add
     /// their own decoders and can camp on each other's.
@@ -113,8 +126,27 @@ fn main() -> Result<()> {
         }),
         None => None,
     };
+    let net = match &a.net {
+        Some(url) => {
+            // Check the URL and format now, not when the first client asks.
+            decsat_io::NetIqSettings::parse_url(url)?;
+            Some(NetRadio {
+                url: url.clone(),
+                sample: decsat_io::NetSample::parse(&a.net_format).with_context(|| {
+                    format!(
+                        "--net-format {}: int8, uint8, int16, int32 or float32",
+                        a.net_format
+                    )
+                })?,
+                sample_rate: a.net_rate,
+                center_hz: a.net_center,
+            })
+        }
+        None => None,
+    };
     let devices = Devices {
         file,
+        net,
         only: a.only.clone(),
     };
     let radios = devices.list();

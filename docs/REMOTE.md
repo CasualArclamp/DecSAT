@@ -24,6 +24,15 @@ decsat-server --file capture.cs8 --file-rate 8e6 --file-center 739.5e6   # a cap
 
 `decsat-server-app.exe` is the same server in a window, for double-clicking: it shows the address to connect to and who is connected, and keeps its settings in `%APPDATA%\DecSAT-Server\prefs.txt` (the password only if asked to, as plain text).
 
+A network IQ stream (SDR++'s IQ Exporter, GNU Radio, rtl_tcp) can be the server's radio too, key `net`. The stream does not say its rate or centre, so you give them; like a capture it cannot be retuned from the client. It is opened when a client connects and closed when it leaves:
+
+```bash
+decsat-server --net tcp://127.0.0.1:7777 --net-format int8 --net-rate 8e6 --net-center 1100e6 --only net --bind 0.0.0.0:5262
+decsat remote SERVER:5262 --radio net --mhz 1100 --rate 8e6 --decoder dvbs2-ts --offset=1200000 --bandwidth=700000 --out out/
+```
+
+`--net` takes `tcp://` (connect), `listen://` or `udp://`; `--net-format` is int8, uint8, int16, int32 or float32. Not yet in `decsat-server-app`.
+
 The default bind is 127.0.0.1. A password can also come from
 `DECSAT_PASSWORD`. No password is the default, and the server says so if it
 is also listening beyond the machine.
