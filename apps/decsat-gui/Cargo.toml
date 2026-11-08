@@ -19,11 +19,13 @@ path = "src/main.rs"
 # The Fobos SDR loads RigExpert's library at run time (nothing to build
 # against), so it is on by default too; it rides on the live-radio UI that
 # the hackrf feature brings.
-default = ["hackrf", "fobos", "airspy", "uhd", "pluto", "rtl"]
+default = ["hackrf", "fobos", "airspy", "sdrplay", "uhd", "pluto", "rtl"]
 hackrf = ["decsat-io/hackrf", "decsat-remote/hackrf"]
 fobos = ["hackrf", "decsat-io/fobos", "decsat-remote/fobos"]
 # The Airspy driver is pure Rust (libairspy-rs on nusb), like the HackRF's.
 airspy = ["hackrf", "decsat-io/airspy", "decsat-remote/airspy"]
+# The SDRplay RSP (RSPduo ...) loads the SDRplay API library at run time.
+sdrplay = ["hackrf", "decsat-io/sdrplay", "decsat-remote/sdrplay"]
 uhd = ["decsat-io/uhd"]
 pluto = ["decsat-io/pluto", "decsat-remote/pluto"]
 rtl = ["decsat-io/rtl"]

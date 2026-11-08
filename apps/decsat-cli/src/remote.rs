@@ -21,7 +21,7 @@ pub struct RemoteIqArgs {
     /// --remote-mhz; --rate is the radio's.
     #[arg(long)]
     pub remote: Option<String>,
-    /// The server's radio: hackrf, airspy, fobos, pluto or file.
+    /// The server's radio: hackrf, airspy, fobos, sdrplay, pluto or file.
     #[arg(long, default_value = "hackrf")]
     pub remote_radio: String,
     /// The remote radio's centre frequency, MHz.

@@ -32,7 +32,7 @@ struct Args {
     /// Let a client that asks replace the one connected.
     #[arg(long)]
     allow_takeover: bool,
-    /// Offer only these radios (comma separated: hackrf, airspy, fobos,
+    /// Offer only these radios (comma separated: hackrf, airspy, fobos, sdrplay,
     /// pluto, file, net).
     #[arg(long, value_delimiter = ',')]
     only: Option<Vec<String>>,

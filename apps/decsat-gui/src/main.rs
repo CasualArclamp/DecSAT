@@ -71,7 +71,7 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
@@ -183,6 +183,25 @@ fn main() -> eframe::Result {
                 if let Some(g) = opts.vga_db {
                     r.airspy.gains.step = g.min(21) as u8;
                 }
+                app.start_radio();
+            }
+            #[cfg(feature = "sdrplay")]
+            if let Some(mhz) = opts.sdrplay_mhz {
+                let r = &mut app.radio;
+                r.device = radio::Device::Sdrplay;
+                r.settings.center_hz = (mhz * 1e6).round() as u64;
+                if let Some(v) = opts.rate_msps {
+                    r.sdrplay.sample_rate = (v * 1e6).round() as u32;
+                }
+                r.lnb_lo_mhz = opts.lo_mhz.unwrap_or(0.0);
+                // --lna is the LNA state, --vga the IF gain reduction in dB.
+                if let Some(g) = opts.lna_db {
+                    r.sdrplay.gains.lna = g.min(27) as u8;
+                }
+                if let Some(g) = opts.vga_db {
+                    r.sdrplay.gains.gr = g.clamp(20, 59) as u8;
+                }
+                r.sdrplay.gains = r.sdrplay.gains.snapped();
                 app.start_radio();
             }
             if let Some(addr) = opts.remote.clone() {
@@ -591,6 +610,19 @@ impl App {
                     .to_string(),
                 ),
             ]);
+            #[cfg(feature = "sdrplay")]
+            p.extend([
+                (
+                    "sdrplay.rate".to_string(),
+                    r.sdrplay.sample_rate.to_string(),
+                ),
+                ("sdrplay.lna".to_string(), r.sdrplay.gains.lna.to_string()),
+                ("sdrplay.gr".to_string(), r.sdrplay.gains.gr.to_string()),
+                (
+                    "sdrplay.tuner_b".to_string(),
+                    u8::from(r.sdrplay.tuner_b).to_string(),
+                ),
+            ]);
         }
         // Persist the active hardware and all device-specific control-panel values.
         // Only reassigned by the Windows-only radio backends below.
@@ -970,6 +1002,22 @@ impl App {
                     };
                 }
                 r.airspy.gains = r.airspy.gains.snapped();
+            }
+            #[cfg(feature = "sdrplay")]
+            {
+                if let Some(v) = get("sdrplay.rate").and_then(|v| v.parse().ok()) {
+                    r.sdrplay.sample_rate = v;
+                }
+                if let Some(v) = get("sdrplay.lna").and_then(|v| v.parse().ok()) {
+                    r.sdrplay.gains.lna = v;
+                }
+                if let Some(v) = get("sdrplay.gr").and_then(|v| v.parse().ok()) {
+                    r.sdrplay.gains.gr = v;
+                }
+                if let Some(v) = get("sdrplay.tuner_b") {
+                    r.sdrplay.tuner_b = v == "1";
+                }
+                r.sdrplay.gains = r.sdrplay.gains.snapped();
             }
         }
         // Restore source preference without opening USB hardware automatically.
@@ -1738,6 +1786,15 @@ impl App {
                         let c = src.control();
                         self.radio.airspy.sample_rate = c.settings().sample_rate;
                         (radio::Live::Airspy(c), Box::new(src) as _)
+                    })
+                }
+                #[cfg(feature = "sdrplay")]
+                radio::Device::Sdrplay => {
+                    decsat_io::SdrplaySource::open(self.radio.sdrplay_settings()).map(|src| {
+                        let c = src.control();
+                        // The LNA state the radio accepted is what runs.
+                        self.radio.sdrplay.gains = c.settings().gains;
+                        (radio::Live::Sdrplay(c), Box::new(src) as _)
                     })
                 }
             };
@@ -2677,6 +2734,18 @@ impl App {
                         let mut settings = self.radio.fobos_settings();
                         settings.center_hz = frequency as u64;
                         decsat_io::FobosSource::open(settings).map(|source| {
+                            let control = source.control();
+                            let tune: Tune = Box::new(move |f| {
+                                let _ = control.set_center(f as u64);
+                            });
+                            (Box::new(source) as _, tune)
+                        })
+                    }
+                    #[cfg(feature = "sdrplay")]
+                    radio::Device::Sdrplay => {
+                        let mut settings = self.radio.sdrplay_settings();
+                        settings.center_hz = frequency as u64;
+                        decsat_io::SdrplaySource::open(settings).map(|source| {
                             let control = source.control();
                             let tune: Tune = Box::new(move |f| {
                                 let _ = control.set_center(f as u64);

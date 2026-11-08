@@ -21,6 +21,10 @@ fobos = ["dep:libloading"]
 # Live Airspy Mini / R2 front end, in pure Rust over USB (libairspy-rs on
 # nusb): no libairspy, no DLLs; on Windows the WinUSB driver.
 airspy = ["dep:libairspy-rs"]
+# Live SDRplay RSP (RSPduo, RSP1A, RSPdx ...) front end. SDRplay's API library
+# (sdrplay_api.dll, from the SDRplay installer) is loaded at run time, so
+# nothing extra is needed to build.
+sdrplay = ["dep:libloading"]
 uhd = []
 # Live ADALM-PLUTO / Pluto+ / LibreSDR front end, receive only: its IIOD
 # protocol in pure Rust over USB (nusb, WinUSB) or TCP. No libiio, no DLLs.

@@ -41,6 +41,10 @@ pub struct Options {
     /// Start the Airspy tuned here, MHz (receive only). `--rate` and `--lo`
     /// apply to it too, and `--vga` is its gain step, 0–21.
     pub airspy_mhz: Option<f64>,
+    /// Start the SDRplay RSP (an RSPduo in single-tuner mode) tuned here, MHz
+    /// (receive only). `--rate` and `--lo` apply to it too; `--lna` is its LNA
+    /// state and `--vga` its IF gain reduction, 20-59 dB.
+    pub sdrplay_mhz: Option<f64>,
     /// Write the session log for this run (in the output folder), even on
     /// an unattended run that otherwise leaves the user's settings alone.
     pub session_log: bool,
@@ -240,7 +244,8 @@ impl Options {
                     );
                 }
                 Some(
-                    flag @ ("--hackrf" | "--fobos" | "--airspy" | "--rate" | "--lo" | "--net-mhz"),
+                    flag @ ("--hackrf" | "--fobos" | "--airspy" | "--sdrplay" | "--rate" | "--lo"
+                    | "--net-mhz"),
                 ) => {
                     let v: f64 = args
                         .next()
@@ -250,6 +255,7 @@ impl Options {
                         "--hackrf" => o.hackrf_mhz = Some(v),
                         "--fobos" => o.fobos_mhz = Some(v),
                         "--airspy" => o.airspy_mhz = Some(v),
+                        "--sdrplay" => o.sdrplay_mhz = Some(v),
                         "--rate" => o.rate_msps = Some(v),
                         "--net-mhz" => o.net_mhz = Some(v),
                         _ => o.lo_mhz = Some(v),
