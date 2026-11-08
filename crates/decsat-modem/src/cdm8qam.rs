@@ -27,6 +27,13 @@
 //! code — is not known yet. [`Cdm8QamRx`] passes the data bits on as
 //! received; a capture with traffic would let the code be found blind.
 //!
+//! The same frame was found carrying **16QAM** at 301.6 kS/s (1962–1964 MHz
+//! capture, 2026-11-08): sixteen clean clusters, a 52-symbol UW on the
+//! grid's corners every 2092 symbols, with a UW of its own ([`UW_16`], half
+//! its bits away from the 8QAM one). Its bit labels and
+//! its code are not known, so that frame is only found, counted and turned
+//! ([`Cdm8QamRx::new_16qam`]); no data bits come out of it.
+//!
 //! Not handled: a mirrored (spectrum-inverted) carrier. The UW lies on one
 //! axis and reads the same mirrored; the data would come out with labels
 //! 1 ↔ 2 and 5 ↔ 6 swapped.
@@ -40,6 +47,9 @@ pub const UW_SYMBOLS: usize = 52;
 /// The UW, one bit a symbol, first symbol most significant: 0 → (3, 3),
 /// 1 → (−3, −3).
 pub const UW: u64 = 0x1_D0AF_1492_C05A;
+/// The UW of the frame carrying 16QAM, read off the carrier (the first
+/// symbol taken as 0: the overall sign is the carrier's phase).
+pub const UW_16: u64 = 0x7_A85C_157A_B12C;
 /// Data symbols a frame (after the UW), then parity symbols.
 pub const DATA_SYMBOLS: usize = 1632;
 pub const PARITY_SYMBOLS: usize = 408;
@@ -66,9 +76,35 @@ pub const POINTS: [(f32, f32); 8] = [
     (-1.0, -1.0),
 ];
 
+/// A 16QAM frame's bits, as far as they are known: 1632 + 408 symbols of
+/// four bits (the split taken from the 8QAM frame's).
+pub const DATA_16: usize = DATA_SYMBOLS * 4;
+pub const FRAME_BITS_16: usize = FRAME_SYMBOLS * 4;
+
+/// The 16 points of the ±1, ±3 grid. Their order is this receiver's own (the
+/// carrier's bit labels are not known); the UW's two are the first and last.
+pub const POINTS_16: [(f32, f32); 16] = [
+    (3.0, 3.0),
+    (3.0, 1.0),
+    (3.0, -1.0),
+    (3.0, -3.0),
+    (1.0, 3.0),
+    (1.0, 1.0),
+    (1.0, -1.0),
+    (1.0, -3.0),
+    (-1.0, 3.0),
+    (-1.0, 1.0),
+    (-1.0, -1.0),
+    (-1.0, -3.0),
+    (-3.0, 3.0),
+    (-3.0, 1.0),
+    (-3.0, -1.0),
+    (-3.0, -3.0),
+];
+
 /// The UW's symbol `k` as ±1 (+1 for a 0 bit).
-fn uw_sign(k: usize) -> f32 {
-    if (UW >> (UW_SYMBOLS - 1 - k)) & 1 == 0 {
+fn uw_sign(word: u64, k: usize) -> f32 {
+    if (word >> (UW_SYMBOLS - 1 - k)) & 1 == 0 {
         1.0
     } else {
         -1.0
@@ -83,8 +119,8 @@ struct UwTables {
 }
 
 impl UwTables {
-    fn new() -> Self {
-        let sign: [f32; UW_SYMBOLS] = std::array::from_fn(uw_sign);
+    fn new(word: u64) -> Self {
+        let sign: [f32; UW_SYMBOLS] = std::array::from_fn(|k| uw_sign(word, k));
         let pair = std::array::from_fn(|k| sign[k] * sign[k + 1]);
         UwTables { sign, pair }
     }
@@ -158,7 +194,16 @@ fn coherent(held: &[Iq], at: usize, t: &UwTables) -> (Iq, f32) {
 /// Comtech 8QAM rate-0.8 frame's, every 2092 symbols. For Identify; looked
 /// for differentially, so the carrier need not be locked.
 pub fn detect(symbols: &[Iq]) -> bool {
-    let t = UwTables::new();
+    detect_word(symbols, UW)
+}
+
+/// The same for the frame that carries 16QAM, by its own UW.
+pub fn detect_16(symbols: &[Iq]) -> bool {
+    detect_word(symbols, UW_16)
+}
+
+fn detect_word(symbols: &[Iq], word: u64) -> bool {
+    let t = UwTables::new(word);
     // Through the listen a few frames at a time: the timing may slip.
     let span = (UW_FRAMES + 1) * FRAME_SYMBOLS;
     symbols.chunks(span).any(|c| find_uw(c, &t).is_some())
@@ -178,6 +223,8 @@ pub struct Cdm8QamStats {
     pub uw_misses: u64,
     /// Symbol slips followed.
     pub slips: u64,
+    /// The frame carries 16QAM (framed only).
+    pub sixteen: bool,
 }
 
 impl Cdm8QamStats {
@@ -194,6 +241,9 @@ impl Cdm8QamStats {
 /// symmetry) and the amplitude to decide against.
 pub struct Cdm8QamRx {
     tables: UwTables,
+    /// The constellation decided against, and the labels of the UW's 0 and 1.
+    points: &'static [(f32, f32)],
+    uw_labels: [usize; 2],
     held: Vec<Iq>,
     /// The next UW's start in `held`, once locked.
     next: Option<usize>,
@@ -215,7 +265,9 @@ impl Default for Cdm8QamRx {
 impl Cdm8QamRx {
     pub fn new() -> Self {
         Cdm8QamRx {
-            tables: UwTables::new(),
+            tables: UwTables::new(UW),
+            points: &POINTS,
+            uw_labels: [0, 4],
             held: Vec::new(),
             next: None,
             since: usize::MAX,
@@ -223,6 +275,16 @@ impl Cdm8QamRx {
             last: None,
             stats: Cdm8QamStats::default(),
         }
+    }
+
+    /// The same frame carrying 16QAM: UW found and counted, no bits out.
+    pub fn new_16qam() -> Self {
+        let mut rx = Self::new();
+        rx.tables = UwTables::new(UW_16);
+        rx.points = &POINTS_16;
+        rx.uw_labels = [0, 15];
+        rx.stats.sixteen = true;
+        rx
     }
 
     /// Feed symbols; each frame's data bits ([`DATA`] of them) go to `out`.
@@ -305,22 +367,27 @@ impl Cdm8QamRx {
         let scale = corner.norm() * UW_SYMBOLS as f32 / c.norm().max(1e-30);
         let rot = corner / corner.norm() * c.conj() / c.norm().max(1e-30) * scale;
         self.stats.turned_deg = (c.arg() - corner.arg()).to_degrees().rem_euclid(360.0);
+        let points = self.points;
         let decide = |s: Iq| -> usize {
             let z = s * rot;
-            (0..8)
+            (0..points.len())
                 .min_by(|&a, &b| {
-                    let d = |l: usize| (z - Iq::new(POINTS[l].0, POINTS[l].1)).norm_sqr();
+                    let d = |l: usize| (z - Iq::new(points[l].0, points[l].1)).norm_sqr();
                     d(a).total_cmp(&d(b))
                 })
-                .expect("eight points")
+                .expect("a constellation has points")
         };
         for k in 0..UW_SYMBOLS {
-            let want = if self.tables.sign[k] > 0.0 { 0 } else { 4 };
+            let want = self.uw_labels[usize::from(self.tables.sign[k] < 0.0)];
             if decide(self.held[at + k]) != want {
                 self.stats.uw_errors += 1;
             }
         }
         self.stats.uw_symbols += UW_SYMBOLS as u64;
+        if self.stats.sixteen {
+            self.stats.frames += 1;
+            return;
+        }
         let mut bits = Vec::with_capacity(DATA);
         for &s in &self.held[at + UW_SYMBOLS..at + UW_SYMBOLS + DATA_SYMBOLS] {
             let l = decide(s);
@@ -339,7 +406,7 @@ pub fn modulate_frame(data: &[u8], parity: &[u8], out: &mut Vec<Iq>) {
     assert_eq!(data.len(), DATA);
     assert_eq!(parity.len(), CODEWORD - DATA);
     for k in 0..UW_SYMBOLS {
-        let p = if uw_sign(k) > 0.0 {
+        let p = if uw_sign(UW, k) > 0.0 {
             POINTS[0]
         } else {
             POINTS[4]
@@ -352,10 +419,46 @@ pub fn modulate_frame(data: &[u8], parity: &[u8], out: &mut Vec<Iq>) {
     }
 }
 
+/// Build a 16QAM frame for tests: the UW, then 2040 labels of [`POINTS_16`].
+pub fn modulate_frame_16qam(labels: &[u8], out: &mut Vec<Iq>) {
+    assert_eq!(labels.len(), DATA_SYMBOLS + PARITY_SYMBOLS);
+    for k in 0..UW_SYMBOLS {
+        let p = POINTS_16[if uw_sign(UW_16, k) > 0.0 { 0 } else { 15 }];
+        out.push(Iq::new(p.0, p.1));
+    }
+    for &l in labels {
+        let p = POINTS_16[usize::from(l & 15)];
+        out.push(Iq::new(p.0, p.1));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tpc2964::tests::{gauss, rng};
+
+    #[test]
+    fn frames_16qam_and_puts_out_no_bits() {
+        let mut next = rng(21);
+        let mut syms = Vec::new();
+        for _ in 0..12 {
+            let labels: Vec<u8> = (0..DATA_SYMBOLS + PARITY_SYMBOLS)
+                .map(|_| (next() & 15) as u8)
+                .collect();
+            modulate_frame_16qam(&labels, &mut syms);
+        }
+        let rx_in = channel(&syms[500..], 73.0, 22);
+        assert!(detect_16(&rx_in));
+        let mut rx = Cdm8QamRx::new_16qam();
+        let mut out = Vec::new();
+        for c in rx_in.chunks(1000) {
+            rx.push(c, &mut out);
+        }
+        assert!(rx.stats.uw_locked);
+        assert!(rx.stats.frames >= 9, "{:?}", rx.stats);
+        assert_eq!(rx.stats.uw_fit(), 1.0, "{:?}", rx.stats);
+        assert!(out.is_empty());
+    }
 
     fn frames(n: usize, seed: u64) -> (Vec<Vec<u8>>, Vec<Iq>) {
         let mut next = rng(seed);

@@ -2179,6 +2179,15 @@ fn print_programme(p: &decsat_engine::ProgrammeView) {
                 _ => String::new(),
             }
         );
+    } else if p.g726.locked {
+        println!(
+            "programme: {} · {} Hz · first nibble {} · second nibble {} · {} samples",
+            p.codec,
+            p.rate,
+            if p.g726.active[0] { "active" } else { "idle" },
+            if p.g726.active[1] { "active" } else { "idle" },
+            p.g726.samples
+        );
     } else if a.locked {
         println!(
             "programme: {} · {} · {} Hz · codewords from bit {} · LL lag-1 {:.2}{} · \

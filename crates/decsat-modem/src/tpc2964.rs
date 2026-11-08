@@ -43,6 +43,8 @@ pub enum Code {
     /// [`TpcRx`] (its UW is symbols, not bits); named here so the TPC
     /// chain's stats and rates can say which frame they are for.
     Comtech8Qam,
+    /// The same frame carrying 16QAM: framed only, see [`crate::cdm8qam`].
+    Comtech16Qam,
 }
 
 impl Code {
@@ -58,7 +60,7 @@ impl Code {
             Code::Tpc2964 => UW,
             Code::Comtech78 => tpc78::UW,
             // Not a bit pattern: see `cdm8qam::UW`.
-            Code::Comtech8Qam => 0,
+            Code::Comtech8Qam | Code::Comtech16Qam => 0,
         }
     }
 
@@ -66,7 +68,7 @@ impl Code {
         match self {
             Code::Tpc2964 => UW_LEN,
             Code::Comtech78 => tpc78::UW_LEN,
-            Code::Comtech8Qam => 0,
+            Code::Comtech8Qam | Code::Comtech16Qam => 0,
         }
     }
 
@@ -76,6 +78,7 @@ impl Code {
             Code::Tpc2964 => FRAME,
             Code::Comtech78 => tpc78::FRAME,
             Code::Comtech8Qam => crate::cdm8qam::FRAME_BITS,
+            Code::Comtech16Qam => crate::cdm8qam::FRAME_BITS_16,
         }
     }
 
@@ -85,6 +88,7 @@ impl Code {
             Code::Tpc2964 => DATA,
             Code::Comtech78 => tpc78::DATA,
             Code::Comtech8Qam => crate::cdm8qam::DATA,
+            Code::Comtech16Qam => crate::cdm8qam::DATA_16,
         }
     }
 
@@ -93,6 +97,7 @@ impl Code {
             Code::Tpc2964 => "TPC 2964 (IESS-315, rate 3/4)",
             Code::Comtech78 => "Comtech TPC 7/8 (16K block)",
             Code::Comtech8Qam => "Comtech 8QAM rate 0.8 (parity not decoded)",
+            Code::Comtech16Qam => "Comtech 16QAM frame (labels and code not known)",
         }
     }
 }

@@ -1643,6 +1643,10 @@ fn programme_card(
             .on_hover_text(if p.mpeg.is_some() {
                 "MPEG audio frames found in the modem's data (a programme feed sent \
                  straight over the link); ▶ plays them, ● keeps them as they are (.mp2)."
+            } else if p.g726.locked {
+                "Two G.726 32 kbit/s ADPCM channels, one in each half of every octet of a \
+                 64 kbit/s IBS carrier, under the IESS-309 synchronous scrambler. Decoded \
+                 exactly. A channel with nothing on it plays the other one."
             } else {
                 "Standard apt-X sub-band ADPCM (a 16-bit codeword for every four samples) \
                  in an IBS carrier's data, under the IESS-309 synchronous scrambler. Its \
@@ -1682,6 +1686,15 @@ fn programme_card(
             } else {
                 ui.label("looking for MPEG audio frames");
             }
+        } else if p.g726.locked {
+            let side = |on: bool| if on { "active" } else { "idle" };
+            ui.colored_label(scope::LOCK, format!("two channels · {} Hz", p.rate))
+                .on_hover_text(format!(
+                    "First nibble {} (left) · second nibble {} (right) · {} samples",
+                    side(p.g726.active[0]),
+                    side(p.g726.active[1]),
+                    p.g726.samples
+                ));
         } else if a.locked {
             ui.colored_label(
                 scope::LOCK,
@@ -2113,6 +2126,7 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
         Some(Code::Comtech78) => "Comtech TPC 7/8 (16K block)",
         Some(Code::Tpc2964) => "TPC 2964 (IESS-315)",
         Some(Code::Comtech8Qam) => "Comtech 8QAM rate 0.8",
+        Some(Code::Comtech16Qam) => "Comtech 16QAM frame",
         None => "TPC 2964 (IESS-315) or Comtech TPC 7/8",
     };
     ui.add_space(6.0);
@@ -2139,7 +2153,7 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
                     "{} · {}{}",
                     match code {
                         Some(Code::Comtech78) => "F8DD4258h every 16 320 bits",
-                        Some(Code::Comtech8Qam) => "52 symbols every 2092",
+                        Some(Code::Comtech8Qam | Code::Comtech16Qam) => "52 symbols every 2092",
                         _ => "F50B8h every 2964 bits",
                     },
                     t.orientation.as_deref().unwrap_or("?"),
@@ -2155,6 +2169,9 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
         ui.end_row();
         ui.label("Structure");
         match t {
+            Some(t) if t.code == Some(Code::Comtech16Qam) => {
+                ui.label(t.structure.as_deref().unwrap_or_default());
+            }
             Some(t) if t.code == Some(Code::Comtech8Qam) => {
                 ui.label(t.structure.as_deref().unwrap_or_default())
                     .on_hover_text(
@@ -2181,7 +2198,19 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
             }
         }
         ui.end_row();
-        if let Some(t) = t.filter(|t| t.code == Some(Code::Comtech8Qam)) {
+        if let Some(t) = t.filter(|t| t.code == Some(Code::Comtech16Qam)) {
+            // Found and counted only.
+            ui.label("Decoding");
+            ui.colored_label(
+                wait,
+                format!(
+                    "{} frames · bit labels and FEC not known · UW {:.1}% right",
+                    t.frames,
+                    t.fit * 100.0
+                ),
+            );
+            ui.end_row();
+        } else if let Some(t) = t.filter(|t| t.code == Some(Code::Comtech8Qam)) {
             // Framed only: the parity's code is not known, so the data go
             // on as received.
             ui.label("Decoding");

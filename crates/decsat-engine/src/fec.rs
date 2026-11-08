@@ -3062,15 +3062,26 @@ fn run(
                     // A pattern in the field matches only that variant.
                     FecInput::Tpc {
                         symbols,
-                        modulation: decsat_core::Modulation::Qam8,
+                        modulation:
+                            modulation @ (decsat_core::Modulation::Qam8
+                            | decsat_core::Modulation::Qam16),
                     } => {
                         // Comtech 8QAM rate 0.8: frame sync and the data
-                        // region; the parity is not decoded.
-                        use decsat_modem::cdm8qam::{Cdm8QamRx, DATA, FRAME_SYMBOLS};
-                        let rx = cdm8.get_or_insert_with(Cdm8QamRx::new);
+                        // region; the parity is not decoded. The same frame
+                        // on 16QAM is only found and counted.
+                        use decsat_modem::cdm8qam::{Cdm8QamRx, DATA, DATA_16, FRAME_SYMBOLS};
+                        let sixteen = modulation == decsat_core::Modulation::Qam16;
+                        let rx = cdm8.get_or_insert_with(|| {
+                            if sixteen {
+                                Cdm8QamRx::new_16qam()
+                            } else {
+                                Cdm8QamRx::new()
+                            }
+                        });
                         rx.push(&symbols, &mut tpc_frames);
-                        let bps = symbol_rate * DATA as f64 / FRAME_SYMBOLS as f64;
-                        (symbols.len() as f64 / symbol_rate, DATA, bps, "cdm8qam")
+                        let data = if sixteen { DATA_16 } else { DATA };
+                        let bps = symbol_rate * data as f64 / FRAME_SYMBOLS as f64;
+                        (symbols.len() as f64 / symbol_rate, data, bps, "cdm8qam")
                     }
                     FecInput::Tpc {
                         symbols,
@@ -3648,7 +3659,11 @@ fn ts_output(o: &FecOutput, primary: bool) -> FecOutput {
 /// agreement as the fit.
 fn cdm8_stats(c: &decsat_modem::cdm8qam::Cdm8QamStats) -> decsat_modem::tpc2964::TpcStats {
     decsat_modem::tpc2964::TpcStats {
-        code: Some(decsat_modem::tpc2964::Code::Comtech8Qam),
+        code: Some(if c.sixteen {
+            decsat_modem::tpc2964::Code::Comtech16Qam
+        } else {
+            decsat_modem::tpc2964::Code::Comtech8Qam
+        }),
         uw_locked: c.uw_locked,
         // Whole degrees, 360 read as 0.
         orientation: Some(format!(
@@ -3656,8 +3671,12 @@ fn cdm8_stats(c: &decsat_modem::cdm8qam::Cdm8QamStats) -> decsat_modem::tpc2964:
             (c.turned_deg.round() as i32).rem_euclid(360)
         )),
         structure: Some(
-            "52-symbol UW, 4896 data + 1224 parity bits a frame (rate 0.8); parity not checked"
-                .into(),
+            if c.sixteen {
+                "52-symbol UW, 2040 symbols of 16QAM a frame; bit labels and code not known"
+            } else {
+                "52-symbol UW, 4896 data + 1224 parity bits a frame (rate 0.8); parity not checked"
+            }
+            .into(),
         ),
         fit: c.uw_fit(),
         frames: c.frames,

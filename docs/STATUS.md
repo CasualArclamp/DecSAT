@@ -6206,3 +6206,31 @@ Tested against the fake IIOD server (11 tests, over TCP loopback too); no
 Pluto has been on the machine yet: `PLUTO_URI=… cargo test -p decsat-io
 --features pluto live_pluto -- --ignored --nocapture` is the first step
 when one is.
+
+## 64 kbit/s IBS programme audio is two G.726 channels; a Comtech 16QAM frame (2026-11-08)
+
+Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
+(1962.197 and 1962.322 MHz) and a 301.6 kS/s carrier at 1963.415 MHz.
+
+- **The audio was garbled because the apt-X search accepted a stream that is
+  not apt-X** ("mono 16 kHz", LL lag-1 0.49, just over its 0.4 floor; 71 % of
+  samples clipped). The IBS payload has a strict 8-bit period, each octet two
+  4-bit fields, and the code 0000 occurs in neither: **two G.726 32 kbit/s
+  channels**, first-sent nibble first (G.726's quantiser never sends 0000).
+  Spectrograms of apt-X, G.726 (each nibble, inverted, bit-reversed, both as
+  one 16 kHz stream), G.722 (both bit orders) and G.711 (A and µ): only the
+  first nibble as G.726 shows speech. On 1962.197 MHz the second nibble is
+  idle; on 1962.322 MHz both are, about −80 dBFS for the whole capture.
+- `decsat-modem::g726` is a port of FFmpeg's decoder, equal to it on a test
+  vector. FFmpeg's own 16-bit output wraps on peaks; ours saturates. The
+  programme stage judges 8000 octets for the zero code before apt-X's search
+  (which wants 16 000) can run. A channel with nothing on it plays the other.
+  The 256 kbit/s capture still comes out as stereo apt-X, unchanged.
+- **The 301.6 kS/s carrier is 16QAM**, not 8QAM: sixteen clusters, no squared
+  line. It has the 8QAM frame's shape (52-symbol UW every 2092 symbols) with
+  a UW of its own, 7A85C157AB12Ch, 26 bits from the 8QAM one. The app now
+  names it, finds the frames (4740 in 31 s, 20 UW misses) and turns it.
+  **Not decoded**: its bit labels and code are not known, and at about 11 dB
+  the hard decisions have too many errors to find them from the data without
+  the FEC. UW corners read 81.5 % right; the carrier loop still reports "not
+  locked" at the 0.6 coherence bar.

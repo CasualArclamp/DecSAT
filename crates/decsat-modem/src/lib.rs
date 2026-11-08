@@ -45,6 +45,7 @@ pub mod e1;
 pub mod edmac;
 pub mod ethblock;
 pub mod fastlink;
+pub mod g726;
 pub mod g728;
 pub mod ibs;
 pub mod ibssync;
