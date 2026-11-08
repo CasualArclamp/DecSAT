@@ -16,7 +16,7 @@ use decsat_core::Iq;
 use rustfft::FftPlanner;
 
 /// A repeating structure in a symbol stream.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Periodicity {
     /// The frame length, symbols.
     pub period: usize,

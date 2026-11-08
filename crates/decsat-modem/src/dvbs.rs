@@ -228,7 +228,7 @@ pub fn qef_es_n0_db(rate: Rate) -> f32 {
 }
 
 /// What the receiver has done, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DvbsStats {
     /// The code rate found, once locked.
     pub rate: Option<Rate>,

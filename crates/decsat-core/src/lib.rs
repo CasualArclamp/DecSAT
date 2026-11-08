@@ -22,7 +22,7 @@ pub type Iq = Complex32;
 
 /// Pulse-shaping roll-off factors allowed by DVB-S2 (0.35/0.25/0.20) and the
 /// tighter ones added by S2X (0.15/0.10/0.05).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RollOff {
     R35,
     R25,

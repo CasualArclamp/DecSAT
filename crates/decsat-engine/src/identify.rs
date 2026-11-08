@@ -48,7 +48,7 @@ const GRID_TOLERANCE: usize = 2;
 const MIN_FRAME_SPACING: usize = 1000;
 
 /// Where a symbol-rate figure came from, best last.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RateSource {
     /// Equivalent noise bandwidth of the spectrum (a few percent).
     Enbw,
@@ -59,7 +59,7 @@ pub enum RateSource {
 }
 
 /// Constellation estimate from the recovered symbols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConstellationGuess {
     Bpsk,
     Qpsk,
@@ -107,7 +107,7 @@ impl ConstellationGuess {
 }
 
 /// What the DVB-S2 search found.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Dvbs2Info {
     /// PLHEADERs that passed the correlation threshold.
     pub headers_seen: usize,
@@ -122,6 +122,7 @@ pub struct Dvbs2Info {
     /// Confirmed frames as (index of the header's last symbol in the symbol
     /// stream analysed, PLS code) — what carrier recovery needs to know which
     /// constellation each stretch of payload uses.
+    #[serde(skip)]
     pub frames: Vec<(usize, u8)>,
     /// No header confirmed, yet headers recur this many symbols apart: DVB-S2
     /// framing whose PLS codes mean something else — a proprietary extension
@@ -195,7 +196,7 @@ impl Dvbs2Info {
 }
 
 /// The verdict.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// Nothing above the noise floor.
     NoSignal,
@@ -233,7 +234,7 @@ pub fn names_tpc(hint: &str) -> bool {
 }
 
 /// Everything Identify measured.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Identification {
     pub verdict: Verdict,
     /// Carrier centre relative to the VFO centre, Hz.
@@ -250,7 +251,9 @@ pub struct Identification {
     /// DVB-S2, else from the 2nd/4th/8th-power line.
     pub carrier_offset_hz: Option<f64>,
     /// Carrier-locked symbols for the constellation display (the last few
-    /// thousand).
+    /// thousand). The remote protocol sends these through its own compact
+    /// constellation codec, so they are left out of the generic encoding.
+    #[serde(skip)]
     pub symbols: Vec<Iq>,
     /// Modulation error ratio of the locked symbols, dB.
     pub mer_db: Option<f32>,
@@ -267,19 +270,21 @@ pub struct Identification {
     pub bursts: Option<Bursts>,
     /// A rate-½ convolutional code its symbols carry, found from their
     /// parity checks ([`decsat_modem::convblind`]).
+    #[serde(skip)]
     pub conv_code: Option<decsat_modem::convblind::Code>,
     /// BPSK whose symbols pair up opposite: bi-phase (Manchester) chips at
     /// the symbol rate — data at half of it.
     pub biphase: bool,
     /// A residual carrier looked at as a beacon: its C/N0 and any telemetry
     /// on its phase ([`crate::beacon::look`]).
+    #[serde(skip)]
     pub beacon: Option<crate::beacon::Look>,
 }
 
 /// A carrier keyed on and off, as TDMA terminals share one (the STDMA
 /// groups in a live Ku band: 20–30 ms gaps, 12–21 dB deep, where a
 /// continuous carrier's power held within 1 dB).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bursts {
     /// Share of the time the carrier is on.
     pub duty: f32,

@@ -17,6 +17,7 @@ rayon = "1.10"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
 
 # DSP is unusably slow unoptimised; keep dev builds fast enough to decode real
 # captures in tests while still compiling quickly (same tradeoff as DecDRM).

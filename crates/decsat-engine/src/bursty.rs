@@ -23,7 +23,7 @@
 //! a band can be told for what it is.
 
 /// A band whose power comes and goes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurstBand {
     /// Its edges relative to the wideband centre, Hz.
     pub lo_hz: f64,

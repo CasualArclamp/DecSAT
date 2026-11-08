@@ -62,7 +62,7 @@ const DIAG: Iq = Iq::new(
 );
 
 /// What the super-frame stage has found, for display.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SfView {
     /// Looking for a super-frame start.
     pub searching: bool,

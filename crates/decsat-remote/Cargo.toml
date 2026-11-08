@@ -1,0 +1,40 @@
+# made by CasualArclamp
+[package]
+name = "decsat-remote"
+description = "DecSAT remote protocol: raw IQ or remote decoding over one TCP link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+hackrf = ["decsat-io/hackrf"]
+fobos = ["decsat-io/fobos"]
+airspy = ["decsat-io/airspy"]
+pluto = ["decsat-io/pluto"]
+
+[dependencies]
+decsat-core = { path = "../decsat-core" }
+decsat-io = { path = "../decsat-io" }
+decsat-dsp = { path = "../decsat-dsp" }
+decsat-engine = { path = "../decsat-engine" }
+decsat-frame = { path = "../decsat-frame" }
+decsat-modem = { path = "../decsat-modem" }
+decsat-ts = { path = "../decsat-ts" }
+num-complex.workspace = true
+serde.workspace = true
+tracing.workspace = true
+# Compact encoding of the control and status messages.
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+zstd = "0.13"
+# The password handshake: HMAC-SHA-256 over random nonces.
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.3"
+# Socket buffer sizes, which std::net does not expose.
+socket2 = "0.5"
+
+[dev-dependencies]
+decsat-mod = { path = "../decsat-mod" }
