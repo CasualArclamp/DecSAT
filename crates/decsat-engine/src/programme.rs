@@ -4,6 +4,8 @@
 //! - apt-X in an IBS carrier's descrambled data (a studio link's stereo
 //!   feed), decoded here and sent on as RTP L16 — PCM at the stream's own
 //!   rate, which both already take;
+//! - two G.726 32 kbit/s channels in the octets of a 64 kbit/s IBS carrier,
+//!   the same way (told from apt-X by the code G.726 never sends);
 //! - MPEG audio frames found in a modem's data (a programme feed sent
 //!   straight over a TPC carrier), handed on as they are: the player decodes
 //!   them, the recorder keeps them (`.mp2`).
@@ -14,6 +16,7 @@ use std::time::SystemTime;
 use decsat_audio::{AudioHandle, AudioPlayer, AudioRecorder};
 use decsat_ip::mcast::{AudioStream, SdpInfo};
 use decsat_modem::aptx::{AptxRx, AptxStats};
+use decsat_modem::g726::{G726PairRx, G726Stats};
 use decsat_modem::ibssync::SyncStats;
 use decsat_modem::mpa::MpaStats;
 
@@ -22,6 +25,9 @@ use crate::fec::{AUDIO_OUTPUT, FecOutput};
 /// What the decoder makes of apt-X (Standard apt-X; the upper bands' step
 /// tables fitted, not known: see `decsat_modem::aptx`).
 const CODEC: &str = "Standard apt-X (apt-X 100)";
+/// The other codec an IBS carrier's data may hold, and its sample rate.
+const CODEC_G726: &str = "G.726 32 kbit/s, two channels";
+const G726_RATE: u32 = 8000;
 /// Audio a packet carries: 20 ms.
 const PACKET_MS: u32 = 20;
 /// RTP payload type for the L16 stream (dynamic, named by its SDP).
@@ -88,6 +94,8 @@ pub struct ProgrammeView {
     /// The IBS scrambling the data came out of.
     pub ibs: Option<SyncStats>,
     pub aptx: AptxStats,
+    /// G.726, when that is what the link carries.
+    pub g726: G726Stats,
     /// MPEG audio frames, when that is what the link carries.
     pub mpeg: Option<MpaStats>,
     /// Once found: the sample rate and channels.
@@ -149,6 +157,7 @@ impl<T> Out<T> {
 /// Programme audio found in a link's data, decoded, played and recorded.
 pub(crate) struct ProgrammeStage {
     rx: AptxRx,
+    g726: G726PairRx,
     mpeg: Option<MpaStats>,
     /// Once found: what goes out.
     format: Option<Fmt>,
@@ -168,6 +177,7 @@ impl ProgrammeStage {
     pub(crate) fn new() -> Self {
         ProgrammeStage {
             rx: AptxRx::new(),
+            g726: G726PairRx::new(),
             mpeg: None,
             format: None,
             player: None,
@@ -231,15 +241,34 @@ impl ProgrammeStage {
     /// apt-X: the link's data octets in, and its data rate (for the sample
     /// rate).
     pub(crate) fn data(&mut self, data: &[u8], data_bps: f64, o: &FecOutput) {
-        self.rx.push(data);
-        if self.rx.stats.locked {
-            let f = Fmt::Pcm(snap_rate(self.rx.sample_rate(data_bps)), self.rx.channels());
-            if self.format != Some(f) {
-                self.format = Some(f);
-                self.follow(o);
-            }
+        // G.726 first: it judges 8000 octets, apt-X's search wants 16 000, so
+        // a G.726 stream never reaches apt-X's search (which would take it
+        // for mono apt-X and play noise).
+        if !self.rx.stats.locked {
+            self.g726.push(data);
         }
-        let pcm = std::mem::take(&mut self.rx.pcm);
+        let found = if self.g726.stats.locked {
+            Some(Fmt::Pcm(G726_RATE, 2))
+        } else {
+            self.rx.push(data);
+            self.rx
+                .stats
+                .locked
+                .then(|| Fmt::Pcm(snap_rate(self.rx.sample_rate(data_bps)), self.rx.channels()))
+        };
+        if let Some(f) = found
+            && self.format != Some(f)
+        {
+            self.format = Some(f);
+            self.follow(o);
+        }
+        // Rust note: `mem::take` leaves an empty Vec behind and hands over
+        // the old one, so the samples are not copied.
+        let pcm = if self.g726.stats.locked {
+            std::mem::take(&mut self.g726.pcm)
+        } else {
+            std::mem::take(&mut self.rx.pcm)
+        };
         if pcm.is_empty() {
             return;
         }
@@ -296,12 +325,14 @@ impl ProgrammeStage {
         };
         let codec = match self.mpeg.as_ref().and_then(|m| m.header) {
             Some(h) => h.describe(),
+            None if self.g726.stats.locked => CODEC_G726.into(),
             None => CODEC.into(),
         };
         ProgrammeView {
             codec,
             ibs,
             aptx: self.rx.stats.clone(),
+            g726: self.g726.stats.clone(),
             mpeg: self.mpeg.clone(),
             rate,
             channels,

@@ -1137,7 +1137,13 @@ fn code_locked(kind: DecoderKind, f: &crate::fec::FecStats) -> bool {
         // The 8QAM frame's parity is not decoded: framed is as far as it goes.
         DecoderKind::Tpc2964 => f.tpc.as_ref().is_some_and(|t| {
             t.decoded > 0
-                || (t.code == Some(decsat_modem::tpc2964::Code::Comtech8Qam) && t.frames > 0)
+                || (matches!(
+                    t.code,
+                    Some(
+                        decsat_modem::tpc2964::Code::Comtech8Qam
+                            | decsat_modem::tpc2964::Code::Comtech16Qam
+                    )
+                ) && t.frames > 0)
         }),
         DecoderKind::Viterbi => {
             f.viterbi.as_ref().is_some_and(|v| v.rate.is_some())
@@ -2000,6 +2006,10 @@ impl Worker {
                                     // Comtech's 8QAM rate-0.8 frame.
                                     Some(decsat_core::Modulation::Qam8) => {
                                         decsat_core::Modulation::Qam8
+                                    }
+                                    // The same frame on 16QAM.
+                                    Some(decsat_core::Modulation::Qam16) => {
+                                        decsat_core::Modulation::Qam16
                                     }
                                     _ => decsat_core::Modulation::Qpsk,
                                 },
@@ -3179,6 +3189,13 @@ fn tpc_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
         return format!(
             "{lock} · Comtech 8QAM rate 0.8 · {} frames · UW {:.1}% right · FEC not \
              decoded (code unknown) · {payload}",
+            t.frames,
+            t.fit * 100.0
+        );
+    }
+    if t.code == Some(decsat_modem::tpc2964::Code::Comtech16Qam) {
+        return format!(
+            "{lock} · Comtech 16QAM frame · {} frames · UW {:.1}% right · bit labels and FEC not known, no data out",
             t.frames,
             t.fit * 100.0
         );
