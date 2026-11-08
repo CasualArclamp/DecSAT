@@ -424,10 +424,16 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 .as_ref()
                 .and_then(|s| s.fec.as_ref())
                 .and_then(|f| f.gse.as_ref());
-            if let Some(e) = ip.and_then(|g| g.wireshark_error.as_ref()) {
+            // BGAN's carve is fed by the VFO itself, not the FEC worker.
+            let bgan = st.as_ref().and_then(|s| s.bgan.as_ref());
+            if let Some(e) = ip
+                .and_then(|g| g.wireshark_error.as_ref())
+                .or(bgan.and_then(|b| b.wireshark_error.as_ref()))
+            {
                 bail!("{e}");
             }
-            let feeding = ip.is_some_and(|g| g.wireshark.is_some());
+            let feeding = ip.is_some_and(|g| g.wireshark.is_some())
+                || bgan.is_some_and(|b| b.wireshark.is_some());
             if wireshark_fed && !feeding && ended_at.is_none() {
                 println!("Wireshark closed");
                 ended_at = Some(Instant::now());
