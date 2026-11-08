@@ -464,7 +464,11 @@ fn video_options(codec: VideoCodec, engine: Engine, bps: u32, gop: u32) -> Vec<S
             rate(&mut a, 1000);
         }
     }
-    if codec != VideoCodec::Av1 {
+    // SVT-AV1 takes its key frame period in `-svtav1-params keyint=`; every
+    // other encoder (NVENC, AMF, QSV AV1 too) needs `-g`, or it keeps ffmpeg's
+    // default (250 pictures: no sequence header for ten seconds, which a
+    // receiver that tunes in late cannot play without).
+    if !(codec == VideoCodec::Av1 && engine == Engine::Cpu) {
         a.extend(["-g".into(), gop.to_string()]);
     }
     a

@@ -28,16 +28,41 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use decsat_ip::serve::StreamServer;
 
+use crate::TsAnalyser;
+use crate::av1::{Av1Extractor, Av1Unit, find_sequence_header, ivf_frame, ivf_header};
 use crate::deframe::TS_LEN;
 
 /// Packets per UDP datagram.
 const PER_DATAGRAM: usize = 7;
 
-/// A `.ts` file.
+/// A `.ts` file. When the stream's video turns out to be AV1 in AOM's TS
+/// mapping (crate::av1), which ffmpeg and VLC cannot read from a TS (they
+/// show it as a private data stream), the AV1 is also written beside it as
+/// `NAME.ivf`, which both play.
 pub struct TsFile {
     out: BufWriter<File>,
     pub path: PathBuf,
     pub packets: u64,
+    av1: Av1Side,
+    /// Packets seen by the PMT watcher.
+    seen: u32,
+}
+
+/// The `.ivf` that goes with an AV1 recording.
+enum Av1Side {
+    /// Watching for the PMT (analyser) to say what the video is.
+    Looking(Box<TsAnalyser>),
+    /// Not AV1: nothing more to do.
+    No,
+    /// AV1 on `pid`: units out of the PES stream into the IVF.
+    Yes {
+        pid: u16,
+        ex: Av1Extractor,
+        ivf: Option<BufWriter<File>>,
+        ivf_path: PathBuf,
+        last_pts: u64,
+        buf: Vec<u8>,
+    },
 }
 
 impl TsFile {
@@ -46,19 +71,128 @@ impl TsFile {
             out: BufWriter::new(File::create(path)?),
             path: path.to_path_buf(),
             packets: 0,
+            av1: Av1Side::Looking(Box::new(TsAnalyser::new())),
+            seen: 0,
         })
     }
 
     pub fn write(&mut self, packets: &[[u8; TS_LEN]]) -> io::Result<()> {
         for p in packets {
             self.out.write_all(p)?;
+            self.av1_packet(p);
         }
         self.packets += packets.len() as u64;
         Ok(())
     }
 
+    /// One packet to the AV1 side file (or to the PMT watcher before it
+    /// knows). Errors on the side file are not the recording's.
+    fn av1_packet(&mut self, p: &[u8; TS_LEN]) {
+        // Rust note: `match &mut self.av1` borrows the enum's contents
+        // mutably; the new state is set after the match, once that ends.
+        let mut found = None;
+        match &mut self.av1 {
+            Av1Side::No => {}
+            Av1Side::Looking(an) => {
+                an.packet(p);
+                // The report is not free: look every so often, not per packet.
+                self.seen += 1;
+                if self.seen.is_multiple_of(256) {
+                    let r = an.report();
+                    let streams: Vec<_> =
+                        r.programmes.iter().flat_map(|q| q.streams.iter()).collect();
+                    if let Some(e) = streams.iter().find(|e| e.kind == Some("AV1 video")) {
+                        found = Some(Some(e.pid));
+                    } else if streams
+                        .iter()
+                        .any(|e| e.kind.is_some_and(|k| k.contains("video")))
+                    {
+                        found = Some(None);
+                    }
+                }
+            }
+            Av1Side::Yes {
+                pid,
+                ex,
+                ivf,
+                ivf_path,
+                last_pts,
+                buf,
+            } => {
+                if u16::from_be_bytes([p[1] & 0x1F, p[2]]) == *pid
+                    && let Some(u) = ex.push(p)
+                {
+                    write_unit(u, ivf, ivf_path, last_pts, buf);
+                }
+            }
+        }
+        match found {
+            Some(Some(pid)) => {
+                self.av1 = Av1Side::Yes {
+                    pid,
+                    ex: Av1Extractor::new(),
+                    ivf: None,
+                    ivf_path: self.path.with_extension("ivf"),
+                    last_pts: 0,
+                    buf: Vec::new(),
+                }
+            }
+            Some(None) => self.av1 = Av1Side::No,
+            None => {}
+        }
+    }
+
     pub fn flush(&mut self) -> io::Result<()> {
+        if let Av1Side::Yes {
+            ex,
+            ivf,
+            ivf_path,
+            last_pts,
+            buf,
+            ..
+        } = &mut self.av1
+        {
+            if let Some(u) = ex.finish() {
+                write_unit(u, ivf, ivf_path, last_pts, buf);
+            }
+            if let Some(f) = ivf {
+                let _ = f.flush();
+            }
+        }
         self.out.flush()
+    }
+}
+
+/// One AV1 unit to the IVF. The file starts at the first unit with a
+/// sequence header (what a decoder needs; the width and height go in the
+/// IVF header), so a recording that began mid-stream still plays.
+fn write_unit(
+    u: Av1Unit,
+    ivf: &mut Option<BufWriter<File>>,
+    path: &Path,
+    last_pts: &mut u64,
+    buf: &mut Vec<u8>,
+) {
+    if ivf.is_none() {
+        let Some(seq) = find_sequence_header(&u.tu) else {
+            return;
+        };
+        let Ok(f) = File::create(path) else { return };
+        let mut f = BufWriter::new(f);
+        if f.write_all(&ivf_header(seq.width as u16, seq.height as u16))
+            .is_err()
+        {
+            return;
+        }
+        *ivf = Some(f);
+    }
+    // Units without a PTS keep the last one's.
+    let pts = u.pts.unwrap_or(*last_pts);
+    *last_pts = pts;
+    buf.clear();
+    ivf_frame(pts, &u.tu, buf);
+    if let Some(f) = ivf {
+        let _ = f.write_all(buf);
     }
 }
 

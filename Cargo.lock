@@ -614,7 +614,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decsat-audio"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "cpal",
  "decsat-ip",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-bgan"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "flate2",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-cli"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-core"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "num-complex",
  "thiserror 2.0.21",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-dsp"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-engine"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-audio",
  "decsat-bgan",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-fec"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "num-complex",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-frame"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-dsp",
@@ -714,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-gse"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-ip",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-gui"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "anyhow",
  "decsat-audio",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-io"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "futures-lite",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-ip"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "thiserror 2.0.21",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-mod"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-dsp",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-modem"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "rustfft",
@@ -791,14 +791,14 @@ dependencies = [
 
 [[package]]
 name = "decsat-opus-sys"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "decsat-ts"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-frame",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-tx"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-io",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-tx-app"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-core",
  "decsat-mod",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-video"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "decsat-audio",
  "decsat-ts",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "decsat-xaac-sys"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "cc",
 ]
