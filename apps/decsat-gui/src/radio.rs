@@ -14,6 +14,8 @@ use decsat_io::{AirspyControl, AirspyGainMode, AirspySettings};
 use decsat_io::{FobosControl, FobosSettings};
 #[cfg(feature = "hackrf")]
 use decsat_io::{HackRfControl, HackRfSettings};
+#[cfg(feature = "sdrplay")]
+use decsat_io::{SdrplayControl, SdrplaySettings};
 
 /// Sample rates offered. 8, 10, 12.5, 16 and 20 MS/s have the least clock
 /// jitter on the HackRF; 2 and 4 are handy for narrow work.
@@ -36,6 +38,8 @@ pub enum Device {
     Fobos,
     #[cfg(feature = "airspy")]
     Airspy,
+    #[cfg(feature = "sdrplay")]
+    Sdrplay,
 }
 
 impl Device {
@@ -46,6 +50,8 @@ impl Device {
             Device::Fobos => "Fobos SDR",
             #[cfg(feature = "airspy")]
             Device::Airspy => "Airspy Mini / R2 / HydraSDR",
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => "SDRplay RSPduo / RSP",
         }
     }
 
@@ -57,6 +63,8 @@ impl Device {
             Device::Fobos => "Fobos",
             #[cfg(feature = "airspy")]
             Device::Airspy => "Airspy",
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => "SDRplay",
         }
     }
 
@@ -68,6 +76,8 @@ impl Device {
             Device::Fobos => "fobos",
             #[cfg(feature = "airspy")]
             Device::Airspy => "airspy",
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => "sdrplay",
         }
     }
 
@@ -78,6 +88,8 @@ impl Device {
             "fobos" => Some(Device::Fobos),
             #[cfg(feature = "airspy")]
             "airspy" => Some(Device::Airspy),
+            #[cfg(feature = "sdrplay")]
+            "sdrplay" => Some(Device::Sdrplay),
             _ => None,
         }
     }
@@ -90,6 +102,8 @@ impl Device {
             Device::Fobos,
             #[cfg(feature = "airspy")]
             Device::Airspy,
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay,
         ]
     }
 
@@ -101,6 +115,8 @@ impl Device {
             Device::Fobos => decsat_io::fobos::FOBOS_MIN_HZ as f64,
             #[cfg(feature = "airspy")]
             Device::Airspy => decsat_io::airspy::AIRSPY_MIN_HZ as f64,
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => decsat_io::sdrplay::SDRPLAY_MIN_HZ as f64,
         }
     }
 
@@ -109,6 +125,8 @@ impl Device {
         match self {
             #[cfg(feature = "airspy")]
             Device::Airspy => decsat_io::airspy::AIRSPY_MAX_HZ as f64,
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => decsat_io::sdrplay::SDRPLAY_MAX_HZ as f64,
             _ => 6e9,
         }
     }
@@ -127,6 +145,8 @@ pub enum Live {
     Fobos(FobosControl),
     #[cfg(feature = "airspy")]
     Airspy(AirspyControl),
+    #[cfg(feature = "sdrplay")]
+    Sdrplay(SdrplayControl),
 }
 
 #[cfg(feature = "hackrf")]
@@ -139,6 +159,8 @@ impl Live {
             Live::Fobos(c) => c.set_center(hz),
             #[cfg(feature = "airspy")]
             Live::Airspy(c) => c.set_center(hz),
+            #[cfg(feature = "sdrplay")]
+            Live::Sdrplay(c) => c.set_center(hz),
         }
     }
 
@@ -150,6 +172,8 @@ impl Live {
             Live::Fobos(c) => c.overflows(),
             #[cfg(feature = "airspy")]
             Live::Airspy(c) => c.overflows(),
+            #[cfg(feature = "sdrplay")]
+            Live::Sdrplay(c) => c.overflows(),
         }
     }
 
@@ -171,6 +195,9 @@ pub struct RadioPanel {
     /// The Airspy's rate and gain (its tuning is `settings.center_hz`).
     #[cfg(feature = "airspy")]
     pub airspy: AirspySettings,
+    /// The SDRplay's rate, gains and tuner (its tuning is `settings.center_hz`).
+    #[cfg(feature = "sdrplay")]
+    pub sdrplay: SdrplaySettings,
     /// LNB local oscillator, MHz: the axis shows tuned + LO (0 = no LNB).
     pub lnb_lo_mhz: f64,
     pub error: Option<String>,
@@ -187,6 +214,8 @@ impl Default for RadioPanel {
             fobos: FobosSettings::default(),
             #[cfg(feature = "airspy")]
             airspy: AirspySettings::default(),
+            #[cfg(feature = "sdrplay")]
+            sdrplay: SdrplaySettings::default(),
             // A Ku LNB's 10.6 GHz LO (a universal LNB's high band; 9750
             // for its low band and QO-100).
             lnb_lo_mhz: 10_600.0,
@@ -210,6 +239,8 @@ impl RadioPanel {
             Device::Fobos => self.fobos.sample_rate,
             #[cfg(feature = "airspy")]
             Device::Airspy => self.airspy.sample_rate,
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => self.sdrplay.sample_rate,
         }
     }
 
@@ -219,6 +250,15 @@ impl RadioPanel {
         AirspySettings {
             center_hz: self.settings.center_hz,
             ..self.airspy
+        }
+    }
+
+    /// The settings the SDRplay opens with: its own, at the shared tuning.
+    #[cfg(feature = "sdrplay")]
+    pub fn sdrplay_settings(&self) -> SdrplaySettings {
+        SdrplaySettings {
+            center_hz: self.settings.center_hz,
+            ..self.sdrplay
         }
     }
 
@@ -285,6 +325,8 @@ impl RadioPanel {
                         Device::Fobos => self.fobos_rows(ui, live),
                         #[cfg(feature = "airspy")]
                         Device::Airspy => self.airspy_rows(ui, live),
+                        #[cfg(feature = "sdrplay")]
+                        Device::Sdrplay => self.sdrplay_rows(ui, live),
                     }
                 });
 
@@ -294,6 +336,8 @@ impl RadioPanel {
                     Device::Fobos => "Receive only, RF input (50–6000 MHz). The Fobos does not power its antenna port — feed an LNB from an external inserter. Needs RigExpert's fobos_sdr.dll (agile firmware) or fobos.dll (stock) beside DecSAT.",
                     #[cfg(feature = "airspy")]
                     Device::Airspy => "Receive only, 24–1750 MHz: behind a Ku LNB, the IF up to about 1.7 GHz. The bias tee stays off — it cannot power an LNB; feed it from an external inserter. Pure Rust over USB (WinUSB driver), no DLL.",
+                    #[cfg(feature = "sdrplay")]
+                    Device::Sdrplay => "Receive only, 1 kHz–2 GHz, single-tuner mode (an RSPduo uses Tuner A or B). The bias tee stays off — feed an LNB from an external inserter. Needs the SDRplay API installed (sdrplay.com), or sdrplay_api.dll beside DecSAT. Both gains are reductions: a lower number is more gain.",
                 };
                 ui.label(RichText::new(note).small().weak());
 
@@ -320,6 +364,23 @@ impl RadioPanel {
                             .weak(),
                         )
                         .on_hover_text(format!("{} {}", i.library, i.library_version));
+                    }
+                    #[cfg(feature = "sdrplay")]
+                    if let Live::Sdrplay(s) = c {
+                        let i = s.info();
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {} · tuner {} · API {:.2} · ADC overloads {}",
+                                i.model,
+                                i.serial,
+                                i.tuner,
+                                i.api_version,
+                                s.overloads()
+                            ))
+                            .small()
+                            .weak(),
+                        )
+                        .on_hover_text(&i.library);
                     }
                     #[cfg(feature = "airspy")]
                     if let Live::Airspy(a) = c {
@@ -505,6 +566,61 @@ impl RadioPanel {
         {
             match c.set_gains(a.gains) {
                 Ok(()) => a.gains = a.gains.snapped(),
+                Err(e) => self.error = Some(e.to_string()),
+            }
+        }
+    }
+
+    /// The SDRplay's rate, gains and tuner.
+    #[cfg(feature = "sdrplay")]
+    fn sdrplay_rows(&mut self, ui: &mut egui::Ui, live: Option<&Live>) {
+        let s = &mut self.sdrplay;
+        let before = s.gains;
+        ui.label("Sample rate");
+        ui.add_enabled_ui(live.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("sdrplay_rate")
+                .selected_text(crate::format::rate(s.sample_rate as f64))
+                .show_ui(ui, |ui| {
+                    for r in decsat_io::SDRPLAY_RATES {
+                        ui.selectable_value(&mut s.sample_rate, r, crate::format::rate(r as f64));
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "2–10.667 MS/s, zero-IF; the analogue bandwidth follows the rate (up to 8 MHz).",
+        )
+        .on_disabled_hover_text("Stop the radio to change the sample rate.");
+        ui.end_row();
+
+        ui.label("LNA state");
+        ui.add(egui::Slider::new(&mut s.gains.lna, 0..=9)).on_hover_text(
+            "RF gain reduction steps: 0 = most gain. An RSPduo has 0–9 (0–8 above 1 GHz); a state it lacks is brought down to its last. Behind an LNB, try 4 or more.",
+        );
+        ui.end_row();
+
+        ui.label("IF gain reduction");
+        ui.add(egui::Slider::new(&mut s.gains.gr, 20..=59).suffix(" dB"))
+            .on_hover_text("20 = most IF gain, 59 = least. Raise it if the overload count climbs.");
+        ui.end_row();
+
+        ui.label("Tuner");
+        ui.add_enabled_ui(live.is_none(), |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut s.tuner_b, false, "A");
+                ui.selectable_value(&mut s.tuner_b, true, "B");
+            });
+        })
+        .response
+        .on_hover_text("RSPduo only: Tuner 1 (A) or Tuner 2 (B). Ignored by other RSPs.")
+        .on_disabled_hover_text("Stop the radio to change the tuner.");
+        ui.end_row();
+
+        if let Some(Live::Sdrplay(c)) = live
+            && s.gains != before
+        {
+            match c.set_gains(s.gains) {
+                Ok(()) => s.gains = c.settings().gains,
                 Err(e) => self.error = Some(e.to_string()),
             }
         }

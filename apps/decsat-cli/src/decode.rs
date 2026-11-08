@@ -5,7 +5,7 @@
 //! E1 timeslots, text, frame structure).
 //!
 //! With `--hackrf <MHz>` the source is the HackRF instead (receive only, its
-//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy, with `--pluto <MHz>` an ADALM-PLUTO / Pluto+: a status line every 30 s, a report at the end
+//! antenna power forced off), with `--fobos <MHz>` a Fobos SDR, with `--airspy <MHz>` an Airspy, with `--sdrplay <MHz>` an SDRplay RSP (RSPduo), with `--pluto <MHz>` an ADALM-PLUTO / Pluto+: a status line every 30 s, a report at the end
 //! (`--seconds`) — for watching a carrier unattended, e.g. a FastLink link
 //! with `--record-on-activity` until a voice channel speaks. With `--net
 //! URL` it is raw IQ from another program (SDR++'s IQ Exporter, GNU Radio,
@@ -43,6 +43,15 @@ pub struct DecodeArgs {
     pub airspy_gain: u8,
     #[cfg_attr(not(feature = "airspy"), allow(dead_code))]
     pub airspy_sensitivity: bool,
+    /// Live: the SDRplay RSP's centre frequency, MHz, LNA state, IF gain
+    /// reduction dB and tuner.
+    pub sdrplay: Option<f64>,
+    #[cfg_attr(not(feature = "sdrplay"), allow(dead_code))]
+    pub sdrplay_lna: u8,
+    #[cfg_attr(not(feature = "sdrplay"), allow(dead_code))]
+    pub sdrplay_gr: u8,
+    #[cfg_attr(not(feature = "sdrplay"), allow(dead_code))]
+    pub sdrplay_tuner_b: bool,
     /// Live: the Pluto's centre frequency, MHz, how to reach it, its gain
     /// (dB or `agc`) and whether to refuse 8-bit IQ.
     pub pluto: Option<f64>,
@@ -197,6 +206,30 @@ fn airspy_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f
     bail!("this build has no Airspy support (the `airspy` feature)")
 }
 
+/// The SDRplay RSP at `mhz`, `rate` samples a second (2–10.667 MS/s).
+#[cfg(feature = "sdrplay")]
+fn sdrplay_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    use decsat_io::{SdrplayGains, SdrplaySettings, SdrplaySource};
+    let src = SdrplaySource::open(SdrplaySettings {
+        center_hz: (mhz * 1e6).round() as u64,
+        sample_rate: rate.round() as u32,
+        gains: SdrplayGains {
+            lna: a.sdrplay_lna,
+            gr: a.sdrplay_gr,
+        }
+        .snapped(),
+        tuner_b: a.sdrplay_tuner_b,
+    })?;
+    let rate = src.sample_rate();
+    println!("{}", src.describe());
+    Ok((Box::new(src), rate))
+}
+
+#[cfg(not(feature = "sdrplay"))]
+fn sdrplay_source(_: &DecodeArgs, _: f64, _: f64) -> Result<(Box<dyn IqSource>, f64)> {
+    bail!("this build has no SDRplay support (the `sdrplay` feature)")
+}
+
 /// The ADALM-PLUTO / Pluto+ at `mhz`, `rate` samples a second.
 #[cfg(feature = "pluto")]
 fn pluto_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSource>, f64)> {
@@ -246,6 +279,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     let live = a.hackrf.is_some()
         || a.fobos.is_some()
         || a.airspy.is_some()
+        || a.sdrplay.is_some()
         || a.pluto.is_some()
         || a.net.is_some()
         || a.remote.remote.is_some();
@@ -287,6 +321,13 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
             rate / 1e6
         );
         (src, rate)
+    } else if let Some(mhz) = a.sdrplay {
+        let (src, rate) = sdrplay_source(&a, mhz, a.rate.unwrap_or(8e6))?;
+        println!(
+            "live from the SDRplay at {mhz:.4} MHz, {:.3} MS/s (receive only)",
+            rate / 1e6
+        );
+        (src, rate)
     } else if let Some(mhz) = a.fobos {
         let (src, rate) = fobos_source(&a, mhz, a.rate.unwrap_or(8e6))?;
         println!(
@@ -317,7 +358,7 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 (Box::new(reader), rate)
             }
             (None, None) => bail!(
-                "give a capture, --hackrf / --fobos / --airspy / --pluto <MHz> or --net tcp://HOST:PORT"
+                "give a capture, --hackrf / --fobos / --airspy / --sdrplay / --pluto <MHz> or --net tcp://HOST:PORT"
             ),
         }
     };

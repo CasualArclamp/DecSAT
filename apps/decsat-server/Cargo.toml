@@ -9,10 +9,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["hackrf", "fobos", "airspy", "pluto"]
+default = ["hackrf", "fobos", "airspy", "sdrplay", "pluto"]
 hackrf = ["decsat-remote/hackrf"]
 fobos = ["decsat-remote/fobos"]
 airspy = ["decsat-remote/airspy"]
+# SDRplay RSP (RSPduo ...): its API library is loaded at run time.
+sdrplay = ["decsat-remote/sdrplay"]
 pluto = ["decsat-remote/pluto"]
 
 [dependencies]

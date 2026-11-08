@@ -13,6 +13,7 @@ default = []
 hackrf = ["decsat-io/hackrf"]
 fobos = ["decsat-io/fobos"]
 airspy = ["decsat-io/airspy"]
+sdrplay = ["decsat-io/sdrplay"]
 pluto = ["decsat-io/pluto"]
 
 [dependencies]

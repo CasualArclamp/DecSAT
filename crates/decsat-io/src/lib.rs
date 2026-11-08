@@ -3,7 +3,7 @@
 //!
 //! Everything upstream of the demodulator talks to an [`IqSource`]: an IQ file
 //! (replay, and the only way to handle transponders wider than the HackRF),
-//! the live HackRF One, Fobos SDR, Airspy or ADALM-PLUTO, or IQ over the network
+//! the live HackRF One, Fobos SDR, Airspy, SDRplay RSP or ADALM-PLUTO, or IQ over the network
 //! ([`net`]: SDR++'s IQ Exporter, GNU Radio, rtl_tcp). Recording goes out
 //! through [`IqFileWriter`].
 
@@ -34,6 +34,9 @@ pub mod fobos;
 #[cfg(feature = "airspy")]
 pub mod airspy;
 
+#[cfg(feature = "sdrplay")]
+pub mod sdrplay;
+
 pub use file::{IqFileReader, IqFileWriter, format_from_path};
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use wav::{CaptureInfo, WavIq, probe_capture};
@@ -49,6 +52,10 @@ pub use fobos::{FOBOS_RATES, FobosControl, FobosGains, FobosInfo, FobosSettings,
 pub use hackrf::{HackRfControl, HackRfGains, HackRfSettings, HackRfSource};
 #[cfg(feature = "hackrf")]
 pub use hackrf_tx::{HackRfTx, HackRfTxSettings};
+#[cfg(feature = "sdrplay")]
+pub use sdrplay::{
+    SDRPLAY_RATES, SdrplayControl, SdrplayGains, SdrplayInfo, SdrplaySettings, SdrplaySource,
+};
 
 use decsat_core::{Iq, Result};
 

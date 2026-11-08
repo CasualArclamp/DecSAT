@@ -147,7 +147,7 @@ enum Command {
     /// Run one decoder over a capture — or live from a radio — and report
     /// what it finds.
     Decode {
-        /// The capture (not needed with --hackrf, --fobos, --airspy or --pluto).
+        /// The capture (not needed with --hackrf, --fobos, --airspy, --sdrplay or --pluto).
         file: Option<PathBuf>,
         /// Live from the HackRF instead: its centre frequency, MHz (as it
         /// tunes: L-band behind an LNB). Receive only, antenna power off.
@@ -197,11 +197,26 @@ enum Command {
         /// Use the Airspy's sensitivity gain table.
         #[arg(long)]
         airspy_sensitivity: bool,
+        /// Live from an SDRplay RSP (an RSPduo is used in single-tuner mode)
+        /// instead: its centre frequency, MHz (0.001–2000). Needs the SDRplay
+        /// API (sdrplay_api.dll, from sdrplay.com) installed, or beside decsat,
+        /// or DECSAT_SDRPLAY_LIB. Receive only; the bias tee stays off.
+        #[arg(long, conflicts_with_all = ["hackrf", "fobos", "airspy", "net"])]
+        sdrplay: Option<f64>,
+        /// SDRplay LNA state, 0 = most gain (RSPduo: 0–9, 0–8 above 1 GHz).
+        #[arg(long, default_value_t = 4)]
+        sdrplay_lna: u8,
+        /// SDRplay IF gain reduction, dB: 20 (most gain) to 59.
+        #[arg(long, default_value_t = 40)]
+        sdrplay_gr: u8,
+        /// Use the RSPduo's Tuner B (Tuner 2) instead of Tuner A.
+        #[arg(long)]
+        sdrplay_tuner_b: bool,
         /// Live from an ADALM-PLUTO, Pluto+ or LibreSDR instead: its centre
         /// frequency, MHz (70–6000; an AD9363 Pluto that was not unlocked
         /// takes 325–3800). Pure Rust over USB or the network. Receive only:
         /// the transmitter stays off.
-        #[arg(long, alias = "plutoplus", conflicts_with_all = ["hackrf", "fobos", "airspy", "net"])]
+        #[arg(long, alias = "plutoplus", conflicts_with_all = ["hackrf", "fobos", "airspy", "sdrplay", "net"])]
         pluto: Option<f64>,
         /// How to reach the Pluto: auto (USB if one is plugged in, else
         /// 192.168.2.1), usb (needs ADI's Pluto USB driver, WinUSB, on
@@ -232,7 +247,7 @@ enum Command {
         #[arg(long, value_parser = parse_format)]
         format: Option<SampleFormat>,
         /// Sample rate; taken from the file name (…_320000Sps…) when omitted.
-        /// Live radios default to HackRF 2, Airspy 6, Fobos 8, Pluto 4 MS/s.
+        /// Live radios default to HackRF 2, Airspy 6, Fobos 8, SDRplay 8, Pluto 4 MS/s.
         #[arg(long)]
         rate: Option<f64>,
         /// Decoder: id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19.
@@ -427,6 +442,10 @@ fn main() -> Result<()> {
             airspy,
             airspy_gain,
             airspy_sensitivity,
+            sdrplay,
+            sdrplay_lna,
+            sdrplay_gr,
+            sdrplay_tuner_b,
             pluto,
             pluto_uri,
             pluto_gain,
@@ -473,6 +492,10 @@ fn main() -> Result<()> {
                 airspy,
                 airspy_gain,
                 airspy_sensitivity,
+                sdrplay,
+                sdrplay_lna,
+                sdrplay_gr,
+                sdrplay_tuner_b,
                 pluto,
                 pluto_uri,
                 pluto_gain,

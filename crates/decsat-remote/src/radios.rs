@@ -160,6 +160,18 @@ impl Devices {
                 .collect(),
             gains: fobos_gains(),
         });
+        #[cfg(feature = "sdrplay")]
+        v.push(RadioInfo {
+            key: "sdrplay".into(),
+            name: "SDRplay RSPduo / RSP".into(),
+            min_hz: decsat_io::sdrplay::SDRPLAY_MIN_HZ as f64,
+            max_hz: decsat_io::sdrplay::SDRPLAY_MAX_HZ as f64,
+            rates: decsat_io::SDRPLAY_RATES
+                .iter()
+                .map(|r| f64::from(*r))
+                .collect(),
+            gains: sdrplay_gains(),
+        });
         #[cfg(feature = "pluto")]
         v.push(RadioInfo {
             key: "pluto".into(),
@@ -233,6 +245,27 @@ fn fobos_of(g: &[Gain]) -> decsat_io::FobosGains {
     }
 }
 
+/// Both SDRplay stages are gain *reductions* (as in the API): a lower number is
+/// more gain.
+#[cfg(feature = "sdrplay")]
+fn sdrplay_gains() -> Vec<Gain> {
+    let d = decsat_io::SdrplayGains::default();
+    vec![
+        stage("lna_state", 0.0, 9.0, 1.0, f64::from(d.lna)),
+        stage("if_gr", 20.0, 59.0, 1.0, f64::from(d.gr)),
+        // 0 = Tuner A, 1 = Tuner B (RSPduo); read when the radio opens.
+        stage("tuner_b", 0.0, 1.0, 1.0, 0.0),
+    ]
+}
+
+#[cfg(feature = "sdrplay")]
+fn sdrplay_of(g: &[Gain]) -> decsat_io::SdrplayGains {
+    decsat_io::SdrplayGains {
+        lna: value(g, "lna_state") as u8,
+        gr: value(g, "if_gr") as u8,
+    }
+}
+
 #[cfg(feature = "pluto")]
 fn pluto_gains() -> Vec<Gain> {
     vec![
@@ -256,6 +289,7 @@ fn pluto_of(g: &[Gain]) -> decsat_io::PlutoGain {
     feature = "hackrf",
     feature = "airspy",
     feature = "fobos",
+    feature = "sdrplay",
     feature = "pluto"
 ))]
 struct Live<C> {
@@ -269,6 +303,7 @@ struct Live<C> {
     feature = "hackrf",
     feature = "airspy",
     feature = "fobos",
+    feature = "sdrplay",
     feature = "pluto"
 ))]
 impl<C: Send + Sync> RadioControl for Live<C> {
@@ -363,6 +398,26 @@ impl RadioProvider for Devices {
                     gains: gains.clone().into(),
                     center: |c: &decsat_io::FobosControl, hz| c.set_center(hz as u64),
                     apply: |c: &decsat_io::FobosControl, g| c.set_gains(fobos_of(g)),
+                };
+                Ok(OpenRadio {
+                    source: Box::new(s),
+                    control: Some(Arc::new(live)),
+                    gains,
+                })
+            }
+            #[cfg(feature = "sdrplay")]
+            "sdrplay" => {
+                let s = decsat_io::SdrplaySource::open(decsat_io::SdrplaySettings {
+                    center_hz: req.center_hz as u64,
+                    sample_rate: req.sample_rate as u32,
+                    gains: sdrplay_of(&gains),
+                    tuner_b: value(&gains, "tuner_b") >= 0.5,
+                })?;
+                let live = Live {
+                    ctl: s.control(),
+                    gains: gains.clone().into(),
+                    center: |c: &decsat_io::SdrplayControl, hz| c.set_center(hz as u64),
+                    apply: |c: &decsat_io::SdrplayControl, g| c.set_gains(sdrplay_of(g)),
                 };
                 Ok(OpenRadio {
                     source: Box::new(s),
