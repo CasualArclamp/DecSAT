@@ -241,10 +241,12 @@ impl VideoPlayer {
         let mut threads = Vec::new();
         let (s, pids) = (sh.clone(), sel.pids.clone());
         let av1_pid = sel.video.filter(|_| sel.av1);
+        // Silent AV1: ffmpeg has no TS input, so nothing goes to its stdin.
+        let to_ts = !(av1_pid.is_some() && sel.audio.is_none());
         threads.push(
             std::thread::Builder::new()
                 .name("decsat-video-feed".into())
-                .spawn(move || feed(packets, &pids, av1_pid, &s))
+                .spawn(move || feed(packets, &pids, av1_pid, to_ts, &s))
                 .map_err(|e| e.to_string())?,
         );
         let (s, exe) = (sh.clone(), exe.to_path_buf());
@@ -415,7 +417,13 @@ fn send_av1(sh: &Shared, u: Av1Unit, last_pts: &mut u64) {
 
 /// The feeder: the programme's packets to ffmpeg's stdin, while it runs
 /// (an AV1 video PID's to its IVF input instead).
-fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], av1_pid: Option<u16>, sh: &Shared) {
+fn feed(
+    rx: Receiver<Vec<[u8; TS_LEN]>>,
+    pids: &[u16],
+    av1_pid: Option<u16>,
+    to_ts: bool,
+    sh: &Shared,
+) {
     let mut av1 = av1_pid.map(|_| Av1Extractor::new());
     let mut last_pts = 0u64;
     let mut buf = Vec::with_capacity(64 * TS_LEN);
@@ -449,7 +457,7 @@ fn feed(rx: Receiver<Vec<[u8; TS_LEN]>>, pids: &[u16], av1_pid: Option<u16>, sh:
                 buf.extend_from_slice(p);
             }
         }
-        if buf.is_empty() {
+        if buf.is_empty() || !to_ts {
             continue;
         }
         // Between ffmpeg runs, wait for the next (the batches behind this
