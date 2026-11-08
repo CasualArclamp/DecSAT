@@ -874,6 +874,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "decsat-server-app"
+version = "1.5.0"
+dependencies = [
+ "decsat-core",
+ "decsat-io",
+ "decsat-remote",
+ "eframe",
+ "image",
+ "winit",
+]
+
+[[package]]
 name = "decsat-ts"
 version = "1.5.0"
 dependencies = [

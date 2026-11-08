@@ -26,6 +26,13 @@ const CENTER: f64 = 1_000_000_000.0;
 struct Loop {
     x: Arc<Vec<Iq>>,
     at: usize,
+    log: Arc<Log>,
+}
+
+impl Drop for Loop {
+    fn drop(&mut self) {
+        self.log.closes.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl IqSource for Loop {
@@ -54,6 +61,7 @@ struct Log {
     tuned: Mutex<Vec<f64>>,
     gains: Mutex<Vec<(String, f64)>>,
     opens: AtomicU64,
+    closes: AtomicU64,
 }
 
 struct Ctl(Arc<Log>);
@@ -91,6 +99,7 @@ impl RadioProvider for Fake {
             source: Box::new(Loop {
                 x: Arc::clone(&self.x),
                 at: 0,
+                log: Arc::clone(&self.log),
             }),
             control: Some(Arc::new(Ctl(Arc::clone(&self.log)))),
             gains: vec![Gain {
@@ -488,4 +497,31 @@ fn shared_mode_owners_and_campers() {
     wait_for("the decoder to close", 5, || {
         watcher.shared_list().is_empty()
     });
+}
+
+#[test]
+fn stopping_a_shared_server_cuts_clients_off_and_frees_the_radio() {
+    let (server, log, addr) = server(ServerConfig {
+        shared: Some(SharedConfig {
+            radio: request(),
+            params: SmartParams {
+                fft_size: 1024,
+                ..Default::default()
+            },
+            max_decoders_each: 1,
+            max_decoders: 4,
+        }),
+        ..Default::default()
+    });
+    let e = RemoteEngine::connect(&opts(&addr, "a"), None, SmartParams::default()).unwrap();
+    wait_for("rows", 15, || !e.new_rows(0).is_empty());
+    assert_eq!(server.clients(), vec!["a".to_string()]);
+    assert_eq!(log.closes.load(Ordering::Relaxed), 0);
+    drop(server);
+    assert_eq!(
+        log.closes.load(Ordering::Relaxed),
+        1,
+        "the radio is closed by the time drop returns"
+    );
+    wait_for("the client to be told", 5, || e.control().ended().is_some());
 }

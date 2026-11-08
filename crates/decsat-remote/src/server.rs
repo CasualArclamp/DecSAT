@@ -35,6 +35,8 @@ const SNDBUF_DUMB: usize = 8 << 20;
 /// Most IQ waiting in the queue, as seconds of stream.
 const IQ_QUEUE_SECS: f64 = 0.25;
 const PORT_POLL: Duration = Duration::from_millis(100);
+/// How long stopping waits for connections to wind up.
+const STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// Shared mode's configuration.
 #[derive(Debug, Clone)]
@@ -83,7 +85,8 @@ struct Common {
     /// Shared mode's permanent hub.
     shared_hub: Option<Arc<Hub>>,
     shared_control: Option<Arc<dyn RadioControl>>,
-    connected: Mutex<Vec<(u64, String)>>,
+    /// Who is connected, with a handle to cut each off when the server stops.
+    connected: Mutex<Vec<(u64, String, TcpStream)>>,
     next_conn: AtomicU64,
 }
 
@@ -174,8 +177,14 @@ impl Drop for Server {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        if let Some(h) = self.common.holder.lock().unwrap().take() {
-            let _ = h.stream.shutdown(Shutdown::Both);
+        for (_, _, stream) in self.common.connected.lock().unwrap().iter() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        // The connections hold the radio open through `common`: wait for
+        // them to let go, so a restart can open it again.
+        let t = Instant::now();
+        while Arc::strong_count(&self.common) > 1 && t.elapsed() < STOP_WAIT {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -297,7 +306,7 @@ fn serve(mut stream: TcpStream, common: &Arc<Common>) -> io::Result<()> {
         .connected
         .lock()
         .unwrap()
-        .push((conn, hello.name.clone()));
+        .push((conn, hello.name.clone(), stream.try_clone()?));
     let result = run_client(stream, common, conn, hello);
     common.connected.lock().unwrap().retain(|c| c.0 != conn);
     let mut holder = common.holder.lock().unwrap();

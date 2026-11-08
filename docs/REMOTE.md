@@ -22,6 +22,8 @@ decsat-server --bind 0.0.0.0:5262 --shared hackrf --center 739.5e6 --rate 8e6 --
 decsat-server --file capture.cs8 --file-rate 8e6 --file-center 739.5e6   # a capture as a radio
 ```
 
+`decsat-server-app.exe` is the same server in a window, for double-clicking: it shows the address to connect to and who is connected, and keeps its settings in `%APPDATA%\DecSAT-Server\prefs.txt` (the password only if asked to, as plain text).
+
 The default bind is 127.0.0.1. A password can also come from
 `DECSAT_PASSWORD`. No password is the default, and the server says so if it
 is also listening beyond the machine.

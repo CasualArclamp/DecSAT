@@ -125,6 +125,8 @@ decsat-server --bind 0.0.0.0:5262 --password-file pw.txt
 decsat-server --bind 0.0.0.0:5262 --shared hackrf --center 739.5e6 --rate 8e6
 ```
 
+Prefer a window? `decsat-server-app.exe` is the same server: double-click, choose who can connect, press Start.
+
 The link is not encrypted: over the internet, use a VPN or SSH tunnel.
 
 Or open a capture with **File ▸ Open IQ…**, or drop it on the window. The sample rate,

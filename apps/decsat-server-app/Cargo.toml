@@ -1,0 +1,28 @@
+# made by CasualArclamp
+[package]
+name = "decsat-server-app"
+description = "DecSAT Server: a window to serve this machine's radio, without the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# eframe/egui 0.36 need Rust 1.95, so the GUI cannot keep the workspace MSRV.
+rust-version = "1.95"
+
+[features]
+default = ["hackrf", "fobos", "airspy", "pluto"]
+hackrf = ["decsat-remote/hackrf"]
+fobos = ["decsat-remote/fobos"]
+airspy = ["decsat-remote/airspy"]
+pluto = ["decsat-remote/pluto"]
+
+[dependencies]
+decsat-core = { path = "../../crates/decsat-core" }
+decsat-io = { path = "../../crates/decsat-io" }
+decsat-remote = { path = "../../crates/decsat-remote" }
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# PNG output for --screenshot (smoke tests).
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = "0.30.13"
