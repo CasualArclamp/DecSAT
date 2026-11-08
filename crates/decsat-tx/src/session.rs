@@ -142,6 +142,9 @@ pub struct TxStatus {
     /// This program's CPU (all its threads), % of one core.
     pub app_cpu_pct: f32,
     pub clipped: u64,
+    /// Blocks the Pluto's link was late with, so the DAC sent gaps: must
+    /// stay 0.
+    pub link_short: u64,
     /// Peak of the last spectrum's span, dBFS.
     pub peak_dbfs: f32,
     pub ffmpeg: Option<FeederStatus>,
@@ -339,7 +342,10 @@ impl TxSession {
         let pump = self.pump.take().ok_or("nothing prepared")?;
         let r = if self.cfg.sink.is_radio() {
             match proof {
-                Some(p) => radio::open_hackrf(p, pump, &self.cfg.sink),
+                Some(p) => match &self.cfg.sink {
+                    TxSink::Pluto { .. } => radio::open_pluto(p, pump, &self.cfg.sink),
+                    _ => radio::open_hackrf(p, pump, &self.cfg.sink),
+                },
                 None => Err("not armed".into()),
             }
         } else {
@@ -393,6 +399,19 @@ impl TxSession {
         }
         match &self.radio {
             Some(r) => r.set_txvga(db),
+            None => Ok(()),
+        }
+    }
+
+    /// The Pluto's attenuation, while transmitting through it (0 to 89.75
+    /// dB); before, where it will start.
+    pub fn set_atten(&mut self, db: f32) -> Result<(), String> {
+        let db = db.clamp(0.0, radio::PLUTO_ATTEN_MAX_DB);
+        if let TxSink::Pluto { atten_db, .. } = &mut self.cfg.sink {
+            *atten_db = db;
+        }
+        match &self.radio {
+            Some(r) => r.set_atten(db),
             None => Ok(()),
         }
     }
@@ -481,6 +500,7 @@ impl TxSession {
             st.frames = s.frames.load(Ordering::Relaxed);
             st.seconds_sent = s.samples.load(Ordering::Relaxed) as f64 / st.sample_rate.max(1.0);
             st.clipped = s.clipped.load(Ordering::Relaxed);
+            st.link_short = self.radio.as_ref().map_or(0, |r| r.link_short());
             let peak = s.peak.load(Ordering::Relaxed).max(1) as f32 / 127.0;
             st.peak_dbfs = 20.0 * peak.log10();
             let (b0, t0) = self.busy_last;
@@ -517,6 +537,27 @@ impl Drop for TxSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pluto_needs_the_arm() {
+        let mut s = TxSession::new(TxConfig {
+            sink: TxSink::Pluto {
+                center_hz: 2_409_750_000,
+                uri: "auto".into(),
+                atten_db: radio::PLUTO_ATTEN_MAX_DB,
+            },
+            ..TxConfig::default()
+        });
+        s.prepare().unwrap();
+        let e = s.transmit().unwrap_err();
+        assert!(e.contains("not armed"), "{e}");
+        s.prepare().unwrap();
+        s.arm(LicenceAck::accept(crate::arm::LICENCE_WARNING).unwrap());
+        let e = s.transmit().unwrap_err();
+        assert!(e.contains("disabled") || e.contains("no Pluto"), "{e}");
+        assert!(!s.is_armed(), "one transmit uses the arm up");
+        assert!(!s.status().radiating);
+    }
 
     #[test]
     fn the_radio_needs_the_arm() {

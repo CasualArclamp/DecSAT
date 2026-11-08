@@ -1,6 +1,6 @@
 // made by CasualArclamp
-//! Live ADALM-PLUTO and Pluto+ (AD9363/AD9361/AD9364) front end, receive
-//! only, in pure Rust: the radio's own IIOD protocol ([`iiod`]) over USB
+//! Live ADALM-PLUTO and Pluto+ (AD9363/AD9361/AD9364) front end in pure
+//! Rust (the transmitter is [`tx`]): the radio's own IIOD protocol ([`iiod`]) over USB
 //! ([`usb`], WinUSB) or the network (TCP 30431: the Pluto's USB Ethernet at
 //! 192.168.2.1, or a Pluto+'s Gigabit Ethernet). No libiio, no DLLs.
 //!
@@ -17,14 +17,16 @@
 //! `cf-ad9361-lpc`'s `sampling_frequency` asks for the decimated rate: the
 //! sequence of libad9361 / SoapyPlutoSDR).
 //!
-//! **Receive only.** Nothing here opens the transmit data device
-//! (`cf-ad9361-dds-core-lpc`), and every open powers the TX LO down.
+//! **The receiver does not transmit.** It never opens the transmit data
+//! device (`cf-ad9361-dds-core-lpc`), and every open powers the TX LO down
+//! (a [`tx::PlutoTx`] running on the same Pluto powers it back up).
 //!
 //! The reader thread keeps two `READBUF` requests in flight (so the round
 //! trip costs no throughput), converts each block to IQ and hands it over a
 //! bounded channel, dropping whole blocks if the consumer falls behind.
 
 pub mod iiod;
+pub mod tx;
 pub mod usb;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

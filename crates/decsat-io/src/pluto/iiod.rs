@@ -214,6 +214,21 @@ impl Client {
         self.exec(&format!("CLOSE {dev}\r\n")).map(|_| ())
     }
 
+    /// Send one block of samples to an output buffer (libiio
+    /// `iiod_client_write_unlocked`): `WRITEBUF dev n`, a `0` once iiod is
+    /// ready to take them, the bytes, then the count it pushed. iiod pushes a
+    /// kernel buffer when it is full and waits for a free one first, so this
+    /// returns at the radio's pace.
+    pub fn writebuf(&mut self, dev: &str, data: &[u8]) -> Result<()> {
+        self.exec(&format!("WRITEBUF {dev} {}\r\n", data.len()))?;
+        self.link.write_all(data).map_err(err)?;
+        let v = self.read_integer()?;
+        if v < 0 {
+            return Err(err(format!("sending samples: {}", errno_text(v))));
+        }
+        Ok(())
+    }
+
     /// Ask for `bytes` of samples; the reply is read by [`Client::readbuf_reply`].
     /// Sending the next request before reading this one's reply keeps the
     /// link busy across the round trip.

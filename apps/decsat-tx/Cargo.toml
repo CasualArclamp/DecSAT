@@ -18,8 +18,9 @@ path = "src/main.rs"
 
 [features]
 # The HackRF driver is pure Rust (no SDK, no DLLs), so it is on by default.
-default = ["hackrf"]
+default = ["hackrf", "pluto"]
 hackrf = ["decsat-tx/hackrf"]
+pluto = ["decsat-tx/pluto"]
 
 [dependencies]
 decsat-core = { path = "../../crates/decsat-core" }

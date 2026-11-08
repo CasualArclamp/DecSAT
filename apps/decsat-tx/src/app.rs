@@ -16,8 +16,8 @@ use decsat_core::RollOff;
 use decsat_mod::datv::{DatvConfig, data_modcods};
 use decsat_tx::encode::{self, CameraMode, Devices, Engine};
 use decsat_tx::{
-    AudioCodec, EncodeSettings, Input, LICENCE_WARNING, LicenceAck, Source, TxConfig, TxSession,
-    TxSink, TxState, TxStatus, VideoCodec, qo100,
+    AudioCodec, EncodeSettings, Input, LICENCE_WARNING, LicenceAck, PLUTO_ATTEN_MAX_DB, Source,
+    TxConfig, TxSession, TxSink, TxState, TxStatus, VideoCodec, qo100,
 };
 use eframe::egui::{self, Color32, RichText, Ui};
 
@@ -75,6 +75,7 @@ enum OutputKind {
     Test,
     IqFile,
     HackRf,
+    Pluto,
 }
 
 /// What the background probe finds: ffmpeg, the devices, each camera's
@@ -120,6 +121,9 @@ pub struct App {
     iq_secs: f64,
     txvga: u16,
     amp: bool,
+    /// The Pluto's link (`auto`, `usb`, `ip:ADDRESS`) and attenuation.
+    pluto_uri: String,
+    atten: f32,
     read_ack: bool,
     // Found in the background.
     probe: Option<Receiver<Probe>>,
@@ -196,6 +200,8 @@ impl App {
             iq_secs: 30.0,
             txvga: 0,
             amp: false,
+            pluto_uri: "auto".into(),
+            atten: PLUTO_ATTEN_MAX_DB,
             read_ack: false,
             probe: None,
             found: None,
@@ -363,6 +369,11 @@ impl App {
                 center_hz: self.freq_hz.round() as u64,
                 txvga_db: self.txvga,
                 amp: self.amp,
+            },
+            OutputKind::Pluto => TxSink::Pluto {
+                center_hz: self.freq_hz.round() as u64,
+                uri: self.pluto_uri.trim().to_string(),
+                atten_db: self.atten,
             },
         }
     }
@@ -751,6 +762,7 @@ impl App {
                             OutputKind::Test => "Test only (no output)",
                             OutputKind::IqFile => "IQ file",
                             OutputKind::HackRf => "HackRF (radio)",
+                            OutputKind::Pluto => "ADALM-PLUTO / Pluto+ (radio)",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -763,6 +775,11 @@ impl App {
                                 &mut self.output,
                                 OutputKind::HackRf,
                                 "HackRF (radio)",
+                            );
+                            ui.selectable_value(
+                                &mut self.output,
+                                OutputKind::Pluto,
+                                "ADALM-PLUTO / Pluto+ (radio)",
                             );
                         });
                 });
@@ -789,14 +806,21 @@ impl App {
     fn banner(&self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.add_space(8.0);
+            let power = if self.output == OutputKind::Pluto {
+                format!("attenuation {:.2} dB · Pluto", self.atten)
+            } else {
+                format!(
+                    "TX VGA {} dB · amp {} · HackRF",
+                    self.txvga,
+                    if self.amp { "ON" } else { "off" }
+                )
+            };
             ui.label(
                 RichText::new(format!(
-                    "● TRANSMITTING · {:.3} MHz · {:.0} kS {} · TX VGA {} dB · amp {} · HackRF",
+                    "● TRANSMITTING · {:.3} MHz · {:.0} kS {} · {power}",
                     self.freq_hz / 1e6,
                     self.symbol_rate / 1e3,
                     decsat_core::modcod_name(self.modcod),
-                    self.txvga,
-                    if self.amp { "ON" } else { "off" }
                 ))
                 .size(16.0)
                 .strong()
@@ -1217,6 +1241,66 @@ impl App {
         Self::section(ui, "OUTPUT");
         let transmitting = self.session.state() == TxState::Transmitting;
         match self.output {
+            OutputKind::Pluto => {
+                egui::Grid::new("pluto")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Link");
+                        ui.add_enabled_ui(!self.busy(), |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pluto_uri)
+                                    .desired_width(140.0)
+                                    .hint_text("auto"),
+                            )
+                            .on_hover_text(
+                                "auto (USB with ADI's driver, else 192.168.2.1), usb, or \
+                                 ip:ADDRESS. To receive in DecSAT at the same time, use \
+                                 ip:192.168.2.1 in both, at the same sample rate",
+                            );
+                        });
+                        ui.end_row();
+                        ui.label("Attenuation");
+                        let mut v = self.atten;
+                        ui.add(
+                            egui::Slider::new(&mut v, PLUTO_ATTEN_MAX_DB..=0.0)
+                                .step_by(0.25)
+                                .suffix(" dB"),
+                        )
+                        .on_hover_text(
+                            "89.75 dB at every start; 0 dB is the Pluto's full power, about +7 dBm",
+                        );
+                        // At most 6 dB less a frame: a slip of the mouse is not a jump.
+                        let v = v.max(self.atten - 6.0);
+                        if v != self.atten {
+                            self.atten = v;
+                            if let Err(e) = self.session.set_atten(v) {
+                                self.status.error = Some(e);
+                            }
+                        }
+                        ui.end_row();
+                        if self.status.link_short > 0 {
+                            ui.label("Link");
+                            ui.label(
+                                RichText::new(format!(
+                                    "late {} blocks: the Pluto sent gaps (a lower rate, or \
+                                     a Pluto+ on Ethernet)",
+                                    self.status.link_short
+                                ))
+                                .color(RED),
+                            );
+                            ui.end_row();
+                        }
+                        ui.label("Level");
+                        ui.add_enabled_ui(!self.busy(), |ui| {
+                            ui.add(
+                                egui::Slider::new(&mut self.level_db, -30.0..=-6.0)
+                                    .suffix(" dBFS RMS"),
+                            );
+                        });
+                        ui.end_row();
+                    });
+            }
             OutputKind::Test => {
                 ui.label(RichText::new("Test only: the whole chain runs, nothing is sent.").weak());
             }
@@ -1502,7 +1586,7 @@ impl App {
                 if ui.add(stop).clicked() {
                     self.stop();
                 }
-                let radio = self.output == OutputKind::HackRf;
+                let radio = matches!(self.output, OutputKind::HackRf | OutputKind::Pluto);
                 let can_tx = state == TxState::Ready && (!radio || self.session.is_armed());
                 if ui
                     .add_enabled(
@@ -1569,6 +1653,16 @@ mod tests {
         app.source = SourceKind::Test;
         let c = app.build_config().unwrap();
         assert_eq!(c.sink, TxSink::Null);
+        app.output = OutputKind::Pluto;
+        let c = app.build_config().unwrap();
+        assert_eq!(
+            c.sink,
+            TxSink::Pluto {
+                center_hz: 2_409_750_000,
+                uri: "auto".into(),
+                atten_db: 89.75,
+            }
+        );
         app.output = OutputKind::HackRf;
         let c = app.build_config().unwrap();
         assert_eq!(

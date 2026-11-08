@@ -22,10 +22,13 @@ fn xml(fw: &str) -> String {
 <channel id="altvoltage1" name="TX_LO" type="output" ><attribute name="frequency" filename="out_altvoltage1_TX_LO_frequency" /><attribute name="powerdown" filename="out_altvoltage1_TX_LO_powerdown" /></channel>
 <channel id="voltage0" type="input" ><attribute name="hardwaregain" filename="in_voltage0_hardwaregain" /><attribute name="gain_control_mode" filename="x" /><attribute name="rf_bandwidth" filename="x" /><attribute name="sampling_frequency" filename="x" /></channel>
 <channel id="altvoltage0" name="RX_LO" type="output" ><attribute name="frequency" filename="out_altvoltage0_RX_LO_frequency" /></channel>
+<channel id="voltage0" type="output" ><attribute name="hardwaregain" filename="out_voltage0_hardwaregain" /><attribute name="rf_bandwidth" filename="x" /><attribute name="sampling_frequency" filename="x" /></channel>
 <attribute name="calib_mode" />
 </device>
 <device id="iio:device3" name="cf-ad9361-dds-core-lpc" >
-<channel id="voltage0" type="output" ><scan-element index="0" format="le:S16/16&gt;&gt;0" /></channel>
+<channel id="voltage0" type="output" ><scan-element index="0" format="le:S16/16&gt;&gt;0" /><attribute name="sampling_frequency" filename="x" /></channel>
+<channel id="voltage1" type="output" ><scan-element index="1" format="le:S16/16&gt;&gt;0" /></channel>
+<channel id="altvoltage0" name="TX1_I_F1" type="output" ><attribute name="raw" filename="x" /></channel>
 </device>
 <device id="iio:device4" name="cf-ad9361-lpc" >
 <channel id="voltage0" type="input" ><scan-element index="0" format="le:S12/16&gt;&gt;0" /><attribute name="calibscale" filename="x" /><attribute name="sampling_frequency" filename="x" /></channel>
@@ -49,6 +52,12 @@ struct State {
     k: u32,
     /// OPEN's mask: 1 = 8-bit (voltage0 alone), 3 = I and Q.
     mask: u32,
+    /// WRITEBUF: blocks and bytes taken, and the first block's bytes.
+    tx_blocks: usize,
+    tx_bytes: usize,
+    tx_first: Vec<u8>,
+    /// Commands and attribute writes in order, for the TX sequence.
+    tx_lo_up_after_block: Option<usize>,
 }
 
 /// One connection to the fake server.
@@ -56,6 +65,14 @@ struct FakeLink {
     st: Arc<Mutex<State>>,
     inbox: Vec<u8>,
     outbox: VecDeque<u8>,
+    /// The `0` of a WRITEBUF whose bytes have not all come yet was sent.
+    acked: bool,
+}
+
+/// Bytes a `WRITEBUF` line asks for, if it is one.
+fn writebuf_len(line: &str) -> Option<usize> {
+    let w: Vec<&str> = line.split_whitespace().collect();
+    (w.first() == Some(&"WRITEBUF")).then(|| w[2].parse().unwrap())
 }
 
 impl FakeLink {
@@ -92,6 +109,10 @@ impl FakeLink {
                     self.reply_int(-22);
                     return;
                 }
+                if key.ends_with("altvoltage1 powerdown") && v == "0" {
+                    let b = st.tx_blocks;
+                    st.tx_lo_up_after_block.get_or_insert(b);
+                }
                 st.attrs.insert(key, v.clone());
                 self.reply_int(v.len() as i64);
             }
@@ -122,6 +143,16 @@ impl FakeLink {
                 self.reply_int((n - half) as i64);
                 self.outbox.extend(&body[half..]);
             }
+            "WRITEBUF" => {
+                // iiod: 0 when ready, then (after the bytes) the count.
+                let data = payload.unwrap();
+                if st.tx_blocks == 0 {
+                    st.tx_first = data.to_vec();
+                }
+                st.tx_blocks += 1;
+                st.tx_bytes += data.len();
+                self.reply_int(data.len() as i64);
+            }
             "BADCMD" => self.reply_int(-22),
             _ => self.reply_int(0), // TIMEOUT, SET, CLOSE
         }
@@ -137,10 +168,18 @@ impl Link for FakeLink {
             };
             let line = String::from_utf8_lossy(&self.inbox[..i]).trim().to_string();
             if line.starts_with("WRITE") {
-                let len: usize = line.rsplit(' ').next().unwrap().parse().unwrap();
+                let len: usize = writebuf_len(&line)
+                    .unwrap_or_else(|| line.rsplit(' ').next().unwrap().parse().unwrap());
                 if self.inbox.len() < i + 1 + len {
-                    return Ok(()); // the value has not come yet
+                    // The value has not come yet. iiod answers a WRITEBUF
+                    // with 0 before it reads the samples.
+                    if writebuf_len(&line).is_some() && !self.acked {
+                        self.acked = true;
+                        self.reply_int(0);
+                    }
+                    return Ok(());
                 }
+                self.acked = false;
                 let payload = self.inbox[i + 1..i + 1 + len].to_vec();
                 self.inbox.drain(..i + 1 + len);
                 self.handle(&line, Some(&payload));
@@ -175,6 +214,7 @@ impl Connector for Fake {
             st: Arc::clone(&self.0),
             inbox: Vec::new(),
             outbox: VecDeque::new(),
+            acked: false,
         }))
     }
     fn describe(&self) -> String {
@@ -444,6 +484,7 @@ fn over_tcp() {
                         st,
                         inbox: Vec::new(),
                         outbox: VecDeque::new(),
+                        acked: false,
                     };
                     let mut b = [0u8; 4096];
                     while let Ok(n) = sock.read(&mut b) {
@@ -514,4 +555,150 @@ fn live_pluto() {
         c.overflows(),
         c.link_lost()
     );
+}
+
+/// A transmit session against the fake: `source` gives a known cs8 pattern.
+fn tx_session(rate: f64, run: impl FnOnce(&Arc<Mutex<State>>, &tx::PlutoTx)) -> Arc<Mutex<State>> {
+    let (st, conn) = fake("v0.39");
+    let mut k: u8 = 0;
+    let t = tx::PlutoTx::start_on(
+        conn,
+        tx::PlutoTxSettings {
+            center_hz: 2400.25e6,
+            sample_rate: rate,
+            bandwidth: None,
+            attenuation_db: 30.0,
+            ..Default::default()
+        },
+        move |out: &mut Vec<u8>| {
+            for _ in 0..1000 {
+                out.push(k);
+                out.push(k.wrapping_neg());
+                k = k.wrapping_add(1);
+            }
+        },
+    )
+    .unwrap();
+    run(&st, &t);
+    drop(t);
+    st
+}
+
+fn wait_blocks(st: &Mutex<State>, n: usize) {
+    let t = std::time::Instant::now();
+    while st.lock().unwrap().tx_blocks < n {
+        assert!(t.elapsed() < Duration::from_secs(10), "no blocks sent");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn tx_session_sends_samples_and_powers_down_at_the_end() {
+    let st = tx_session(4e6, |st, t| {
+        wait_blocks(st, 3);
+        t.set_attenuation(12.3).unwrap();
+        assert_eq!(
+            st.lock().unwrap().attrs["iio:device0 OUTPUT voltage0 hardwaregain"],
+            "-12.25"
+        );
+        assert!(t.counters.bytes.load(Ordering::Relaxed) > 0);
+    });
+    let st = st.lock().unwrap();
+    let log = st.log.join("\n");
+    // I and Q of TX1 on the DDS device, the phy and the DDS core at the rate.
+    assert!(
+        log.contains("OPEN iio:device3 ") && log.contains(" 00000003"),
+        "{log}"
+    );
+    assert_eq!(
+        st.attrs["iio:device0 OUTPUT voltage0 sampling_frequency"],
+        "4000000"
+    );
+    assert_eq!(
+        st.attrs["iio:device3 OUTPUT voltage0 sampling_frequency"],
+        "4000000"
+    );
+    assert_eq!(
+        st.attrs["iio:device0 OUTPUT voltage0 rf_bandwidth"],
+        "4000000"
+    );
+    assert_eq!(
+        st.attrs["iio:device0 OUTPUT altvoltage1 frequency"],
+        "2400250000"
+    );
+    // The configured attenuation went on before the LO came up.
+    let atten = log.find("hardwaregain 6").unwrap(); // "-30.00": 6 bytes
+    let lo_up = log.find("altvoltage1 powerdown 1\nWRITE").unwrap_or(0);
+    assert!(atten > lo_up);
+    // The LO only after the first block was in the buffer.
+    assert_eq!(st.tx_lo_up_after_block, Some(1));
+    // Dropped: LO down, attenuation at its most, the buffer closed.
+    assert_eq!(st.attrs["iio:device0 OUTPUT altvoltage1 powerdown"], "1");
+    assert_eq!(
+        st.attrs["iio:device0 OUTPUT voltage0 hardwaregain"],
+        "-89.75"
+    );
+    assert!(log.contains("CLOSE iio:device3"), "{log}");
+    // Blocks of 1/30 s, cs8 shifted to the DAC's top bits.
+    let samples = block_samples(4e6);
+    assert_eq!(st.tx_first.len(), 4 * samples);
+    let w = |i: usize| i16::from_le_bytes([st.tx_first[2 * i], st.tx_first[2 * i + 1]]);
+    assert_eq!((w(0), w(1)), (0, 0));
+    assert_eq!((w(2), w(3)), (256, -256));
+    assert_eq!((w(254), w(255)), (127 << 8, -127 << 8));
+    assert_eq!(w(256), -128 << 8); // k = 128 is -128 as i8
+    assert_eq!(st.tx_bytes, st.tx_blocks * 4 * samples);
+}
+
+#[test]
+fn tx_low_rates_use_the_fpga_interpolator() {
+    let st = tx_session(1e6, |st, _| wait_blocks(st, 1));
+    let st = st.lock().unwrap();
+    assert_eq!(
+        st.attrs["iio:device0 OUTPUT voltage0 sampling_frequency"],
+        "8000000"
+    );
+    assert_eq!(
+        st.attrs["iio:device3 OUTPUT voltage0 sampling_frequency"],
+        "1000000"
+    );
+}
+
+#[test]
+fn tx_puts_the_lo_back_if_a_receiver_powered_it_down() {
+    let st = tx_session(4e6, |st, _| {
+        wait_blocks(st, 1);
+        // What a receive-only open on the same Pluto does.
+        st.lock().unwrap().attrs.insert(
+            "iio:device0 OUTPUT altvoltage1 powerdown".into(),
+            "1".into(),
+        );
+        let t = std::time::Instant::now();
+        loop {
+            if st.lock().unwrap().attrs["iio:device0 OUTPUT altvoltage1 powerdown"] == "0" {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "LO left down");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    assert_eq!(
+        st.lock().unwrap().attrs["iio:device0 OUTPUT altvoltage1 powerdown"],
+        "1"
+    );
+}
+
+#[test]
+fn tx_refuses_a_frequency_outside_the_chip() {
+    let e = tx::PlutoTx::start(
+        tx::PlutoTxSettings {
+            center_hz: 10e6,
+            uri: PlutoUri::Ip("127.0.0.1:1".into()),
+            ..Default::default()
+        },
+        |_| {},
+    )
+    .err()
+    .unwrap();
+    assert!(e.to_string().contains("outside"), "{e}");
 }

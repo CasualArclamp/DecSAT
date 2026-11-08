@@ -13,6 +13,8 @@ default = []
 # The HackRF One as a sink (pure Rust over USB). Without it the radio sink
 # says so and the file and null sinks still work.
 hackrf = ["decsat-io/hackrf"]
+# The ADALM-PLUTO / Pluto+ as a sink (IIOD over USB or TCP, pure Rust).
+pluto = ["decsat-io/pluto"]
 
 [dependencies]
 decsat-core = { path = "../decsat-core" }

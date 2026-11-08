@@ -1,9 +1,12 @@
 // made by CasualArclamp
-//! Where the samples go: the HackRF, an IQ file, or nowhere.
+//! Where the samples go: the HackRF, the Pluto, an IQ file, or nowhere.
 //!
-//! **This file holds the only call that opens the HackRF** ([`open_hackrf`]),
-//! and it needs an [`ArmedProof`] by value (see arm.rs; a test checks no
-//! other file has the call). The radio starts at the TX VGA and amplifier
+//! **This file holds the only calls that open a radio for transmit**
+//! ([`open_hackrf`], [`open_pluto`]), and each needs an [`ArmedProof`] by
+//! value (see arm.rs; a test checks no other file has the calls). The Pluto
+//! starts at the attenuation the session gives it (89.75 dB at every start
+//! of the window), its TX LO up only once the first block is in the DAC's
+//! buffer (`decsat_io::PlutoTx`). The radio starts at the TX VGA and amplifier
 //! the session gives it, which the window sets to 0 dB and off at every
 //! start; antenna power is never switched on (`decsat_io::HackRfTx` hard
 //! codes it off); dropping the radio stops it.
@@ -40,11 +43,21 @@ pub enum TxSink {
         txvga_db: u16,
         amp: bool,
     },
+    /// An ADALM-PLUTO / Pluto+ at `center_hz`, over `uri` (`auto`, `usb`,
+    /// `ip:ADDRESS`), `atten_db` 0 to 89.75 dB.
+    Pluto {
+        center_hz: u64,
+        uri: String,
+        atten_db: f32,
+    },
 }
+
+/// The Pluto's most attenuation, dB.
+pub const PLUTO_ATTEN_MAX_DB: f32 = 89.75;
 
 impl TxSink {
     pub fn is_radio(&self) -> bool {
-        matches!(self, TxSink::HackRf { .. })
+        matches!(self, TxSink::HackRf { .. } | TxSink::Pluto { .. })
     }
 }
 
@@ -53,6 +66,8 @@ pub enum Radio {
     Virtual(VirtualRadio),
     #[cfg(feature = "hackrf")]
     HackRf(decsat_io::HackRfTx),
+    #[cfg(feature = "pluto")]
+    Pluto(decsat_io::PlutoTx),
 }
 
 impl Radio {
@@ -69,6 +84,32 @@ impl Radio {
                 .stopped
                 .load(Ordering::Relaxed)
                 .then(|| h.counters.error.lock().unwrap().clone()),
+            #[cfg(feature = "pluto")]
+            Radio::Pluto(p) => p
+                .counters
+                .stopped
+                .load(Ordering::Relaxed)
+                .then(|| p.counters.error.lock().unwrap().clone()),
+        }
+    }
+
+    /// Change the Pluto's attenuation (the Pluto only).
+    pub fn set_atten(&self, db: f32) -> Result<(), String> {
+        let _ = db;
+        match self {
+            #[cfg(feature = "pluto")]
+            Radio::Pluto(p) => p.set_attenuation(f64::from(db)).map_err(|e| e.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Blocks the Pluto's link was late with (the DAC sent gaps); 0 for the
+    /// others.
+    pub fn link_short(&self) -> u64 {
+        match self {
+            #[cfg(feature = "pluto")]
+            Radio::Pluto(p) => p.counters.link_short.load(Ordering::Relaxed),
+            _ => 0,
         }
     }
 
@@ -81,6 +122,8 @@ impl Radio {
             }
             #[cfg(feature = "hackrf")]
             Radio::HackRf(h) => h.set_txvga(db).map_err(|e| e.to_string()),
+            #[cfg(feature = "pluto")]
+            Radio::Pluto(_) => Ok(()),
         }
     }
 }
@@ -121,6 +164,46 @@ pub fn open_hackrf(_proof: ArmedProof, _pump: Pump, _sink: &TxSink) -> Result<Ra
     Err("this build has no HackRF support".into())
 }
 
+/// Open the Pluto and transmit `pump`. The one place the Pluto is opened for
+/// transmit.
+#[cfg(feature = "pluto")]
+pub fn open_pluto(_proof: ArmedProof, mut pump: Pump, sink: &TxSink) -> Result<Radio, String> {
+    if std::env::var_os(NO_RADIO_ENV).is_some() || cfg!(test) {
+        return Err(format!("the radio is disabled ({NO_RADIO_ENV} is set)"));
+    }
+    let TxSink::Pluto {
+        center_hz,
+        uri,
+        atten_db,
+    } = sink
+    else {
+        return Err("not a Pluto sink".into());
+    };
+    let rate = pump.config().sample_rate();
+    let settings = decsat_io::PlutoTxSettings {
+        uri: uri.parse()?,
+        center_hz: *center_hz as f64,
+        sample_rate: rate,
+        bandwidth: None,
+        attenuation_db: f64::from(*atten_db),
+    };
+    decsat_io::PlutoTx::start(settings, move |out| pump.fill_cs8(out))
+        .map(Radio::Pluto)
+        .map_err(|e| {
+            format!(
+                "{e} Is the Pluto plugged in, with ADI's USB driver (or reachable at \
+                 192.168.2.1)? Over USB only one program can use it: for receive and \
+                 transmit together use ip:192.168.2.1 in both, at the same sample rate."
+            )
+        })
+}
+
+/// Without the Pluto driver there is no Pluto to open.
+#[cfg(not(feature = "pluto"))]
+pub fn open_pluto(_proof: ArmedProof, _pump: Pump, _sink: &TxSink) -> Result<Radio, String> {
+    Err("this build has no Pluto support".into())
+}
+
 /// A radio that is not one: the pump drained into a file or nowhere, at the
 /// sample rate.
 pub struct VirtualRadio {
@@ -141,7 +224,9 @@ impl VirtualRadio {
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 (Some(w), *seconds)
             }
-            TxSink::HackRf { .. } => return Err("the HackRF is not a virtual sink".into()),
+            TxSink::HackRf { .. } | TxSink::Pluto { .. } => {
+                return Err("a radio is not a virtual sink".into());
+            }
         };
         let rate = pump.config().sample_rate();
         let limit = limit.map(|s| (s * rate) as u64);

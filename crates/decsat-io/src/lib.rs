@@ -15,6 +15,8 @@ pub mod pluto;
 pub mod uhd;
 pub mod wav;
 #[cfg(feature = "pluto")]
+pub use pluto::tx::{PlutoTx, PlutoTxCounters, PlutoTxSettings};
+#[cfg(feature = "pluto")]
 pub use pluto::{
     EightBit, PlutoControl, PlutoGain, PlutoInfo, PlutoSettings, PlutoSource, PlutoUri,
 };

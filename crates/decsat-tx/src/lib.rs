@@ -38,5 +38,5 @@ pub mod session;
 
 pub use arm::{LICENCE_WARNING, LicenceAck};
 pub use encode::{AudioCodec, EncodeSettings, Engine, Input, Picture, VideoCodec};
-pub use radio::{NO_RADIO_ENV, TxSink};
+pub use radio::{NO_RADIO_ENV, PLUTO_ATTEN_MAX_DB, TxSink};
 pub use session::{Source, TxConfig, TxSession, TxState, TxStatus};

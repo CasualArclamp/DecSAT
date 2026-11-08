@@ -47,8 +47,14 @@ The Airspy Mini / R2 is behind `--features airspy` (on by default in both
 apps): pure Rust over USB through `libairspy-rs`, no DLL.
 The ADALM-PLUTO / Pluto+ / LibreSDR is behind `--features pluto` (on by
 default in both apps): its IIOD protocol in pure Rust over USB (nusb, ADI's
-WinUSB driver) or TCP 30431, no libiio, no DLL; receive only (TX LO powered
-down, the DDS device never opened). Ported from DecDVB-T's driver.
+WinUSB driver) or TCP 30431, no libiio, no DLL. The receiver never opens the
+DDS device and powers the TX LO down; the transmitter (`decsat-io/src/pluto/tx.rs`,
+`PlutoTx`) is the TX app's "ADALM-PLUTO / Pluto+ (radio)" output, behind the
+same arm as the HackRF, starting at 89.75 dB attenuation, its LO up only after
+the first block, and putting the LO back up if a receiver on the same Pluto
+powers it down (full duplex: both on ip:192.168.2.1 at the same rate). Tested
+against the fake IIOD server only (`cargo test -p decsat-io --features pluto tx_`).
+Ported from DecDVB-T's driver.
 
 ## House rules
 
