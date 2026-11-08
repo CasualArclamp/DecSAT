@@ -244,6 +244,32 @@ impl UdpSink {
 pub struct TcpSink {
     server: StreamServer,
     pub addr: SocketAddr,
+    mode: TcpMode,
+    seen: u32,
+    /// The packets seen while looking, sent on once the mode is known.
+    held: Vec<[u8; TS_LEN]>,
+}
+
+/// Packets the sink looks at for a PMT before it gives up and sends the TS
+/// as it is (a stream with none, or one this analyser cannot read).
+const LOOK_LIMIT: u32 = 4000;
+
+/// What a TCP sink sends. VLC and PotPlayer cannot read AV1 in a TS (AOM's
+/// mapping, crate::av1; they show a private data stream), so for an AV1
+/// video the stream is the IVF they do play, made from the units: the
+/// picture only, as the IVF holds no sound.
+enum TcpMode {
+    /// Watching for the PMT to say what the video is; nothing goes out
+    /// meanwhile (a second or so), as the stream may turn out to be IVF.
+    Looking(Box<TsAnalyser>),
+    /// Anything else: the TS as it is.
+    Ts,
+    Av1 {
+        pid: u16,
+        ex: Av1Extractor,
+        last_pts: u64,
+        started: bool,
+    },
 }
 
 impl TcpSink {
@@ -253,6 +279,9 @@ impl TcpSink {
         Ok(TcpSink {
             addr: server.addr,
             server,
+            mode: TcpMode::Looking(Box::new(TsAnalyser::new())),
+            seen: 0,
+            held: Vec::new(),
         })
     }
 
@@ -262,8 +291,79 @@ impl TcpSink {
     }
 
     pub fn write(&mut self, packets: &[[u8; TS_LEN]]) {
-        if !packets.is_empty() {
-            self.server.write(packets.concat());
+        if packets.is_empty() {
+            return;
+        }
+        if let TcpMode::Looking(an) = &mut self.mode {
+            for p in packets {
+                an.packet(p);
+            }
+            self.held.extend_from_slice(packets);
+            self.seen += packets.len() as u32;
+            let mut next = None;
+            if self.held.len() as u32 > LOOK_LIMIT {
+                next = Some(TcpMode::Ts);
+            } else if self.seen >= 64 {
+                self.seen = 0;
+                let r = an.report();
+                let streams: Vec<_> = r.programmes.iter().flat_map(|q| q.streams.iter()).collect();
+                if let Some(e) = streams.iter().find(|e| e.kind == Some("AV1 video")) {
+                    next = Some(TcpMode::Av1 {
+                        pid: e.pid,
+                        ex: Av1Extractor::new(),
+                        last_pts: 0,
+                        started: false,
+                    });
+                } else if !streams.is_empty() {
+                    next = Some(TcpMode::Ts);
+                }
+            }
+            let Some(next) = next else { return };
+            // What was held while looking goes out first, in the mode found.
+            self.mode = next;
+            let held = std::mem::take(&mut self.held);
+            self.send(&held);
+            return;
+        }
+        self.send(packets);
+    }
+
+    /// `packets` to the clients in the mode found.
+    fn send(&mut self, packets: &[[u8; TS_LEN]]) {
+        match &mut self.mode {
+            TcpMode::Looking(_) => {}
+            TcpMode::Ts => self.server.write(packets.concat()),
+            TcpMode::Av1 {
+                pid,
+                ex,
+                last_pts,
+                started,
+            } => {
+                let mut out = Vec::new();
+                for p in packets {
+                    if u16::from_be_bytes([p[1] & 0x1F, p[2]]) != *pid {
+                        continue;
+                    }
+                    let Some(u) = ex.push(p) else { continue };
+                    if !*started {
+                        // The header needs the size: from the first unit
+                        // with a sequence header (what a decoder starts at).
+                        let Some(seq) = find_sequence_header(&u.tu) else {
+                            continue;
+                        };
+                        self.server.set_prelude(
+                            "video/x-ivf",
+                            ivf_header(seq.width as u16, seq.height as u16).to_vec(),
+                        );
+                        *started = true;
+                    }
+                    // A unit with no PTS keeps the last one's.
+                    let pts = u.pts.unwrap_or(*last_pts);
+                    *last_pts = pts;
+                    ivf_frame(pts, &u.tu, &mut out);
+                }
+                self.server.write(out);
+            }
         }
     }
 }
@@ -387,6 +487,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         std::thread::sleep(Duration::from_millis(600));
+        // No PMT in it: the sink looks for one a while, then sends the TS.
+        sink.write(&pkts(LOOK_LIMIT as usize + 1));
         sink.write(&pkts(10));
 
         raw.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -408,5 +510,88 @@ mod tests {
         let mut got = vec![0u8; TS_LEN];
         http.read_exact(&mut got).unwrap();
         assert_eq!(got[0], 0x47);
+    }
+
+    /// AV1 in AOM's mapping comes out of the TCP sink as an IVF, which
+    /// ffmpeg reads. Skipped without an ffmpeg that has SVT-AV1.
+    #[test]
+    fn tcp_serves_av1_as_ivf() {
+        use std::process::{Command, Stdio};
+        let tmp = std::env::temp_dir();
+        let ts = tmp.join(format!("decsat-sink-av1-{}.ts", std::process::id()));
+        let made = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=25",
+            ])
+            .args(["-t", "4", "-c:v", "libsvtav1", "-preset", "12"])
+            .args([
+                "-svtav1-params",
+                "pred-struct=1",
+                "-g",
+                "25",
+                "-f",
+                "mpegts",
+            ])
+            .arg(&ts)
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("no SVT-AV1 in this ffmpeg: skipped");
+            return;
+        }
+        let data = std::fs::read(&ts).unwrap();
+        let _ = std::fs::remove_file(&ts);
+        // ffmpeg's TS to AOM's mapping, as the transmitter makes it.
+        let mut fx = crate::av1::Av1TsFixer::new(0x1000, 0x100, 1e6);
+        let mut mapped: Vec<[u8; TS_LEN]> = Vec::new();
+        let (chunks, _) = data.as_chunks::<TS_LEN>();
+        for c in chunks {
+            fx.push(c, &mut mapped);
+        }
+        let mut sink = TcpSink::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut http = TcpStream::connect(sink.addr).unwrap();
+        http.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let t0 = std::time::Instant::now();
+        while sink.clients().is_empty() && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for batch in mapped.chunks(200) {
+            sink.write(batch);
+        }
+        drop(sink);
+        http.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut all = Vec::new();
+        let _ = http.read_to_end(&mut all);
+        let at = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = String::from_utf8_lossy(&all[..at]).to_string();
+        assert!(head.contains("video/x-ivf"), "{head}");
+        let body = &all[at..];
+        assert_eq!(&body[..4], b"DKIF");
+        let mut ff = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "ivf", "-i", "-", "-f", "null", "-"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        ff.stdin.take().unwrap().write_all(body).unwrap();
+        let out = ff.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }

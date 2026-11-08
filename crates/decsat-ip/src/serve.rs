@@ -19,6 +19,14 @@ use std::time::Duration;
 /// Chunks a client may have queued before new ones are dropped for it.
 const CLIENT_QUEUE: usize = 256;
 
+/// A stream's own start: a file header every client needs, however late it
+/// joins, and the content type to say it is.
+#[derive(Clone)]
+struct Prelude {
+    content_type: &'static str,
+    bytes: Vec<u8>,
+}
+
 struct Client {
     peer: SocketAddr,
     tx: SyncSender<Arc<Vec<u8>>>,
@@ -28,6 +36,9 @@ struct Client {
 /// A TCP (and HTTP) server streaming to every connected client.
 pub struct StreamServer {
     pub addr: SocketAddr,
+    /// What a new client is sent first (and its HTTP content type), when
+    /// the stream is not the plain one: [`StreamServer::set_prelude`].
+    prelude: Arc<Mutex<Option<Prelude>>>,
     clients: Arc<Mutex<Vec<Client>>>,
     stop: Arc<AtomicBool>,
     accept: Option<JoinHandle<()>>,
@@ -43,19 +54,31 @@ impl StreamServer {
         listener.set_nonblocking(true)?;
         let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let prelude: Arc<Mutex<Option<Prelude>>> = Arc::new(Mutex::new(None));
         let accept = {
-            let (clients, stop) = (clients.clone(), stop.clone());
+            let (clients, stop, prelude) = (clients.clone(), stop.clone(), prelude.clone());
             std::thread::Builder::new()
                 .name("decsat-serve".into())
-                .spawn(move || accept_loop(listener, clients, stop, content_type))?
+                .spawn(move || accept_loop(listener, clients, stop, content_type, prelude))?
         };
         Ok(StreamServer {
             addr,
+            prelude,
             clients,
             stop,
             accept: Some(accept),
             dropped_chunks: 0,
         })
+    }
+
+    /// From now on every new client is told `content_type` and sent `bytes`
+    /// before the stream (a container's header, for a stream that is not
+    /// plain TS).
+    pub fn set_prelude(&mut self, content_type: &'static str, bytes: Vec<u8>) {
+        *self.prelude.lock().unwrap() = Some(Prelude {
+            content_type,
+            bytes,
+        });
     }
 
     /// Addresses of the players connected now.
@@ -107,6 +130,7 @@ fn accept_loop(
     clients: Arc<Mutex<Vec<Client>>>,
     stop: Arc<AtomicBool>,
     content_type: &'static str,
+    prelude: Arc<Mutex<Option<Prelude>>>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
@@ -114,10 +138,11 @@ fn accept_loop(
                 let (tx, rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(CLIENT_QUEUE);
                 let alive = Arc::new(AtomicBool::new(true));
                 let a = alive.clone();
+                let prelude = prelude.clone();
                 let spawned = std::thread::Builder::new()
                     .name("decsat-serve-client".into())
                     .spawn(move || {
-                        serve_client(stream, rx, content_type);
+                        serve_client(stream, rx, content_type, prelude);
                         a.store(false, Ordering::Relaxed);
                     });
                 if spawned.is_ok() {
@@ -133,7 +158,12 @@ fn accept_loop(
 }
 
 /// Answer an HTTP request if the client sends one, then stream.
-fn serve_client(mut s: TcpStream, rx: mpsc::Receiver<Arc<Vec<u8>>>, content_type: &str) {
+fn serve_client(
+    mut s: TcpStream,
+    rx: mpsc::Receiver<Arc<Vec<u8>>>,
+    content_type: &str,
+    prelude: Arc<Mutex<Option<Prelude>>>,
+) {
     let _ = s.set_nonblocking(false);
     let _ = s.set_nodelay(true);
     // A player speaking HTTP sends its request at once; a raw TCP client
@@ -153,6 +183,13 @@ fn serve_client(mut s: TcpStream, rx: mpsc::Receiver<Arc<Vec<u8>>>, content_type
             Err(_) => break, // timeout: a raw client
         }
     }
+    // The stream's kind must be known before the HTTP head (and the header
+    // of a container) goes out: the first chunk only comes once it is (a
+    // prelude is set before the first of its chunks).
+    let Ok(first) = rx.recv() else { return };
+    let first = Some(first);
+    let pre = prelude.lock().unwrap().clone();
+    let content_type = pre.as_ref().map_or(content_type, |p| p.content_type);
     if req.starts_with(b"GET ") || req.starts_with(b"HEAD ") {
         let head = format!(
             "HTTP/1.0 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\n\
@@ -163,6 +200,16 @@ fn serve_client(mut s: TcpStream, rx: mpsc::Receiver<Arc<Vec<u8>>>, content_type
         }
     }
     let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+    if let Some(p) = &pre
+        && s.write_all(&p.bytes).is_err()
+    {
+        return;
+    }
+    if let Some(chunk) = first
+        && s.write_all(&chunk).is_err()
+    {
+        return;
+    }
     while let Ok(chunk) = rx.recv() {
         if s.write_all(&chunk).is_err() {
             return;
