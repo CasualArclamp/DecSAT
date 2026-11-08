@@ -11,7 +11,7 @@
 use std::fmt;
 
 /// Constellation / modulation order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Modulation {
     /// Plain BPSK — not a DVB-S2 modulation, but common on generic carriers
     /// (telemetry, SCPC data), so the generic PSK decoder handles it.

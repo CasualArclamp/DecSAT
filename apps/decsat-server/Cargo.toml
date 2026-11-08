@@ -1,0 +1,23 @@
+# made by CasualArclamp
+[package]
+name = "decsat-server"
+description = "DecSAT remote server: a radio on this machine, the app on another"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["hackrf", "fobos", "airspy", "pluto"]
+hackrf = ["decsat-remote/hackrf"]
+fobos = ["decsat-remote/fobos"]
+airspy = ["decsat-remote/airspy"]
+pluto = ["decsat-remote/pluto"]
+
+[dependencies]
+decsat-core = { path = "../../crates/decsat-core" }
+decsat-io = { path = "../../crates/decsat-io" }
+decsat-remote = { path = "../../crates/decsat-remote" }
+anyhow.workspace = true
+clap = { version = "4.6", features = ["derive"] }

@@ -19,7 +19,7 @@
 //! other signals does not.
 
 /// One detected carrier.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Carrier {
     /// Centre relative to the wideband centre, Hz.
     pub center_hz: f64,

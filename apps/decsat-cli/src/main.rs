@@ -12,6 +12,7 @@ mod mcast;
 mod payload;
 mod pcap;
 mod record;
+mod remote;
 mod scene;
 mod tx;
 
@@ -41,6 +42,8 @@ struct Cli {
 enum Command {
     /// Print the modulation and coding table.
     Modcods,
+    /// Run a decoder on a decsat-server: the display and TS come here.
+    Remote(remote::RemoteArgs),
     /// Read an IQ file and report basic signal statistics.
     Analyse {
         /// IQ capture to read.
@@ -156,6 +159,8 @@ enum Command {
         /// recognised. Needs --rate.
         #[arg(long)]
         net: Option<String>,
+        #[command(flatten)]
+        remote: remote::RemoteIqArgs,
         /// The network stream's sample type: int8, uint8, int16, int32 or
         /// float32.
         #[arg(long, default_value = "int8")]
@@ -406,10 +411,12 @@ fn main() -> Result<()> {
             timeout,
             decode,
         } => scan(file, format, rate, timeout, decode),
+        Command::Remote(a) => remote::run(&a),
         Command::Decode {
             file,
             hackrf,
             net,
+            remote,
             iq,
             lna,
             vga,
@@ -455,6 +462,7 @@ fn main() -> Result<()> {
                 file,
                 hackrf,
                 net,
+                remote,
                 iq,
                 lna,
                 vga,

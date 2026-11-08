@@ -18,7 +18,7 @@ fn parity(x: u8) -> u8 {
 }
 
 /// The punctured code rates (Table 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Rate {
     R1_2,
     R2_3,

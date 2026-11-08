@@ -20,7 +20,7 @@ use decsat_frame::{BbHeader, StreamFormat};
 pub const TS_UPL_BITS: u16 = 188 * 8;
 
 /// What an input stream carries, from its BBHEADERs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum StreamContent {
     /// GSE (generic mode, UPL 0): to IP.
     #[default]
@@ -72,7 +72,7 @@ impl StreamContent {
 }
 
 /// One input stream, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamView {
     /// MATYPE-2; 0 for a single stream.
     pub isi: u8,

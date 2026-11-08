@@ -27,6 +27,7 @@ decsat-core = { path = "../../crates/decsat-core" }
 decsat-io = { path = "../../crates/decsat-io" }
 decsat-dsp = { path = "../../crates/decsat-dsp" }
 decsat-engine = { path = "../../crates/decsat-engine" }
+decsat-remote = { path = "../../crates/decsat-remote" }
 decsat-mod = { path = "../../crates/decsat-mod" }
 decsat-modem = { path = "../../crates/decsat-modem" }
 decsat-gse = { path = "../../crates/decsat-gse" }

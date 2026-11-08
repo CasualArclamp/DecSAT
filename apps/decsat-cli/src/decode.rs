@@ -25,6 +25,8 @@ pub struct DecodeArgs {
     pub hackrf: Option<f64>,
     /// Live: raw IQ over the network, and its sample type.
     pub net: Option<String>,
+    /// Live: raw IQ from a decsat-server.
+    pub remote: crate::remote::RemoteIqArgs,
     pub iq: String,
     pub lna: u16,
     pub vga: u16,
@@ -245,8 +247,15 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
         || a.fobos.is_some()
         || a.airspy.is_some()
         || a.pluto.is_some()
-        || a.net.is_some();
-    let (source, rate): (Box<dyn IqSource>, f64) = if a.net.is_some() {
+        || a.net.is_some()
+        || a.remote.remote.is_some();
+    let (source, rate): (Box<dyn IqSource>, f64) = if let Some(addr) = &a.remote.remote {
+        let want = a.rate.context("give --rate: the radio's sample rate")?;
+        let src = crate::remote::open_iq(&a.remote, addr, want)?;
+        let rate = src.sample_rate();
+        println!("live from {} (receive only)", src.describe());
+        (Box::new(src), rate)
+    } else if a.net.is_some() {
         use decsat_io::{NetIqSettings, NetIqSource, NetSample};
         let url = a.net.as_deref().unwrap_or_default();
         let (mode, addr) = NetIqSettings::parse_url(url)?;

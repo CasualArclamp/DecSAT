@@ -110,6 +110,23 @@ real carriers stay put.
 cargo run --release -p decsat-gui -- capture_8Msps.cs8
 ```
 
+### A radio on another machine
+
+`decsat-server` runs next to the radio; DecSAT connects from anywhere (Source
+▸ Remote server settings…). **Smart** mode decodes on the server and sends
+only the waterfall, constellations, decoder status and the TS; **dumb** mode
+sends the IQ, 4 to 16 bits with block scaling and optional zstd, whole band or
+a slice. Smart mode currently offers Identify, DVB-S2/S2X → TS and DVB-S → TS.
+`--shared` runs one radio for everyone, QO-100 style: each user adds decoders
+and can camp on anyone else's. Details: [docs/REMOTE.md](docs/REMOTE.md).
+
+```bash
+decsat-server --bind 0.0.0.0:5262 --password-file pw.txt
+decsat-server --bind 0.0.0.0:5262 --shared hackrf --center 739.5e6 --rate 8e6
+```
+
+The link is not encrypted: over the internet, use a VPN or SSH tunnel.
+
 Or open a capture with **File ▸ Open IQ…**, or drop it on the window. The sample rate,
 centre frequency and format are read from the file name when it carries them
 (gqrx, SDR++ and DecSAT's own recordings do); otherwise set them under

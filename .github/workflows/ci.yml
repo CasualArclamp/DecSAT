@@ -50,6 +50,32 @@ jobs:
       - name: Build with the hackrf feature
         run: cargo build -p decsat-cli --features hackrf
 
+  # The remote server is the part of DecSAT meant for small boxes at the
+  # dish: it must build and pass on ARM64 too, and its binary is kept.
+  server:
+    name: server (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config cmake
+      - run: cargo test --release -p decsat-remote
+      - run: cargo build --release -p decsat-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decsat-server-${{ runner.arch }}
+          path: target/release/decsat-server
+
   clippy:
     runs-on: ubuntu-latest
     steps:

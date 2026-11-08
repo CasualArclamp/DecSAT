@@ -54,7 +54,7 @@ impl Default for EngineOptions {
 }
 
 /// What the source is doing.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SourceState {
     #[default]
     Running,

@@ -697,7 +697,7 @@ pub struct VfoStatus {
 }
 
 /// A running demodulator's carrier loop, for display.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct CarrierState {
     pub locked: bool,
     /// The symbols' modulation error ratio, dB: their Es/N0 as measured

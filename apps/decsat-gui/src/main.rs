@@ -14,6 +14,7 @@ mod beacon_list;
 mod bgan_card;
 mod biss_memory;
 mod carrier_caps;
+mod decoder_filter;
 mod dns_viewer;
 mod filename;
 mod format;
@@ -28,6 +29,7 @@ mod radar_airports;
 mod radar_map;
 mod radar_scope;
 mod radio;
+mod remote_panel;
 mod session;
 mod session_log;
 mod side_panel;
@@ -69,7 +71,7 @@ fn main() -> eframe::Result {
         Err(e) => {
             eprintln!("decsat-gui: {e}");
             eprintln!(
-                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
+                "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
@@ -183,6 +185,25 @@ fn main() -> eframe::Result {
                 }
                 app.start_radio();
             }
+            if let Some(addr) = opts.remote.clone() {
+                app.remote.addr = addr;
+                app.remote.selected = true;
+                app.remote.smart = !opts.remote_dumb;
+                if let Some(k) = opts.remote_radio.clone() {
+                    app.remote.radio_key = k;
+                }
+                if let Some(r) = opts.rate_msps {
+                    app.remote.rate = r * 1e6;
+                }
+                if let Some(f) = opts.net_mhz {
+                    app.remote.center_hz = f * 1e6;
+                }
+                app.remote.lo_hz = opts.lo_mhz.unwrap_or(0.0) * 1e6;
+                if let Ok(p) = std::env::var("DECSAT_PASSWORD") {
+                    app.remote.password = p;
+                }
+                app.start_remote(&cc.egui_ctx);
+            }
             if let Some(url) = opts.net.clone() {
                 app.net_url = url;
                 if let Some(t) = opts.iq {
@@ -203,7 +224,7 @@ fn main() -> eframe::Result {
 }
 
 struct App {
-    engine: Option<Engine>,
+    engine: Option<remote_panel::AnyEngine>,
     path: Option<PathBuf>,
     /// Source settings as the user has them, and as the running engine has them.
     sample_rate: f64,
@@ -321,6 +342,8 @@ struct App {
     net_selected: bool,
     net_running: bool,
     net_control: Option<decsat_io::NetIqControl>,
+    /// A DecSAT server as the source, and this app as one.
+    remote: remote_panel::RemotePanel,
     /// The radio's tuning the VFOs were last placed against (`None` until
     /// the first frame), to carry them along when it changes.
     #[cfg(feature = "hackrf")]
@@ -461,6 +484,7 @@ impl Default for App {
             net_selected: false,
             net_running: false,
             net_control: None,
+            remote: Default::default(),
             #[cfg(feature = "hackrf")]
             tuned_hz: None,
             remember: false,
@@ -587,7 +611,21 @@ impl App {
         if self.net_selected {
             active = "net";
         }
+        if self.remote.selected {
+            active = "remote";
+        }
         p.push(("device.selected".into(), active.into()));
+        for (k, v) in [
+            ("addr", self.remote.addr.clone()),
+            ("radio", self.remote.radio_key.clone()),
+            ("center", self.remote.center_hz.to_string()),
+            ("rate", self.remote.rate.to_string()),
+            ("lo", self.remote.lo_hz.to_string()),
+            ("smart", if self.remote.smart { "1" } else { "0" }.into()),
+            ("bits", self.remote.bits.to_string()),
+        ] {
+            p.push((format!("device.remote.{k}"), v));
+        }
         {
             let u = &self.net_settings;
             for (k, v) in [
@@ -1029,7 +1067,29 @@ impl App {
         if let Some(v) = get("device.net.lo").and_then(|s| s.parse().ok()) {
             self.net_lo_hz = v;
         }
+        if let Some(v) = get("device.remote.addr") {
+            self.remote.addr = v.to_string();
+        }
+        if let Some(v) = get("device.remote.radio") {
+            self.remote.radio_key = v.to_string();
+        }
+        if let Some(v) = get("device.remote.center").and_then(|s| s.parse().ok()) {
+            self.remote.center_hz = v;
+        }
+        if let Some(v) = get("device.remote.rate").and_then(|s| s.parse().ok()) {
+            self.remote.rate = v;
+        }
+        if let Some(v) = get("device.remote.lo").and_then(|s| s.parse().ok()) {
+            self.remote.lo_hz = v;
+        }
+        if let Some(v) = get("device.remote.smart") {
+            self.remote.smart = v == "1";
+        }
+        if let Some(v) = get("device.remote.bits").and_then(|s| s.parse().ok()) {
+            self.remote.bits = v;
+        }
         match get("device.selected") {
+            Some("remote") => self.remote.selected = true,
             Some("net") => self.net_selected = true,
             #[cfg(all(windows, feature = "uhd"))]
             Some("uhd") => self.uhd_selected = true,
@@ -1078,6 +1138,9 @@ impl App {
     /// The span's RF centre as the radio's tuning and LO (or the file's
     /// centre) give it, before the LO trim.
     fn rf_untrimmed(&self) -> f64 {
+        if self.path.is_none() && self.remote.selected {
+            return self.remote.center_hz + self.remote.lo_hz;
+        }
         #[cfg(all(windows, feature = "uhd"))]
         if self.path.is_none() && self.uhd_selected {
             return self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz;
@@ -1167,7 +1230,7 @@ impl App {
     /// Run `source` through a fresh engine, keeping the VFOs.
     fn start_engine(&mut self, source: Box<dyn decsat_io::IqSource>) {
         let rate = source.sample_rate();
-        let mut eng = Engine::start(source, self.opts.clone());
+        let mut eng = remote_panel::AnyEngine::Local(Engine::start(source, self.opts.clone()));
         if self.paused {
             eng.set_paused(true);
         }
@@ -1190,6 +1253,133 @@ impl App {
         self.front = FrontStatus::default();
         self.sample_rate = rate;
         self.band.set_span(rate);
+    }
+
+    /// Connect to the server with the panel's settings. The result is
+    /// collected by [`Self::tick_remote`].
+    fn start_remote(&mut self, ctx: &egui::Context) {
+        self.stop_source();
+        self.path = None;
+        self.remote.selected = true;
+        let p = decsat_remote::msg::SmartParams {
+            fft_size: self.opts.fft_size as u32,
+            rows_per_sec: self.opts.rows_per_sec as f32,
+            dc_removal: self.opts.dc_removal,
+            ..Default::default()
+        };
+        self.remote.connect(p, ctx);
+    }
+
+    /// Retune the server's radio, carrying the VFOs so they stay on their
+    /// carriers.
+    fn retune_remote(&mut self, tuner_hz: f64) {
+        let by = self.remote.center_hz - tuner_hz;
+        self.remote.center_hz = tuner_hz;
+        let Some(c) = &self.remote.control else {
+            return;
+        };
+        c.tune(tuner_hz);
+        for v in &mut self.vfos {
+            v.settings.offset_hz += by;
+            if let Some(e) = &self.engine {
+                e.carry_vfo(v.id, v.settings.clone(), by);
+            }
+        }
+    }
+
+    /// Each frame: the connection coming up, and news from the server.
+    fn tick_remote(&mut self) {
+        use remote_panel::{AnyEngine, Opened};
+        match self.remote.poll_connect() {
+            Some(Ok(Opened::Dumb(src))) => {
+                self.remote.control = Some(src.control());
+                self.remote.running = true;
+                self.remote.status = format!("Connected: {}", decsat_io::IqSource::describe(&src));
+                self.note = self.remote.status.clone();
+                self.start_engine(Box::new(src));
+            }
+            Some(Ok(Opened::Smart(mut eng))) => {
+                let rate = eng.sample_rate();
+                self.remote.control = Some(eng.control());
+                self.remote.running = true;
+                self.remote.status = "Connected: decoding on the server".into();
+                self.note = self.remote.status.clone();
+                let old = std::mem::take(&mut self.vfos);
+                let mut remap = BTreeMap::new();
+                for v in old {
+                    let id = eng.add_vfo(v.settings.clone());
+                    remap.insert(v.id, id);
+                    self.vfos.push(UiVfo {
+                        id,
+                        settings: v.settings,
+                    });
+                }
+                self.selected = self.selected.and_then(|s| remap.get(&s).copied());
+                self.statuses.clear();
+                self.engine = Some(AnyEngine::Remote(eng));
+                self.history.reset();
+                self.last_seq = 0;
+                self.front = FrontStatus::default();
+                self.sample_rate = rate;
+                self.band.set_span(rate);
+            }
+            Some(Err(e)) => {
+                self.remote.status = e.to_string();
+                self.note = self.remote.status.clone();
+            }
+            None => {}
+        }
+        let Some(c) = self.remote.control.clone() else {
+            return;
+        };
+        if let Some(n) = c.take_note() {
+            self.note = format!("Server: {n}");
+        }
+        if let Some(why) = c.ended() {
+            self.stop_source();
+            self.remote.status = format!("Disconnected: {why}");
+            self.note = self.remote.status.clone();
+            return;
+        }
+        let Some(AnyEngine::Remote(e)) = &self.engine else {
+            return;
+        };
+        for (id, why) in e.take_gone() {
+            self.vfos.retain(|v| v.id != id);
+            self.statuses.remove(&id);
+            self.note = format!("Server: {why}");
+        }
+        for id in e.take_camp_updates() {
+            if let (Some(s), Some(v)) = (
+                e.vfo_settings(id),
+                self.vfos.iter_mut().find(|v| v.id == id),
+            ) {
+                v.settings = s;
+            }
+        }
+    }
+
+    /// The remote window and what it asks for.
+    fn remote_window(&mut self, ctx: &egui::Context) {
+        let actions = {
+            let engine = self.engine.as_ref().and_then(|e| e.remote());
+            self.remote.show(ctx, engine)
+        };
+        for a in actions {
+            match a {
+                remote_panel::RemoteAction::StopLocal => self.stop_source(),
+                remote_panel::RemoteAction::Camp(server_id) => {
+                    if let Some(e) = self.engine.as_ref().and_then(|e| e.remote()) {
+                        let id = e.camp(server_id);
+                        if let Some(s) = e.vfo_settings(id) {
+                            self.vfos.push(UiVfo { id, settings: s });
+                            self.selected = Some(id);
+                        }
+                    }
+                }
+            }
+        }
+        decoder_filter::set(self.engine.as_ref().is_some_and(|e| e.remote().is_some()));
     }
 
     /// Open the network stream with the panel's settings.
@@ -1395,6 +1585,9 @@ impl App {
         }
         self.net_running = false;
         self.net_control = None;
+        self.remote.running = false;
+        self.remote.control = None;
+        self.remote.cancel_connect();
         #[cfg(feature = "hackrf")]
         {
             self.live = None;
@@ -2088,6 +2281,9 @@ impl App {
         if self.rtl_running {
             return self.rtl_control.is_some();
         }
+        if self.remote.running {
+            return !self.remote.is_shared();
+        }
         if self.net_running {
             return self.net_control.as_ref().is_some_and(|c| c.is_rtl_tcp());
         }
@@ -2106,6 +2302,11 @@ impl App {
     fn set_rf_center(&mut self, rf: f64) {
         // The readout shows the trimmed RF; the tuning is without the trim.
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
+        if self.remote.selected && self.path.is_none() {
+            self.retune_remote((rf - self.remote.lo_hz).max(0.0));
+            self.rf_center_mhz = rf / 1e6;
+            return;
+        }
         if self.net_selected && self.path.is_none() {
             let if_hz = (rf - self.net_lo_hz).max(0.0);
             self.net_settings.center_hz = if_hz.round();
@@ -2272,11 +2473,13 @@ impl App {
         #[allow(unused_mut)]
         let mut lo = if self.net_selected {
             self.net_lo_hz
+        } else if self.remote.selected {
+            self.remote.lo_hz
         } else {
             0.0
         };
         #[cfg(feature = "hackrf")]
-        if !self.net_selected {
+        if !self.net_selected && !self.remote.selected {
             lo = self.radio.lnb_lo_mhz * 1e6;
         }
         #[cfg(all(windows, feature = "rtl"))]
@@ -2387,6 +2590,10 @@ impl App {
         &mut self,
         frequency: f64,
     ) -> Option<(Box<dyn decsat_io::IqSource>, Box<dyn FnMut(f64) + Send>)> {
+        if self.remote.selected {
+            self.note = "Remote server: the wideband sweep needs a local radio".into();
+            return None;
+        }
         if self.net_selected {
             self.note = "Network IQ: the wideband sweep needs a radio DecSAT tunes".into();
             return None;
@@ -2503,6 +2710,9 @@ impl App {
     }
     fn restart_selected_overview(&mut self, was_running: bool) {
         if !was_running {
+            return;
+        }
+        if self.remote.selected {
             return;
         }
         if self.net_selected {
@@ -2993,6 +3203,8 @@ impl eframe::App for App {
         #[cfg(all(windows, feature = "rtl"))]
         self.rtl_panel(ui.ctx());
         self.net_panel(ui.ctx());
+        self.remote_window(ui.ctx());
+        self.tick_remote();
         self.streamreader.show(ui);
         egui::Panel::top("freqbar").show(ui, |ui| self.freq_row(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));

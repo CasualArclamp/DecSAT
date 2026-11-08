@@ -64,7 +64,7 @@ pub fn bb_scramble(frame: &mut [u8]) {
 }
 
 /// The TS/GS field of MATYPE-1 (EN 302 307-1 Table 3, EN 302 307-2 Table 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StreamFormat {
     /// 00: generic packetized.
     GenericPacketized,
@@ -160,7 +160,7 @@ impl RollOffReader {
 }
 
 /// A parsed BBHEADER (§5.1.6, Figure 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BbHeader {
     pub format: StreamFormat,
     /// SIS (true) or MIS.

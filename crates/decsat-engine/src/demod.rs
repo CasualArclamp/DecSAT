@@ -182,7 +182,7 @@ impl Known {
 }
 
 /// Lock state, for display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LockState {
     /// Looking for a PLHEADER.
     Searching,

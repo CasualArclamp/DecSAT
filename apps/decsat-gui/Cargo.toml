@@ -20,12 +20,12 @@ path = "src/main.rs"
 # against), so it is on by default too; it rides on the live-radio UI that
 # the hackrf feature brings.
 default = ["hackrf", "fobos", "airspy", "uhd", "pluto", "rtl"]
-hackrf = ["decsat-io/hackrf"]
-fobos = ["hackrf", "decsat-io/fobos"]
+hackrf = ["decsat-io/hackrf", "decsat-remote/hackrf"]
+fobos = ["hackrf", "decsat-io/fobos", "decsat-remote/fobos"]
 # The Airspy driver is pure Rust (libairspy-rs on nusb), like the HackRF's.
-airspy = ["hackrf", "decsat-io/airspy"]
+airspy = ["hackrf", "decsat-io/airspy", "decsat-remote/airspy"]
 uhd = ["decsat-io/uhd"]
-pluto = ["decsat-io/pluto"]
+pluto = ["decsat-io/pluto", "decsat-remote/pluto"]
 rtl = ["decsat-io/rtl"]
 
 [dependencies]
@@ -35,6 +35,7 @@ decsat-ip = { path = "../../crates/decsat-ip" }
 decsat-ts = { path = "../../crates/decsat-ts" }
 decsat-io = { path = "../../crates/decsat-io" }
 decsat-engine = { path = "../../crates/decsat-engine" }
+decsat-remote = { path = "../../crates/decsat-remote" }
 decsat-mod = { path = "../../crates/decsat-mod" }
 decsat-audio = { path = "../../crates/decsat-audio" }
 decsat-video = { path = "../../crates/decsat-video" }
