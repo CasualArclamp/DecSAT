@@ -769,6 +769,7 @@ dependencies = [
  "anyhow",
  "decsat-audio",
  "decsat-core",
+ "decsat-dsp",
  "decsat-engine",
  "decsat-gse",
  "decsat-io",

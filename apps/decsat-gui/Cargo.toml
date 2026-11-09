@@ -32,6 +32,7 @@ rtl = ["decsat-io/rtl"]
 
 [dependencies]
 decsat-core = { path = "../../crates/decsat-core" }
+decsat-dsp = { path = "../../crates/decsat-dsp" }
 decsat-gse = { path = "../../crates/decsat-gse" }
 decsat-ip = { path = "../../crates/decsat-ip" }
 decsat-ts = { path = "../../crates/decsat-ts" }
