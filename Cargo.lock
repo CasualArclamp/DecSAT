@@ -904,6 +904,7 @@ dependencies = [
  "decsat-mod",
  "decsat-ts",
  "decsat-video",
+ "decsat-xaac-sys",
  "rustfft",
  "windows-sys 0.61.2",
 ]

@@ -22,6 +22,8 @@ decsat-io = { path = "../decsat-io" }
 decsat-mod = { path = "../decsat-mod" }
 decsat-ts = { path = "../decsat-ts" }
 decsat-video = { path = "../decsat-video" }
+# libxaac's encoder, for HE-AAC (crate::he_aac).
+decsat-xaac-sys = { path = "../decsat-xaac-sys", features = ["encoder"] }
 rustfft.workspace = true
 
 [target.'cfg(windows)'.dependencies]

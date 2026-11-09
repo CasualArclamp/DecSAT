@@ -27,6 +27,37 @@ fn sources(root: &Path, list: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The encoder half (`encoder/`, `encoder/drc_src/`) with the shim, after DecDRM's
+/// `decdrm-xaac-sys`, unpatched. Its three `common` files come from the decoder's library.
+fn build_encoder(root: &Path, manifest: &Path) {
+    println!("cargo:rerun-if-changed=csrc");
+    let mut files = Vec::new();
+    for dir in ["encoder", "encoder/drc_src"] {
+        println!("cargo:rerun-if-changed={}", root.join(dir).display());
+        let mut c: Vec<PathBuf> = fs::read_dir(root.join(dir))
+            .unwrap_or_else(|e| panic!("{dir}: {e}"))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "c"))
+            .collect();
+        c.sort();
+        files.extend(c);
+    }
+    assert!(files.len() > 100, "libxaac's encoder sources look wrong");
+    let mut b = cc::Build::new();
+    b.files(&files)
+        .file(manifest.join("csrc/decsat_xaac_shim.c"))
+        .include(root.join("encoder"))
+        .include(root.join("encoder/drc_src"))
+        .include(root.join("common"))
+        .define("LOUDNESS_LEVELING_SUPPORT", None)
+        .opt_level(3)
+        .warnings(false);
+    if !b.get_compiler().is_like_msvc() {
+        b.flag("-fwrapv");
+    }
+    b.compile("xaacenc");
+}
+
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../../third_party/libxaac");
@@ -52,6 +83,12 @@ fn main() {
         Ok("arm") => "decoder/armv7/libxaacdec_armv7.cmake",
         _ => "decoder/x86/libxaacdec_x86.cmake",
     };
+
+    // Before the decoder, whose `common` files it also needs: a Unix linker reads static
+    // libraries in order.
+    if env::var_os("CARGO_FEATURE_ENCODER").is_some() {
+        build_encoder(&root, &manifest);
+    }
 
     let mut files = Vec::new();
     for list in [

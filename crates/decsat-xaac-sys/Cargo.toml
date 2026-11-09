@@ -11,6 +11,10 @@ rust-version.workspace = true
 links = "xaacdec"
 build = "build.rs"
 
+[features]
+# The HE-AAC encoder too (the transmitter); the receiver needs only the decoder.
+encoder = []
+
 [dependencies]
 
 [build-dependencies]

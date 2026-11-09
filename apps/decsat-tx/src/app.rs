@@ -1093,7 +1093,7 @@ impl App {
                     egui::ComboBox::from_id_salt("audio")
                         .selected_text(self.audio.label())
                         .show_ui(ui, |ui| {
-                            for a in [AudioCodec::Aac, AudioCodec::Mp2, AudioCodec::None] {
+                            for a in AudioCodec::ALL {
                                 ui.selectable_value(&mut self.audio, a, a.label());
                             }
                         });
