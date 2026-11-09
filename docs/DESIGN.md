@@ -357,7 +357,11 @@ docs/ DESIGN.md, reference/ (git-ignored), samples/ (git-ignored), exe/, scripts
   Matroska (raw RGBA 960×540 letterboxed by DAR, f32 stereo 48 kHz) with
   per-block timestamps; audio goes to a `decsat_audio` PCM player and the
   pictures follow its clock (the wall clock without sound). ffmpeg that
-  stops is restarted (a stream still scrambled at first).
+  stops is restarted (a stream still scrambled at first). Pictures and
+  sound run in separate ffmpegs on the same `-copyts` clock: in one, the
+  scheduler holds pictures back to stay level with the sound, and sound PES
+  of 0.7–0.9 s (narrow QO-100 carriers) left its output falling ever further
+  behind the stream (underruns, dropped pictures), whatever the codec.
 
 ## 5. FEC — the heavy part
 
