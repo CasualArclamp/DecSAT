@@ -6252,3 +6252,14 @@ Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
 - The bursts between frames (see DESIGN §3e) are probably AO-40 FEC copies
   of the same text; not decoded, and not confirmed.
 
+## qo100-beacon: dials, satellite view, squarer look (2026-11-10)
+
+- Telemetry as ten dials (V1 to V9, temperature) with a green band: within
+  0.2 V of the 2019 values, the only reference; -10 to 65 C. AMSAT has
+  published neither the rails nor their limits, so the bands are a guess.
+- A small 3-D satellite with its wings turned to the sun. Computed from UTC
+  (Astronomical Almanac low-precision sun, 25.9 E); the beacon sends no
+  attitude.
+- The constellation is DecSAT's heat map. Square corners, neutral greys,
+  monospace numbers.
+- Dials seen moving on synthesised frames only.

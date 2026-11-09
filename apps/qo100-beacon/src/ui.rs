@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
 use decsat_modem::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
@@ -16,17 +16,28 @@ use eframe::egui::{
 };
 
 use crate::Options;
+use crate::gauges::{Dial, dial};
+use crate::heatmap;
+use crate::sat;
 use crate::source::{self, COLUMNS, LogLine, ROWS, Running, SPAN_HZ};
 
-const BG: Color32 = Color32::from_rgb(13, 17, 23);
-const PANEL: Color32 = Color32::from_rgb(22, 27, 34);
-const EDGE: Color32 = Color32::from_rgb(48, 54, 61);
-const TEXT: Color32 = Color32::from_rgb(230, 237, 243);
-const MUTED: Color32 = Color32::from_rgb(139, 148, 158);
-const ACCENT: Color32 = Color32::from_rgb(88, 166, 255);
-const GOOD: Color32 = Color32::from_rgb(63, 185, 80);
-const WARN: Color32 = Color32::from_rgb(210, 153, 34);
-const BAD: Color32 = Color32::from_rgb(248, 81, 73);
+pub(crate) const BG: Color32 = Color32::from_rgb(22, 23, 25);
+pub(crate) const PANEL: Color32 = Color32::from_rgb(30, 32, 35);
+pub(crate) const EDGE: Color32 = Color32::from_rgb(58, 61, 66);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(222, 224, 227);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(140, 144, 150);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(77, 148, 222);
+pub(crate) const GOOD: Color32 = Color32::from_rgb(72, 176, 96);
+pub(crate) const WARN: Color32 = Color32::from_rgb(214, 160, 48);
+pub(crate) const BAD: Color32 = Color32::from_rgb(220, 80, 72);
+
+/// The 2019 beacon's voltages (EA4GPZ's reception), the only reference
+/// there is: a dial is green within [`GOOD_V`] of its one. Which rail each
+/// is has not been published.
+const REFERENCE_V: [f32; 9] = [1.0, 1.8, 1.0, 1.0, 1.8, 1.5, 1.3, 0.0, 0.5];
+const GOOD_V: f32 = 0.2;
+/// The temperature taken as good, degrees C (2019's was 56).
+const GOOD_TEMP: (f32, f32) = (-10.0, 65.0);
 
 pub struct App {
     opts: Options,
@@ -37,6 +48,7 @@ pub struct App {
     /// The block shown; `None` follows the latest.
     picked: Option<char>,
     waterfall: Option<TextureHandle>,
+    heat: heatmap::Grid,
     rows_drawn: u64,
     started: Instant,
     shot_sent: bool,
@@ -62,6 +74,7 @@ impl App {
             error: None,
             picked: None,
             waterfall: None,
+            heat: heatmap::Grid::default(),
             rows_drawn: 0,
             started: Instant::now(),
             shot_sent: false,
@@ -188,7 +201,7 @@ impl eframe::App for App {
                 let rest = ui.available_size();
                 let left_w = (rest.x * 0.52).clamp(420.0, 640.0);
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     // Rust note: a child `Ui` inherits its parent's layout, so
                     // the columns have to ask for top-to-bottom themselves.
                     let down = Layout::top_down(Align::Min);
@@ -220,12 +233,12 @@ fn card() -> Frame {
     Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0, EDGE))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::ZERO)
+        .inner_margin(Margin::same(10))
 }
 
 fn caption(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.5).color(MUTED).strong());
+    ui.label(RichText::new(text).size(11.0).color(MUTED));
 }
 
 /// The state of the receiver, for the pill and the band.
@@ -244,7 +257,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("QO-100 Beacon")
-                    .size(20.0)
+                    .size(16.0)
                     .strong()
                     .color(TEXT),
             );
@@ -308,48 +321,73 @@ impl App {
     }
 
     fn left(&mut self, ui: &mut Ui, sn: Option<&Snapshot>, width: f32) {
+        let inner = width - 22.0;
+        let view = sn.map(|s| &s.view);
         card().show(ui, |ui| {
-            ui.set_width(width - 26.0);
+            ui.set_width(inner);
             ui.horizontal(|ui| {
                 caption(ui, "AUDIO SPECTRUM");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some(s) = sn {
-                        ui.label(RichText::new(&s.label).size(11.5).color(MUTED));
+                        ui.label(RichText::new(&s.label).size(11.0).color(MUTED));
                     }
                 });
             });
             ui.add_space(4.0);
-            self.waterfall_view(ui, sn, width - 26.0);
+            self.waterfall_view(ui, sn, inner);
         });
-        ui.add_space(10.0);
+        ui.add_space(8.0);
         ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             card().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(164.0);
-                    ui.set_height(186.0);
+                    ui.set_width(150.0);
+                    ui.set_height(172.0);
                     caption(ui, "CONSTELLATION");
                     ui.add_space(6.0);
-                    constellation(ui, sn.map(|s| s.scatter.as_slice()).unwrap_or(&[]));
+                    let points = sn.map(|s| s.scatter.as_slice()).unwrap_or(&[]);
+                    self.heat.show(ui, points, 150.0);
                 });
             });
             card().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width((width - 26.0 - 164.0 - 38.0).max(120.0));
-                    ui.set_height(186.0);
-                    caption(ui, "HOUSEKEEPING");
+                    ui.set_width((inner - 180.0).max(220.0));
+                    ui.set_height(172.0);
+                    ui.horizontal(|ui| {
+                        caption(ui, "SATELLITE");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let note = "wings from the time, not telemetry";
+                            ui.label(RichText::new(note).size(11.0).color(MUTED));
+                        });
+                    });
                     ui.add_space(6.0);
-                    housekeeping(ui, sn.map(|s| &s.view));
+                    satellite(ui, view, self.started.elapsed().as_secs_f32());
                 });
+            });
+        });
+        ui.add_space(8.0);
+        card().show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(inner);
+                let telemetry = view.and_then(|v| v.telemetry.as_ref());
+                ui.horizontal(|ui| {
+                    caption(ui, "TELEMETRY");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(telemetry_note(view)).size(11.0).color(MUTED));
+                    });
+                });
+                ui.add_space(4.0);
+                dials(ui, telemetry.map(|(_, t)| t), inner);
             });
         });
     }
 
     fn waterfall_view(&mut self, ui: &mut Ui, sn: Option<&Snapshot>, width: f32) {
-        let height = (ui.available_height() - 260.0).clamp(120.0, 300.0);
+        let height = (ui.available_height() - 474.0).clamp(80.0, 320.0);
         let (rect, _) = ui.allocate_exact_size(vec2(width, height + 18.0), Sense::hover());
         let painter = ui.painter_at(rect);
         let area = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 18.0));
-        painter.rect_filled(area, CornerRadius::same(4), Color32::BLACK);
+        painter.rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
         if let Some(t) = &self.waterfall
             && sn.is_some()
         {
@@ -476,7 +514,7 @@ fn block_text(ui: &mut Ui, f: &P3Frame) {
     ui.add_space(4.0);
     Frame::new()
         .fill(BG)
-        .corner_radius(CornerRadius::same(4))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -591,7 +629,7 @@ fn stat(ui: &mut Ui, w: f32, title: &str, value: String, colour: Color32, detail
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 caption(ui, title);
-                ui.label(RichText::new(value).size(19.0).strong().color(colour));
+                ui.label(RichText::new(value).size(17.0).monospace().color(colour));
                 ui.add(egui::Label::new(RichText::new(detail).size(11.0).color(MUTED)).truncate());
             });
         });
@@ -611,7 +649,7 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
                 let (rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(rect, CornerRadius::same(3), BG);
+                p.rect_filled(rect, CornerRadius::ZERO, BG);
                 let mut fill = rect;
                 fill.set_width(rect.width() * frac);
                 let colour = if db > -6.0 {
@@ -621,11 +659,11 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
                 } else {
                     GOOD
                 };
-                p.rect_filled(fill, CornerRadius::same(3), colour);
+                p.rect_filled(fill, CornerRadius::ZERO, colour);
                 ui.label(
                     RichText::new(format!("{db:.0} dBFS"))
                         .size(13.0)
-                        .strong()
+                        .monospace()
                         .color(TEXT),
                 );
                 let detail = match sn {
@@ -642,116 +680,130 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
         });
 }
 
-fn constellation(ui: &mut Ui, points: &[Iq]) {
-    let side = 150.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(4), BG);
-    let c = rect.center();
-    let axis = Stroke::new(1.0, EDGE);
-    p.hline(rect.x_range(), c.y, axis);
-    p.vline(c.x, rect.y_range(), axis);
-    // Bits are scaled to a mean of 1: both points land inside ±2.
-    let scale = side / 4.0;
-    for z in points {
-        let at = pos2(
-            c.x + z.re.clamp(-2.0, 2.0) * scale,
-            c.y - z.im.clamp(-2.0, 2.0) * scale,
+/// What the telemetry card's corner says.
+fn telemetry_note(v: Option<&P3View>) -> String {
+    if let Some((block, _)) = v.and_then(|v| v.telemetry.as_ref()) {
+        return format!("block {block} · green: within {GOOD_V} V of the 2019 values");
+    }
+    let blank_k = v
+        .and_then(|v| v.blocks.get(&'K'))
+        .is_some_and(|f| f.crc_ok && f.lines().iter().skip(1).all(String::is_empty));
+    if blank_k {
+        "not being sent: the K block came through blank".into()
+    } else {
+        "none received yet".into()
+    }
+}
+
+/// Nine voltage dials and the temperature, five to a row.
+fn dials(ui: &mut Ui, t: Option<&Telemetry>, width: f32) {
+    let cell = vec2((width / 5.0).floor(), 88.0);
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    let voltage = |ui: &mut Ui, i: usize| {
+        let reference = REFERENCE_V[i];
+        dial(
+            ui,
+            cell,
+            &Dial {
+                label: &format!("V{}", i + 1),
+                unit: "V",
+                value: t.and_then(|t| t.voltages.get(i).copied()),
+                min: 0.0,
+                max: 3.0,
+                good: Some(((reference - GOOD_V).max(0.0), reference + GOOD_V)),
+                decimals: 1,
+            },
         );
-        p.circle_filled(at, 1.4, Color32::from_rgba_unmultiplied(88, 166, 255, 150));
-    }
+    };
+    ui.horizontal(|ui| (0..5).for_each(|i| voltage(ui, i)));
+    ui.horizontal(|ui| {
+        (5..9).for_each(|i| voltage(ui, i));
+        dial(
+            ui,
+            cell,
+            &Dial {
+                label: "TEMP",
+                unit: "C",
+                value: t.and_then(|t| t.temperature_c),
+                min: -20.0,
+                max: 80.0,
+                good: Some(GOOD_TEMP),
+                decimals: 0,
+            },
+        );
+    });
 }
 
-fn housekeeping(ui: &mut Ui, v: Option<&P3View>) {
-    match v.and_then(|v| v.telemetry.as_ref().map(|(b, t)| (*b, t))) {
-        Some((block, t)) => telemetry(ui, block, t),
-        None => {
-            let blank_k = v
-                .and_then(|v| v.blocks.get(&'K'))
-                .is_some_and(|f| f.crc_ok && f.lines().iter().skip(1).all(String::is_empty));
-            let text = if blank_k {
-                "The satellite is not sending any right now: its K block, where \
-                 voltages and temperature have appeared, came through blank."
-            } else {
-                "None received yet. Voltages, temperature and uptime appear here \
-                 if the beacon sends them."
-            };
-            ui.label(RichText::new(text).size(12.5).color(MUTED));
-        }
-    }
-}
-
-fn telemetry(ui: &mut Ui, block: char, t: &Telemetry) {
-    egui::Grid::new("housekeeping")
-        .num_columns(2)
-        .spacing([14.0, 3.0])
-        .show(ui, |ui| {
-            let row = |ui: &mut Ui, name: &str, value: String| {
-                ui.label(RichText::new(name).size(12.0).color(MUTED));
-                ui.label(RichText::new(value).size(12.5).color(TEXT));
-                ui.end_row();
-            };
-            if let Some(u) = t.uptime_text() {
-                row(ui, "Uptime", u);
-            }
-            if let Some(c) = t.temperature_c {
-                row(ui, "Temperature", format!("{c:.0} °C"));
-            }
-            if let Some(c) = t.commands {
-                row(ui, "Commands", c.to_string());
-            }
-            if t.leila_requests.is_some() || t.leila_active.is_some() {
-                row(
-                    ui,
-                    "LEILA",
-                    format!(
-                        "{} req · {} active",
-                        t.leila_requests.unwrap_or(0),
-                        t.leila_active.unwrap_or(0)
-                    ),
-                );
-            }
-            if !t.counters.is_empty() {
-                let list = t
-                    .counters
-                    .iter()
-                    .map(|(n, v)| format!("{n} {v}"))
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                row(ui, "Counters", list);
-            }
-            row(ui, "From block", block.to_string());
+/// The satellite with its wings to the sun, and the values that are not
+/// dials.
+fn satellite(ui: &mut Ui, v: Option<&P3View>, t: f32) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let sun = sat::sun_at(now);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(180.0, 150.0), Sense::hover());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, CornerRadius::ZERO, BG);
+        sat::draw(&p, rect, &sun, t, TEXT, MUTED);
+        ui.vertical(|ui| {
+            egui::Grid::new("satellite")
+                .num_columns(2)
+                .spacing([10.0, 2.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut Ui, name: &str, value: String| {
+                        ui.label(RichText::new(name).size(11.5).color(MUTED));
+                        ui.label(RichText::new(value).size(12.0).monospace().color(TEXT));
+                        ui.end_row();
+                    };
+                    row(ui, "Wing angle", format!("{:.0}°", sun.wing_deg));
+                    row(
+                        ui,
+                        "Sun off wing",
+                        format!("{:.1}°", sun.off_normal_deg.abs()),
+                    );
+                    let light = if sun.eclipse {
+                        "eclipse".to_string()
+                    } else {
+                        format!("{:.0} %", 100.0 * sun.off_normal_deg.to_radians().cos())
+                    };
+                    row(ui, "Sunlight", light);
+                    if let Some((_, t)) = v.and_then(|v| v.telemetry.as_ref()) {
+                        if let Some(u) = t.uptime_text() {
+                            row(ui, "Uptime", u);
+                        }
+                        if let Some(c) = t.commands {
+                            row(ui, "Commands", c.to_string());
+                        }
+                        if t.leila_requests.is_some() || t.leila_active.is_some() {
+                            row(
+                                ui,
+                                "LEILA",
+                                format!(
+                                    "{} req, {} act",
+                                    t.leila_requests.unwrap_or(0),
+                                    t.leila_active.unwrap_or(0)
+                                ),
+                            );
+                        }
+                        if !t.counters.is_empty() {
+                            let set: Vec<String> = t
+                                .counters
+                                .iter()
+                                .filter(|(_, n)| *n != 0)
+                                .map(|(name, n)| format!("{name} {n}"))
+                                .collect();
+                            let shown = if set.is_empty() {
+                                "all 0".to_string()
+                            } else {
+                                set.join(" ")
+                            };
+                            row(ui, "Counters", shown);
+                        }
+                    }
+                });
         });
-    if !t.voltages.is_empty() {
-        ui.add_space(6.0);
-        voltages(ui, &t.voltages);
-    }
-}
-
-/// One bar per voltage; AMSAT has not said which rail each is.
-fn voltages(ui: &mut Ui, volts: &[f32]) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 52.0), Sense::hover());
-    let p = ui.painter_at(rect);
-    let n = volts.len() as f32;
-    let full = volts.iter().fold(2.0f32, |m, v| m.max(*v));
-    let slot = rect.width() / n;
-    for (i, v) in volts.iter().enumerate() {
-        let x = rect.min.x + slot * i as f32;
-        let bar_h = (v / full).clamp(0.0, 1.0) * 30.0;
-        let bar = Rect::from_min_max(
-            pos2(x + 3.0, rect.min.y + 34.0 - bar_h),
-            pos2(x + slot - 3.0, rect.min.y + 34.0),
-        );
-        p.rect_filled(bar, CornerRadius::same(2), ACCENT);
-        p.text(
-            pos2(x + slot / 2.0, rect.min.y + 44.0),
-            Align2::CENTER_CENTER,
-            format!("{v:.1}"),
-            FontId::proportional(10.5),
-            TEXT,
-        );
-    }
+    });
 }
 
 /// The waterfall as an image, newest row at the top: levels scaled to each

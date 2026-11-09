@@ -6,6 +6,9 @@
 //! the beacon anywhere from about 300 Hz to 3.7 kHz; the frames are found
 //! and shown by [`decsat_modem::p3rx`], as in DecSAT's own decoder.
 
+mod gauges;
+mod heatmap;
+mod sat;
 mod source;
 mod ui;
 
@@ -72,7 +75,7 @@ fn main() -> eframe::Result {
     let (w, h) = opts.size.unwrap_or((1240, 800));
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([w as f32, h as f32])
-        .with_min_inner_size([1000.0, 640.0])
+        .with_min_inner_size([1000.0, 780.0])
         .with_title("QO-100 Beacon");
     let options = eframe::NativeOptions {
         viewport,
@@ -83,6 +86,22 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_theme(egui::Theme::Dark);
+            // Square, plain controls.
+            cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
+                let r = egui::CornerRadius::same(1);
+                let w = &mut s.visuals.widgets;
+                for v in [
+                    &mut w.noninteractive,
+                    &mut w.inactive,
+                    &mut w.hovered,
+                    &mut w.active,
+                    &mut w.open,
+                ] {
+                    v.corner_radius = r;
+                }
+                s.visuals.window_corner_radius = r;
+                s.visuals.menu_corner_radius = r;
+            });
             Ok(Box::new(ui::App::new(opts)))
         }),
     )
