@@ -414,8 +414,13 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
   Encoder defaults follow QO-100 captures from PlutoDVB2 (November 2026):
   H.265 reaches 720p30 from about 430 kbit/s of video, a key frame every
   5 s (AV1 2 s), AAC 48k stereo, PAT/PMT 400 ms, PCR 20 ms, 15 % overhead
-  so the multiplex keeps some nulls. MODCODs stay as cited in `qo100.rs`:
-  a TS cannot show what those captures used.
+  so the multiplex keeps some nulls. The 333 and 500 kS presets are what
+  was received on the air (QPSK 3/5, short frames, no pilots; `qo100.rs`).
+  While transmitting the MODCOD, frame size, pilots and frequency can change:
+  the modulator takes the new format at the next PLFRAME with no break in
+  the carrier, an encoder restarts at the new TS rate (nulls meanwhile), and
+  a retune stays within 10 MHz of where it was keyed and, on QO-100, on the
+  transponder and off the beacon.
   QO-100 presets from BATC's 2021 bandplan V3 and its conference page, each
   value cited in `qo100.rs`; the bandplan's limits checked. **AV1:** neither
   ffmpeg's TS muxer nor its demuxer (9.0) knows AOM's "Carriage of AV1 in

@@ -349,6 +349,9 @@ pub struct TsFeed {
     input: Box<dyn TsInput>,
     /// The channel's TS rate, bit/s: its clock for pacing the input.
     ts_rate: f64,
+    /// The input's clock, seconds: what the packets sent so far took. Kept
+    /// as a sum so a change of rate does not move the time already gone.
+    clock: f64,
     carry: Vec<u8>,
     prev_crc: u8,
     roll_off: RollOff,
@@ -366,6 +369,7 @@ impl TsFeed {
         TsFeed {
             input,
             ts_rate,
+            clock: 0.0,
             carry: Vec::new(),
             prev_crc: 0,
             roll_off: RollOff::R35,
@@ -378,8 +382,8 @@ impl TsFeed {
 
     fn packet(&mut self) -> [u8; TS_LEN] {
         let c = &self.counters;
-        let sent = c.packets.load(Ordering::Relaxed) + c.nulls.load(Ordering::Relaxed);
-        let now = (sent * (TS_LEN * 8) as u64) as f64 / self.ts_rate.max(1.0);
+        let now = self.clock;
+        self.clock += (TS_LEN * 8) as f64 / self.ts_rate.max(1.0);
         match self.input.next_packet(now) {
             Some(p) => {
                 c.packets.fetch_add(1, Ordering::Relaxed);
@@ -400,6 +404,10 @@ impl BbFrameSource for TsFeed {
 
     fn set_ccm(&mut self, ccm: bool) {
         self.ccm = ccm;
+    }
+
+    fn set_ts_rate(&mut self, ts_rate: f64) {
+        self.ts_rate = ts_rate;
     }
 
     fn next_frame(&mut self, bytes: usize) -> Vec<u8> {
@@ -570,10 +578,42 @@ pub fn modcod_by_name(s: &str) -> Option<u8> {
         .map(|(m, _)| m)
 }
 
+/// The frame format, changeable while the carrier runs: each PLFRAME's PLS
+/// code says what it is (EN 302 307-1 §5.5.2), and the symbol rate and the
+/// filter stay as they are, so the carrier does not break.
+#[derive(Debug)]
+pub struct LiveMode(std::sync::atomic::AtomicU32);
+
+impl LiveMode {
+    fn pack(modcod: u8, short: bool, pilots: bool) -> u32 {
+        u32::from(modcod) | u32::from(short) << 8 | u32::from(pilots) << 9
+    }
+
+    pub fn new(modcod: u8, short: bool, pilots: bool) -> Self {
+        LiveMode(std::sync::atomic::AtomicU32::new(Self::pack(
+            modcod, short, pilots,
+        )))
+    }
+
+    /// Takes effect from the next PLFRAME. One that carries no data is
+    /// ignored by the modulator.
+    pub fn set(&self, modcod: u8, short: bool, pilots: bool) {
+        self.0
+            .store(Self::pack(modcod, short, pilots), Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> (u8, bool, bool) {
+        let v = self.0.load(Ordering::Relaxed);
+        (v as u8, v & 1 << 8 != 0, v & 1 << 9 != 0)
+    }
+}
+
 /// The modulator: TS in, baseband samples at [`DatvConfig::sample_rate`] out,
 /// a PLFRAME at a time.
 pub struct DatvModulator {
     pub config: DatvConfig,
+    /// The frame format to send, from another thread: see [`LiveMode`].
+    pub live: Arc<LiveMode>,
     framer: PlFramer,
     shaper: Shaper,
     symbols: Vec<Iq>,
@@ -595,6 +635,11 @@ impl DatvModulator {
         DatvModulator {
             shaper: Shaper::new(config.sps(), config.roll_off.as_f64(), 16),
             config,
+            live: Arc::new(LiveMode::new(
+                config.modcod,
+                config.short_fecframe,
+                config.pilots,
+            )),
             framer,
             symbols: Vec::new(),
             counters,
@@ -603,8 +648,25 @@ impl DatvModulator {
         }
     }
 
+    /// Take up a change of frame format, between PLFRAMEs.
+    fn follow_live(&mut self) {
+        let (modcod, short_fecframe, pilots) = self.live.get();
+        let next = DatvConfig {
+            modcod,
+            short_fecframe,
+            pilots,
+            ..self.config
+        };
+        if next != self.config && next.carries_data() {
+            self.config = next;
+            self.framer
+                .set_ts_rate(next.ts_rate().expect("a MODCOD that carries data"));
+        }
+    }
+
     /// Append one PLFRAME's samples to `out` (unit average power).
     pub fn next_frame(&mut self, out: &mut Vec<Iq>) {
+        self.follow_live();
         self.symbols.clear();
         self.framer.build(self.config.spec(), &mut self.symbols);
         self.shaper.process(&self.symbols, out);
@@ -613,6 +675,7 @@ impl DatvModulator {
 
     /// The symbols alone, one PLFRAME's (for loopback tests).
     pub fn next_frame_symbols(&mut self, out: &mut Vec<Iq>) {
+        self.follow_live();
         self.framer.build(self.config.spec(), out);
         self.frames += 1;
     }
@@ -692,6 +755,52 @@ mod tests {
         assert!(got[sent.len()..].iter().all(|p| pid_of(p) == NULL_PID));
         assert!(got.len() > sent.len() + 100);
         assert_eq!(feed.counters.packets.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
+    fn the_format_changes_between_frames() {
+        let cfg = DatvConfig {
+            modcod: 5, // QPSK 3/5
+            ..DatvConfig::default()
+        };
+        let mut m = DatvModulator::new(cfg, Box::new(TsTest::new()));
+        let len = |m: &mut DatvModulator| {
+            let mut v = Vec::new();
+            m.next_frame_symbols(&mut v);
+            v.len()
+        };
+        // Normal QPSK with pilots, then short without.
+        assert_eq!(len(&mut m), 33_282);
+        m.live.set(5, true, false);
+        assert_eq!(len(&mut m), 8_190);
+        assert!(m.config.short_fecframe && !m.config.pilots);
+        // A code that carries no data is not taken up.
+        m.live.set(0, false, false);
+        assert_eq!(len(&mut m), 8_190);
+        assert_eq!(m.config.modcod, 5);
+    }
+
+    #[test]
+    fn a_new_rate_does_not_move_the_time_already_gone() {
+        struct Times(Arc<Mutex<Vec<f64>>>);
+        impl TsInput for Times {
+            fn next_packet(&mut self, now: f64) -> Option<[u8; TS_LEN]> {
+                self.0.lock().unwrap().push(now);
+                None
+            }
+            fn describe(&self) -> String {
+                "times".into()
+            }
+        }
+        let times = Arc::new(Mutex::new(Vec::new()));
+        // One packet a second, then two.
+        let mut f = TsFeed::new(Box::new(Times(times.clone())), (TS_LEN * 8) as f64);
+        f.packet();
+        f.packet();
+        f.set_ts_rate((TS_LEN * 16) as f64);
+        f.packet();
+        f.packet();
+        assert_eq!(*times.lock().unwrap(), [0.0, 1.0, 2.0, 2.5]);
     }
 
     #[test]

@@ -11,6 +11,8 @@
 //!   --preset N                                     (a QO-100 preset's index, default 0: the net)
 //!   --out PATH.cs8 | --null                        (default --null)
 //!   --seconds S                                    (default 10)
+//!   --retune-at S --retune-modcod N [--retune-short] [--retune-pilots]
+//!                                                  (change the MODCOD on the air)
 //! ```
 
 use std::path::PathBuf;
@@ -130,9 +132,19 @@ fn main() {
         std::process::exit(1);
     }
     let t1 = Instant::now();
+    let mut retune_at: Option<f64> = get("--retune-at").map(|v| v.parse().unwrap());
     let (mut ff_sum, mut app_sum, mut mod_sum, mut n) = (0.0, 0.0, 0.0, 0);
     loop {
         std::thread::sleep(Duration::from_millis(1000));
+        if retune_at.is_some_and(|at| t1.elapsed().as_secs_f64() >= at) {
+            retune_at = None;
+            let m: u8 = get("--retune-modcod")
+                .expect("--retune-modcod")
+                .parse()
+                .unwrap();
+            let r = s.set_mode(m, has("--retune-short"), has("--retune-pilots"));
+            println!("retune to {}: {r:?}", decsat_core::modcod_name(m));
+        }
         let st = s.status();
         let ff = st.ffmpeg.clone().unwrap_or_default();
         println!(

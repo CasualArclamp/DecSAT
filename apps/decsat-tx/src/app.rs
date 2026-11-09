@@ -70,6 +70,9 @@ impl SourceKind {
     }
 }
 
+/// A retune at most this often while the frequency is being dragged.
+const RETUNE_EVERY: Duration = Duration::from_millis(200);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputKind {
     Test,
@@ -131,6 +134,9 @@ pub struct App {
     // Drawing.
     cam_tex: Option<egui::TextureHandle>,
     cam_serial: u64,
+    /// Why the last change on the air was refused.
+    live_note: Option<String>,
+    last_retune: Instant,
     started: Instant,
     shot_sent: bool,
     focus_lost: Option<Instant>,
@@ -209,6 +215,8 @@ impl App {
             found: None,
             cam_tex: None,
             cam_serial: 0,
+            live_note: None,
+            last_retune: Instant::now(),
             started: Instant::now(),
             shot_sent: false,
             focus_lost: None,
@@ -846,12 +854,49 @@ impl App {
             if self.source.encodes() {
                 self.encoder_ui(ui);
             }
-            self.mode_ui(ui);
-            self.channel_ui(ui);
         })
         .response
         .on_disabled_hover_text("Stop first");
+        self.mode_ui(ui);
+        self.channel_ui(ui);
+        self.apply_live();
         self.radio_ui(ui);
+    }
+
+    /// Send what the form now says to a running session: the MODCOD at once,
+    /// the frequency at most every [`RETUNE_EVERY`] while it is being dragged.
+    fn apply_live(&mut self) {
+        if !self.busy() {
+            self.live_note = None;
+            return;
+        }
+        let d = self.session.config().datv;
+        if (self.modcod, self.short, self.pilots) != (d.modcod, d.short_fecframe, d.pilots) {
+            match self.session.set_mode(self.modcod, self.short, self.pilots) {
+                Ok(_) => {
+                    self.cam_serial = 0;
+                    self.live_note = None;
+                }
+                Err(e) => {
+                    (self.modcod, self.short, self.pilots) = (d.modcod, d.short_fecframe, d.pilots);
+                    self.live_note = Some(e);
+                }
+            }
+        }
+        let hz = self.freq_hz.round() as u64;
+        if let Some(now) = self.session.center_hz()
+            && hz != now
+            && self.last_retune.elapsed() >= RETUNE_EVERY
+        {
+            self.last_retune = Instant::now();
+            match self.session.set_center_hz(hz) {
+                Ok(()) => self.live_note = None,
+                Err(e) => {
+                    self.freq_hz = now as f64;
+                    self.live_note = Some(e);
+                }
+            }
+        }
     }
 
     fn source_ui(&mut self, ui: &mut Ui) {
@@ -1090,6 +1135,7 @@ impl App {
     }
 
     fn mode_ui(&mut self, ui: &mut Ui) {
+        let idle = !self.busy();
         Self::section(ui, "MODE");
         let presets = qo100::presets();
         egui::Grid::new("mode")
@@ -1101,28 +1147,32 @@ impl App {
                     .preset
                     .map(|i| format!("QO-100 · {}", presets[i].name))
                     .unwrap_or_else(|| "custom".into());
-                egui::ComboBox::from_id_salt("preset")
-                    .width(260.0)
-                    .selected_text(text)
-                    .show_ui(ui, |ui| {
-                        for (i, p) in presets.iter().enumerate() {
-                            let r = ui
-                                .selectable_label(
-                                    self.preset == Some(i),
-                                    format!("QO-100 · {}", p.name),
-                                )
-                                .on_hover_text(p.source);
-                            if r.clicked() {
-                                self.preset = Some(i);
-                                self.modcod = p.modcod;
-                                self.symbol_rate = p.symbol_rate;
-                                self.roll_off = p.roll_off;
-                                self.pilots = p.pilots;
-                                self.short = p.short_fecframe;
-                                self.freq_hz = p.uplinks_mhz[0] * 1e6;
+                ui.add_enabled_ui(idle, |ui| {
+                    egui::ComboBox::from_id_salt("preset")
+                        .width(260.0)
+                        .selected_text(text)
+                        .show_ui(ui, |ui| {
+                            for (i, p) in presets.iter().enumerate() {
+                                let r = ui
+                                    .selectable_label(
+                                        self.preset == Some(i),
+                                        format!("QO-100 · {}", p.name),
+                                    )
+                                    .on_hover_text(p.source);
+                                if r.clicked() {
+                                    self.preset = Some(i);
+                                    self.modcod = p.modcod;
+                                    self.symbol_rate = p.symbol_rate;
+                                    self.roll_off = p.roll_off;
+                                    self.pilots = p.pilots;
+                                    self.short = p.short_fecframe;
+                                    self.freq_hz = p.uplinks_mhz[0] * 1e6;
+                                }
                             }
-                        }
-                    });
+                        });
+                })
+                .response
+                .on_disabled_hover_text("Stop first: a preset changes the symbol rate");
                 ui.end_row();
                 let before = (
                     self.modcod,
@@ -1137,8 +1187,16 @@ impl App {
                         .selected_text(decsat_core::modcod_name(self.modcod))
                         .height(400.0)
                         .show_ui(ui, |ui| {
-                            for (m, name) in data_modcods() {
-                                ui.selectable_value(&mut self.modcod, m, name);
+                            // By standard, each in its own PLS order.
+                            let all = data_modcods();
+                            for (standard, s2x) in [("DVB-S2", false), ("DVB-S2X", true)] {
+                                if s2x {
+                                    ui.separator();
+                                }
+                                ui.label(RichText::new(standard).strong().color(AMBER));
+                                for (m, name) in all.iter().filter(|(m, _)| (*m >= 128) == s2x) {
+                                    ui.selectable_value(&mut self.modcod, *m, name);
+                                }
                             }
                         });
                     ui.add_enabled_ui(self.modcod <= 28, |ui| {
@@ -1148,33 +1206,37 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("Symbol rate");
-                ui.horizontal(|ui| {
-                    let mut ks = self.symbol_rate / 1e3;
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut ks)
-                                .range(25.0..=10_000.0)
-                                .speed(1.0)
-                                .suffix(" kS"),
-                        )
-                        .changed()
-                    {
-                        self.symbol_rate = (ks * 1e3).round();
-                    }
-                    ui.label("roll-off");
-                    egui::ComboBox::from_id_salt("rolloff")
-                        .width(60.0)
-                        .selected_text(format!("{:.2}", self.roll_off.as_f64()))
-                        .show_ui(ui, |ui| {
-                            for r in RollOff::ALL {
-                                ui.selectable_value(
-                                    &mut self.roll_off,
-                                    r,
-                                    format!("{:.2}", r.as_f64()),
-                                );
-                            }
-                        });
-                });
+                ui.add_enabled_ui(idle, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut ks = self.symbol_rate / 1e3;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut ks)
+                                    .range(25.0..=10_000.0)
+                                    .speed(1.0)
+                                    .suffix(" kS"),
+                            )
+                            .changed()
+                        {
+                            self.symbol_rate = (ks * 1e3).round();
+                        }
+                        ui.label("roll-off");
+                        egui::ComboBox::from_id_salt("rolloff")
+                            .width(60.0)
+                            .selected_text(format!("{:.2}", self.roll_off.as_f64()))
+                            .show_ui(ui, |ui| {
+                                for r in RollOff::ALL {
+                                    ui.selectable_value(
+                                        &mut self.roll_off,
+                                        r,
+                                        format!("{:.2}", r.as_f64()),
+                                    );
+                                }
+                            });
+                    })
+                })
+                .response
+                .on_disabled_hover_text("Stop first: the sample rate depends on it");
                 ui.end_row();
                 if before
                     != (
@@ -1200,6 +1262,16 @@ impl App {
                     _ => "no transport stream".into(),
                 });
                 ui.end_row();
+                if !idle && self.source.encodes() {
+                    ui.label("");
+                    ui.label(
+                        RichText::new(
+                            "A new TS rate restarts the encoder: a break of a second or two",
+                        )
+                        .weak(),
+                    );
+                    ui.end_row();
+                }
                 ui.label("Samples");
                 ui.label(
                     RichText::new(format!("{:.3} MS/s ({}×)", d.sample_rate() / 1e6, d.sps()))
@@ -1212,6 +1284,9 @@ impl App {
     fn channel_ui(&mut self, ui: &mut Ui) {
         Self::section(ui, "CHANNEL (uplink)");
         freq_display::show(ui, &mut self.freq_hz, 1e6, 6e9, 28.0);
+        if let Some(why) = &self.live_note {
+            ui.colored_label(AMBER, format!("Not changed: {why}."));
+        }
         let mhz = self.freq_hz / 1e6;
         if (qo100::UPLINK_MHZ.0..=qo100::UPLINK_MHZ.1).contains(&mhz) {
             ui.label(format!(

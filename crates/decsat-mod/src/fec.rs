@@ -19,6 +19,9 @@ pub trait BbFrameSource: Send {
     fn set_roll_off(&mut self, roll_off: RollOff);
     /// CCM (one MODCOD) or ACM/VCM, for MATYPE.
     fn set_ccm(&mut self, ccm: bool);
+    /// The channel's TS rate changed (a new MODCOD on the air), bit/s. Only
+    /// a source that paces its input by the channel needs it.
+    fn set_ts_rate(&mut self, _ts_rate: f64) {}
 }
 
 /// BCH and LDPC encoders, built on first use per code.

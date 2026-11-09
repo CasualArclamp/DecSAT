@@ -229,9 +229,9 @@ pub fn downlink_mhz(uplink_mhz: f64) -> f64 {
     uplink_mhz + DOWNLINK_OFFSET_MHZ
 }
 
-/// What is wrong, if anything, with sending `symbol_rate` at `uplink_mhz`
-/// on QO-100 by [V3]; `None` when it fits the bandplan.
-pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
+/// Why a carrier cannot go at `uplink_mhz` at all: off the transponder or on
+/// the beacon. A retune while transmitting is refused for these.
+pub fn refused(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
     let half = symbol_rate * (1.0 + roll_off.as_f64()) / 2e6;
     if uplink_mhz - half < UPLINK_MHZ.0 || uplink_mhz + half > UPLINK_MHZ.1 {
         return Some(format!(
@@ -245,6 +245,16 @@ pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<Str
     if (uplink_mhz - BEACON_UPLINK_MHZ).abs() < half + beacon_half {
         return Some("on the beacon".into());
     }
+    None
+}
+
+/// What is wrong, if anything, with sending `symbol_rate` at `uplink_mhz`
+/// on QO-100 by [V3]; `None` when it fits the bandplan.
+pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
+    if let Some(why) = refused(uplink_mhz, symbol_rate, roll_off) {
+        return Some(why);
+    }
+    let half = symbol_rate * (1.0 + roll_off.as_f64()) / 2e6;
     if symbol_rate > MAX_ROUTINE_SYMBOL_RATE {
         return Some("above 1500 kS, the bandplan's routine maximum".into());
     }

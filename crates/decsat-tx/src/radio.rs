@@ -103,6 +103,18 @@ impl Radio {
         }
     }
 
+    /// Retune while sending (a file or nothing has no frequency).
+    pub fn set_center(&self, hz: u64) -> Result<(), String> {
+        let _ = hz;
+        match self {
+            Radio::Virtual(_) => Ok(()),
+            #[cfg(feature = "hackrf")]
+            Radio::HackRf(h) => h.set_center(hz).map_err(|e| e.to_string()),
+            #[cfg(feature = "pluto")]
+            Radio::Pluto(p) => p.set_center(hz as f64).map_err(|e| e.to_string()),
+        }
+    }
+
     /// Blocks the Pluto's link was late with (the DAC sent gaps); 0 for the
     /// others.
     pub fn link_short(&self) -> u64 {
