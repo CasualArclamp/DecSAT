@@ -29,6 +29,7 @@ pub const USAGE: &str = "\
 usage: decsat-tx [options]
   --source camera[:NAME]|test|file:PATH|ts:PATH   what to send (default: as last time)
   --codec h264|h265|h266|av1|mpeg2                 the video codec
+  --audio aac|he-aac|opus|mp2|none                 the audio codec
   --preset N                                       a QO-100 preset (0 = the net)
   --sink null|iq:PATH.cs8                          a test output (never the radio)
   --start                                          prepare and start on that test output
@@ -43,6 +44,7 @@ usage: decsat-tx [options]
 pub struct Options {
     pub source: Option<String>,
     pub codec: Option<String>,
+    pub audio: Option<String>,
     pub preset: Option<usize>,
     /// `null` or `iq:PATH`: never the radio.
     pub sink: Option<String>,
@@ -63,6 +65,7 @@ impl Options {
             match a.as_str() {
                 "--source" => o.source = Some(val("--source")?),
                 "--codec" => o.codec = Some(val("--codec")?),
+                "--audio" => o.audio = Some(val("--audio")?),
                 "--preset" => {
                     o.preset = Some(val("--preset")?.parse().map_err(|_| "--preset N")?);
                 }

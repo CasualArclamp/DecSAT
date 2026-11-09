@@ -257,6 +257,9 @@ impl App {
         if let Some(c) = self.opts.codec.as_deref().and_then(VideoCodec::from_key) {
             self.codec = c;
         }
+        if let Some(a) = self.opts.audio.as_deref().and_then(AudioCodec::from_key) {
+            self.audio = a;
+        }
         if let Some(s) = self.opts.source.clone() {
             if let Some(rest) = s.strip_prefix("camera") {
                 self.source = SourceKind::Camera;
