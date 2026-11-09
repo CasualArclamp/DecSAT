@@ -14,14 +14,18 @@
 //!   pace. A live camera keeps real time by itself; a file is held back by
 //!   the pipe (the reader blocks when the ring is full). No `-re`: that
 //!   would be a second clock.
-//! - Video gets what the channel carries less the audio and about 12 % of
+//! - Video gets what the channel carries less the audio and about 15 % of
 //!   overhead (TS and PES headers, PSI, the CBR margin), and a picture size
 //!   to suit ([`picture_for`]); the rate control is constant bit rate with
-//!   a one-second buffer, a key frame every second (ETSI TR 101 290's usual
-//!   0.5–2 s; the AV1 mapping asks for one at least every 2 s).
+//!   a one-second buffer and a key frame every [`KEY_FRAME_SECS`] (2 s for
+//!   AV1, which its TS mapping asks for).
 //! - PIDs, PMT and service name as BATC asks for QO-100 (crate::qo100):
 //!   PMT 4095, video 256, audio 257, the PCR on the video, the service named
 //!   by the call sign.
+//! - The defaults follow what is on the air: QO-100 captures of November
+//!   2026 from PlutoDVB2 (0.5.15.2, 0.5.16.7) measured 720p30 H.265 at about
+//!   470 kbit/s, a key frame every 5 s, PAT/PMT every 400 ms, a PCR every
+//!   20 ms and 1–8 % null packets.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -220,7 +224,7 @@ pub struct EncodeSettings {
     pub codec: VideoCodec,
     pub engine: Engine,
     pub audio: AudioCodec,
-    /// Audio bit rate, bit/s (mono).
+    /// Audio bit rate, bit/s (channels by [`audio_channels`]).
     pub audio_bps: u32,
     /// The service's name: the call sign on QO-100.
     pub service_name: String,
@@ -237,7 +241,7 @@ impl Default for EncodeSettings {
             codec: VideoCodec::H265,
             engine: Engine::Cpu,
             audio: AudioCodec::Aac,
-            audio_bps: 32_000,
+            audio_bps: DEFAULT_AUDIO_BPS,
             service_name: "DecSAT".into(),
             overlay: false,
             picture: None,
@@ -267,22 +271,47 @@ pub fn mux_rate(ts_rate: f64) -> u64 {
     (ts_rate * 0.998).floor() as u64
 }
 
-/// The video's bit rate for a channel of `ts_rate` bit/s.
+/// The video's bit rate for a channel of `ts_rate` bit/s. The 15 % leaves
+/// null packets in the multiplex, as the captures on the air have (at 12 %
+/// a test pattern left 0.07 %).
 pub fn video_rate(ts_rate: f64, audio: AudioCodec, audio_bps: u32) -> u32 {
     let a = if audio == AudioCodec::None {
         0.0
     } else {
         f64::from(audio_bps) * 1.1
     };
-    ((ts_rate * 0.88 - a).max(16_000.0)) as u32
+    ((ts_rate * 0.85 - a).max(16_000.0)) as u32
+}
+
+/// Seconds between key frames (the captures on the air: 5 s). A receiver
+/// tuning in waits up to this for a picture; at these rates a key frame
+/// every second costs too much of the channel.
+pub const KEY_FRAME_SECS: u32 = 5;
+/// The most AV1 gets: its TS mapping asks for one at least every 2 s.
+pub const KEY_FRAME_SECS_AV1: u32 = 2;
+
+/// The default audio rate, bit/s (AAC-LC 48k stereo, as CT100RE sent).
+pub const DEFAULT_AUDIO_BPS: u32 = 48_000;
+
+/// The audio channels at `audio_bps`: stereo from 48 kbit/s, as the captures
+/// on the air; below that one channel gets the bits.
+pub fn audio_channels(audio_bps: u32) -> u32 {
+    if audio_bps >= 48_000 { 2 } else { 1 }
 }
 
 /// A picture that `video_bps` carries in `codec`: the largest of the usual
-/// sizes with at least ~0.08 bits a pixel (H.264's floor for a watchable
-/// talking head) after the codec's efficiency, 25 frames a second (15
-/// below 150 kbit/s).
+/// sizes with at least ~0.026 bits a pixel for H.264 after the codec's
+/// efficiency (0.0156 for H.265: 720p30 from about 430 kbit/s, as the
+/// captures on the air send at 470), 30 frames a second (15 below
+/// 150 kbit/s; VVC 25, the rate its encoder was measured at).
 pub fn picture_for(codec: VideoCodec, video_bps: u32) -> Picture {
-    let fps = if video_bps < 150_000 { 15 } else { 25 };
+    let fps = if video_bps < 150_000 {
+        15
+    } else if codec == VideoCodec::H266 {
+        25
+    } else {
+        30
+    };
     let sizes = [
         (1280, 720),
         (960, 540),
@@ -292,7 +321,7 @@ pub fn picture_for(codec: VideoCodec, video_bps: u32) -> Picture {
         (320, 180),
         (240, 136),
     ];
-    let bpp_needed = 0.08 * codec.efficiency();
+    let bpp_needed = 0.026 * codec.efficiency();
     let (width, height) = sizes
         .into_iter()
         .find(|&(w, h)| f64::from(video_bps) / f64::from(w * h * fps) >= bpp_needed)
@@ -422,7 +451,7 @@ fn video_options(codec: VideoCodec, engine: Engine, bps: u32, gop: u32) -> Vec<S
             // stream type, ffmpeg (≥ 7.1) knows VVC in TS (stream type 33h).
             a.extend(["-preset", "faster"].map(String::from));
             a.extend(["-b:v".into(), format!("{k}k")]);
-            a.extend(["-period".into(), "1".into()]);
+            a.extend(["-period".into(), KEY_FRAME_SECS.to_string()]);
         }
         (VideoCodec::Av1, Engine::Cpu) => {
             // Preset 12 is SVT-AV1's fastest (measured 24 % of a core at
@@ -612,7 +641,12 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
             a.extend([s("-map"), audio_in.to_string()]);
         }
     }
-    let gop = pic.fps;
+    let key_secs = if settings.codec == VideoCodec::Av1 {
+        KEY_FRAME_SECS_AV1
+    } else {
+        KEY_FRAME_SECS
+    };
+    let gop = pic.fps * key_secs;
     a.extend(video_options(
         settings.codec,
         settings.engine,
@@ -626,7 +660,12 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
             AudioCodec::Mp2 => a.extend(["-c:a", "mp2", "-b:a", &ab].map(String::from)),
             AudioCodec::None => {}
         }
-        a.extend(["-ac", "1", "-ar", "48000"].map(String::from));
+        a.extend([
+            s("-ac"),
+            audio_channels(settings.audio_bps).to_string(),
+            s("-ar"),
+            s("48000"),
+        ]);
     }
     let mux = mux_rate(ts_rate);
     a.extend([
@@ -643,9 +682,9 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
         s("-mpegts_flags"),
         s("resend_headers"),
         s("-pcr_period"),
-        s("40"),
+        s("20"),
         s("-pat_period"),
-        s("0.2"),
+        s("0.4"),
         s("-metadata"),
         format!("service_name={}", settings.service_name),
         s("-metadata"),
@@ -908,16 +947,49 @@ Error opening input file dummy."#;
 
     #[test]
     fn the_picture_follows_the_rate_and_the_codec() {
-        // QO-100's net, 333 kS QPSK 2/3: 430 kbit/s of TS.
+        // A channel of 430 kbit/s of TS.
         let v = video_rate(430_000.0, AudioCodec::Aac, 32_000);
-        assert!((340_000..=350_000).contains(&v), "{v}");
+        assert!((325_000..=335_000).contains(&v), "{v}");
         let h264 = picture_for(VideoCodec::H264, v);
         let h265 = picture_for(VideoCodec::H265, v);
         assert!(h265.width > h264.width, "{h264:?} {h265:?}");
+        assert_eq!((h265.width, h265.height, h265.fps), (960, 540, 30));
+        // What the captures on the air send: 720p30 at about 470 kbit/s.
+        let on_air = picture_for(VideoCodec::H265, 470_000);
+        assert_eq!((on_air.width, on_air.height, on_air.fps), (1280, 720, 30));
         // 1500 kS: 720p for HEVC, VVC held to 270 lines.
         assert_eq!(picture_for(VideoCodec::H265, 1_650_000).height, 720);
         assert_eq!(picture_for(VideoCodec::H266, 1_650_000).height, 270);
         assert_eq!(picture_for(VideoCodec::H265, 100_000).fps, 15);
+        assert_eq!(picture_for(VideoCodec::H266, 1_650_000).fps, 25);
+    }
+
+    #[test]
+    fn the_timing_is_what_is_on_the_air() {
+        let at = |a: &[String], k: &str| a[a.iter().position(|x| x == k).unwrap() + 1].clone();
+        // H.265 at 470 kbit/s of video: 720p30, so a key frame every 150.
+        let s = EncodeSettings {
+            picture: Some(picture_for(VideoCodec::H265, 470_000)),
+            ..EncodeSettings::default()
+        };
+        let a = args(&s, 594_000.0, None);
+        assert_eq!(at(&a, "-g"), "150");
+        assert_eq!(at(&a, "-pcr_period"), "20");
+        assert_eq!(at(&a, "-pat_period"), "0.4");
+        assert_eq!(at(&a, "-ac"), "2");
+        assert_eq!(at(&a, "-b:a"), "48k");
+        // Below 48 kbit/s the one channel; AV1 keeps to its 2 s.
+        assert_eq!(audio_channels(32_000), 1);
+        let av1 = EncodeSettings {
+            codec: VideoCodec::Av1,
+            picture: Some(Picture {
+                width: 640,
+                height: 360,
+                fps: 30,
+            }),
+            ..EncodeSettings::default()
+        };
+        assert!(at(&args(&av1, 594_000.0, None), "-svtav1-params").contains("keyint=60"));
     }
 
     #[test]

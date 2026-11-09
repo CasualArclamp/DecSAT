@@ -181,7 +181,9 @@ impl App {
             audio: get("audio")
                 .and_then(|a| AudioCodec::from_key(&a))
                 .unwrap_or(AudioCodec::Aac),
-            audio_kbps: get("audio_kbps").and_then(|v| v.parse().ok()).unwrap_or(32),
+            audio_kbps: get("audio_kbps")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(encode::DEFAULT_AUDIO_BPS / 1000),
             callsign: get("callsign").unwrap_or_default(),
             overlay: get("overlay").is_some_and(|v| v == "1"),
             preset,
@@ -1051,10 +1053,16 @@ impl App {
                             }
                         });
                     if self.audio != AudioCodec::None {
+                        // Worked out first: the DragValue borrows the field.
+                        let suffix = if encode::audio_channels(self.audio_kbps * 1000) == 2 {
+                            " kbit/s stereo"
+                        } else {
+                            " kbit/s mono"
+                        };
                         ui.add(
                             egui::DragValue::new(&mut self.audio_kbps)
                                 .range(16..=192)
-                                .suffix(" kbit/s mono"),
+                                .suffix(suffix),
                         );
                     }
                 });
@@ -1673,9 +1681,9 @@ mod tests {
                 amp: false
             }
         );
-        // The net preset: 333 kS QPSK 2/3, pilots, normal frames, 0.20.
+        // The net preset: 333 kS QPSK 3/5, no pilots, short frames, 0.20.
         assert_eq!(c.datv.symbol_rate, 333e3);
-        assert_eq!(c.datv.modcod, 6);
-        assert!(c.datv.pilots && !c.datv.short_fecframe);
+        assert_eq!(c.datv.modcod, 5);
+        assert!(!c.datv.pilots && c.datv.short_fecframe);
     }
 }
