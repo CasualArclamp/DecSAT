@@ -208,6 +208,38 @@ pub fn args(
     a
 }
 
+/// The arguments for a programme, as the player runs it: the pictures' ffmpeg
+/// and, when there are both pictures and sound, a second ffmpeg for the sound.
+///
+/// Why two: one ffmpeg holds its decoded pictures back so that no output
+/// stream runs ahead of the others. A sound PES can hold most of a second
+/// (narrow QO-100 carriers: 0.7–0.8 s), and to reach the next one ffmpeg must
+/// bring through more pictures than it will let past. Its output then falls
+/// further and further behind the stream, and only drains when the input
+/// ends. Apart, each keeps up. Both keep the stream's own timestamps
+/// (`-copyts`), so the sound's clock still times the pictures.
+pub fn player_args(
+    video: Option<u16>,
+    audio: Option<u16>,
+    deint: Deinterlace,
+    gpu: bool,
+    av1: Option<&str>,
+) -> (Vec<String>, Option<Vec<String>>) {
+    if video.is_none() || audio.is_none() {
+        return (args(video, audio, deint, gpu, av1), None);
+    }
+    let keep_times = |mut a: Vec<String>| {
+        if !a.iter().any(|x| x == "-copyts") {
+            a.insert(0, "-copyts".into());
+        }
+        a
+    };
+    (
+        keep_times(args(video, None, deint, gpu, av1)),
+        Some(keep_times(args(None, audio, deint, false, None))),
+    )
+}
+
 /// What a line of ffmpeg's log is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogLine {
@@ -268,6 +300,32 @@ mod tests {
 
     #[test]
     fn maps_by_pid_and_fits_the_picture() {
+        let (v, s) = player_args(Some(0x21), Some(0x22), Deinterlace::Bob, true, None);
+        let s = s.expect("pictures and sound run apart");
+        let maps = |a: &[String]| -> Vec<String> {
+            a.iter()
+                .zip(a.iter().skip(1))
+                .filter(|(k, _)| *k == "-map")
+                .map(|(_, m)| m.clone())
+                .collect()
+        };
+        assert_eq!(maps(&v), ["0:i:33?"]);
+        assert_eq!(maps(&s), ["0:i:34?"]);
+        // One clock for both, and the graphics card only for the pictures.
+        assert!(v.iter().any(|x| x == "-copyts") && s.iter().any(|x| x == "-copyts"));
+        assert!(v.iter().any(|x| x == "-hwaccel") && !s.iter().any(|x| x == "-hwaccel"));
+        // Only one of them: nothing to split.
+        assert!(
+            player_args(Some(0x21), None, Deinterlace::Bob, false, None)
+                .1
+                .is_none()
+        );
+        assert!(
+            player_args(None, Some(0x22), Deinterlace::Bob, false, None)
+                .1
+                .is_none()
+        );
+
         let a = args(Some(0x21), Some(0x22), Deinterlace::Frame, false, None);
         assert!(!a.iter().any(|x| x == "-hwaccel"));
         let maps: Vec<&String> = a

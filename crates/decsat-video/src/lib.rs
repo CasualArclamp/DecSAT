@@ -26,7 +26,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -218,6 +218,10 @@ struct Shared {
     status: Mutex<Status>,
     stdin: Mutex<Option<ChildStdin>>,
     child: Mutex<Option<Child>>,
+    /// The sound's own ffmpeg, when pictures and sound run apart
+    /// ([`ffmpeg::player_args`]), and the way to its input.
+    sound_child: Mutex<Option<Child>>,
+    sound_input: Mutex<Option<SyncSender<Vec<u8>>>>,
     /// AV1: the units waiting for ffmpeg's IVF input (while it is not
     /// connected, from the newest with a sequence header), and whether a
     /// writer is connected to it.
@@ -266,6 +270,8 @@ impl VideoPlayer {
             status: Mutex::new(Status::default()),
             stdin: Mutex::new(None),
             child: Mutex::new(None),
+            sound_child: Mutex::new(None),
+            sound_input: Mutex::new(None),
             av1_queue: Mutex::new(VecDeque::new()),
             av1_ready: Condvar::new(),
             av1_connected: AtomicBool::new(false),
@@ -415,10 +421,13 @@ impl VideoPlayer {
 impl Drop for VideoPlayer {
     fn drop(&mut self) {
         self.sh.quit.store(true, Ordering::Relaxed);
-        if let Some(c) = self.sh.child.lock().unwrap().as_mut() {
-            let _ = c.kill();
+        for child in [&self.sh.child, &self.sh.sound_child] {
+            if let Some(c) = child.lock().unwrap().as_mut() {
+                let _ = c.kill();
+            }
         }
         *self.sh.stdin.lock().unwrap() = None;
+        *self.sh.sound_input.lock().unwrap() = None;
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -472,6 +481,7 @@ fn feed(
                 // The stream has ended (its VFO gone): ffmpeg is told so,
                 // and finishes what it has.
                 *sh.stdin.lock().unwrap() = None;
+                *sh.sound_input.lock().unwrap() = None;
                 break;
             }
         };
@@ -500,6 +510,16 @@ fn feed(
         // Between ffmpeg runs, wait for the next (the batches behind this
         // one queue up meanwhile, and the tap drops what does not fit).
         loop {
+            // The sound's copy first, and never waited for: a heavy picture
+            // holding up the write below must not reach the sound.
+            // (`try_send` fails at once if the queue is full.)
+            let to_sound = match sh.sound_input.lock().unwrap().as_ref() {
+                Some(tx) => {
+                    let _ = tx.try_send(buf.clone());
+                    true
+                }
+                None => false,
+            };
             let mut stdin = sh.stdin.lock().unwrap();
             if let Some(w) = stdin.as_mut() {
                 if w.write_all(&buf).is_ok() {
@@ -507,6 +527,11 @@ fn feed(
                 } else {
                     *stdin = None; // ffmpeg has stopped; the supervisor restarts it
                 }
+                break;
+            }
+            // AV1 with sound: only the sound's ffmpeg reads the TS.
+            if to_sound {
+                sh.status.lock().unwrap().fed_bytes += buf.len() as u64;
                 break;
             }
             drop(stdin);
@@ -587,7 +612,10 @@ fn supervise(exe: &Path, sel: &Selection, sh: &Arc<Shared>, output: OutputKind) 
             .as_ref()
             .and_then(|l| l.local_addr().ok())
             .map(|a| format!("tcp://{a}"));
-        let args = ffmpeg::args(sel.video, sel.audio, sel.deint, sel.gpu, url.as_deref());
+        let (args, sound_args) =
+            ffmpeg::player_args(sel.video, sel.audio, sel.deint, sel.gpu, url.as_deref());
+        // AV1 with its own sound ffmpeg: this one has only the IVF input.
+        let reads_ts = !(sel.av1 && sound_args.is_some());
         let mut cmd = Command::new(exe);
         cmd.args(&args)
             .stdin(Stdio::piped())
@@ -602,7 +630,7 @@ fn supervise(exe: &Path, sel: &Selection, sh: &Arc<Shared>, output: OutputKind) 
             }
         };
         let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
-        *sh.stdin.lock().unwrap() = child.stdin.take();
+        *sh.stdin.lock().unwrap() = child.stdin.take().filter(|_| reads_ts);
         *sh.child.lock().unwrap() = Some(child);
         sh.frames.lock().unwrap().clear();
         let generation = sh.generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -617,12 +645,27 @@ fn supervise(exe: &Path, sel: &Selection, sh: &Arc<Shared>, output: OutputKind) 
             st.streams.clear();
             st.playing = false;
         }
+        // Which ffmpeg lists the programme's streams: the one reading the TS.
         let log = stderr.map(|e| {
             let s = sh.clone();
-            std::thread::spawn(move || read_log(e, &s))
+            std::thread::spawn(move || read_log(e, &s, reads_ts))
+        });
+        // `Arc<AtomicBool>`: a flag both threads can hold; true while this
+        // run of the pictures' ffmpeg lasts.
+        let run = Arc::new(AtomicBool::new(true));
+        let sound = sound_args.map(|sound_args| {
+            let (s, r, x, list) = (sh.clone(), run.clone(), exe.to_path_buf(), !reads_ts);
+            std::thread::spawn(move || supervise_sound(&x, &sound_args, &s, output, &r, list))
         });
         if let Some(out) = stdout {
             read_output(out, sh, output);
+        }
+        run.store(false, Ordering::Relaxed);
+        if let Some(c) = sh.sound_child.lock().unwrap().as_mut() {
+            let _ = c.kill();
+        }
+        if let Some(t) = sound {
+            let _ = t.join();
         }
         *sh.audio.lock().unwrap() = None;
         *sh.stdin.lock().unwrap() = None;
@@ -646,6 +689,81 @@ fn supervise(exe: &Path, sel: &Selection, sh: &Arc<Shared>, output: OutputKind) 
         drop(st);
         let t0 = Instant::now();
         while t0.elapsed() < RESTART && !sh.quit.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Batches of TS packets held for the sound's ffmpeg (seconds of the stream);
+/// it reads far faster than they come, so this only rides out a stall.
+const SOUND_INPUT_QUEUE: usize = 1024;
+
+/// The sound's own ffmpeg, for as long as `run` holds: started again if it
+/// stops (the pictures go on without it, on the wall clock, meanwhile).
+fn supervise_sound(
+    exe: &Path,
+    args: &[String],
+    sh: &Arc<Shared>,
+    output: OutputKind,
+    run: &AtomicBool,
+    list_streams: bool,
+) {
+    let going = || run.load(Ordering::Relaxed) && !sh.quit.load(Ordering::Relaxed);
+    while going() {
+        let mut cmd = Command::new(exe);
+        cmd.args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        no_console(&mut cmd);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                sh.status.lock().unwrap().last_error = Some(format!("{}: {e}", exe.display()));
+                return;
+            }
+        };
+        let (stdin, stdout, stderr) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        *sh.sound_child.lock().unwrap() = Some(child);
+        let (tx, rx) = sync_channel::<Vec<u8>>(SOUND_INPUT_QUEUE);
+        // Its own writer, so a full pipe here never blocks the feeder. It
+        // ends when the sending side is dropped below, closing ffmpeg's stdin.
+        let writer = stdin.map(|mut w| {
+            std::thread::spawn(move || {
+                while let Ok(b) = rx.recv() {
+                    if w.write_all(&b).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        *sh.sound_input.lock().unwrap() = Some(tx);
+        // Stopped while it was starting: `supervise` may have looked before
+        // the child was stored above.
+        if !going()
+            && let Some(c) = sh.sound_child.lock().unwrap().as_mut()
+        {
+            let _ = c.kill();
+        }
+        let log = stderr.map(|e| {
+            let s = sh.clone();
+            std::thread::spawn(move || read_log(e, &s, list_streams))
+        });
+        if let Some(out) = stdout {
+            read_output(out, sh, output);
+        }
+        *sh.sound_input.lock().unwrap() = None;
+        *sh.audio.lock().unwrap() = None;
+        if let Some(mut c) = sh.sound_child.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        for t in [writer, log].into_iter().flatten() {
+            let _ = t.join();
+        }
+        let t0 = Instant::now();
+        while t0.elapsed() < RESTART && going() {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -737,15 +855,16 @@ fn read_output(out: impl Read, sh: &Shared, output: OutputKind) {
     }
 }
 
-/// ffmpeg's log: the input's streams, and its complaints.
-fn read_log(err: impl Read, sh: &Shared) {
+/// ffmpeg's log: the input's streams (if this is the ffmpeg to list them),
+/// and its complaints.
+fn read_log(err: impl Read, sh: &Shared, list_streams: bool) {
     let mut in_input = false;
     for line in BufReader::new(err).lines() {
         let Ok(line) = line else { break };
         match ffmpeg::classify(&line) {
             ffmpeg::LogLine::InputStart => in_input = true,
             ffmpeg::LogLine::InputEnd => in_input = false,
-            ffmpeg::LogLine::Stream { pid, desc } if in_input => {
+            ffmpeg::LogLine::Stream { pid, desc } if in_input && list_streams => {
                 sh.status.lock().unwrap().streams.push((pid, desc));
             }
             ffmpeg::LogLine::Error(e) => {
