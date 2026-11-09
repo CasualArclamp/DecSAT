@@ -37,7 +37,13 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed=build.rs");
-    for dir in ["common", "decoder", "decoder/armv8", "decoder/armv7", "decoder/x86"] {
+    for dir in [
+        "common",
+        "decoder",
+        "decoder/armv8",
+        "decoder/armv7",
+        "decoder/x86",
+    ] {
         println!("cargo:rerun-if-changed={}", root.join(dir).display());
     }
 
@@ -62,8 +68,14 @@ fn main() {
     );
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let n_c = files.iter().filter(|p| p.extension().and_then(|e| e.to_str()) == Some("c")).count();
-    let n_s = files.iter().filter(|p| p.extension().and_then(|e| e.to_str()) == Some("s")).count();
+    let n_c = files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("c"))
+        .count();
+    let n_s = files
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("s"))
+        .count();
     eprintln!("[decsat-xaac-sys] compiling {n_c} C files + {n_s} asm files for arch {target_arch}");
 
     let mut b = cc::Build::new();
@@ -113,8 +125,8 @@ fn main() {
             if source.extension().and_then(|e| e.to_str()) != Some("s") {
                 continue;
             }
-            let source_text = fs::read_to_string(source)
-                .unwrap_or_else(|e| panic!("{}: {e}", source.display()));
+            let source_text =
+                fs::read_to_string(source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
             for line in source_text.lines() {
                 let Some(symbol) = line
                     .trim_start()
@@ -124,7 +136,11 @@ fn main() {
                 else {
                     continue;
                 };
-                if !symbol.is_empty() && symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if !symbol.is_empty()
+                    && symbol
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     text.push_str(&format!(".globl _{symbol}\n_{symbol} = {symbol}\n"));
                 }
             }
