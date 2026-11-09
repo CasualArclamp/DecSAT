@@ -2615,6 +2615,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qo100-beacon"
+version = "1.7.1"
+dependencies = [
+ "cpal",
+ "decsat-core",
+ "decsat-io",
+ "decsat-modem",
+ "eframe",
+ "image",
+ "rfd",
+ "rustfft",
+ "winit",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

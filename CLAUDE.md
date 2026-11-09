@@ -29,6 +29,8 @@ cargo test --release -p decsat-remote                                     # code
 cargo run --release -p decsat-cli -- decode --pluto 1450 --rate 4e6 --pluto-gain 40 --decoder id   # live ADALM-PLUTO / Pluto+ (--pluto-uri auto|usb|ip:ADDR, --pluto-gain agc, --pluto-16bit); receive only
 cargo test -p decsat-io --features pluto pluto                                     # the Pluto driver against a fake IIOD server
 PLUTO_URI=ip:192.168.2.1 cargo test -p decsat-io --features pluto live_pluto -- --ignored --nocapture   # a real Pluto (PLUTO_URI defaults to auto); receive only
+cargo run --release -p decsat-cli -- decode recording.wav --decoder p3 --bandwidth 8000 --fast   # QO-100's PSK beacon from a WebSDR's mono WAV
+cargo run --release -p qo100-beacon -- --file recording.wav --speed 20 --screenshot out/b.png --after 9   # the standalone sound-card app (--device NAME for a sound input)
 cargo run --release -p decsat-gui -- --net tcp://127.0.0.1:7777 --iq int8 --rate 8 --net-mhz 1100 --lo 9750 --claim-carriers --screenshot out/x.png --after 10
 ```
 

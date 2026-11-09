@@ -17,7 +17,7 @@
 # Note: with -File, PowerShell binds only the first bare word to a
 # [string[]] parameter, so the names are taken from all remaining arguments.
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Apps)
-if (-not $Apps -or $Apps.Count -eq 0) { $Apps = @("gui", "cli", "tx") }
+if (-not $Apps -or $Apps.Count -eq 0) { $Apps = @("gui", "cli", "tx", "beacon") }
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -28,6 +28,7 @@ $all = [ordered]@{
     gui = @("decsat-gui", "decsat-gui.exe")
     cli = @("decsat-cli", "decsat.exe")
     tx  = @("decsat-tx-app", "decsat-tx.exe")
+    beacon = @("qo100-beacon", "qo100-beacon.exe")
     server = @("decsat-server", "decsat-server.exe")
     serverapp = @("decsat-server-app", "decsat-server-app.exe")
 }

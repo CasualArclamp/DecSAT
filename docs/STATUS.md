@@ -6234,3 +6234,21 @@ Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
   the hard decisions have too many errors to find them from the data without
   the FEC. UW corners read 81.5 % right; the carrier loop still reports "not
   locked" at the 0.6 coherence bar.
+
+## QO-100's PSK beacon, and a standalone app (2026-11-10)
+
+- `decsat-modem::p3beacon` (frames, CRC, housekeeping parser) and `p3rx`
+  (feed-forward receiver), decoder `DecoderKind::P3Beacon` (`p3`), a GUI
+  card, and `apps/qo100-beacon`: the receiver on a sound card or recording.
+  Mono WAV files now open as a real signal.
+- A clean 3-minute BATC WebSDR recording: 6 frames, 6 CRCs good, blocks
+  K/L/M/N. Looped through VB-Cable into the app at 48 kHz: every frame good.
+- A poorer recording (54 s of audio, the rest digital silence, 6 s of weak
+  signal) gives frames with errors; its CRC, with the corrupted text put
+  right by reading it, equals the one on the air (0x5BB4).
+- **No voltages on the air now**: the K block is blank with a good CRC. The
+  housekeeping parser and display were tested on synthesised 2019-format
+  frames only.
+- The bursts between frames (see DESIGN §3e) are probably AO-40 FEC copies
+  of the same text; not decoded, and not confirmed.
+

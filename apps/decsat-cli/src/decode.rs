@@ -117,8 +117,9 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
         "bgan" | "inmarsat" => DecoderKind::Bgan,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
+        "p3" | "p3-beacon" | "qo100" | "ao40" => DecoderKind::P3Beacon,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon, p3)"
         ),
     })
 }
@@ -662,6 +663,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(v) = &st.beacon {
         print_beacon(v);
+    }
+    if let Some(v) = &st.p3 {
+        print_p3(v);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text, guid_vendor};
@@ -1943,6 +1947,72 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
             100.0 * ch.change_4ms,
             100.0 * ch.ones
         );
+    }
+}
+
+/// AMSAT's PSK beacon: the frames as text, and any housekeeping values.
+fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
+    use decsat_modem::p3beacon::FRAME_BYTES;
+    println!(
+        "p3 beacon: carrier {}, line {:.0} dB, bits {:.1} dB, {} frames, {} good CRC, {} cut short",
+        v.carrier_hz
+            .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
+        v.line_db,
+        v.quality_db,
+        v.frames,
+        v.good,
+        v.partial,
+    );
+    for f in &v.recent {
+        let state = if f.crc_ok {
+            "CRC good".to_string()
+        } else if f.complete {
+            "CRC BAD".to_string()
+        } else {
+            format!("cut short, {}/{FRAME_BYTES} bytes", f.bytes.len())
+        };
+        println!(
+            "  block {} ({state}, {} sync bits wrong)",
+            f.block().unwrap_or('?'),
+            f.sync_errors
+        );
+        if f.is_text() {
+            for line in f.lines() {
+                println!("    {line}");
+            }
+        } else {
+            for row in f.bytes.chunks(32) {
+                let hex: String = row.iter().map(|b| format!("{b:02x}")).collect();
+                println!("    {hex}");
+            }
+        }
+    }
+    if let Some((block, t)) = &v.telemetry {
+        println!("  housekeeping (block {block}):");
+        if let Some(u) = t.uptime_text() {
+            println!("    uptime      {u}");
+        }
+        if let Some(c) = t.commands {
+            println!("    commands    {c}");
+        }
+        if t.leila_requests.is_some() || t.leila_active.is_some() {
+            println!(
+                "    LEILA       {} requests, {} active",
+                t.leila_requests.unwrap_or(0),
+                t.leila_active.unwrap_or(0)
+            );
+        }
+        if let Some(c) = t.temperature_c {
+            println!("    temperature {c:.0} C");
+        }
+        if !t.voltages.is_empty() {
+            println!("    voltages    {:?} V", t.voltages);
+        }
+        for (name, n) in &t.counters {
+            println!("    {name:<11} {n}");
+        }
+    } else if !v.blocks.is_empty() {
+        println!("  no housekeeping values in the blocks received");
     }
 }
 

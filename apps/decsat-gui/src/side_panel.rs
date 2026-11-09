@@ -1168,6 +1168,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         crate::beacon_card::show(ui, b, inp.rf_center, v.id);
     }
 
+    if v.settings.decoder == DecoderKind::P3Beacon
+        && let Some(p) = &st.p3
+    {
+        crate::p3_card::show(ui, p, v.id);
+    }
+
     if v.settings.decoder == DecoderKind::Bgan
         && let Some(b) = &st.bgan
     {

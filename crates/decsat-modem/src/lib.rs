@@ -54,6 +54,8 @@ pub mod is19;
 pub mod mode_s;
 pub mod mpa;
 pub mod oui;
+pub mod p3beacon;
+pub mod p3rx;
 pub mod paradise;
 pub mod payload;
 pub mod pcm;
