@@ -15,6 +15,9 @@ use eframe::egui::{
 
 use crate::prefs;
 
+/// Grid cells per side: about one to a pixel of the plot.
+const BINS: usize = 256;
+
 /// How the constellation is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Style {
@@ -50,18 +53,10 @@ impl Style {
             .unwrap_or_default()
     }
 
-    /// Grid cells per side.
-    fn bins(self) -> usize {
-        match self {
-            Style::Heatmap => 128,
-            _ => 256,
-        }
-    }
-
     /// Seconds for the grid to fall to 1/e.
     fn fade_s(self) -> f32 {
         match self {
-            Style::Heatmap => 1.5,
+            Style::Heatmap => 2.5,
             _ => 0.45,
         }
     }
@@ -141,7 +136,7 @@ impl Grid {
     /// Adds a snapshot, unless it is the one already added. True if the grid
     /// changed.
     fn feed(&mut self, style: Style, range: f32, pts: &[Iq], now: f64) -> bool {
-        let n = style.bins();
+        let n = BINS;
         if self.style != style || self.range != range || self.cells.len() != n * n {
             self.style = style;
             self.range = range;
@@ -198,10 +193,10 @@ impl Grid {
     }
 
     fn image(&self) -> ColorImage {
-        let n = self.style.bins();
+        let n = BINS;
         let rgba: Vec<u8> = match self.style {
             Style::Heatmap => {
-                let smooth = smooth(&smooth(&self.cells, n), n);
+                let smooth = smooth(&self.cells, n);
                 let peak = smooth.iter().copied().fold(1e-6f32, f32::max);
                 // Log scale relative to the peak, so that the contrast between
                 // clusters and the gaps does not depend on how many symbols
@@ -382,7 +377,7 @@ mod tests {
         let mut g = Grid::default();
         let (a, b) = (cluster(0.0), vec![Iq::new(1.0, -1.0); 200]);
         g.feed(Style::Phosphor, 1.8, &a, 0.0);
-        let n = Style::Phosphor.bins();
+        let n = BINS;
         let top_right = |g: &Grid| g.cells[..n * n / 2].iter().sum::<f32>();
         let before = top_right(&g);
         g.feed(Style::Phosphor, 1.8, &b, 0.45);
@@ -397,9 +392,9 @@ mod tests {
         let mut pts = cluster(0.0);
         pts.push(Iq::new(1e4, -1e4));
         assert!(g.feed(Style::Heatmap, 1.8, &pts, 0.1));
-        assert_eq!(g.cells.len(), 128 * 128);
+        assert_eq!(g.cells.len(), 256 * 256);
         assert!(total(&g) <= pts.len() as f32);
-        assert_eq!(g.image().size, [128, 128]);
+        assert_eq!(g.image().size, [256, 256]);
     }
 
     #[test]
