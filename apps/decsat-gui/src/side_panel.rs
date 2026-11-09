@@ -1495,12 +1495,18 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             _ => {}
         }
     } else if !st.scatter.is_empty() {
-        ui.label(RichText::new("Constellation").strong());
-        if v.settings.decoder == DecoderKind::Bgan {
-            constellation_qam16(ui, &st.scatter, side);
-        } else {
-            constellation(ui, &st.scatter, side);
-        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Constellation").strong());
+            crate::constellation::picker(ui);
+        });
+        // Its own id per VFO: a heatmap must not carry over to the next one.
+        ui.push_id(("vfo_constellation", v.id), |ui| {
+            if v.settings.decoder == DecoderKind::Bgan {
+                constellation_qam16(ui, &st.scatter, side);
+            } else {
+                constellation(ui, &st.scatter, side);
+            }
+        });
     }
     if !st.spectrum_db.is_empty() {
         ui.label(RichText::new("VFO spectrum").strong());
@@ -6548,6 +6554,15 @@ fn modcod_table(ui: &mut Ui, counts: &BTreeMap<u8, u64>) {
 /// A 16-QAM cloud: tiny dots (a few thousand of them), the 16 ideal points
 /// marked faintly, since the constellation is known (BGAN's F80T4.5X-8B).
 fn constellation_qam16(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
+    // levels +-0.5 and +-1.5 over sqrt(2.5) (TS 102 744-2-1 Table 5.3)
+    let lv = [-1.5f64, -0.5, 0.5, 1.5].map(|x| x / 2.5f64.sqrt());
+    let ideal: Vec<[f64; 2]> = lv
+        .iter()
+        .flat_map(|&i| lv.iter().map(move |&q| [i, q]))
+        .collect();
+    if crate::constellation::show(ui, pts, side, 1.4, &ideal) {
+        return;
+    }
     let rms = (pts.iter().map(|s| s.norm_sqr()).sum::<f32>() / pts.len().max(1) as f32)
         .sqrt()
         .max(1e-9);
@@ -6555,13 +6570,8 @@ fn constellation_qam16(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
         .iter()
         .map(|s| [(s.re / rms) as f64, (s.im / rms) as f64])
         .collect();
-    // levels +-0.5 and +-1.5 over sqrt(2.5) (TS 102 744-2-1 Table 5.3)
-    let lv = [-1.5f64, -0.5, 0.5, 1.5].map(|x| x / 2.5f64.sqrt());
-    let ideal: PlotPoints = lv
-        .iter()
-        .flat_map(|&i| lv.iter().map(move |&q| [i, q]))
-        .collect();
-    Plot::new("constellation_qam16")
+    let ideal: PlotPoints = ideal.into_iter().collect();
+    let plot = Plot::new("constellation_qam16")
         .width(side)
         .height(side)
         .data_aspect(1.0)
@@ -6588,9 +6598,13 @@ fn constellation_qam16(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
                     .color(Color32::from_rgba_unmultiplied(120, 200, 255, 170)),
             );
         });
+    crate::constellation::context_menu(&plot.response);
 }
 
 fn constellation(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
+    if crate::constellation::show(ui, pts, side, 1.8, &[]) {
+        return;
+    }
     let rms = (pts.iter().map(|s| s.norm_sqr()).sum::<f32>() / pts.len().max(1) as f32)
         .sqrt()
         .max(1e-9);
@@ -6598,7 +6612,7 @@ fn constellation(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
         .iter()
         .map(|s| [(s.re / rms) as f64, (s.im / rms) as f64])
         .collect();
-    Plot::new("constellation")
+    let plot = Plot::new("constellation")
         .width(side)
         .height(side)
         .data_aspect(1.0)
@@ -6619,6 +6633,7 @@ fn constellation(ui: &mut Ui, pts: &[decsat_core::Iq], side: f32) {
                     .color(Color32::from_rgb(120, 200, 255)),
             );
         });
+    crate::constellation::context_menu(&plot.response);
 }
 
 /// A burst's waveform against time: its envelope and its I and Q (on the

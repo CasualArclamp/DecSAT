@@ -14,6 +14,7 @@ mod beacon_list;
 mod bgan_card;
 mod biss_memory;
 mod carrier_caps;
+mod constellation;
 mod decoder_filter;
 mod dns_viewer;
 mod filename;
