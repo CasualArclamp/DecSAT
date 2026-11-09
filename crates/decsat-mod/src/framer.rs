@@ -130,6 +130,11 @@ impl PlFramer {
         self.source.set_roll_off(roll_off);
     }
 
+    /// The channel's TS rate, for a source that paces its input by it.
+    pub fn set_ts_rate(&mut self, ts_rate: f64) {
+        self.source.set_ts_rate(ts_rate);
+    }
+
     fn next_u64(&mut self) -> u64 {
         // xorshift64*
         let mut x = self.rng;

@@ -12,11 +12,18 @@
 //!   DVB-S2, QPSK, FEC 2/3, 0.2 roll-off.
 //! - **[USER]** The user's choice at this app's kickoff (2026-11-03): pilots
 //!   on, normal FECFRAMEs. Neither source above says.
+//! - **[AIR]** Stations received on QO-100 with DecSAT, 2026-11-09, roll-off
+//!   0.20 and pilots off in every case. Frame size and pilots follow from
+//!   the TS rate the receiver reported, which only one combination fits:
+//!   333 kS QPSK 3/5, short frames (385.1 kbit/s, two stations); 500 kS QPSK
+//!   3/5, short frames (578.3 kbit/s, also about 60 PLFRAMEs a second).
+//!   Also heard: 500 kS QPSK 2/3, normal frames (661.1 kbit/s).
 //!
-//! The bandplan names no MODCOD for users (only the beacon's FEC 4/5), so
-//! every preset starts at [CONF]'s QPSK 2/3 (QPSK 1/2 for the very narrow
-//! rates, where the margin matters more than the rate); all of it stays
-//! editable in the app.
+//! The bandplan names no MODCOD for users (only the beacon's FEC 4/5). The
+//! 333 and 500 kS presets are what [AIR] heard; the rest start at [CONF]'s
+//! QPSK 2/3 (QPSK 1/2 for the very narrow rates, where the margin matters
+//! more than the rate) with [USER]'s framing. All of it stays editable in
+//! the app.
 
 use decsat_core::RollOff;
 use decsat_mod::datv::DatvConfig;
@@ -45,6 +52,7 @@ pub const PID_PMT: u16 = 4095;
 
 /// DVB-S2 MODCOD numbers (EN 302 307-1 Table 12).
 const QPSK_1_2: u8 = 4;
+const QPSK_3_5: u8 = 5;
 const QPSK_2_3: u8 = 6;
 
 /// One preset: a group of channels sharing a symbol rate and mode.
@@ -112,6 +120,12 @@ pub fn presets() -> Vec<Preset> {
         roll_off: RollOff::R20,
         source,
     };
+    // Pilots off and the frame size [AIR] heard.
+    let short_no_pilots = |preset: Preset| Preset {
+        pilots: false,
+        short_fecframe: true,
+        ..preset
+    };
     // [V3] §4: Narrow, 333 kS, 2403.25 then every 500 kHz to 2409.75 (14).
     let narrow = slots(2403.25, 0.5, 14);
     // [V3] §4 notes: "The lower 9 frequencies may be used for 500 kS", and
@@ -125,22 +139,22 @@ pub fn presets() -> Vec<Preset> {
     vec![
         // [V3] Bandplan note 3: "Regular nets should use 10499.25 MHz and
         // 333 kS when possible" (uplink 2409.75).
-        p(
+        short_no_pilots(p(
             "Net · 333 kS",
             "Narrow",
             vec![2409.75],
             333e3,
-            QPSK_2_3,
-            "V3 note 3; QPSK 2/3 and 0.20 from BATC's conference page",
-        ),
-        p(
+            QPSK_3_5,
+            "V3 note 3; QPSK 3/5, short frames, no pilots as received on the air",
+        )),
+        short_no_pilots(p(
             "Narrow · 333 kS",
             "Narrow",
             high_first(narrow.clone()),
             333e3,
-            QPSK_2_3,
-            "V3 §4 Narrow (14 slots); QPSK 2/3 and 0.20 from BATC's conference page",
-        ),
+            QPSK_3_5,
+            "V3 §4 Narrow (14 slots); QPSK 3/5, short frames, no pilots as received on the air",
+        )),
         p(
             "Narrow · 250 kS",
             "Narrow",
@@ -149,14 +163,14 @@ pub fn presets() -> Vec<Preset> {
             QPSK_2_3,
             "V3 §4 Narrow (333 kS and 250 kS share the 14 slots)",
         ),
-        p(
+        short_no_pilots(p(
             "Narrow · 500 kS",
             "Wide and Narrow",
             narrow500,
             500e3,
-            QPSK_2_3,
-            "V3 §4 Narrow (the lower 9 slots) and note 1",
-        ),
+            QPSK_3_5,
+            "V3 §4 Narrow (the lower 9 slots) and note 1; QPSK 3/5, short frames, no pilots as received on the air",
+        )),
         p(
             "Very narrow · 125 kS",
             "Very narrow",
@@ -215,9 +229,9 @@ pub fn downlink_mhz(uplink_mhz: f64) -> f64 {
     uplink_mhz + DOWNLINK_OFFSET_MHZ
 }
 
-/// What is wrong, if anything, with sending `symbol_rate` at `uplink_mhz`
-/// on QO-100 by [V3]; `None` when it fits the bandplan.
-pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
+/// Why a carrier cannot go at `uplink_mhz` at all: off the transponder or on
+/// the beacon. A retune while transmitting is refused for these.
+pub fn refused(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
     let half = symbol_rate * (1.0 + roll_off.as_f64()) / 2e6;
     if uplink_mhz - half < UPLINK_MHZ.0 || uplink_mhz + half > UPLINK_MHZ.1 {
         return Some(format!(
@@ -231,6 +245,16 @@ pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<Str
     if (uplink_mhz - BEACON_UPLINK_MHZ).abs() < half + beacon_half {
         return Some("on the beacon".into());
     }
+    None
+}
+
+/// What is wrong, if anything, with sending `symbol_rate` at `uplink_mhz`
+/// on QO-100 by [V3]; `None` when it fits the bandplan.
+pub fn check(uplink_mhz: f64, symbol_rate: f64, roll_off: RollOff) -> Option<String> {
+    if let Some(why) = refused(uplink_mhz, symbol_rate, roll_off) {
+        return Some(why);
+    }
+    let half = symbol_rate * (1.0 + roll_off.as_f64()) / 2e6;
     if symbol_rate > MAX_ROUTINE_SYMBOL_RATE {
         return Some("above 1500 kS, the bandplan's routine maximum".into());
     }
@@ -257,12 +281,24 @@ mod tests {
         assert_eq!(net.uplinks_mhz, vec![2409.75]);
         assert!((downlink_mhz(2409.75) - 10499.25).abs() < 1e-9);
         assert_eq!(net.symbol_rate, 333e3);
-        assert!(net.pilots && !net.short_fecframe);
-        // QPSK 2/3, pilots on: 42 960 bits a 33 282-symbol PLFRAME.
+        assert!(!net.pilots && net.short_fecframe);
+        // QPSK 3/5, short, no pilots: 9472 bits a 8190-symbol PLFRAME, the
+        // 385.1 kbit/s received on the air.
         assert!(
-            (net.ts_rate() - 429_830.0).abs() < 100.0,
+            (net.ts_rate() - 385_128.0).abs() < 100.0,
             "{}",
             net.ts_rate()
+        );
+    }
+
+    #[test]
+    fn five_hundred_ks_is_what_was_received() {
+        let ps = presets();
+        let n500 = ps.iter().find(|p| p.name == "Narrow · 500 kS").unwrap();
+        assert!(
+            (n500.ts_rate() - 578_266.0).abs() < 100.0,
+            "{}",
+            n500.ts_rate()
         );
     }
 

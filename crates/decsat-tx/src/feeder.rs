@@ -281,6 +281,10 @@ fn read_ts(
             return;
         }
     }
+    // Killed on purpose (a stop, or a new rate) is not the source's end.
+    if sh.quit.load(Ordering::Relaxed) {
+        return;
+    }
     sh.ended.store(true, Ordering::Relaxed);
     sh.status.lock().unwrap().ended = true;
 }

@@ -11,7 +11,11 @@
 //!   window starts at 0 dB and off every time (never saved); antenna power
 //!   never;
 //! - stop, an error, closing the window or quitting drop the radio, which
-//!   turns it off.
+//!   turns it off;
+//! - while it transmits the MODCOD and frequency can change
+//!   ([`TxSession::set_mode`], [`TxSession::set_center_hz`]), but a retune
+//!   stays within [`LIVE_RETUNE_SPAN_HZ`] of where it was keyed, and on
+//!   QO-100 on the transponder and off the beacon.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -19,7 +23,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use decsat_mod::datv::{DatvConfig, TS_LEN, TsFile, TsInput, TsTest, TsUdp};
+use decsat_core::RollOff;
+use decsat_mod::datv::{DatvConfig, LiveMode, TS_LEN, TsFile, TsInput, TsTest, TsUdp};
 
 use crate::arm::{Arm, LicenceAck};
 use crate::cpu::{CpuGauge, process_cpu_seconds};
@@ -27,6 +32,7 @@ use crate::encode::{EncodeSettings, Input};
 use crate::feeder::{Feeder, FeederStatus, PreviewFrame};
 use crate::iq::{Pump, PumpStats};
 use crate::live::{LiveTs, TsRing};
+use crate::qo100;
 use crate::radio::{self, Radio, TxSink};
 
 /// The programme's source.
@@ -161,6 +167,9 @@ pub struct TxSession {
     pump: Option<Pump>,
     radio: Option<Radio>,
     stats: Option<Arc<PumpStats>>,
+    live: Option<Arc<LiveMode>>,
+    /// Where the radio was keyed: a retune stays near it.
+    keyed_hz: Option<u64>,
     counters: Option<Arc<decsat_mod::datv::FeedCounters>>,
     spectrum: Option<Arc<std::sync::Mutex<Vec<f32>>>>,
     ended: Arc<AtomicBool>,
@@ -181,6 +190,29 @@ const RING_SECS: f64 = 1.0;
 const RING_MIN: usize = 64;
 /// The encoder gets this long to deliver its first packets.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// How far a retune while transmitting may go from where the radio was
+/// keyed; further needs a stop and the arm again. QO-100's whole uplink fits.
+pub const LIVE_RETUNE_SPAN_HZ: u64 = 10_000_000;
+
+/// Why the radio, keyed at `keyed_hz`, may not retune to `hz` on the air.
+fn live_retune_refused(
+    keyed_hz: u64,
+    hz: u64,
+    symbol_rate: f64,
+    roll_off: RollOff,
+) -> Option<String> {
+    if keyed_hz.abs_diff(hz) > LIVE_RETUNE_SPAN_HZ {
+        return Some(format!(
+            "more than {} MHz from where it was keyed: stop first",
+            LIVE_RETUNE_SPAN_HZ / 1_000_000
+        ));
+    }
+    let on_qo100 = (qo100::UPLINK_MHZ.0..=qo100::UPLINK_MHZ.1).contains(&(keyed_hz as f64 / 1e6));
+    if on_qo100 {
+        return qo100::refused(hz as f64 / 1e6, symbol_rate, roll_off);
+    }
+    None
+}
 
 impl TxSession {
     pub fn new(cfg: TxConfig) -> TxSession {
@@ -194,6 +226,8 @@ impl TxSession {
             pump: None,
             radio: None,
             stats: None,
+            live: None,
+            keyed_hz: None,
             counters: None,
             spectrum: None,
             ended: Arc::new(AtomicBool::new(false)),
@@ -308,6 +342,7 @@ impl TxSession {
         let pump = Pump::new(self.cfg.datv, input, self.cfg.level);
         self.input = pump.input_described();
         self.stats = Some(pump.stats.clone());
+        self.live = Some(pump.live.clone());
         self.counters = Some(pump.counters.clone());
         self.spectrum = Some(pump.spectrum.clone());
         self.pump = Some(pump);
@@ -357,6 +392,7 @@ impl TxSession {
                     ring.set_hold(None);
                 }
                 self.radio = Some(radio);
+                self.keyed_hz = self.center_hz();
                 self.state = TxState::Transmitting;
                 self.tx_since = Some(Instant::now());
                 if let Some(s) = &self.stats {
@@ -381,6 +417,8 @@ impl TxSession {
         self.feeder = None;
         self.pump = None;
         self.ring = None;
+        self.live = None;
+        self.keyed_hz = None;
         self.state = TxState::Idle;
         self.tx_since = None;
         self.finished_at = None;
@@ -390,6 +428,100 @@ impl TxSession {
         self.stop();
         self.error = Some(e);
         self.state = TxState::Failed;
+    }
+
+    /// Change the MODCOD and framing while it runs. The carrier does not
+    /// break; the frames change at the next PLFRAME. An encoder is restarted
+    /// at the new TS rate (`true` is returned; a camera's preview starts
+    /// again, a video file from its beginning), the modulator sending nulls
+    /// until it delivers. A TS file or UDP keeps its own rate.
+    pub fn set_mode(&mut self, modcod: u8, short: bool, pilots: bool) -> Result<bool, String> {
+        if !matches!(
+            self.state,
+            TxState::Preparing | TxState::Ready | TxState::Transmitting
+        ) {
+            return Err("not running".into());
+        }
+        let next = DatvConfig {
+            modcod,
+            short_fecframe: short,
+            pilots,
+            ..self.cfg.datv
+        };
+        if next == self.cfg.datv {
+            return Ok(false);
+        }
+        if !next.carries_data() {
+            return Err(format!(
+                "{} carries no transport stream",
+                decsat_core::modcod_name(modcod)
+            ));
+        }
+        let before = self.ts_rate();
+        self.cfg.datv = next;
+        if let Some(live) = &self.live {
+            live.set(modcod, short, pilots);
+        }
+        let ts_rate = self.ts_rate();
+        let (Source::Encode(enc), Some(ring)) = (self.cfg.source.clone(), self.ring.clone()) else {
+            return Ok(false);
+        };
+        if ts_rate == before {
+            return Ok(false);
+        }
+        let exe =
+            crate::encode::find_ffmpeg(self.cfg.ffmpeg.as_deref()).ok_or("ffmpeg not found")?;
+        // The old one goes first: a camera can be opened only once.
+        self.feeder = None;
+        if self.state == TxState::Preparing {
+            self.preparing_since = Some(Instant::now());
+        }
+        match Feeder::start(
+            &exe,
+            &enc,
+            ts_rate,
+            ring,
+            self.ended.clone(),
+            self.cfg.preview,
+            self.prefill_packets() * 3 / 2,
+        ) {
+            Ok(f) => {
+                self.feeder = Some(f);
+                Ok(true)
+            }
+            Err(e) => {
+                self.fail(e.clone());
+                Err(e)
+            }
+        }
+    }
+
+    /// Where the radio is, or will be, tuned (a file or nothing has no
+    /// frequency).
+    pub fn center_hz(&self) -> Option<u64> {
+        match self.cfg.sink {
+            TxSink::HackRf { center_hz, .. } | TxSink::Pluto { center_hz, .. } => Some(center_hz),
+            _ => None,
+        }
+    }
+
+    /// Retune; while transmitting, as far as [`live_retune_refused`] allows.
+    pub fn set_center_hz(&mut self, hz: u64) -> Result<(), String> {
+        if let Some(keyed) = self.keyed_hz
+            && let Some(why) =
+                live_retune_refused(keyed, hz, self.cfg.datv.symbol_rate, self.cfg.datv.roll_off)
+        {
+            return Err(why);
+        }
+        if let Some(r) = &self.radio {
+            r.set_center(hz)?;
+        }
+        if let TxSink::HackRf { center_hz, .. } | TxSink::Pluto { center_hz, .. } =
+            &mut self.cfg.sink
+        {
+            *center_hz = hz;
+        }
+        Ok(())
     }
 
     /// The TX VGA, while transmitting through the radio.
@@ -580,6 +712,49 @@ mod tests {
         assert!(s.transmit().is_err());
         assert!(!s.is_armed(), "one transmit uses the arm up");
         assert!(!s.status().radiating);
+    }
+
+    #[test]
+    fn a_live_retune_stays_on_the_transponder() {
+        let refused = |keyed, hz| live_retune_refused(keyed, hz, 333e3, RollOff::R20);
+        assert_eq!(refused(2_409_750_000, 2_403_250_000), None);
+        assert!(
+            refused(2_409_750_000, 2_402_000_000)
+                .unwrap()
+                .contains("beacon")
+        );
+        assert!(
+            refused(2_409_750_000, 2_410_500_000)
+                .unwrap()
+                .contains("outside")
+        );
+        assert!(
+            refused(2_409_750_000, 2_430_000_000)
+                .unwrap()
+                .contains("keyed")
+        );
+        // Elsewhere (a dummy load on another band), only the distance.
+        assert_eq!(refused(1_290_000_000, 1_291_000_000), None);
+    }
+
+    #[test]
+    fn the_mode_changes_while_it_runs() {
+        let mut s = TxSession::new(TxConfig::default());
+        assert!(s.set_mode(5, true, false).is_err(), "not running yet");
+        s.prepare().unwrap();
+        s.transmit().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let before = s.status().frames;
+        // The test stream has no encoder to restart.
+        assert_eq!(s.set_mode(5, true, false), Ok(false));
+        assert_eq!(s.config().datv.modcod, 5);
+        assert!(s.set_mode(0, false, false).is_err(), "no data in a dummy");
+        assert_eq!(s.config().datv.modcod, 5);
+        std::thread::sleep(Duration::from_millis(200));
+        let st = s.status();
+        assert_eq!(st.state, Some(TxState::Transmitting));
+        assert!(st.frames > before, "the carrier keeps going");
+        s.stop();
     }
 
     #[test]

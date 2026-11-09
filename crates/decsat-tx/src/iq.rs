@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use decsat_core::Iq;
-use decsat_mod::datv::{DatvConfig, DatvModulator, FeedCounters, TsInput};
+use decsat_mod::datv::{DatvConfig, DatvModulator, FeedCounters, LiveMode, TsInput};
 use rustfft::{Fft, FftPlanner};
 
 /// Spectrum bins (one FFT of this many samples).
@@ -38,6 +38,8 @@ pub struct Pump {
     buf: Vec<Iq>,
     pub stats: Arc<PumpStats>,
     pub counters: Arc<FeedCounters>,
+    /// The frame format, changeable while it runs.
+    pub live: Arc<LiveMode>,
     /// The latest spectrum, dB (power, full scale 0 dB), centre in the
     /// middle.
     pub spectrum: Arc<Mutex<Vec<f32>>>,
@@ -61,6 +63,7 @@ impl Pump {
             .collect();
         Pump {
             counters: m.counters.clone(),
+            live: m.live.clone(),
             m,
             gain: level.clamp(0.01, 0.7),
             buf: Vec::new(),
