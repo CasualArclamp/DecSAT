@@ -2492,12 +2492,31 @@ impl App {
             ui.label(format!("{secs:.1} s"));
             ui.separator();
             ui.label(format!("front end {:.0}%", self.front.load * 100.0));
+            ui.separator();
+            let level = decsat_dsp::dot::vector_level();
+            ui.label(format!("CPU: {level}"))
+                .on_hover_text(vector_help(level));
             if !self.note.is_empty() {
                 ui.separator();
                 ui.label(RichText::new(&self.note).weak());
             }
         });
     }
+}
+
+/// The status bar's tooltip: what each fast path runs on at this CPU's vector
+/// level. The LDPC decoder has only an AVX-512 copy and the demapper only an
+/// AVX2 one, so they do not all follow the filters.
+fn vector_help(level: &str) -> String {
+    let (ldpc, demap) = match level {
+        "AVX-512" => ("AVX-512", "AVX2"),
+        "AVX2" => ("SSE2", "AVX2"),
+        other => (other, other),
+    };
+    format!(
+        "Widest vector instructions this CPU can use.\n\
+         Filters: {level}\nLDPC decoder: {ldpc}\nLLR demapper: {demap}"
+    )
 }
 
 impl App {
