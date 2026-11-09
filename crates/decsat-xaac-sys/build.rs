@@ -62,6 +62,11 @@ fn main() {
     ] {
         files.extend(sources(&root, list));
     }
+    // libxaac's ARMv8 list names `ixheaacd_postradixcompute4.s` twice, and `cc` does not
+    // remove duplicates: both would compile to the same object path. `dedup` only drops
+    // adjacent repeats, hence the sort first.
+    files.sort();
+    files.dedup();
     assert!(
         files.len() > 100,
         "libxaac's decoder source lists look wrong"
@@ -79,8 +84,7 @@ fn main() {
     eprintln!("[decsat-xaac-sys] compiling {n_c} C files + {n_s} asm files for arch {target_arch}");
 
     let mut b = cc::Build::new();
-    b.files(&files)
-        .include(root.join("common"))
+    b.include(root.join("common"))
         .include(root.join("decoder"))
         .include(root.join("decoder/drc_src"))
         .define("LOUDNESS_LEVELING_SUPPORT", None)
@@ -149,5 +153,7 @@ fn main() {
         files.push(aliases);
     }
 
+    // The one place the sources are added: `files` is only complete here, once the macOS
+    // aliases are in it, and `cc` compiles a file once per time it is added.
     b.files(&files).compile("xaacdec");
 }
