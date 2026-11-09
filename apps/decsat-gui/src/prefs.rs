@@ -289,6 +289,18 @@ pub fn set_pcap_rotate_minutes(minutes: u64) {
     let _ = write_key("pcap_rotate_min", &minutes.to_string());
 }
 
+/// The constellation plot's style (`constellation::Style`'s key).
+pub fn constellation_style() -> String {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "constellation_style")
+        .map_or_else(String::new, |(_, v)| v)
+}
+
+pub fn set_constellation_style(key: &str) {
+    let _ = write_key("constellation_style", key);
+}
+
 /// Keep a session log (`decsat-log-….csv` in the output folder).
 pub fn session_log() -> bool {
     read_all()
