@@ -286,8 +286,9 @@ impl TvWindow {
                 .checkbox(&mut self.gpu, "GPU decode")
                 .on_hover_text(
                     "Decode the video on the graphics card (NVDEC, D3D11VA…), leaving the \
-                     CPU to the demodulator and FEC; falls back to software if the card \
-                     cannot. Restarts the picture; remembered",
+                     CPU to the demodulator and FEC. Off by default: some HEVC streams come \
+                     out slower than real time this way, and the picture and sound stutter. \
+                     Restarts the picture; remembered",
                 )
                 .changed()
             {

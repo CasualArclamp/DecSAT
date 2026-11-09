@@ -736,15 +736,19 @@ pub fn set_tv_bob(bob: bool) {
 }
 
 /// Whether the player decodes video on the GPU (true when never set).
+/// Decode the TV picture on the graphics card. Off unless asked for: on an
+/// HEVC stream from QO-100 it came out 20 % slower than real time (23 pictures
+/// a second of 30, with the sound running dry), where software kept up. A new
+/// key, so that the old default of "on", saved as `tv_gpu`, is not carried over.
 pub fn tv_gpu() -> bool {
     read_all()
         .into_iter()
-        .find(|(k, _)| k == "tv_gpu")
-        .is_none_or(|(_, v)| v != "0")
+        .find(|(k, _)| k == "tv_gpu_decode")
+        .is_some_and(|(_, v)| v == "1")
 }
 
 pub fn set_tv_gpu(gpu: bool) {
-    let _ = write_key("tv_gpu", if gpu { "1" } else { "0" });
+    let _ = write_key("tv_gpu_decode", if gpu { "1" } else { "0" });
 }
 
 pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {

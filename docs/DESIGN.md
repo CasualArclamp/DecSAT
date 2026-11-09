@@ -421,6 +421,9 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
   the carrier, an encoder restarts at the new TS rate (nulls meanwhile), and
   a retune stays within 10 MHz of where it was keyed and, on QO-100, on the
   transponder and off the beacon.
+  The in-app TV player decodes in software unless GPU decode is ticked: with
+  `-hwaccel auto` a 720p30 HEVC capture from QO-100 came out at 23 pictures a
+  second, its sound running dry, where software held 30.
   Audio is AAC-LC, HE-AAC, Opus or MP2. HE-AAC (which ffmpeg cannot encode:
   no SBR in its own AAC, libfdk_aac not GPL-compatible) comes from libxaac's
   encoder: a second ffmpeg captures PCM, ADTS frames go to the main ffmpeg's
