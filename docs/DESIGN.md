@@ -106,6 +106,7 @@ IqSource (HackRF 20 MS/s, or a wideband file)
 | **TDMA bursts** | One carrier or an MF-TDMA group: bursts found and demodulated one by one, their layout (preamble, pilots, fixed fields, idle fill) read blind, slot grid, frame and terminals; data symbols to a `.bursts` file. See §3c. | T1–T2 done |
 | **IS-19 DAMA outbound** | The 102.4 kBd outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown, everything measured): frame sync, pilots, descrambling, the packet stream, the call signalling (request acks, channel assignments) named; packets to a `.csv` on Record. See `decsat-modem::is19` and STATUS 2026-10-15. | done |
 | **Satellite beacon** | The carrier tracked and measured (frequency, drift, C/N0) and any telemetry decoded blind: PCM/PSK/PM subcarrier, PCM/PM or suppressed-carrier BPSK/QPSK; NRZ/bi-phase; IRIG-style minor frames (known or blind sync word, counter, major-frame map, word plots) or CCSDS (RS dual basis, randomiser, K = 7, TM/AOS frames); pointing tone. See §3d. | done |
+| **AMSAT PSK beacon** | QO-100's 400 bit/s beacon in AO-40's uncoded format: frames, CRC, the blocks as text, housekeeping values when sent. Also the standalone sound-card app `qo100-beacon`. See §3e. | done |
 | **Inmarsat BGAN forward** | The F80T4.5X-8B bearer (16-QAM, 151.2 kBd, ETSI TS 102 744): real-time carrier/timing/frame sync, ten-level turbo FEC with a re-encode acceptance test, bearer control, IP carving, findings. A port of DecBGAN; needs the free ETSI Annex C tables. See `docs/BGAN.md`. | done (physical layer) |
 | **IQ recorder** | That VFO's narrowband IQ to a file | M1 |
 | **Spectrum only** | Zoomed spectrum, level, occupied bandwidth; no decode | done |
@@ -275,6 +276,39 @@ carrier goes to the beacon decoder in a 200 kHz VFO.
 
 Not done: FM/FM (IRIG analogue subcarriers), turbo/LDPC-coded CCSDS,
 space packets inside transfer frames, word lengths other than 8/16 bits.
+
+## 3e. AMSAT's PSK beacon (QO-100)
+
+Asked for 2026-11-10 with WebSDR recordings of QO-100's 10489.750 MHz
+beacon. `decsat-modem::p3beacon` has the frames and `decsat-modem::p3rx` the
+receiver, in that crate so the standalone app needs no codecs or engine.
+
+BPSK, differential then Manchester, 400 bit/s; 32-bit sync 0x3915ED30; 514
+bytes (512 of block, CRC-16/CCITT-FALSE), no FEC. Blocks seen on 2026-11-09:
+K, L, M, N, plain ASCII in 64-character lines.
+
+The receiver is feed-forward: carrier from the line of the squared signal
+(after mixing and filtering: squared at 8 kS/s, a carrier above 2 kHz
+aliases), phase from the smoothed square, bit instants from the best fit
+over ±60 ms. A WebSDR's audio drops samples, and a tracking loop took seconds
+to recover from each. The windows hold half-second blocks; the sign the
+halved phase leaves open is settled by re-reading the last bits.
+
+What the beacon carries today: **no voltages or temperature**. The K block,
+which had them in 2019 (`UPT`, `TEMP`, `VOLTAGES`, `TFL`...; EA4GPZ's post),
+was received blank with a good CRC. [`parse_telemetry`] reads that wording
+should it return; which rail each voltage is has not been published.
+
+Between the uncoded frames (25.4 s apart, not 10.4) the beacon sends 6016
+more bits: 51 bytes of 0x00/0x50, then 5200-odd bits with fixed bits at
+regular spacing, repeating every four frames with the block cycle. That
+looks like AO-40's FEC frame carrying the same static text; not decoded.
+
+Not done: AO-40's FEC frames; AO-40's binary A blocks' calibrated channels
+(no table for QO-100; a binary block shows as hex).
+
+Mono WAV files read as a real signal (Q = 0), so a WebSDR's audio opens as
+a capture.
 
 ## 4. Workspace layout
 

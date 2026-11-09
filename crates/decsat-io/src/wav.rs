@@ -8,6 +8,10 @@
 //! before or after it). Files over 4 GiB come as RF64 (EBU Tech 3306), whose
 //! `ds64` chunk carries the real sizes. SDR#, HDSDR and SDRuno also write an
 //! `auxi` chunk whose centre frequency is read when present.
+//!
+//! One-channel WAV files are read too, as a real signal (Q = 0): an audio
+//! recording from a WebSDR or an SSB receiver. A narrow signal in one is
+//! found at its audio frequency, with an image at minus that.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -25,6 +29,8 @@ pub struct WavIq {
     pub data_len: u64,
     /// From an `auxi` chunk, when there is one.
     pub center_freq: Option<f64>,
+    /// One channel: samples of `format`'s width, read as a real signal.
+    pub mono: bool,
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -40,8 +46,8 @@ fn invalid(msg: &str) -> decsat_core::Error {
 }
 
 /// Read `path`'s header if it is a WAV (RIFF or RF64) file: `Ok(None)` for
-/// any other file, an error for a WAV that is not two-channel IQ in a format
-/// this reader takes.
+/// any other file, an error for a WAV that is not one- or two-channel in a
+/// format this reader takes.
 pub fn probe(path: &Path) -> Result<Option<WavIq>> {
     let mut f = File::open(path)?;
     let mut head = [0u8; 12];
@@ -101,9 +107,9 @@ pub fn probe(path: &Path) -> Result<Option<WavIq>> {
                 }
                 let (tag, channels, rate, bits) =
                     fmt.ok_or_else(|| invalid("no fmt chunk before the data"))?;
-                if channels != 2 {
+                if channels != 1 && channels != 2 {
                     return Err(invalid(&format!(
-                        "{channels} channel(s): IQ needs two (I left, Q right)"
+                        "{channels} channels: one (audio) or two (I left, Q right) only"
                     )));
                 }
                 let format = match (tag, bits) {
@@ -127,6 +133,7 @@ pub fn probe(path: &Path) -> Result<Option<WavIq>> {
                     data_offset: body,
                     data_len: len,
                     center_freq: center,
+                    mono: channels == 1,
                 }));
             }
             _ => {}
@@ -263,12 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn mono_wav_is_refused_and_raw_files_are_not_wav() {
+    fn mono_wav_reads_as_a_real_signal_and_raw_files_are_not_wav() {
         let dir = std::env::temp_dir();
-        let mut mono = wav(1, 16, 8000, &[0, 0, 0, 0], None);
+        let samples: Vec<u8> = [16384i16, -16384, 8192]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let mut mono = wav(1, 16, 8000, &samples, None);
         mono[22] = 1; // channels
         let p = dir.join("decsat-wavmono.wav");
         std::fs::write(&p, mono).unwrap();
+        assert!(probe(&p).unwrap().unwrap().mono);
+        let (r, got) = read_all(&p);
+        assert_eq!(r.sample_rate(), 8000.0);
+        assert_eq!(
+            got,
+            vec![Iq::new(0.5, 0.0), Iq::new(-0.5, 0.0), Iq::new(0.25, 0.0)]
+        );
+        let mut three = wav(1, 16, 8000, &samples, None);
+        three[22] = 3;
+        std::fs::write(&p, three).unwrap();
         assert!(probe(&p).is_err());
         let raw = dir.join("decsat-raw.cs8");
         std::fs::write(&raw, [1u8, 2, 3, 4]).unwrap();

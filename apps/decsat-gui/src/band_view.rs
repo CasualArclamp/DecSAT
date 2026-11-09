@@ -449,6 +449,14 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             }
             None => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "P3 12 frames" — AMSAT's PSK beacon.
+        DecoderKind::P3Beacon => match st.p3.as_ref() {
+            Some(p) if p.frames + p.partial > 0 => {
+                format!("{} frames, {} good", p.frames + p.partial, p.good)
+            }
+            Some(p) if p.carrier_hz.is_some() => "beacon found".to_string(),
+            _ => "looking".to_string(),
+        },
         // "BCN 58 dB-Hz · TLM 4.8k" — the carrier's C/N0 and the telemetry's
         // bit rate (once frames are found), "CW" when there is none.
         DecoderKind::Beacon => match st.beacon.as_ref().and_then(|b| b.carrier.map(|c| (b, c))) {

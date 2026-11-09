@@ -74,6 +74,7 @@ real carriers stay put.
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
 | **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on live beacons — Intelsat 19's: 4800 bit/s bi-phase on a 48 kHz subcarrier, IRIG frames; Eutelsat 172B's: 9600 symbol/s NRZ on a 76.8 kHz subcarrier, K = 7 coded CCSDS TM frames — every frame |
+| **QO-100's PSK beacon** (AO-40's uncoded format, 400 bit/s): frames with CRC, the blocks as text, housekeeping values when sent; also from a sound card in the small `qo100-beacon` app | ✅ on WebSDR recordings of 10489.750 MHz, every frame's CRC good |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
@@ -881,6 +882,27 @@ BPSK bi-phase chips, and Identify says so rather than calling them a code.
 ```bash
 decsat decode beacon_533333Sps.cf32 --decoder beacon   # carrier, telemetry, frames, the last few in hex
 ```
+
+### QO-100's PSK beacon
+
+Decoder **AMSAT PSK beacon** (`p3` on the command line): a VFO a few kHz wide
+on 10489.750 MHz, or on a receiver's audio. A mono WAV (a WebSDR's recording)
+opens as a capture:
+
+```bash
+decsat decode recording.wav --decoder p3 --bandwidth 8000 --fast
+```
+
+**`qo100-beacon.exe`** is the same receiver on its own, for a sound card:
+pick the input (or a virtual cable from a WebSDR or SDR program), press
+Listen, and tune USB so the beacon is somewhere between 300 Hz and 3.7 kHz.
+It shows the waterfall, the constellation, the latest of each block, a log of
+every frame and the housekeeping values. A frame takes 10.4 s and they come
+every 25 s.
+
+As received in November 2026 the beacon sends text only: the K block, which
+carried uptime, temperature and voltages in 2019, is blank. They will show
+if it sends them again.
 
 ### Generic PSK → symbols
 

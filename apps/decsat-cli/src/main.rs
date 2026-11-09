@@ -250,7 +250,7 @@ enum Command {
         /// Live radios default to HackRF 2, Airspy 6, Fobos 8, SDRplay 8, Pluto 4 MS/s.
         #[arg(long)]
         rate: Option<f64>,
-        /// Decoder: id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19.
+        /// Decoder: id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19, beacon, p3 (QO-100's PSK beacon).
         #[arg(long, default_value = "id")]
         decoder: String,
         /// VFO centre relative to the capture's centre, Hz.

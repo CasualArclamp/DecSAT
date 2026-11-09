@@ -27,6 +27,7 @@
 
 pub mod bits;
 pub mod carrier;
+pub use decsat_modem::p3rx as p3;
 pub mod pm;
 pub mod synth;
 

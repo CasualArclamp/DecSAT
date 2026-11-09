@@ -22,6 +22,7 @@ mod format;
 mod freq_display;
 mod freqplan;
 mod orbit;
+mod p3_card;
 mod player;
 #[cfg(feature = "pluto")]
 mod pluto_panel;
@@ -74,7 +75,7 @@ fn main() -> eframe::Result {
             eprintln!("decsat-gui: {e}");
             eprintln!(
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
-                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|psk|tdma|pool|rec|spec[,…]] [--beacons] \
+                 [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );

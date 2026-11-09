@@ -53,7 +53,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: >-
-          cargo build --release --target x86_64-pc-windows-msvc -p decsat-gui -p decsat-cli -p decsat-tx-app -p decsat-server -p decsat-server-app
+          cargo build --release --target x86_64-pc-windows-msvc -p decsat-gui -p decsat-cli -p decsat-tx-app -p decsat-server -p decsat-server-app -p qo100-beacon
       - name: Check (versions, no C runtime DLL, command-line smoke test)
         shell: bash
         run: |
@@ -67,7 +67,7 @@ jobs:
             test "$("$bin/decsat-gui" --version)" = "decsat-gui ${TAG#v}"
             test "$("$bin/decsat-tx" --version)" = "decsat-tx ${TAG#v}"
           fi
-          for exe in decsat decsat-gui decsat-tx decsat-server decsat-server-app; do
+          for exe in decsat decsat-gui decsat-tx decsat-server decsat-server-app qo100-beacon; do
             if grep -a -q -i -e vcruntime140 -e api-ms-win-crt "$bin/$exe.exe"; then
               echo "$exe.exe imports a C runtime DLL: not a static build" >&2
               exit 1
@@ -91,15 +91,16 @@ jobs:
         run: |
           set -euo pipefail
           bin=target/x86_64-pc-windows-msvc/release
-          cp "$bin/decsat-gui.exe" "$bin/decsat.exe" "$bin/decsat-tx.exe" "$bin/decsat-server.exe" "$bin/decsat-server-app.exe" .
+          cp "$bin/decsat-gui.exe" "$bin/decsat.exe" "$bin/decsat-tx.exe" "$bin/decsat-server.exe" "$bin/decsat-server-app.exe" "$bin/qo100-beacon.exe" .
           mv test-signals/decsat-scene_8Msps.cs8 test-signals/decsat-cid_3360000sps.cs8 .
-          files=(decsat-gui.exe decsat.exe decsat-tx.exe decsat-server.exe decsat-server-app.exe decsat-scene_8Msps.cs8 decsat-cid_3360000sps.cs8)
+          files=(decsat-gui.exe decsat.exe decsat-tx.exe decsat-server.exe decsat-server-app.exe qo100-beacon.exe decsat-scene_8Msps.cs8 decsat-cid_3360000sps.cs8)
           cat > notes.md <<'EOF'
           Portable Windows executables for 64-bit Windows 10/11, nothing to install (static C runtime).
 
           | File | What |
           |---|---|
           | `decsat-gui.exe` | Desktop app: wideband waterfall with VFOs (DVB-S2/S2X → GSE/IP or MPEG-TS, DVB-S, satellite modems, DVB-CID, generic PSK/QAM, IQ record), IQ files or a HackRF One; a DVB-S2/S2X transmitter (MPEG-TS to the HackRF or a file) |
+          | `qo100-beacon.exe` | QO-100's 400 bit/s PSK beacon from a sound card: waterfall, frames, text and housekeeping values |
           | `decsat-tx.exe` | Transmitter: a webcam and microphone (or a video file) encoded live in H.264, H.265, H.266, AV1 or MPEG-2 by ffmpeg, on a DVB-S2/S2X carrier with QO-100 presets, to the HackRF or an IQ file (needs ffmpeg) |
           | `decsat.exe` | Command line: `decsat scan`, `decsat decode`, `decsat analyse`, `decsat scene`, `decsat cid`, `decsat test-signals`, `decsat tx`, `decsat record`, `decsat modcods` |
           | `decsat-server.exe` | Headless SDR server: serves a radio at the dish to `decsat-gui` or `decsat` over one TCP connection (see docs/REMOTE.md) |

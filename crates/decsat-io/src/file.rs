@@ -42,8 +42,13 @@ pub struct IqFileReader {
     pos: u64,
     sample_rate: f64,
     center_freq: f64,
-    /// Scratch byte buffer, sized to `block_samples * bytes_per_sample`.
+    /// Scratch byte buffer, sized to `block_samples * bytes_per_sample`
+    /// (half that for a one-channel WAV file).
     raw: Vec<u8>,
+    /// A one-channel WAV file: each sample becomes I, with Q = 0.
+    mono: bool,
+    /// The samples of a one-channel file, widened to I and Q.
+    paired: Vec<u8>,
     name: String,
 }
 
@@ -59,16 +64,18 @@ impl IqFileReader {
         block_samples: usize,
     ) -> Result<Self> {
         let wav = crate::wav::probe(path)?;
-        let (fmt, sample_rate, start, len, center) = match &wav {
+        let (fmt, sample_rate, start, len, center, mono) = match &wav {
             Some(w) => (
                 w.format,
                 w.sample_rate,
                 w.data_offset,
                 Some(w.data_len),
                 w.center_freq.unwrap_or(0.0),
+                w.mono,
             ),
-            None => (fmt, sample_rate, 0, None, 0.0),
+            None => (fmt, sample_rate, 0, None, 0.0, false),
         };
+        let width = fmt.bytes_per_sample() / if mono { 2 } else { 1 };
         let mut file = File::open(path)?;
         file.seek(SeekFrom::Start(start))?;
         Ok(IqFileReader {
@@ -79,7 +86,9 @@ impl IqFileReader {
             pos: 0,
             sample_rate,
             center_freq: center,
-            raw: vec![0u8; block_samples * fmt.bytes_per_sample()],
+            raw: vec![0u8; block_samples * width],
+            mono,
+            paired: Vec::new(),
             name: path
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -118,6 +127,20 @@ impl IqSource for IqFileReader {
         }
         self.pos += filled as u64;
         // Drop any trailing partial sample.
+        if self.mono {
+            let width = self.fmt.bytes_per_sample() / 2;
+            let usable = filled - (filled % width);
+            // Rust note: `chunks_exact` walks the bytes one sample at a time.
+            // 8-bit WAV samples are unsigned, so their zero is 128.
+            let zero = if width == 1 { 128 } else { 0 };
+            self.paired.clear();
+            for sample in self.raw[..usable].chunks_exact(width) {
+                self.paired.extend_from_slice(sample);
+                self.paired.resize(self.paired.len() + width, zero);
+            }
+            bytes_to_iq(&self.paired, self.fmt, out);
+            return Ok(out.len());
+        }
         let usable = filled - (filled % self.fmt.bytes_per_sample());
         bytes_to_iq(&self.raw[..usable], self.fmt, out);
         Ok(out.len())
