@@ -67,6 +67,12 @@ const SLEW: f64 = 0.1;
 /// The sound clock further than this, ms, from where the pictures' clock was
 /// heading has jumped (audio cut back to live, a restart): follow it at once.
 const RESYNC_MS: f64 = 120.0;
+/// After a dropout the sound comes back behind the pictures: up to this far,
+/// ms, the pictures ease back to it instead of freezing until it catches up.
+const MAX_EASE_MS: f64 = 3000.0;
+/// How much slower the pictures run while easing back (0.25: at 3/4 speed, so
+/// a one-second dropout is taken up in four seconds).
+const EASE: f64 = 0.25;
 /// Pictures due at once beyond this many are dropped as late; up to it they
 /// are shown one at a time, oldest first, in the next polls (a slow frame of
 /// the GUI is then not a dropped picture).
@@ -125,8 +131,8 @@ pub struct Status {
     pub playing: bool,
     /// Transport stream bytes given to ffmpeg.
     pub fed_bytes: u64,
-    /// What the pictures are timed by: "sound", "wall", or "waiting for the
-    /// sound".
+    /// What the pictures are timed by: "sound", "wall", "wall while the sound
+    /// refills", or "waiting for the sound".
     pub clock: &'static str,
     pub audio: Option<decsat_audio::Status>,
 }
@@ -144,6 +150,11 @@ struct AudioClock {
 /// runs on the wall clock between readings and takes up a tenth of the
 /// difference at each, so it follows the sound's rate and offset, and
 /// jumps only when the sound does ([`RESYNC_MS`]).
+///
+/// While the sound runs dry and refills it stands still, so the pictures
+/// would freeze for as long as the refill takes. Instead the clock
+/// [coasts](Self::coast) on the wall clock meanwhile, and when the sound comes
+/// back behind it the pictures ease back to it ([`EASE`]) rather than wait.
 #[derive(Debug, Default)]
 struct SlewClock {
     last: Option<(Instant, f64)>,
@@ -155,10 +166,14 @@ impl SlewClock {
     fn update(&mut self, now: Instant, raw: f64) -> (f64, bool) {
         let (clock, jumped) = match self.last {
             Some((t, c)) => {
-                let predicted = c + now.duration_since(t).as_secs_f64() * 1000.0;
+                let dt = now.duration_since(t).as_secs_f64() * 1000.0;
+                let predicted = c + dt;
                 let err = raw - predicted;
-                if err.abs() > RESYNC_MS {
+                if err > RESYNC_MS || err < -MAX_EASE_MS {
                     (raw, true)
+                } else if err < -RESYNC_MS {
+                    // The sound is behind, after a dropout.
+                    ((predicted - EASE * dt).max(raw), false)
                 } else {
                     (predicted + SLEW * err, false)
                 }
@@ -167,6 +182,15 @@ impl SlewClock {
         };
         self.last = Some((now, clock));
         (clock, jumped)
+    }
+
+    /// With no sound to follow for now: the clock at `now` on the wall clock,
+    /// `None` if it has not started.
+    fn coast(&mut self, now: Instant) -> Option<f64> {
+        let (t, c) = self.last?;
+        let clock = c + now.duration_since(t).as_secs_f64() * 1000.0;
+        self.last = Some((now, clock));
+        Some(clock)
     }
 }
 
@@ -338,6 +362,11 @@ impl VideoPlayer {
                 let (c, j) = self.sync.slew.update(now, raw);
                 jumped = j;
                 c.floor() as i64
+            }
+            // The sound has run dry and is refilling: the pictures go on.
+            Some(None) if self.sync.slew.last.is_some() => {
+                st.clock = "wall while the sound refills";
+                self.sync.slew.coast(now).unwrap_or(front as f64).floor() as i64
             }
             // Sound on its way: hold the first picture until it plays, for
             // a while (a sound device that fails must not stop the picture).
@@ -805,6 +834,43 @@ mod tests {
         // The sound cut back to live, 400 ms on.
         let (c, jumped) = clock.update(t0 + Duration::from_millis(33), 1450.0);
         assert!(jumped && c == 1450.0);
+    }
+
+    /// A dropout: the sound's position stands still for a second while it
+    /// refills. The clock goes on, then eases back with no jump or stop.
+    #[test]
+    fn the_clock_runs_through_a_dropout_and_eases_back() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut clock = SlewClock::default();
+        assert_eq!(clock.coast(t0), None, "nothing to coast from yet");
+        clock.update(t0, 1000.0);
+        // No sound for a second: the clock keeps time.
+        let c = clock.coast(at(1000)).unwrap();
+        assert!((c - 2000.0).abs() < 1.0, "{c}");
+        // The sound is back where it stopped, and playing on.
+        let (mut last, mut t) = (c, 1000u64);
+        let mut raw = 1000.0;
+        while t < 8000 {
+            t += 20;
+            raw += 20.0;
+            let (c, jumped) = clock.update(at(t), raw);
+            assert!(!jumped, "jumped at {t} ms");
+            assert!(c > last, "stopped at {t} ms: {c} after {last}");
+            assert!(c >= raw, "behind the sound at {t} ms");
+            last = c;
+        }
+        // Back in step with the sound.
+        assert!((last - raw).abs() < RESYNC_MS, "{last} against {raw}");
+    }
+
+    #[test]
+    fn a_sound_far_behind_is_followed_at_once() {
+        let t0 = Instant::now();
+        let mut clock = SlewClock::default();
+        clock.update(t0, 10_000.0);
+        let (c, jumped) = clock.update(t0 + Duration::from_millis(20), 5_000.0);
+        assert!(jumped && c == 5_000.0);
     }
 
     #[test]

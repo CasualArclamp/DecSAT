@@ -373,6 +373,14 @@ pub const KEY_FRAME_SECS: u32 = 5;
 /// The most AV1 gets: its TS mapping asks for one at least every 2 s.
 pub const KEY_FRAME_SECS_AV1: u32 = 2;
 
+/// Milliseconds between PCRs for a channel of `ts_rate` bit/s. 20 ms is what
+/// stations on the air send, but a PCR can cost a whole 188-byte packet: 75
+/// kbit/s at that spacing, which overruns a very narrow channel. Below 300
+/// kbit/s, the 100 ms that ISO/IEC 13818-1 §2.7.2 allows at most.
+pub fn pcr_period_ms(ts_rate: f64) -> u32 {
+    if ts_rate < 300_000.0 { 100 } else { 20 }
+}
+
 /// The default audio rate, bit/s (AAC-LC 48k stereo, as CT100RE sent).
 pub const DEFAULT_AUDIO_BPS: u32 = 48_000;
 
@@ -799,7 +807,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
         s("-mpegts_flags"),
         s("resend_headers"),
         s("-pcr_period"),
-        s("20"),
+        pcr_period_ms(ts_rate).to_string(),
         s("-pat_period"),
         s("0.4"),
         s("-metadata"),
@@ -1133,6 +1141,8 @@ Error opening input file dummy."#;
         let a = args(&s, 594_000.0, None);
         assert_eq!(at(&a, "-g"), "150");
         assert_eq!(at(&a, "-pcr_period"), "20");
+        // A very narrow channel cannot spare that many PCR packets.
+        assert_eq!(at(&args(&s, 121_000.0, None), "-pcr_period"), "100");
         assert_eq!(at(&a, "-pat_period"), "0.4");
         assert_eq!(at(&a, "-ac"), "2");
         assert_eq!(at(&a, "-b:a"), "48k");
