@@ -30,6 +30,10 @@
 //! itself). An error code with bit 31 set ([`IA_FATAL_ERROR`]) is fatal; other non-zero
 //! codes are warnings (a damaged frame, concealed).
 
+/// The encoder, for the transmitter (feature `encoder`).
+#[cfg(feature = "encoder")]
+pub mod enc;
+
 use core::ffi::c_void;
 
 /// `IA_ERRORCODE`.

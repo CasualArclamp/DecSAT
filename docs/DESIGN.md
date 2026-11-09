@@ -421,6 +421,10 @@ After BBFRAMEs exist, GS-mode payload is GSE. Implement:
   the carrier, an encoder restarts at the new TS rate (nulls meanwhile), and
   a retune stays within 10 MHz of where it was keyed and, on QO-100, on the
   transponder and off the beacon.
+  Audio is AAC-LC, HE-AAC, Opus or MP2. HE-AAC (which ffmpeg cannot encode:
+  no SBR in its own AAC, libfdk_aac not GPL-compatible) comes from libxaac's
+  encoder: a second ffmpeg captures PCM, ADTS frames go to the main ffmpeg's
+  stdin and it copies them into the TS.
   QO-100 presets from BATC's 2021 bandplan V3 and its conference page, each
   value cited in `qo100.rs`; the bandplan's limits checked. **AV1:** neither
   ffmpeg's TS muxer nor its demuxer (9.0) knows AOM's "Carriage of AV1 in

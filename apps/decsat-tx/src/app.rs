@@ -257,6 +257,9 @@ impl App {
         if let Some(c) = self.opts.codec.as_deref().and_then(VideoCodec::from_key) {
             self.codec = c;
         }
+        if let Some(a) = self.opts.audio.as_deref().and_then(AudioCodec::from_key) {
+            self.audio = a;
+        }
         if let Some(s) = self.opts.source.clone() {
             if let Some(rest) = s.strip_prefix("camera") {
                 self.source = SourceKind::Camera;
@@ -1093,7 +1096,7 @@ impl App {
                     egui::ComboBox::from_id_salt("audio")
                         .selected_text(self.audio.label())
                         .show_ui(ui, |ui| {
-                            for a in [AudioCodec::Aac, AudioCodec::Mp2, AudioCodec::None] {
+                            for a in AudioCodec::ALL {
                                 ui.selectable_value(&mut self.audio, a, a.label());
                             }
                         });

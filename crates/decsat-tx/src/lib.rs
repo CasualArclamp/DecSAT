@@ -20,6 +20,7 @@
 //!
 //! - [`qo100`]: QO-100 wideband transponder presets, with their sources.
 //! - [`encode`]: codecs and engines, ffmpeg's command line, cameras.
+//! - [`he_aac`]: HE-AAC from libxaac's encoder, which ffmpeg lacks.
 //! - [`feeder`]: ffmpeg running, its stream, log and preview read.
 //! - [`live`]: the TS ring and the modulator's input from it.
 //! - [`iq`]: the modulator as a sample pump, with its spectrum.
@@ -30,6 +31,7 @@ pub mod arm;
 pub mod cpu;
 pub mod encode;
 pub mod feeder;
+pub mod he_aac;
 pub mod iq;
 pub mod live;
 pub mod qo100;

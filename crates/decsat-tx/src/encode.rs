@@ -150,15 +150,30 @@ pub const AUTO_ORDER: [Engine; 4] = [Engine::Nvenc, Engine::Amf, Engine::Qsv, En
 pub enum AudioCodec {
     /// AAC-LC (ffmpeg's own encoder), ADTS in the TS.
     Aac,
+    /// HE-AAC v1 (libxaac's encoder, crate::he_aac), ADTS in the TS.
+    HeAac,
+    /// Opus (libopus), in the TS as ffmpeg maps it: stream type 06h with an
+    /// `Opus` registration descriptor.
+    Opus,
     /// MPEG-1 Layer II, what older DATV receivers expect.
     Mp2,
     None,
 }
 
 impl AudioCodec {
+    pub const ALL: [AudioCodec; 5] = [
+        AudioCodec::Aac,
+        AudioCodec::HeAac,
+        AudioCodec::Opus,
+        AudioCodec::Mp2,
+        AudioCodec::None,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             AudioCodec::Aac => "AAC",
+            AudioCodec::HeAac => "HE-AAC",
+            AudioCodec::Opus => "Opus",
             AudioCodec::Mp2 => "MP2",
             AudioCodec::None => "none",
         }
@@ -167,13 +182,15 @@ impl AudioCodec {
     pub fn key(self) -> &'static str {
         match self {
             AudioCodec::Aac => "aac",
+            AudioCodec::HeAac => "he-aac",
+            AudioCodec::Opus => "opus",
             AudioCodec::Mp2 => "mp2",
             AudioCodec::None => "none",
         }
     }
 
     pub fn from_key(s: &str) -> Option<AudioCodec> {
-        [AudioCodec::Aac, AudioCodec::Mp2, AudioCodec::None]
+        Self::ALL
             .into_iter()
             .find(|c| c.key() == s.to_ascii_lowercase())
     }
@@ -275,12 +292,78 @@ pub fn mux_rate(ts_rate: f64) -> u64 {
 /// null packets in the multiplex, as the captures on the air have (at 12 %
 /// a test pattern left 0.07 %).
 pub fn video_rate(ts_rate: f64, audio: AudioCodec, audio_bps: u32) -> u32 {
-    let a = if audio == AudioCodec::None {
-        0.0
-    } else {
-        f64::from(audio_bps) * 1.1
-    };
+    let a = f64::from(audio_bps)
+        * match audio {
+            AudioCodec::None => 0.0,
+            // Measured: 45 kbit/s of TS for 32 kbit/s at 20 ms frames.
+            AudioCodec::Opus => 1.4,
+            _ => 1.1,
+        };
     ((ts_rate * 0.85 - a).max(16_000.0)) as u32
+}
+
+/// The audio's capture for HE-AAC, which ffmpeg cannot encode: a second
+/// ffmpeg's arguments, sending 48 kHz 16-bit PCM to its stdout for
+/// crate::he_aac. `None` for the other codecs, or with no audio to take.
+pub fn he_aac_capture_args(settings: &EncodeSettings) -> Option<Vec<String>> {
+    if settings.audio != AudioCodec::HeAac {
+        return None;
+    }
+    let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-loglevel", "error"]
+        .map(String::from)
+        .to_vec();
+    let s = |x: &str| x.to_string();
+    match &settings.input {
+        Input::Camera { audio: None, .. } => return None,
+        Input::Camera {
+            audio: Some(mic), ..
+        } => {
+            if cfg!(windows) {
+                a.extend([
+                    s("-f"),
+                    s("dshow"),
+                    s("-audio_buffer_size"),
+                    s("40"),
+                    s("-i"),
+                    format!("audio={mic}"),
+                ]);
+            } else {
+                a.extend([s("-f"), s("alsa"), s("-i"), mic.clone()]);
+            }
+        }
+        Input::File { path, looped } => {
+            if *looped {
+                a.extend(["-stream_loop", "-1"].map(String::from));
+            }
+            a.extend([s("-i"), path.to_string_lossy().into_owned()]);
+        }
+        Input::TestPattern => {
+            a.extend(
+                [
+                    "-re",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=1000:sample_rate=48000",
+                ]
+                .map(String::from),
+            );
+        }
+    }
+    a.extend([
+        s("-map"),
+        s("0:a:0"),
+        s("-ac"),
+        audio_channels(settings.audio_bps).to_string(),
+        s("-ar"),
+        s("48000"),
+        s("-f"),
+        s("s16le"),
+        s("-flush_packets"),
+        s("1"),
+        s("pipe:1"),
+    ]);
+    Some(a)
 }
 
 /// Seconds between key frames (the captures on the air: 5 s). A receiver
@@ -520,6 +603,8 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
     // `-progress` on stderr: key=value lines a second, read by the feeder.
     a.extend(["-stats_period", "1", "-progress", "pipe:2"].map(String::from));
     let mut has_audio = settings.audio != AudioCodec::None;
+    // HE-AAC comes in on stdin, already encoded (see crate::feeder).
+    let he_aac = settings.audio == AudioCodec::HeAac;
     match &settings.input {
         Input::Camera { video, audio, mode } => {
             if cfg!(windows) {
@@ -539,6 +624,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
                 }
                 let mut spec = format!("video={video}");
                 match audio {
+                    Some(_) if has_audio && he_aac => {}
                     Some(mic) if has_audio => spec.push_str(&format!(":audio={mic}")),
                     _ => has_audio = false,
                 }
@@ -555,6 +641,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
                 }
                 a.extend([s("-i"), video.clone()]);
                 match audio {
+                    Some(_) if has_audio && he_aac => {}
                     Some(mic) if has_audio => a.extend([s("-f"), s("alsa"), s("-i"), mic.clone()]),
                     _ => has_audio = false,
                 }
@@ -577,7 +664,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
                     pic.width, pic.height, pic.fps
                 ),
             ]);
-            if has_audio {
+            if has_audio && !he_aac {
                 a.extend([
                     s("-f"),
                     s("lavfi"),
@@ -587,9 +674,33 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
             }
         }
     }
+    let he_aac = he_aac && has_audio;
+    if he_aac {
+        if !matches!(settings.input, Input::File { .. }) {
+            // A live source: stamped as it arrives, so it stays with the
+            // camera however the sound card's clock drifts.
+            a.extend(["-use_wallclock_as_timestamps", "1"].map(String::from));
+        }
+        a.extend(
+            [
+                "-thread_queue_size",
+                "512",
+                "-analyzeduration",
+                "0",
+                "-probesize",
+                "4096",
+                "-f",
+                "aac",
+                "-i",
+                "pipe:0",
+            ]
+            .map(String::from),
+        );
+    }
     // The second input (a separate audio device, or the test tone) is
     // input 1; DirectShow gives both from input 0.
     let audio_in = match &settings.input {
+        _ if he_aac => "1:a:0",
         Input::Camera { .. } if !cfg!(windows) => "1:a:0",
         Input::TestPattern => "1:a:0",
         _ => "0:a:0",
@@ -597,7 +708,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
     // A file may have no sound: mapped with `?` (no error) and not split
     // for the preview's meter, which would need it to exist.
     let is_file = matches!(settings.input, Input::File { .. });
-    let audio_preview = has_audio && preview.is_some() && !is_file;
+    let audio_preview = has_audio && preview.is_some() && !is_file && !he_aac;
     // The filter graph: one chain to the encoder, and with a preview a
     // split to it.
     let mut vf = format!(
@@ -635,7 +746,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
     if has_audio {
         if audio_preview {
             a.extend([s("-map"), s("[aenc]")]);
-        } else if is_file {
+        } else if is_file && !he_aac {
             a.extend([s("-map"), format!("{audio_in}?")]);
         } else {
             a.extend([s("-map"), audio_in.to_string()]);
@@ -658,14 +769,20 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
         match settings.audio {
             AudioCodec::Aac => a.extend(["-c:a", "aac", "-b:a", &ab].map(String::from)),
             AudioCodec::Mp2 => a.extend(["-c:a", "mp2", "-b:a", &ab].map(String::from)),
+            AudioCodec::Opus => {
+                a.extend(["-c:a", "libopus", "-b:a", &ab, "-vbr", "off"].map(String::from));
+            }
+            AudioCodec::HeAac => a.extend(["-c:a", "copy"].map(String::from)),
             AudioCodec::None => {}
         }
-        a.extend([
-            s("-ac"),
-            audio_channels(settings.audio_bps).to_string(),
-            s("-ar"),
-            s("48000"),
-        ]);
+        if settings.audio != AudioCodec::HeAac {
+            a.extend([
+                s("-ac"),
+                audio_channels(settings.audio_bps).to_string(),
+                s("-ar"),
+                s("48000"),
+            ]);
+        }
     }
     let mux = mux_rate(ts_rate);
     a.extend([
@@ -962,6 +1079,47 @@ Error opening input file dummy."#;
         assert_eq!(picture_for(VideoCodec::H266, 1_650_000).height, 270);
         assert_eq!(picture_for(VideoCodec::H265, 100_000).fps, 15);
         assert_eq!(picture_for(VideoCodec::H266, 1_650_000).fps, 25);
+    }
+
+    #[test]
+    fn opus_and_he_aac_reach_the_command_line() {
+        let at = |a: &[String], k: &str| a[a.iter().position(|x| x == k).unwrap() + 1].clone();
+        let opus = EncodeSettings {
+            audio: AudioCodec::Opus,
+            ..EncodeSettings::default()
+        };
+        assert_eq!(he_aac_capture_args(&opus), None);
+        let a = args(&opus, 430_000.0, None);
+        assert_eq!(at(&a, "-c:a"), "libopus");
+        assert_eq!(at(&a, "-ar"), "48000");
+        assert_eq!(AudioCodec::from_key("opus"), Some(AudioCodec::Opus));
+
+        let he = EncodeSettings {
+            audio: AudioCodec::HeAac,
+            ..EncodeSettings::default()
+        };
+        assert_eq!(AudioCodec::from_key("he-aac"), Some(AudioCodec::HeAac));
+        let a = args(&he, 430_000.0, None);
+        assert_eq!(at(&a, "-c:a"), "copy");
+        assert!(a.windows(2).any(|w| w[0] == "-i" && w[1] == "pipe:0"));
+        assert!(!a.iter().any(|x| x.contains("sine=")), "the capture has it");
+        assert!(a.windows(2).any(|w| w[0] == "-map" && w[1] == "1:a:0"));
+        let c = he_aac_capture_args(&he).unwrap();
+        assert_eq!(c.last().unwrap(), "pipe:1");
+        assert_eq!(at(&c, "-f"), "lavfi");
+        assert!(c.iter().any(|x| x == "s16le"));
+        // A camera with no microphone has no audio to capture or to map.
+        let silent = EncodeSettings {
+            input: Input::Camera {
+                video: "Cam".into(),
+                audio: None,
+                mode: None,
+            },
+            audio: AudioCodec::HeAac,
+            ..EncodeSettings::default()
+        };
+        assert_eq!(he_aac_capture_args(&silent), None);
+        assert!(!args(&silent, 430_000.0, None).iter().any(|x| x == "pipe:0"));
     }
 
     #[test]

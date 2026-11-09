@@ -38,7 +38,8 @@ CMake for libopus: if `cmake` is not on PATH, Visual Studio's own is at
 libopus (Opus radio) is the `third_party/opus` submodule (tag v1.6.1), built
 by `decsat-opus-sys` with CMake, as in DecDRM; libxaac (AAC with SBR/PS,
 Apache-2.0) is `third_party/libxaac` (v0.1.13), its decoder built by
-`decsat-xaac-sys` with `cc`. Not FDK-AAC: its licence does not mix with the
+`decsat-xaac-sys` with `cc` (and its encoder, for the transmitter's HE-AAC, with the
+`encoder` feature). Not FDK-AAC: its licence does not mix with the
 GPL. `git submodule update --init` fetches both.
 
 The live HackRF front end is behind `--features hackrf` (on `decsat-io`, re-exported

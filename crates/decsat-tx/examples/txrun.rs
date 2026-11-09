@@ -6,6 +6,7 @@
 //! cargo run --release -p decsat-tx --example txrun -- [options]
 //!   --source camera[:NAME] | test | file:PATH      (default test)
 //!   --mic NAME | --no-audio
+//!   --audio aac|he-aac|opus|mp2 --audio-kbps K     (default aac 48)
 //!   --codec h264|h265|h266|av1|mpeg2               (default h265)
 //!   --engine auto|cpu|nvenc|amf|qsv                (default auto)
 //!   --preset N                                     (a QO-100 preset's index, default 0: the net)
@@ -44,7 +45,9 @@ fn main() {
     let audio = if has("--no-audio") {
         AudioCodec::None
     } else {
-        AudioCodec::Aac
+        get("--audio").map_or(AudioCodec::Aac, |a| {
+            AudioCodec::from_key(&a).expect("audio")
+        })
     };
     let input = if let Some(rest) = source.strip_prefix("camera") {
         let name = rest
@@ -85,6 +88,9 @@ fn main() {
         codec,
         engine,
         audio,
+        audio_bps: get("--audio-kbps").map_or(encode::DEFAULT_AUDIO_BPS, |k| {
+            k.parse::<u32>().expect("--audio-kbps") * 1000
+        }),
         service_name: "TEST".into(),
         ..EncodeSettings::default()
     };

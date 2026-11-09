@@ -12,13 +12,17 @@
 //!   TCP connection ffmpeg makes to us), the newest picture and the sound's
 //!   level kept for the window.
 //!
+//! - `tx-he-aac`, for HE-AAC (which ffmpeg cannot encode): a second ffmpeg
+//!   captures the sound as PCM, [`HeAacEncoder`] makes ADTS frames of it, and
+//!   they go to the main ffmpeg's stdin, which copies them into the TS.
+//!
 //! Dropping the [`Feeder`] kills ffmpeg and joins the threads.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -30,6 +34,7 @@ use decsat_video::mkv::{Event, MkvReader};
 
 use crate::cpu::{CpuGauge, child_cpu_seconds};
 use crate::encode::{self, EncodeSettings, Input, VideoCodec};
+use crate::he_aac::HeAacEncoder;
 use crate::live::TsRing;
 use crate::qo100::{PID_PMT, PID_VIDEO};
 
@@ -79,6 +84,8 @@ struct Shared {
     quit: AtomicBool,
     status: Mutex<FeederStatus>,
     child: Mutex<Option<Child>>,
+    /// HE-AAC's capture ffmpeg.
+    capture: Mutex<Option<Child>>,
     preview: Mutex<Option<PreviewFrame>>,
     serial: AtomicU64,
     ended: Arc<AtomicBool>,
@@ -116,14 +123,30 @@ impl Feeder {
             .and_then(|l| l.local_addr().ok())
             .map(|a| format!("tcp://{a}"));
         let args = encode::args(settings, ts_rate, url.as_deref());
+        let capture = encode::he_aac_capture_args(settings);
+        let he_aac = capture
+            .as_ref()
+            .map(|_| {
+                HeAacEncoder::new(
+                    48_000,
+                    encode::audio_channels(settings.audio_bps),
+                    settings.audio_bps,
+                )
+            })
+            .transpose()?;
         let mut child = encode::command(exe)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if capture.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("{}: {e}", exe.display()))?;
-        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let (stdout, stderr, stdin) =
+            (child.stdout.take(), child.stderr.take(), child.stdin.take());
         let cpu = CpuGauge::new(child_cpu_seconds(&child));
         let sh = Arc::new(Shared {
             quit: AtomicBool::new(false),
@@ -132,6 +155,7 @@ impl Feeder {
                 ..Default::default()
             }),
             child: Mutex::new(Some(child)),
+            capture: Mutex::new(None),
             preview: Mutex::new(None),
             serial: AtomicU64::new(0),
             ended,
@@ -156,6 +180,36 @@ impl Feeder {
         if let Some(err) = stderr {
             let s = sh.clone();
             threads.push(spawn("tx-ff-log", Box::new(move || read_log(err, &s)))?);
+        }
+        if let (Some(cap), Some(enc), Some(to_mux)) = (capture, he_aac, stdin) {
+            let mut c = match encode::command(exe)
+                .args(&cap)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(mut main) = sh.child.lock().unwrap().take() {
+                        let _ = main.kill();
+                        let _ = main.wait();
+                    }
+                    return Err(format!("{}: {e}", exe.display()));
+                }
+            };
+            let (pcm, log) = (c.stdout.take(), c.stderr.take());
+            *sh.capture.lock().unwrap() = Some(c);
+            let s = sh.clone();
+            let is_file = matches!(settings.input, Input::File { .. });
+            threads.push(spawn(
+                "tx-he-aac",
+                Box::new(move || {
+                    if let (Some(pcm), Some(log)) = (pcm, log) {
+                        pump_he_aac(pcm, log, enc, to_mux, &s, is_file);
+                    }
+                }),
+            )?);
         }
         if let Some(l) = listener {
             let s = sh.clone();
@@ -213,9 +267,69 @@ impl Drop for Feeder {
             let _ = c.kill();
             let _ = c.wait();
         }
+        if let Some(mut c) = self.sh.capture.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// PCM from the capture, HE-AAC frames to the main ffmpeg, the level for
+/// the window's meter (the preview's sound does not exist in this mode).
+fn pump_he_aac(
+    mut pcm: impl Read,
+    mut log: impl Read,
+    mut enc: HeAacEncoder,
+    mut to_mux: ChildStdin,
+    sh: &Shared,
+    is_file: bool,
+) {
+    let mut frame = vec![0u8; enc.frame_bytes()];
+    let mut frames = 0u64;
+    while pcm.read_exact(&mut frame).is_ok() {
+        frames += 1;
+        let peak = frame
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i32::from(i16::from_le_bytes(*b)).abs())
+            .max()
+            .unwrap_or(0);
+        let db = 20.0 * (peak.max(1) as f32 / 32768.0).log10();
+        sh.status.lock().unwrap().audio_dbfs = Some(db);
+        match enc.encode(&frame) {
+            Ok(adts) => {
+                if to_mux
+                    .write_all(adts)
+                    .and_then(|()| to_mux.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(e) => {
+                sh.status.lock().unwrap().exit = Some(e);
+                return;
+            }
+        }
+    }
+    if sh.quit.load(Ordering::Relaxed) || (is_file && frames > 0) {
+        return;
+    }
+    // The capture ended by itself: a file with no sound, or a lost microphone.
+    let mut why = String::new();
+    let _ = log.read_to_string(&mut why);
+    let last = why.lines().last().unwrap_or("").to_string();
+    let mut s = sh.status.lock().unwrap();
+    if s.exit.is_none() {
+        s.exit = Some(if frames == 0 {
+            format!("HE-AAC: no sound from the source. {last}")
+        } else {
+            format!("HE-AAC: the sound stopped. {last}")
+        });
     }
 }
 
