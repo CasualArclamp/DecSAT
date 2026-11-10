@@ -71,8 +71,14 @@ impl Default for TvWindow {
     }
 }
 
+/// The PMT's name for Enhanced apt-X (decsat_ts::psi), which the app
+/// decodes itself.
+const APTX: &str = "Enhanced apt-X";
+
 /// The PIDs a service needs (PAT, its PMT and PCR, its streams), its video,
-/// and its sound: `audio` if it is one of its streams, else its first audio.
+/// and its sound: `audio` if it is one of its streams, else its first audio
+/// (Enhanced apt-X, which ffmpeg cannot decode, only for a service with no
+/// picture).
 pub fn selection(p: &Programme, audio: Option<u16>) -> Selection {
     let mut pids = vec![0, p.pmt_pid];
     pids.extend(p.pcr_pid);
@@ -80,13 +86,28 @@ pub fn selection(p: &Programme, audio: Option<u16>) -> Selection {
     pids.sort_unstable();
     pids.dedup();
     let video = p.streams.iter().find(|e| e.is_video()).map(|e| e.pid);
+    let is_aptx = |pid: u16| {
+        p.streams
+            .iter()
+            .any(|e| e.pid == pid && e.kind == Some(APTX))
+    };
     let audio = audio
         .filter(|a| p.streams.iter().any(|e| e.pid == *a))
-        .or_else(|| p.streams.iter().find(|e| e.is_audio()).map(|e| e.pid));
+        // Beside a picture ffmpeg plays the sound, and it cannot play this.
+        .filter(|a| video.is_none() || !is_aptx(*a))
+        .or_else(|| p.streams.iter().find(|e| e.is_audio()).map(|e| e.pid))
+        .or_else(|| {
+            p.streams
+                .iter()
+                .find(|e| video.is_none() && e.kind == Some(APTX))
+                .map(|e| e.pid)
+        });
+    let aptx = video.is_none() && audio.is_some_and(is_aptx);
     Selection {
         pids,
         video,
         audio,
+        aptx,
         deint: Deinterlace::default(),
         gpu: false,
         av1: p
@@ -116,6 +137,17 @@ impl TvWindow {
         };
         sel.gpu = self.gpu;
         self.audio = sel.audio;
+        // Enhanced apt-X is decoded here: no ffmpeg to find.
+        if let (true, Some(pid)) = (sel.aptx, sel.audio) {
+            match VideoPlayer::start_aptx(rx, pid, decsat_audio::OutputKind::Device) {
+                Ok(p) => {
+                    p.set_volume(self.volume);
+                    self.player = Some(p);
+                }
+                Err(e) => self.error = Some(e),
+            }
+            return;
+        }
         let configured = prefs::ffmpeg_path();
         let Some(exe) = decsat_video::find_ffmpeg(configured.as_deref()) else {
             self.error = Some(
@@ -324,7 +356,28 @@ impl TvWindow {
             }
             if let Some(p) = &self.player {
                 let st = p.status();
-                let (col, text) = if st.running && st.frames_shown > 0 {
+                let sounding = st
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| a.state == decsat_audio::PlayState::Playing);
+                let (col, text) = if st.in_app && st.running {
+                    if sounding {
+                        (
+                            Color32::from_rgb(110, 220, 110),
+                            "playing · decoded in the app".to_string(),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgb(240, 200, 80),
+                            "waiting for the sound…".to_string(),
+                        )
+                    }
+                } else if st.in_app {
+                    (
+                        Color32::from_rgb(240, 200, 80),
+                        st.exit.unwrap_or_else(|| "stopped".into()),
+                    )
+                } else if st.running && st.frames_shown > 0 {
                     (
                         Color32::from_rgb(110, 220, 110),
                         format!("playing · timed by the {}", st.clock),
@@ -390,7 +443,11 @@ impl TvWindow {
                 p.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "no picture",
+                    if self.player.as_ref().is_some_and(|p| p.status().in_app) {
+                        "sound only"
+                    } else {
+                        "no picture"
+                    },
                     egui::FontId::proportional(16.0),
                     Color32::GRAY,
                 );
@@ -437,5 +494,27 @@ mod tests {
         assert_eq!(selection(&p, Some(0x23)).audio, Some(0x23));
         // Not one of its streams: its first sound.
         assert_eq!(selection(&p, Some(0x99)).audio, Some(0x22));
+        assert!(!s.aptx);
+    }
+
+    #[test]
+    fn enhanced_aptx_radio_is_decoded_in_the_app() {
+        let mut es = EsInfo::new(0x65, 0x9B);
+        es.kind = Some(APTX);
+        let mut p = Programme {
+            number: 1000,
+            pmt_pid: 0x64,
+            pcr_pid: Some(0x65),
+            streams: vec![es],
+            ..Default::default()
+        };
+        let s = selection(&p, None);
+        assert_eq!((s.video, s.audio, s.aptx), (None, Some(0x65), true));
+        // With a picture the service goes to ffmpeg, without that sound.
+        p.streams.insert(0, EsInfo::new(0x60, 0x1B));
+        for asked in [None, Some(0x65)] {
+            let s = selection(&p, asked);
+            assert_eq!((s.video, s.audio, s.aptx), (Some(0x60), None, false));
+        }
     }
 }
