@@ -22,6 +22,10 @@ rfd = "0.17.2"
 # PNG output for --screenshot.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
+[build-dependencies]
+# The exe's icon (a Windows resource).
+winresource = "0.1"
+
 # eframe's defaults turn on winit's defaults; with them off they come back
 # here (Linux only), so building needs no X11/Wayland dev packages.
 [target.'cfg(target_os = "linux")'.dependencies]
