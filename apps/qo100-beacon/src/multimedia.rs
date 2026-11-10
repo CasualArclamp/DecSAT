@@ -9,7 +9,8 @@ use std::collections::VecDeque;
 use decsat_core::Iq;
 use decsat_modem::hsmodem::{
     BAUD, FRAME_SYMBOLS, HsFile, NB_SPECTRUM_HZ, NB_SPECTRUM_LEVELS, NB_SPECTRUM_STEP_HZ,
-    RING_RADIUS, ROLLOFF, WB_SPECTRUM_HZ, WB_SPECTRUM_LEVELS, WB_SPECTRUM_STEP_HZ,
+    RING_RADIUS, ROLLOFF, WB_SPECTRUM_HZ, WB_SPECTRUM_LEVELS, WB_SPECTRUM_STEP_HZ, WbCarrier,
+    wb_carriers,
 };
 use decsat_modem::hsmodemrx::HsView;
 use eframe::egui::{
@@ -53,7 +54,7 @@ impl Fall {
         marks: &[f64],
         height: f32,
         lut: &[Color32],
-    ) {
+    ) -> Rect {
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(width, height + 18.0), Sense::hover());
         // As the audio waterfall: the picture is made one pixel of it to a
@@ -124,6 +125,103 @@ impl Fall {
                 MUTED,
             );
         }
+        area
+    }
+}
+
+/// The spectrum strip's height: the labels' room, then the trace's.
+const TRACE_H: f32 = 74.0;
+const TRACE_LABELS: f32 = 24.0;
+
+/// A spectrum over a streamed waterfall: the mean of its latest lines as a
+/// trace, in a strip as wide as the waterfall under it. Returns the strip.
+fn spectrum_trace(ui: &mut Ui, lines: &[Vec<u8>], levels: usize) -> Rect {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, TRACE_H), Sense::hover());
+    // On the pixel grid, as the waterfall is, so the two line up.
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let area = Rect::from_min_size(
+        pos2(snap(rect.min.x), snap(rect.min.y)),
+        vec2((width * ppp).round() / ppp, snap(TRACE_H)),
+    );
+    let painter = ui.painter_at(area);
+    painter.rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
+    let recent: Vec<&Vec<u8>> = lines
+        .iter()
+        .rev()
+        .take(8)
+        .filter(|l| l.len() == levels)
+        .collect();
+    if recent.is_empty() {
+        return area;
+    }
+    let room = area.height() - TRACE_LABELS - 4.0;
+    let line: Vec<egui::Pos2> = (0..levels)
+        .map(|i| {
+            let mean = recent.iter().map(|l| f32::from(l[i])).sum::<f32>() / recent.len() as f32;
+            pos2(
+                area.min.x + (i as f32 + 0.5) / levels as f32 * area.width(),
+                area.max.y - 2.0 - mean / 63.0 * room,
+            )
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        line,
+        Stroke::new(1.2, Color32::from_rgb(250, 200, 110)),
+    ));
+    area
+}
+
+/// A symbol rate for a label: `333 kS/s`, `1.5 MS/s`.
+fn rate_text(rate: f64) -> String {
+    if rate >= 1e6 {
+        format!("{} MS/s", (rate / 1e5).round() / 10.0)
+    } else {
+        format!("{:.0} kS/s", rate / 1e3)
+    }
+}
+
+/// Over the wide-band waterfall: a bar as wide as each carrier's symbol
+/// rate and the rate under it. A rate the bandplan uses is given as that;
+/// one measured between them, or on a carrier too narrow to measure well,
+/// is marked as about.
+fn carrier_labels(ui: &Ui, area: Rect, carriers: &[WbCarrier]) {
+    let span_hz = WB_SPECTRUM_STEP_HZ * WB_SPECTRUM_LEVELS as f64;
+    let x_of = |hz: f64| area.min.x + ((hz - WB_SPECTRUM_HZ) / span_hz) as f32 * area.width();
+    let painter = ui.painter().with_clip_rect(area);
+    let ink = Color32::from_rgb(235, 240, 250);
+    let backing = Color32::from_rgba_unmultiplied(0, 0, 0, 170);
+    for c in carriers {
+        let rate = c.standard.unwrap_or(c.symbol_rate);
+        let narrow = c.symbol_rate < 4.0 * WB_SPECTRUM_STEP_HZ;
+        let text = match (c.beacon, c.standard) {
+            (true, _) => format!("beacon {}", rate_text(rate)),
+            (false, Some(_)) if !narrow => rate_text(rate),
+            _ => format!("~{}", rate_text(rate)),
+        };
+        let (left, right) = (
+            x_of(c.centre_hz - rate / 2.0),
+            x_of(c.centre_hz + rate / 2.0),
+        );
+        let y = area.min.y + 5.0;
+        painter.hline(left.max(area.min.x)..=right, y, Stroke::new(2.0, ink));
+        for x in [left, right] {
+            painter.vline(x, y - 3.0..=y + 3.0, Stroke::new(1.0, ink));
+        }
+        let galley = painter.layout_no_wrap(text, FontId::proportional(11.5), ink);
+        // The beacon's centre is the picture's edge: its label goes inside.
+        let mid = x_of(c.centre_hz).clamp(
+            area.min.x + galley.size().x / 2.0 + 4.0,
+            area.max.x - galley.size().x / 2.0 - 4.0,
+        );
+        let at = pos2(mid - galley.size().x / 2.0, y + 6.0);
+        painter.rect_filled(
+            Rect::from_min_size(at, galley.size()).expand2(vec2(3.0, 1.0)),
+            CornerRadius::ZERO,
+            backing,
+        );
+        painter.galley(at, galley, ink);
     }
 }
 
@@ -184,6 +282,9 @@ pub struct Page {
     nb: Fall,
     wb: Fall,
     heat: heatmap::Grid,
+    /// The wide-band waterfall's carriers, and the line count they were
+    /// measured at.
+    carriers: (u64, Vec<WbCarrier>),
     /// The small audio waterfall's picture.
     audio: Option<TextureHandle>,
     /// Constellation points waiting their turn, and the fraction of one
@@ -193,8 +294,9 @@ pub struct Page {
     point_debt: f32,
     /// The file whose text is shown (its identity); `None` shows the latest.
     picked: Option<u16>,
-    /// The file on show, read into pieces (and whose it is).
-    read: Option<(u16, bulletin::Bulletin)>,
+    /// The file on show, read into pieces: whose it is and how many of its
+    /// frames were in.
+    read: Option<(u16, usize, bulletin::Bulletin)>,
 }
 
 /// The audio as the window already has it for the PSK page's waterfall:
@@ -513,6 +615,8 @@ impl Page {
                 });
             });
             ui.add_space(4.0);
+            let none_yet = Vec::new();
+            let trace = spectrum_trace(ui, v.map_or(&none_yet, |v| &v.wb), WB_SPECTRUM_LEVELS);
             self.wb.show(
                 ui,
                 "hs-wb",
@@ -521,9 +625,16 @@ impl Page {
                 WB_SPECTRUM_LEVELS,
                 (WB_SPECTRUM_HZ, WB_SPECTRUM_STEP_HZ),
                 &[10492.0, 10494.0, 10496.0, 10498.0],
-                fall_h,
+                (fall_h - TRACE_H - 4.0).max(40.0),
                 lut,
             );
+            // Each carrier's symbol rate, measured from the lines when a
+            // new one comes.
+            let count = v.map_or(0, |v| v.wb_lines);
+            if self.carriers.0 != count {
+                self.carriers = (count, wb_carriers(v.map_or(&none, |v| &v.wb)));
+            }
+            carrier_labels(ui, trace, &self.carriers.1);
         });
         ui.add_space(8.0);
         ui.horizontal_top(|ui| {
@@ -642,35 +753,59 @@ impl Page {
                     .color(MUTED),
             );
         }
-        if done.is_empty() {
+        // The file arriving can be read as far as it has come.
+        let live = v
+            .and_then(|v| v.arriving.as_ref())
+            .filter(|f| f.so_far.is_some());
+        if done.is_empty() && live.is_none() {
             return;
         }
         let shown = self
             .picked
-            .and_then(|id| done.iter().find(|f| f.id == id))
+            .and_then(|id| done.iter().chain(live).find(|f| f.id == id))
+            .or(live)
             .or(done.last());
         let shown_id = shown.map(|f| f.id);
         ui.horizontal_wrapped(|ui| {
-            for f in done.iter().rev() {
-                if ui
-                    .selectable_label(shown_id == Some(f.id), &f.name)
-                    .clicked()
-                {
+            for f in live.into_iter().chain(done.iter().rev()) {
+                let name = if f.complete() {
+                    f.name.clone()
+                } else {
+                    format!("{} (arriving)", f.name)
+                };
+                if ui.selectable_label(shown_id == Some(f.id), name).clicked() {
                     self.picked = Some(f.id);
                 }
             }
         });
         ui.add_space(4.0);
         let Some(f) = shown else { return };
-        // Read into headings, paragraphs and lists once, not every frame.
-        if self.read.as_ref().is_none_or(|(id, _)| *id != f.id) {
-            self.read = Some((f.id, bulletin::parse(&file_text(f))));
+        // Read into headings, paragraphs and lists when it changes, not
+        // every frame.
+        if self
+            .read
+            .as_ref()
+            .is_none_or(|(id, have, _)| (*id, *have) != (f.id, f.have))
+        {
+            self.read = Some((f.id, f.have, bulletin::parse(&file_text(f))));
         }
-        let Some((_, read)) = &self.read else { return };
+        let Some((_, _, read)) = &self.read else {
+            return;
+        };
         egui::ScrollArea::vertical()
             .id_salt(("hs-file", f.id))
             .auto_shrink(false)
-            .show(ui, |ui| bulletin::show(ui, read));
+            .show(ui, |ui| {
+                bulletin::show(ui, read);
+                if !f.complete() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("… as far as the frames received in a row from the first go")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                }
+            });
     }
 }
 
