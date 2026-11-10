@@ -707,14 +707,15 @@ impl Page {
                 .id_salt("hs-skimmer")
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    for line in lines.iter().rev() {
-                        ui.label(
-                            RichText::new(line.replace('~', "  "))
-                                .size(12.0)
-                                .monospace()
-                                .color(TEXT),
-                        );
-                    }
+                    egui::Grid::new("hs-skimmer-grid")
+                        .num_columns(7)
+                        .spacing([14.0, 3.0])
+                        .show(ui, |ui| {
+                            for line in lines.iter().rev() {
+                                skimmer_row(ui, line);
+                                ui.end_row();
+                            }
+                        });
                 });
         });
         ui.add_space(8.0);
@@ -852,6 +853,26 @@ fn spot_row(ui: &mut Ui, spot: &str) {
     cell(ui, station, TEXT);
     cell(ui, format!("de {spotter}"), MUTED);
     ui.add(egui::Label::new(RichText::new(plain(&comment)).size(12.0).color(MUTED)).truncate());
+}
+
+/// A CW-skimmer line's fields, as the beacon's own page reads them
+/// (`qo100info.html`, message type 2): skimmer, kHz, station, dB, words a
+/// minute, what was sent, time.
+fn skimmer_row(ui: &mut Ui, line: &str) {
+    let mut fields = line.split('~');
+    let mut next = || fields.next().unwrap_or("").to_string();
+    let (skimmer, khz, station, db, wpm, sent, time) =
+        (next(), next(), next(), next(), next(), next(), next());
+    let cell = |ui: &mut Ui, text: String, colour: Color32| {
+        ui.label(RichText::new(text).size(12.0).monospace().color(colour));
+    };
+    cell(ui, time, MUTED);
+    cell(ui, khz, ACCENT);
+    cell(ui, station, TEXT);
+    cell(ui, format!("{db} dB"), MUTED);
+    cell(ui, format!("{wpm} WPM"), MUTED);
+    cell(ui, sent, TEXT);
+    cell(ui, format!("de {}", skimmer.trim_end_matches(':')), MUTED);
 }
 
 /// The file is a web page, by its name.
