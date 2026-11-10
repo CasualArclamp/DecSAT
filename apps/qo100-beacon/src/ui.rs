@@ -3,9 +3,10 @@
 //! the satellite reports), what it says on the right (the latest of each
 //! block, and a log of every frame).
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
 use decsat_modem::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
@@ -49,6 +50,12 @@ pub struct App {
     picked: Option<char>,
     waterfall: Option<TextureHandle>,
     heat: heatmap::Grid,
+    /// Constellation points waiting their turn: the decoder hands bits
+    /// over half a second at a time, the display lets them out evenly.
+    points: VecDeque<Iq>,
+    /// Fraction of a point carried to the next frame.
+    point_debt: f32,
+    palette: Vec<Color32>,
     rows_drawn: u64,
     started: Instant,
     shot_sent: bool,
@@ -75,6 +82,9 @@ impl App {
             picked: None,
             waterfall: None,
             heat: heatmap::Grid::default(),
+            points: VecDeque::new(),
+            point_debt: 0.0,
+            palette: palette(),
             rows_drawn: 0,
             started: Instant::now(),
             shot_sent: false,
@@ -120,6 +130,20 @@ impl App {
         }
     }
 
+    /// The constellation points due this frame: 400 a second, faster when
+    /// more than a second's worth is waiting.
+    fn release_points(&mut self, dt: f32) -> Vec<Iq> {
+        if let Some(r) = &self.running {
+            self.points
+                .extend(r.shared.lock().unwrap().points.drain(..));
+        }
+        let rate = 400.0f32.max(self.points.len() as f32);
+        self.point_debt += rate * dt.min(0.25);
+        let n = (self.point_debt as usize).min(self.points.len());
+        self.point_debt = (self.point_debt - n as f32).min(1.0);
+        self.points.drain(..n).collect()
+    }
+
     fn screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.opts.screenshot.clone() else {
             return;
@@ -148,7 +172,9 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.screenshot(ctx);
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // Every frame: the waterfall and the constellation move at the
+        // display's rate.
+        ctx.request_repaint();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -158,7 +184,6 @@ impl eframe::App for App {
             let s = r.shared.lock().unwrap();
             Snapshot {
                 view: s.view.clone(),
-                scatter: s.scatter.clone(),
                 level_db: s.level_db,
                 label: s.label.clone(),
                 ended: s.ended,
@@ -172,8 +197,11 @@ impl eframe::App for App {
             && sn.rows_added != self.rows_drawn
         {
             self.rows_drawn = sn.rows_added;
-            let rows = r.shared.lock().unwrap().rows.clone();
-            let image = waterfall_image(&rows);
+            let (rows, levels) = {
+                let s = r.shared.lock().unwrap();
+                (s.rows.clone(), s.levels)
+            };
+            let image = waterfall_image(&rows, levels, &self.palette);
             match &mut self.waterfall {
                 Some(t) => t.set(image, TextureOptions::LINEAR),
                 None => {
@@ -219,7 +247,6 @@ impl eframe::App for App {
 /// A copy of what the decoding thread has published.
 struct Snapshot {
     view: P3View,
-    scatter: Vec<Iq>,
     level_db: f32,
     label: String,
     ended: bool,
@@ -345,8 +372,8 @@ impl App {
                     ui.set_height(172.0);
                     caption(ui, "CONSTELLATION");
                     ui.add_space(6.0);
-                    let points = sn.map(|s| s.scatter.as_slice()).unwrap_or(&[]);
-                    self.heat.show(ui, points, 150.0);
+                    let points = self.release_points(ui.input(|i| i.stable_dt));
+                    self.heat.show(ui, &points, 150.0);
                 });
             });
             card().show(ui, |ui| {
@@ -806,43 +833,51 @@ fn satellite(ui: &mut Ui, v: Option<&P3View>, t: f32) {
     });
 }
 
-/// The waterfall as an image, newest row at the top: levels scaled to each
-/// row's floor so the display needs no gain control.
-fn waterfall_image(rows: &std::collections::VecDeque<Vec<f32>>) -> ColorImage {
-    let mut rgba = vec![0u8; COLUMNS * ROWS * 4];
+/// The waterfall as an image, newest row at the top, coloured between
+/// `levels` (dB) through `lut`.
+fn waterfall_image(rows: &VecDeque<Vec<f32>>, (lo, hi): (f32, f32), lut: &[Color32]) -> ColorImage {
+    let floor = [lut[0].r(), lut[0].g(), lut[0].b(), 255];
+    let mut rgba: Vec<u8> = floor
+        .iter()
+        .copied()
+        .cycle()
+        .take(COLUMNS * ROWS * 4)
+        .collect();
+    let top = (lut.len() - 1) as f32;
+    let scale = top / (hi - lo).max(1e-3);
     for (y, row) in rows.iter().take(ROWS).enumerate() {
-        let mut sorted = row.clone();
-        sorted.sort_by(f32::total_cmp);
-        let floor = sorted[sorted.len() / 5];
-        for (x, v) in row.iter().enumerate() {
-            let t = ((v - floor - 2.0) / 38.0).clamp(0.0, 1.0);
-            let [r, g, b] = heat(t);
+        for (x, &db) in row.iter().take(COLUMNS).enumerate() {
+            let c = lut[((db - lo) * scale).clamp(0.0, top) as usize];
             let at = (y * COLUMNS + x) * 4;
-            rgba[at] = r;
-            rgba[at + 1] = g;
-            rgba[at + 2] = b;
-            rgba[at + 3] = 255;
+            rgba[at..at + 3].copy_from_slice(&[c.r(), c.g(), c.b()]);
         }
     }
     ColorImage::from_rgba_unmultiplied([COLUMNS, ROWS], &rgba)
 }
 
-/// A blue-to-amber colour ramp.
-fn heat(t: f32) -> [u8; 3] {
-    const STOPS: [[f32; 3]; 5] = [
-        [8.0, 12.0, 24.0],
-        [16.0, 52.0, 110.0],
-        [32.0, 140.0, 170.0],
-        [230.0, 200.0, 70.0],
-        [255.0, 245.0, 220.0],
+/// DecSAT's waterfall colour map (`decsat-gui/src/waterfall.rs`): dark
+/// violet through orange to pale yellow, the "inferno" family.
+fn palette() -> Vec<Color32> {
+    const STOPS: [(f32, [u8; 3]); 6] = [
+        (0.0, [0, 0, 4]),
+        (0.2, [40, 11, 84]),
+        (0.4, [101, 21, 110]),
+        (0.6, [159, 42, 99]),
+        (0.8, [237, 105, 37]),
+        (1.0, [252, 255, 164]),
     ];
-    let scaled = t * (STOPS.len() - 1) as f32;
-    let i = (scaled as usize).min(STOPS.len() - 2);
-    let f = scaled - i as f32;
-    let mix = |a: f32, b: f32| (a + (b - a) * f) as u8;
-    [
-        mix(STOPS[i][0], STOPS[i + 1][0]),
-        mix(STOPS[i][1], STOPS[i + 1][1]),
-        mix(STOPS[i][2], STOPS[i + 1][2]),
-    ]
+    (0..256)
+        .map(|i| {
+            let t = i as f32 / 255.0;
+            let k = STOPS
+                .windows(2)
+                .position(|w| t <= w[1].0)
+                .unwrap_or(STOPS.len() - 2);
+            let ((t0, c0), (t1, c1)) = (STOPS[k], STOPS[k + 1]);
+            let f = (t - t0) / (t1 - t0);
+            let mix =
+                |a: u8, b: u8| (f32::from(a) + f * (f32::from(b) - f32::from(a))).round() as u8;
+            Color32::from_rgb(mix(c0[0], c1[0]), mix(c0[1], c1[1]), mix(c0[2], c1[2]))
+        })
+        .collect()
 }

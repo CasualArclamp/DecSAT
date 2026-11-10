@@ -233,6 +233,8 @@ pub struct P3Rx {
     mean: f32,
     dev: f32,
     scatter: Vec<Iq>,
+    /// Points not yet taken by [`P3Rx::take_points`].
+    fresh: Vec<Iq>,
     done: Vec<P3Frame>,
     view: P3View,
     // Working buffers, kept between blocks.
@@ -271,6 +273,7 @@ impl P3Rx {
             mean: 0.0,
             dev: 0.0,
             scatter: Vec::with_capacity(SCATTER),
+            fresh: Vec::new(),
             done: Vec::new(),
             view: P3View {
                 message: "Looking for the beacon".into(),
@@ -319,6 +322,12 @@ impl P3Rx {
 
     pub fn scatter(&self) -> Vec<Iq> {
         self.scatter.clone()
+    }
+
+    /// The points read since the last call, oldest first: for a display
+    /// that adds each bit once. (At most a few seconds' worth are kept.)
+    pub fn take_points(&mut self) -> Vec<Iq> {
+        std::mem::take(&mut self.fresh)
     }
 
     /// The signal stopped: forget timing and carrier, and close any frame.
@@ -679,7 +688,11 @@ impl P3Rx {
                 self.scatter.remove(0);
             }
             let scale = self.mean.max(1e-9);
-            self.scatter.push(Iq::new(s / scale, self.mfq[i] / scale));
+            let point = Iq::new(s / scale, self.mfq[i] / scale);
+            self.scatter.push(point);
+            if self.fresh.len() < 4 * SCATTER {
+                self.fresh.push(point);
+            }
             t = t_bit + SAMPLES_PER_BIT as i64;
         }
         self.next_bit = Some(t);

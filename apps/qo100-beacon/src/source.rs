@@ -22,7 +22,9 @@ use rustfft::{FftPlanner, num_complex::Complex32};
 pub const COLUMNS: usize = 512;
 pub const SPAN_HZ: f64 = 4000.0;
 /// Waterfall rows kept.
-pub const ROWS: usize = 220;
+pub const ROWS: usize = 480;
+/// Waterfall rows a second of signal.
+const ROWS_PER_S: f64 = 60.0;
 /// Lines kept in the log.
 const LOG: usize = 400;
 /// Blocks of samples queued for the decoder before a sound card's are dropped.
@@ -39,7 +41,10 @@ pub struct LogLine {
 #[derive(Default)]
 pub struct Shared {
     pub view: P3View,
-    pub scatter: Vec<Iq>,
+    /// Constellation points the window has not yet drawn, oldest first.
+    pub points: VecDeque<Iq>,
+    /// The waterfall's colour range, dB (low, high): see [`Levels`].
+    pub levels: (f32, f32),
     /// Newest row first; dB per column.
     pub rows: VecDeque<Vec<f32>>,
     pub rows_added: u64,
@@ -250,6 +255,7 @@ fn decode(
 ) {
     let mut p3 = P3Rx::new(rate);
     let mut spectrum = Spectrum::new(rate);
+    let mut levels = Levels::default();
     let mut power = 0.0f32;
     let mut seen_total = 0u64;
     let mut stream_s = 0.0f64;
@@ -276,7 +282,7 @@ fn decode(
         if !rows.is_empty() || last_publish.elapsed().as_millis() >= 100 {
             last_publish = Instant::now();
             let v = p3.view();
-            let scatter = p3.scatter();
+            let points = p3.take_points();
             let when = if live {
                 utc()
             } else {
@@ -288,6 +294,7 @@ fn decode(
             };
             let mut s = shared.lock().unwrap();
             for row in rows {
+                levels.follow(&row);
                 s.rows.push_front(row);
                 s.rows.truncate(ROWS);
                 s.rows_added += 1;
@@ -305,7 +312,11 @@ fn decode(
             }
             s.log.truncate(LOG);
             s.view = v;
-            s.scatter = scatter;
+            s.levels = levels.range();
+            s.points.extend(points);
+            // A window that is not drawing must not let them pile up.
+            let extra = s.points.len().saturating_sub(4000);
+            s.points.drain(..extra);
         }
     }
     p3.finish();
@@ -313,6 +324,38 @@ fn decode(
     let mut s = shared.lock().unwrap();
     s.view = v;
     s.ended = true;
+}
+
+/// The waterfall's automatic levels, as DecSAT's (`decsat-gui/src/
+/// waterfall.rs`): the floor (20th percentile) and the peak (99.5th) of each
+/// row, followed with some inertia so the colours do not pump.
+#[derive(Default)]
+struct Levels {
+    floor: Option<f32>,
+    peak: Option<f32>,
+}
+
+impl Levels {
+    /// Smallest range shown, dB.
+    const MIN_RANGE_DB: f32 = 25.0;
+    /// DecSAT moves 5 % a row at 25 rows a second; the same pace here.
+    const STEP: f32 = 0.05 * 25.0 / ROWS_PER_S as f32;
+
+    fn follow(&mut self, row: &[f32]) {
+        let mut sorted = row.to_vec();
+        sorted.sort_unstable_by(f32::total_cmp);
+        let q = |p: f32| sorted[((sorted.len() - 1) as f32 * p) as usize];
+        let (f, p) = (q(0.2), q(0.995));
+        self.floor = Some(self.floor.map_or(f, |x| x + Self::STEP * (f - x)));
+        self.peak = Some(self.peak.map_or(p, |x| x + Self::STEP * (p - x)));
+    }
+
+    fn range(&self) -> (f32, f32) {
+        match (self.floor, self.peak) {
+            (Some(f), Some(p)) => (f - 3.0, (p + 3.0).max(f + Self::MIN_RANGE_DB)),
+            _ => (-110.0, -40.0),
+        }
+    }
 }
 
 /// The waterfall's columns: FFTs of the input, the audio band only.
@@ -336,7 +379,7 @@ impl Spectrum {
             .collect();
         Spectrum {
             n,
-            hop: n / 2,
+            hop: ((rate / ROWS_PER_S) as usize).max(1),
             buf: Vec::with_capacity(2 * n),
             fft: FftPlanner::new().plan_fft_forward(n),
             work: vec![Complex32::new(0.0, 0.0); n],

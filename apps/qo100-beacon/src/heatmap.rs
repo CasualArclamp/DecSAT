@@ -4,7 +4,6 @@
 //! from its own peak. DecSAT's heat map (`decsat-gui/src/constellation.rs`),
 //! without its other styles.
 
-use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 use decsat_core::Iq;
@@ -23,56 +22,35 @@ const RANGE: f32 = 2.0;
 #[derive(Default)]
 pub struct Grid {
     cells: Vec<f32>,
-    /// The snapshot last added, so the same one is not added twice.
-    last_hash: u64,
     last_time: Option<f64>,
     texture: Option<TextureHandle>,
 }
 
-fn snapshot_hash(pts: &[Iq]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    pts.len().hash(&mut h);
-    for s in pts {
-        s.re.to_bits().hash(&mut h);
-        s.im.to_bits().hash(&mut h);
-    }
-    h.finish()
-}
-
 impl Grid {
-    /// Adds a snapshot, unless it is the one already added. True if the grid
-    /// changed.
-    fn feed(&mut self, pts: &[Iq], now: f64) -> bool {
+    /// Fade for the time gone by, then add `pts` (each given once, scaled so
+    /// the two BPSK points are at plus and minus one).
+    fn add(&mut self, pts: &[Iq], now: f64) {
         let n = BINS;
         if self.cells.len() != n * n {
             self.cells = vec![0.0; n * n];
             self.last_time = None;
         }
-        let hash = snapshot_hash(pts);
-        if self.last_time.is_some() && hash == self.last_hash {
-            return false;
-        }
-        self.last_hash = hash;
         // A long gap cannot wipe the picture.
         if let Some(t) = self.last_time {
             let keep = (-((now - t).clamp(0.0, 1.0) as f32) / FADE_S).exp();
             self.cells.iter_mut().for_each(|c| *c *= keep);
         }
         self.last_time = Some(now);
-        let rms = (pts.iter().map(|s| s.norm_sqr()).sum::<f32>() / pts.len().max(1) as f32)
-            .sqrt()
-            .max(1e-9);
         let scale = n as f32 / (2.0 * RANGE);
         for s in pts {
-            let x = (s.re / rms + RANGE) * scale;
-            let y = (RANGE - s.im / rms) * scale;
+            let x = (s.re + RANGE) * scale;
+            let y = (RANGE - s.im) * scale;
             // A cast from a negative float saturates to 0, so test first.
             if x < 0.0 || y < 0.0 || x >= n as f32 || y >= n as f32 {
                 continue;
             }
             self.cells[y as usize * n + x as usize] += 1.0;
         }
-        true
     }
 
     fn image(&self) -> ColorImage {
@@ -94,20 +72,19 @@ impl Grid {
         ColorImage::from_rgba_unmultiplied([n, n], &rgba)
     }
 
-    /// Draw `pts` in a square of `side`, with a mark at each BPSK point.
+    /// Add `pts` (new ones only) and draw the grid in a square of `side`, with a mark at each BPSK point.
     pub fn show(&mut self, ui: &mut Ui, pts: &[Iq], side: f32) {
         let now = ui.input(|i| i.time);
-        if self.feed(pts, now) || self.texture.is_none() {
-            let image = self.image();
-            match &mut self.texture {
-                Some(t) => t.set(image, TextureOptions::LINEAR),
-                None => {
-                    self.texture = Some(ui.ctx().load_texture(
-                        "constellation",
-                        image,
-                        TextureOptions::LINEAR,
-                    ));
-                }
+        self.add(pts, now);
+        let image = self.image();
+        match &mut self.texture {
+            Some(t) => t.set(image, TextureOptions::LINEAR),
+            None => {
+                self.texture = Some(ui.ctx().load_texture(
+                    "constellation",
+                    image,
+                    TextureOptions::LINEAR,
+                ));
             }
         }
         let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
@@ -178,16 +155,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stale_snapshot_is_not_added_twice_and_old_ones_fade() {
-        let pts = vec![Iq::new(1.0, 0.0), Iq::new(-1.0, 0.0)];
+    fn points_add_once_and_fade() {
+        let pts = vec![Iq::new(1.0, 0.0), Iq::new(-1.0, 0.0), Iq::new(9.0, 0.0)];
         let mut g = Grid::default();
-        assert!(g.feed(&pts, 0.0));
+        g.add(&pts, 0.0);
         let total = |g: &Grid| g.cells.iter().sum::<f32>();
         assert_eq!(total(&g), 2.0);
-        assert!(!g.feed(&pts, 0.5));
-        assert_eq!(total(&g), 2.0);
-        let other = vec![Iq::new(0.9, 0.1), Iq::new(-1.1, 0.0)];
-        assert!(g.feed(&other, 1.0));
-        assert!(total(&g) < 4.0 && total(&g) > 3.0);
+        g.add(&[], 1.0);
+        assert!(total(&g) < 1.5 && total(&g) > 1.0);
     }
 }
