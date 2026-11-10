@@ -625,6 +625,12 @@ pub struct SessionView {
     pub attributes: Vec<(String, String)>,
 }
 
+/// A stream with no packet for this long (s) has ended, or never was one:
+/// a live one sends sound 50 times a second or keep-alives about 5, while
+/// errors in an address or SSRC leave a stream of a few packets that says
+/// what its last packet said (squelch open, perhaps) for ever.
+pub const STREAM_GONE: f64 = 10.0;
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RadioView {
     /// Streams of `MIN_PACKETS` packets or more; packets in the rest (an
@@ -637,6 +643,23 @@ pub struct RadioView {
     pub session_count: u64,
     /// The newest last (at most `EVENTS`).
     pub events: Vec<Event>,
+}
+
+impl RadioView {
+    /// The streams still sending, and the rest (ended, or made by errors):
+    /// those whose last packet is [`STREAM_GONE`] older than the newest.
+    pub fn live_and_gone(&self) -> (Vec<&StreamView>, Vec<&StreamView>) {
+        let newest = self
+            .streams
+            .iter()
+            .map(|s| s.last_time)
+            .fold(f64::NEG_INFINITY, f64::max);
+        // Rust note: `partition` sorts an iterator's items into two
+        // collections by a test, keeping their order.
+        self.streams
+            .iter()
+            .partition(|s| newest - s.last_time <= STREAM_GONE)
+    }
 }
 
 /// Packets a stream needs to be listed.
@@ -1121,6 +1144,27 @@ mod tests {
         assert_eq!((s.voice, s.talk_packets), (4, 2));
         assert!((s.talk_secs - 0.04).abs() < 1e-9);
         assert!(rx.take_voice().is_empty());
+    }
+
+    /// A stream that stopped is told from those still sending.
+    #[test]
+    fn a_stream_without_packets_is_gone() {
+        let a: IpAddr = [172, 16, 82, 28].into();
+        let b: IpAddr = [10, 26, 185, 112].into();
+        let mut rx = RadioRx::new();
+        let off = [0u8; 4];
+        // Two streams (their ports differ); the second stops at 0.1 s.
+        for seq in 1..=600u16 {
+            let t = f64::from(seq) * 0.02;
+            rx.udp((a, 8602), (b, 8580), &packet(PT_R2S, seq, &off, &[0; 4]), t);
+            if seq <= 5 {
+                rx.udp((a, 8604), (b, 8582), &packet(PT_R2S, seq, &off, &[0; 4]), t);
+            }
+        }
+        let v = rx.view();
+        let (live, gone) = v.live_and_gone();
+        assert_eq!((live.len(), gone.len()), (1, 1));
+        assert_eq!((live[0].key.sport, gone[0].key.sport), (8602, 8604));
     }
 
     /// A stream's first packets are not handed on: a stray one (its SSRC
