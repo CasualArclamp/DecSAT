@@ -11,6 +11,7 @@
 //! 2.6 kHz of audio (USB, dial about 10489.9924 MHz) with a filter at least
 //! 4 kHz wide. Both are looked for all the time.
 
+mod bulletin;
 mod gauges;
 mod heatmap;
 mod multimedia;
