@@ -1954,7 +1954,7 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
 fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
     use decsat_modem::p3beacon::FRAME_BYTES;
     println!(
-        "p3 beacon: carrier {}, line {:.0} dB, bits {:.1} dB, {} frames, {} good CRC, {} cut short",
+        "p3 beacon: carrier {}, line {:.0} dB, bits {:.1} dB, {} frames, {} good CRC, {} cut short, {} FEC blocks",
         v.carrier_hz
             .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
         v.line_db,
@@ -1962,9 +1962,12 @@ fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
         v.frames,
         v.good,
         v.partial,
+        v.fec_good,
     );
     for f in &v.recent {
-        let state = if f.crc_ok {
+        let state = if f.fec {
+            format!("FEC good, {} bytes corrected, first half", f.fec_corrected)
+        } else if f.crc_ok {
             "CRC good".to_string()
         } else if f.complete {
             "CRC BAD".to_string()
@@ -2010,6 +2013,24 @@ fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
         }
         for (name, n) in &t.counters {
             println!("    {name:<11} {n}");
+        }
+    } else if let Some(h) = &v.ao40 {
+        println!(
+            "  AO-40 housekeeping ({} block, {} {} UTC, command {}):",
+            h.block, h.date, h.time, h.command
+        );
+        for c in &h.channels {
+            let value = if c.unit.is_empty() {
+                format!("{} (raw)", c.raw)
+            } else {
+                format!("{:.2} {}", c.value, c.unit)
+            };
+            let dead = if c.dead {
+                "  [sensor dead since 2000]"
+            } else {
+                ""
+            };
+            println!("    #{:03X} {:<28} {value}{dead}", c.address, c.name);
         }
     } else if !v.blocks.is_empty() {
         println!("  no housekeeping values in the blocks received");

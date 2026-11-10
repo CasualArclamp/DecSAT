@@ -316,7 +316,7 @@ fn decode(
             };
             let mut s = shared.lock().unwrap();
             s.level_db = 10.0 * power.max(1e-12).log10();
-            let total = v.frames + v.partial;
+            let total = v.frames + v.partial + v.fec_good;
             let new = (total - seen_total) as usize;
             seen_total = total;
             let at = v.recent.len().saturating_sub(new);

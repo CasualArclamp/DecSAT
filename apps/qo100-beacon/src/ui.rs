@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
+use decsat_modem::ao40::{self, Housekeeping};
 use decsat_modem::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_modem::p3rx::P3View;
 use eframe::egui::{
@@ -488,7 +489,10 @@ impl App {
                     });
                 });
                 ui.add_space(4.0);
-                dials(ui, telemetry.map(|(_, t)| t), inner);
+                match view.and_then(|v| v.ao40.as_ref()) {
+                    Some(h) => dials_ao40(ui, h, inner),
+                    None => dials(ui, telemetry.map(|(_, t)| t), inner),
+                }
             });
         });
     }
@@ -587,8 +591,10 @@ impl App {
         run(&mut self.shown_fec, fec.map(|b| b as f32), 400.0);
 
         let frames = view.map_or(0, |v| v.frames);
-        let (crc_frac, crc_note, crc_colour) = match (in_frame, view.and_then(|v| v.recent.last()))
-        {
+        // The last frame of each kind.
+        let last_frame = view.and_then(|v| v.recent.iter().rev().find(|f| !f.fec));
+        let last_is_fec = view.and_then(|v| v.recent.last()).filter(|f| f.fec);
+        let (crc_frac, crc_note, crc_colour) = match (in_frame, last_frame) {
             (Some(_), _) => {
                 let f = self.shown_bytes / FRAME_BYTES as f32;
                 (f, format!("{:.0} %", f * 100.0), ACCENT)
@@ -599,12 +605,18 @@ impl App {
             }
             _ => (0.0, "waiting for sync".to_string(), MUTED),
         };
-        let (fec_frac, fec_note) = match fec {
-            Some(_) => {
+        let (fec_frac, fec_note, fec_colour) = match (last_is_fec, fec) {
+            // Decoded, and nothing newer has started.
+            (Some(f), _) if in_frame.is_none() => (
+                1.0,
+                format!("good · {} bytes corrected", f.fec_corrected),
+                GOOD,
+            ),
+            (_, Some(_)) => {
                 let f = self.shown_fec / FEC_BLOCK_BITS as f32;
-                (f, format!("{:.0} % · not decoded", f * 100.0))
+                (f, format!("{:.0} %", f * 100.0), ACCENT)
             }
-            None => (0.0, "follows each frame · not decoded".to_string()),
+            _ => (0.0, "follows each frame".to_string(), MUTED),
         };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
@@ -617,7 +629,7 @@ impl App {
                 crc_colour,
                 &crc_note,
             );
-            bar(ui, w, "FEC BLOCK", fec_frac, MUTED, &fec_note);
+            bar(ui, w, "FEC BLOCK", fec_frac, fec_colour, &fec_note);
         });
         in_frame.map(|v| {
             let n = (self.shown_bytes as usize).min(v.arriving.len());
@@ -718,6 +730,11 @@ fn bar(ui: &mut Ui, width: f32, label: &str, fraction: f32, colour: Color32, not
 fn frame_state(f: &P3Frame) -> (String, Color32) {
     if f.crc_ok {
         ("CRC good".into(), GOOD)
+    } else if f.fec {
+        (
+            format!("FEC good · {} bytes corrected", f.fec_corrected),
+            GOOD,
+        )
     } else if f.complete {
         ("CRC bad".into(), BAD)
     } else {
@@ -754,15 +771,29 @@ fn block_text(ui: &mut Ui, f: &P3Frame, live: bool) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    if f.is_text() {
-                        for line in f.lines() {
-                            let shown = if line.is_empty() {
-                                " ".to_string()
+                    let text_line = |ui: &mut Ui, line: String| {
+                        let shown = if line.is_empty() {
+                            " ".to_string()
+                        } else {
+                            line
+                        };
+                        ui.label(RichText::new(shown).monospace().size(12.5).color(TEXT));
+                    };
+                    if let Some(h) = ao40::housekeeping(&f.bytes) {
+                        f.lines().into_iter().take(4).for_each(|l| text_line(ui, l));
+                        ui.add_space(4.0);
+                        for c in &h.channels {
+                            let value = if c.unit.is_empty() {
+                                format!("{:>8}", c.raw)
                             } else {
-                                line
+                                format!("{:>8.2} {}", c.value, c.unit)
                             };
-                            ui.label(RichText::new(shown).monospace().size(12.5).color(TEXT));
+                            let line = format!("#{:03X}  {:<28}{value}", c.address, c.name);
+                            let colour = if c.dead { MUTED } else { TEXT };
+                            ui.label(RichText::new(line).monospace().size(12.0).color(colour));
                         }
+                    } else if f.is_text() {
+                        f.lines().into_iter().for_each(|l| text_line(ui, l));
                     } else {
                         for row in f.bytes.chunks(24) {
                             let hex: String = row.iter().map(|b| format!("{b:02x} ")).collect();
@@ -836,7 +867,7 @@ fn stat_row(ui: &mut Ui, sn: Option<&Snapshot>) {
             } else {
                 TEXT
             },
-            format!("CRC good · {} cut short", v.map_or(0, |v| v.partial)),
+            format!("CRC good · {} FEC blocks", v.map_or(0, |v| v.fec_good)),
         );
         level_stat(ui, w, sn);
     });
@@ -913,6 +944,9 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
 
 /// What the telemetry card's corner says.
 fn telemetry_note(v: Option<&P3View>) -> String {
+    if let Some(h) = v.and_then(|v| v.ao40.as_ref()) {
+        return format!("AO-40 · {} block · {} {} UTC", h.block, h.date, h.time);
+    }
     if let Some((block, _)) = v.and_then(|v| v.telemetry.as_ref()) {
         return format!("block {block} · green: within {GOOD_V} V of the 2019 values");
     }
@@ -963,6 +997,45 @@ fn dials(ui: &mut Ui, t: Option<&Telemetry>, width: f32) {
             },
         );
     });
+}
+
+/// Ten of AO-40's channels as dials: power, temperatures, spin. No green
+/// bands: the spec gives equations, not limits.
+fn dials_ao40(ui: &mut Ui, h: &Housekeeping, width: f32) {
+    const SHOWN: [(u16, &str, f32, f32, usize); 10] = [
+        (0x10B, "MAIN BATTERY", 0.0, 35.0, 1),
+        (0x10D, "28 V BUS", 0.0, 35.0, 1),
+        (0x10C, "AUX BATTERY", 0.0, 35.0, 1),
+        (0x106, "BATTERY AMPS", -32.0, 32.0, 1),
+        (0x108, "BUS AMPS", 0.0, 20.0, 1),
+        (0x161, "TEMP IHU", -40.0, 80.0, 0),
+        (0x149, "TEMP BATTERY", -40.0, 80.0, 0),
+        (0x14C, "TEMP PANEL 1", -40.0, 80.0, 0),
+        (0x140, "TEMP SEU", -40.0, 80.0, 0),
+        (0x100, "SPIN", 0.0, 20.0, 1),
+    ];
+    let cell = vec2((width / 5.0).floor(), 88.0);
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    for row in SHOWN.chunks(5) {
+        ui.horizontal(|ui| {
+            for &(address, label, min, max, decimals) in row {
+                let c = h.channel(address);
+                dial(
+                    ui,
+                    cell,
+                    &Dial {
+                        label,
+                        unit: c.map_or("", |c| c.unit),
+                        value: c.map(|c| c.value),
+                        min,
+                        max,
+                        good: None,
+                        decimals,
+                    },
+                );
+            }
+        });
+    }
 }
 
 /// The satellite with its wings to the sun, and the values that are not

@@ -299,13 +299,19 @@ which had them in 2019 (`UPT`, `TEMP`, `VOLTAGES`, `TFL`...; EA4GPZ's post),
 was received blank with a good CRC. [`parse_telemetry`] reads that wording
 should it return; which rail each voltage is has not been published.
 
-Between the uncoded frames (25.4 s apart, not 10.4) the beacon sends 6016
-more bits: 51 bytes of 0x00/0x50, then 5200-odd bits with fixed bits at
-regular spacing, repeating every four frames with the block cycle. That
-looks like AO-40's FEC frame carrying the same static text; not decoded.
+Between the uncoded frames (25.4 s apart, not 10.4) the beacon sends the
+block's first 256 bytes again in AO-40's FEC format (`decsat-modem::p3fec`),
+51 bytes of filler after the frame: two RS(160,128) codewords with bytes
+alternating (CCSDS's code, conventional basis), CCSDS randomiser, K = 7
+rate 1/2 with the second output inverted and a 6-bit tail, laid down the
+columns of a 65 × 80 block whose first column is a 65-bit sync vector
+(x⁷ + x³ + 1 from all ones), sent row by row. Found by the sync vector in
+the soft differential bits, checked by the Reed–Solomon code. All of that
+was worked out on, and matches, blocks received 2026-11-09; the K block's
+telemetry lines fall inside the 256 bytes.
 
-Not done: AO-40's FEC frames; AO-40's binary A blocks' calibrated channels
-(no table for QO-100; a binary block shows as hex).
+Not done: AO-40's binary A blocks' calibrated channels (no table for
+QO-100; a binary block shows as hex).
 
 Mono WAV files read as a real signal (Q = 0), so a WebSDR's audio opens as
 a capture.
