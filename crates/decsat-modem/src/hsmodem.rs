@@ -364,6 +364,160 @@ pub const WB_SPECTRUM_HZ: f64 = 10_491_500_000.0;
 pub const WB_SPECTRUM_STEP_HZ: f64 = 30_000.0;
 pub const WB_SPECTRUM_LEVELS: usize = 266;
 
+/// The wide-band transponder's own beacon: DVB-S2 at 1.5 MS/s, centred on
+/// the spectrum's first level, so only its upper half is in it (AMSAT-DL's
+/// QO-100 wide-band bandplan).
+pub const WB_BEACON_SYMBOL_RATE: f64 = 1_500_000.0;
+/// The symbol rates the wide-band bandplan uses for DATV, Hz.
+pub const WB_STANDARD_RATES: [f64; 9] = [
+    33_000.0,
+    66_000.0,
+    125_000.0,
+    250_000.0,
+    333_000.0,
+    500_000.0,
+    1_000_000.0,
+    1_500_000.0,
+    2_000_000.0,
+];
+
+/// A carrier seen in the wide-band waterfall.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WbCarrier {
+    /// Its centre, Hz.
+    pub centre_hz: f64,
+    /// Its symbol rate as measured, Hz: see [`wb_carriers`].
+    pub symbol_rate: f64,
+    /// The bandplan's rate it is taken for, when the measured one is
+    /// within an eighth of one.
+    pub standard: Option<f64>,
+    /// Its top over the noise, in the spectrum's levels (0 to 63).
+    pub height: f32,
+    /// The transponder's own beacon, at the spectrum's lower edge.
+    pub beacon: bool,
+}
+
+/// The carriers in the wide-band waterfall's latest lines (oldest first),
+/// each with a symbol rate.
+///
+/// The rate is the carrier's equivalent noise bandwidth: its area over the
+/// noise divided by the height of its flat top, which for a root-raised-
+/// cosine carrier is the symbol rate whatever the roll-off. DecSAT's
+/// carrier finder measures the same (`decsat-engine`, `carriers.rs`). Here
+/// the spectrum is coarse (30 kHz a level, 64 steps, on a scale the beacon
+/// does not publish), so two things steady it: the lines are averaged, and
+/// the transponder's own beacon, whose rate is known and whose upper half
+/// is always in the spectrum, sets the scale. A carrier under four levels
+/// wide (120 kHz) is only roughly measured.
+pub fn wb_carriers(lines: &[Vec<u8>]) -> Vec<WbCarrier> {
+    const AVERAGE: usize = 24;
+    let recent: Vec<&Vec<u8>> = lines
+        .iter()
+        .rev()
+        .take(AVERAGE)
+        .filter(|l| l.len() == WB_SPECTRUM_LEVELS)
+        .collect();
+    if recent.len() < 2 {
+        return Vec::new();
+    }
+    let n = WB_SPECTRUM_LEVELS;
+    let mean: Vec<f32> = (0..n)
+        .map(|i| recent.iter().map(|l| l[i] as f32).sum::<f32>() / recent.len() as f32)
+        .collect();
+    // The noise: the level a fifth of the way up the sorted spectrum, as a
+    // transponder may be mostly full.
+    let mut sorted = mean.clone();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted[n / 5];
+    // A carrier: a run of levels well over the noise whose top is a good
+    // deal higher still (a sixth of the beacon's height: the noise itself
+    // rises a few levels towards the transponder's upper edge).
+    const EDGE: f32 = 2.5;
+    const TOP: f32 = 10.0;
+    let mut found: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if mean[i] <= floor + EDGE {
+            i += 1;
+            continue;
+        }
+        let from = i;
+        while i < n && mean[i] > floor + EDGE {
+            i += 1;
+        }
+        let top = mean[from..i].iter().copied().fold(0.0, f32::max);
+        if top >= floor + TOP && i - from >= 2 {
+            found.push((from, i));
+        }
+    }
+    // Area over the noise, and the flat top's height: the median of the
+    // levels in the upper half of the carrier.
+    let measure = |from: usize, to: usize| -> (f64, f32, f64) {
+        let excess: Vec<f32> = mean[from..to]
+            .iter()
+            .map(|m| (m - floor).max(0.0))
+            .collect();
+        let peak = excess.iter().copied().fold(0.0, f32::max);
+        let mut upper: Vec<f32> = excess
+            .iter()
+            .copied()
+            .filter(|&e| e >= 0.5 * peak)
+            .collect();
+        upper.sort_by(f32::total_cmp);
+        let top = upper[upper.len() / 2];
+        let area: f64 = excess.iter().map(|&e| e as f64).sum();
+        let centre = excess
+            .iter()
+            .enumerate()
+            .map(|(k, &e)| (from + k) as f64 * e as f64)
+            .sum::<f64>()
+            / area.max(1e-9);
+        (area / top.max(1e-3) as f64, top, centre)
+    };
+    // The beacon is the carrier at the lower edge: half of it is there, so
+    // its width in levels should be half its rate. What it comes to
+    // instead is the scale's error, the same for every carrier.
+    let beacon = found.first().copied().filter(|&(from, _)| from == 0);
+    let scale = beacon.map_or(1.0, |(from, to)| {
+        // The first level is the beacon's centre: half a level of it.
+        let half = (measure(from, to).0 - 0.5) * WB_SPECTRUM_STEP_HZ;
+        (WB_BEACON_SYMBOL_RATE / 2.0 / half.max(1.0)).clamp(0.7, 1.4)
+    });
+    found
+        .iter()
+        .map(|&(from, to)| {
+            let (width, top, centre) = measure(from, to);
+            if Some((from, to)) == beacon {
+                return WbCarrier {
+                    centre_hz: WB_SPECTRUM_HZ,
+                    symbol_rate: WB_BEACON_SYMBOL_RATE,
+                    standard: Some(WB_BEACON_SYMBOL_RATE),
+                    height: top,
+                    beacon: true,
+                };
+            }
+            let symbol_rate = width * WB_SPECTRUM_STEP_HZ * scale;
+            let standard = WB_STANDARD_RATES
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    (a / symbol_rate)
+                        .ln()
+                        .abs()
+                        .total_cmp(&(b / symbol_rate).ln().abs())
+                })
+                .filter(|s| (s / symbol_rate).ln().abs() < 0.125);
+            WbCarrier {
+                centre_hz: WB_SPECTRUM_HZ + centre * WB_SPECTRUM_STEP_HZ,
+                symbol_rate,
+                standard,
+                height: top,
+                beacon: false,
+            }
+        })
+        .collect()
+}
+
 /// Bytes of file header in a file's first frame (`ArraySend.cs`,
 /// `AddHeader`): 50 of name, 2 of CRC, 3 of length.
 pub const FILE_HEADER_BYTES: usize = 55;
@@ -527,6 +681,10 @@ pub struct HsFile {
     /// The file inside, when what was sent is a ZIP archive: its name and
     /// contents.
     pub inside: Option<(String, Vec<u8>)>,
+    /// While frames are still missing: the file inside as far as it can
+    /// be read, which is the unbroken run of frames from the first one,
+    /// unzipped up to where they stop.
+    pub so_far: Option<(String, Vec<u8>)>,
 }
 
 impl HsFile {
@@ -536,9 +694,10 @@ impl HsFile {
 
     /// The contents as text, unzipped when they were zipped.
     pub fn text(&self) -> Option<String> {
-        let bytes = match (&self.inside, &self.data) {
-            (Some((_, inner)), _) => inner,
-            (None, Some(data)) => data,
+        let bytes = match (&self.inside, &self.data, &self.so_far) {
+            (Some((_, inner)), _, _) => inner,
+            (None, Some(data), _) => data,
+            (None, None, Some((_, part))) => part,
             _ => return None,
         };
         Some(String::from_utf8_lossy(bytes).into_owned())
@@ -581,6 +740,43 @@ pub fn unzip_first(zip: &[u8]) -> Option<(String, Vec<u8>)> {
     (out.len() == size).then_some((name, out))
 }
 
+/// The start of a ZIP archive's first file, from the start of the archive:
+/// its name and as much of its contents as the bytes given hold. Deflate
+/// is read from the front, so a file can be shown while it arrives.
+pub fn unzip_so_far(zip: &[u8]) -> Option<(String, Vec<u8>)> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*zip.get(at)?, *zip.get(at + 1)?]) as usize);
+    if zip.get(..4)? != b"PK\x03\x04" {
+        return None;
+    }
+    let method = u16_at(8)?;
+    let name_len = u16_at(26)?;
+    let body = 30 + name_len + u16_at(28)?;
+    let name = String::from_utf8_lossy(zip.get(30..30 + name_len)?).into_owned();
+    let data = zip.get(body..)?;
+    let out = match method {
+        0 => data.to_vec(),
+        8 => {
+            let mut inflate = flate2::Decompress::new(false);
+            let mut out: Vec<u8> = Vec::new();
+            loop {
+                let (taken, made) = (inflate.total_in(), inflate.total_out());
+                // Rust note: `decompress_vec` writes into the vector's
+                // spare room, so there has to be some.
+                out.reserve(32 * 1024);
+                let rest = &data[taken as usize..];
+                let state = inflate.decompress_vec(rest, &mut out, flate2::FlushDecompress::None);
+                let stuck = inflate.total_in() == taken && inflate.total_out() == made;
+                if !matches!(state, Ok(flate2::Status::Ok | flate2::Status::BufError)) || stuck {
+                    break;
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    (!out.is_empty()).then_some((name, out))
+}
+
 /// Puts files together from their frames. The beacon sends each file over
 /// and over: frames missed one time round are filled in the next.
 #[derive(Debug, Default)]
@@ -621,6 +817,7 @@ impl Files {
                         frames,
                         data: None,
                         inside: None,
+                        so_far: None,
                     };
                     self.current = Some((file, vec![None; frames]));
                 }
@@ -647,8 +844,20 @@ impl Files {
         parts[n] = Some(frame.payload.clone());
         file.have += 1;
         if file.have < file.frames {
+            // What can be read already: the frames from the first up to
+            // the first one missing.
+            let run: Vec<u8> = parts
+                .iter()
+                .map_while(|p| p.as_ref())
+                .flatten()
+                .copied()
+                .collect();
+            if run.len() > FILE_HEADER_BYTES {
+                file.so_far = unzip_so_far(&run[FILE_HEADER_BYTES..]);
+            }
             return;
         }
+        file.so_far = None;
         let all: Vec<u8> = parts.iter().flatten().flatten().copied().collect();
         let data = all[FILE_HEADER_BYTES..FILE_HEADER_BYTES + file.len].to_vec();
         if crc16(&data) != file.id {
@@ -993,6 +1202,9 @@ mod tests {
         let mut files = Files::default();
         // First time round the middle frame is lost; second time the last.
         files.push(&frames[0]);
+        // Its start can be read at once.
+        let so_far = files.arriving().and_then(HsFile::text).unwrap();
+        assert!(so_far.len() > 100 && inner.starts_with(so_far.as_bytes()));
         files.push(&frames[2]);
         assert_eq!(files.arriving().map(|f| (f.have, f.frames)), Some((2, 3)));
         files.push(&frames[0]);
@@ -1004,6 +1216,30 @@ mod tests {
     }
 
     #[test]
+    fn a_deflated_file_is_read_as_far_as_it_has_come() {
+        use std::io::Write;
+        let text: Vec<u8> = (0..400)
+            .flat_map(|i| format!("Line {i} of the bulletin, with words in it.\n").into_bytes())
+            .collect();
+        let mut packer =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        packer.write_all(&text).unwrap();
+        let packed = packer.finish().unwrap();
+        // A local file header as a streaming zipper writes it: sizes left
+        // for later (flag bit 3).
+        let mut zip = b"PK\x03\x04\x14\0\x08\0\x08\0\0\0\0\0".to_vec();
+        zip.extend([0u8; 12]);
+        zip.extend([5, 0, 0, 0]);
+        zip.extend(b"a.blt");
+        zip.extend(&packed);
+        let (name, part) = unzip_so_far(&zip[..zip.len() / 2]).unwrap();
+        assert_eq!(name, "a.blt");
+        assert!(part.len() > text.len() / 4 && text.starts_with(&part));
+        let (_, whole) = unzip_so_far(&zip).unwrap();
+        assert_eq!(whole, text);
+    }
+
+    #[test]
     fn half_a_zip_is_not_unzipped() {
         // The received first frame holds the ZIP's header and the name of
         // the file inside, but only the start of its data.
@@ -1011,6 +1247,56 @@ mod tests {
         let zip = &f.payload[FILE_HEADER_BYTES..];
         assert_eq!(zip[30..41], *b"ANS-263.blt");
         assert_eq!(unzip_first(zip), None);
+    }
+
+    /// A wide-band waterfall line: noise at level 4, the beacon's upper
+    /// half, and raised-cosine carriers (centre MHz, symbols a second,
+    /// height) drawn at 30 kHz a level.
+    fn wb_line(carriers: &[(f64, f64, f32)], wobble: u8) -> Vec<u8> {
+        let shape = |hz: f64, rate: f64| -> f32 {
+            // A raised cosine's power spectrum, roll-off 0.2.
+            let (x, a) = (hz.abs() / rate, 0.2);
+            if x <= (1.0 - a) / 2.0 {
+                1.0
+            } else if x >= (1.0 + a) / 2.0 {
+                0.0
+            } else {
+                (0.5 * (1.0 + (std::f64::consts::PI / a * (x - (1.0 - a) / 2.0)).cos())) as f32
+            }
+        };
+        (0..WB_SPECTRUM_LEVELS)
+            .map(|i| {
+                let hz = WB_SPECTRUM_HZ + i as f64 * WB_SPECTRUM_STEP_HZ;
+                let mut level = 4.0 + ((i as u8).wrapping_mul(7).wrapping_add(wobble) % 3) as f32;
+                level += 59.0 * shape(hz - WB_SPECTRUM_HZ, WB_BEACON_SYMBOL_RATE);
+                for &(mhz, rate, height) in carriers {
+                    level += height * shape(hz - mhz * 1e6, rate);
+                }
+                level.min(63.0) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_band_carriers_get_their_rates() {
+        let carriers = [
+            (10494.2, 500e3, 40.0),
+            (10496.0, 1000e3, 30.0),
+            (10497.8, 333e3, 50.0),
+        ];
+        let lines: Vec<Vec<u8>> = (0..30).map(|k| wb_line(&carriers, k)).collect();
+        let found = wb_carriers(&lines);
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found[0].beacon);
+        assert_eq!(found[0].standard, Some(1_500_000.0));
+        for (c, &(mhz, rate, _)) in found[1..].iter().zip(&carriers) {
+            assert!((c.centre_hz / 1e6 - mhz).abs() < 0.03, "{c:?}");
+            assert!((c.symbol_rate / rate - 1.0).abs() < 0.12, "{c:?}");
+            assert_eq!(c.standard, Some(rate), "{c:?}");
+        }
+        // Noise alone: only the beacon.
+        let quiet: Vec<Vec<u8>> = (0..30).map(|k| wb_line(&[], k)).collect();
+        assert_eq!(wb_carriers(&quiet).len(), 1);
     }
 
     #[test]
