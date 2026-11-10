@@ -1,11 +1,14 @@
 // made by CasualArclamp
 //! The Barker-11 spread carrier's card: lock, carrier, Es/N0, the frame
-//! layout found, and the latest frame's data blocks in hex.
+//! layout found, the latest frame's data blocks in hex, and the frames as
+//! a bitmap.
 
 use decsat_engine::VfoId;
-use decsat_engine::beacon::barker::{BarkerView, CHIP_RATE, SYMBOL_RATE};
+use decsat_engine::beacon::barker::{BarkerView, CHIP_RATE, Raster, SYMBOL_RATE};
 
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{
+    self, Color32, ColorImage, Rect, RichText, Sense, TextureHandle, TextureOptions, Ui, pos2, vec2,
+};
 
 const GOOD: Color32 = Color32::from_rgb(110, 220, 110);
 const WAIT: Color32 = Color32::from_rgb(240, 200, 80);
@@ -83,4 +86,122 @@ pub fn show(ui: &mut Ui, v: &BarkerView, id: VfoId) {
                 .on_hover_text(format!("Block {k}: {bits} bits, the first {SHOWN} bytes."));
         }
     }
+    bitmap(ui, &v.raster, id);
+}
+
+/// The bitmap's texture, kept until another frame arrives.
+#[derive(Clone)]
+struct MapTexture {
+    revision: u64,
+    tex: TextureHandle,
+}
+
+/// A symbol's colour: preamble and unique words in blue, data that has
+/// never changed in grey, data that changes dark or bright.
+fn bit_colour(one: bool, sync: bool, changed: bool) -> [u8; 4] {
+    match (sync, changed, one) {
+        (true, _, false) => [18, 40, 78, 255],
+        (true, _, true) => [70, 140, 230, 255],
+        (false, false, false) => [30, 30, 34, 255],
+        (false, false, true) => [104, 104, 110, 255],
+        (false, true, false) => [8, 8, 10, 255],
+        (false, true, true) => [236, 226, 120, 255],
+    }
+}
+
+/// The frames as a bitmap: a row a frame (the latest at the bottom), a
+/// column a symbol. As the beacon card's frame map, for bits.
+fn bitmap(ui: &mut Ui, r: &Raster, id: VfoId) {
+    let (rows, cols) = (r.rows.len(), r.cols);
+    if rows == 0 || cols == 0 || cols > ui.ctx().input(|i| i.max_texture_side) {
+        return;
+    }
+    ui.add_space(6.0);
+    // Points a symbol; 0 fits the frame to the card.
+    let zoom_key = egui::Id::new(("barker_zoom", id));
+    let mut zoom: u8 = ui.data(|d| d.get_temp(zoom_key)).unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Frames").strong()).on_hover_text(
+            "Each row a frame, the latest at the bottom; each column a symbol. Blue: preamble \
+             and unique words. Grey: data that has not changed since the decoder started. \
+             Dark and bright: data that changes.",
+        );
+        for (z, name) in [(0u8, "fit"), (1, "1×"), (2, "2×"), (4, "4×")] {
+            if ui.selectable_label(zoom == z, name).clicked() {
+                zoom = z;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(zoom_key, zoom));
+
+    let key = egui::Id::new(("barker_map", id));
+    let cached: Option<MapTexture> = ui.data(|d| d.get_temp(key));
+    let tex = match cached {
+        Some(t) if t.revision == r.revision && t.tex.size() == [cols, rows] => t.tex,
+        _ => {
+            let mut rgba = Vec::with_capacity(rows * cols * 4);
+            for row in &r.rows {
+                for c in 0..cols {
+                    rgba.extend(bit_colour(
+                        Raster::bit(row, c),
+                        Raster::bit(&r.sync, c),
+                        Raster::bit(&r.changed, c),
+                    ));
+                }
+            }
+            let img = ColorImage::from_rgba_unmultiplied([cols, rows], &rgba);
+            // Fitted, several symbols share a point: LINEAR averages them
+            // instead of showing every third.
+            let tex =
+                ui.ctx()
+                    .load_texture(format!("barker_map_{id:?}"), img, TextureOptions::LINEAR);
+            ui.data_mut(|d| {
+                d.insert_temp(
+                    key,
+                    MapTexture {
+                        revision: r.revision,
+                        tex: tex.clone(),
+                    },
+                )
+            });
+            tex
+        }
+    };
+    let row_h = (192.0 / rows as f32).clamp(2.0, 6.0);
+    // Rust note: `id_salt` keeps this scroll area's position apart from
+    // any other on the panel.
+    egui::ScrollArea::horizontal()
+        .id_salt(("barker_scroll", id))
+        .show(ui, |ui| {
+            let width = if zoom == 0 {
+                ui.available_width()
+            } else {
+                cols as f32 * f32::from(zoom)
+            };
+            let (rect, resp) =
+                ui.allocate_exact_size(vec2(width, row_h * rows as f32), Sense::hover());
+            ui.painter().image(
+                tex.id(),
+                rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            if let Some(p) = resp.hover_pos() {
+                let c = (((p.x - rect.left()) / rect.width() * cols as f32) as usize).min(cols - 1);
+                let row =
+                    (((p.y - rect.top()) / rect.height() * rows as f32) as usize).min(rows - 1);
+                let kind = if Raster::bit(&r.sync, c) {
+                    "preamble or unique word"
+                } else if Raster::bit(&r.changed, c) {
+                    "data, changes"
+                } else {
+                    "data, never changed"
+                };
+                resp.on_hover_text_at_pointer(format!(
+                    "symbol {c}, {} frames back: {} — {kind}",
+                    rows - 1 - row,
+                    u8::from(Raster::bit(&r.rows[row], c)),
+                ));
+            }
+        });
 }

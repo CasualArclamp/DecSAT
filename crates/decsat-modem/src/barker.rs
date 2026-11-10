@@ -95,6 +95,8 @@ const LOST_SYMBOLS: u32 = 6000;
 /// Points kept for the scatter, and frames kept in the view.
 const SCATTER: usize = 512;
 const KEEP: usize = 4;
+/// Frames kept for the bitmap.
+const RASTER_ROWS: usize = 96;
 
 /// One frame, from the start of its preamble to the next.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -116,6 +118,58 @@ pub struct BarkerFrame {
     /// The data blocks in order: their length in bits, and the bits packed
     /// first bit in the top bit (the last byte zero-padded).
     pub blocks: Vec<(usize, Vec<u8>)>,
+    /// The whole frame, preamble first, packed the same way; and, packed
+    /// alike, which of its symbols are preamble or unique word.
+    pub bits: Vec<u8>,
+    pub sync: Vec<u8>,
+}
+
+/// The latest frames as a bitmap: a row a frame, a column a symbol.
+#[derive(Debug, Clone, Default)]
+pub struct Raster {
+    /// Counts up as frames arrive (a display redraws when it moves).
+    pub revision: u64,
+    /// Symbols in a row.
+    pub cols: usize,
+    /// The frames, oldest first, each packed first bit in the top bit.
+    pub rows: Vec<Vec<u8>>,
+    /// Packed alike: the symbols that are preamble or unique word, and
+    /// those seen to change from one frame to the next since the bitmap
+    /// began.
+    pub sync: Vec<u8>,
+    pub changed: Vec<u8>,
+}
+
+impl Raster {
+    /// Bit `i` of a packed row or mask.
+    pub fn bit(packed: &[u8], i: usize) -> bool {
+        packed
+            .get(i / 8)
+            .is_some_and(|b| (b >> (7 - i % 8)) & 1 == 1)
+    }
+
+    fn add(&mut self, f: &BarkerFrame) {
+        // A frame of another length starts the bitmap again.
+        if self.cols != f.symbols {
+            *self = Raster {
+                revision: self.revision,
+                cols: f.symbols,
+                changed: vec![0; f.bits.len()],
+                ..Default::default()
+            };
+        }
+        if let Some(last) = self.rows.last() {
+            for (c, (a, b)) in self.changed.iter_mut().zip(last.iter().zip(&f.bits)) {
+                *c |= a ^ b;
+            }
+        }
+        if self.rows.len() == RASTER_ROWS {
+            self.rows.remove(0);
+        }
+        self.rows.push(f.bits.clone());
+        self.sync = f.sync.clone();
+        self.revision += 1;
+    }
 }
 
 /// What the card shows.
@@ -138,6 +192,9 @@ pub struct BarkerView {
     pub layout: String,
     /// The latest frames, oldest first.
     pub recent: Vec<BarkerFrame>,
+    /// The latest frames as a bitmap. Rust note: an `Arc` is a shared
+    /// pointer, so cloning the view does not copy the bitmap.
+    pub raster: std::sync::Arc<Raster>,
     pub message: String,
 }
 
@@ -246,6 +303,9 @@ fn parse(bits: &[u8]) -> BarkerFrame {
     // (is a unique word, length in bits) after the preamble.
     let mut items: Vec<(bool, usize)> = Vec::new();
     let mut block_start = FIRST_BLOCK_AT.min(bits.len());
+    f.bits = pack(bits).1;
+    let mut sync = vec![0u8; bits.len()];
+    sync[..block_start].fill(1);
     // The spare symbol at the end belongs to no block.
     let bits = &bits[..bits.len().saturating_sub(SPARE_SYMBOLS).max(block_start)];
     let mut reg = 0u64;
@@ -261,6 +321,7 @@ fn parse(bits: &[u8]) -> BarkerFrame {
         let wrong = (reg ^ UNIQUE_WORD).count_ones();
         if wrong <= UNIQUE_WORD_MAX_ERRORS {
             let at = i - UNIQUE_WORD_BITS;
+            sync[at..i].fill(1);
             if at > block_start {
                 f.blocks.push(pack(&bits[block_start..at]));
                 items.push((false, at - block_start));
@@ -281,6 +342,7 @@ fn parse(bits: &[u8]) -> BarkerFrame {
         items.push((false, bits.len() - block_start));
     }
     f.layout = layout(&items);
+    f.sync = pack(&sync).1;
     f
 }
 
@@ -364,6 +426,7 @@ pub struct BarkerRx {
     framer: Framer,
     done: Vec<BarkerFrame>,
     scatter: Vec<Iq>,
+    raster: Raster,
     view: BarkerView,
 }
 
@@ -403,6 +466,7 @@ impl BarkerRx {
             framer: Framer::new(),
             done: Vec::new(),
             scatter: Vec::with_capacity(SCATTER),
+            raster: Raster::default(),
             view: BarkerView {
                 message,
                 ..Default::default()
@@ -632,6 +696,8 @@ impl BarkerRx {
                 f.symbols as f64 / SYMBOL_RATE * 1e3,
                 f.layout
             );
+            self.raster.add(&f);
+            v.raster = std::sync::Arc::new(self.raster.clone());
             if v.recent.len() == KEEP {
                 v.recent.remove(0);
             }
@@ -770,6 +836,30 @@ mod tests {
     #[test]
     fn decodes_at_an_odd_rate_with_the_carrier_off() {
         decode(437_500.0, -2900.0, 10.0);
+    }
+
+    #[test]
+    fn raster_marks_sync_and_what_changes() {
+        let (x, _) = synth(1e6, 4, 0.0, 20.0);
+        let mut rx = BarkerRx::new(1e6);
+        rx.push(&x);
+        let r = rx.view().raster;
+        assert_eq!((r.cols, r.rows.len(), r.revision), (1919, 4, 4));
+        // Preamble and unique words are sync and never change; the first
+        // block's first bit is the preamble's last symbol.
+        let sync: Vec<usize> = (0..r.cols).filter(|&i| Raster::bit(&r.sync, i)).collect();
+        assert_eq!(sync.len(), FIRST_BLOCK_AT + 2 * 64);
+        assert!(sync.iter().all(|&i| !Raster::bit(&r.changed, i)));
+        assert!(Raster::bit(&r.sync, 253) && !Raster::bit(&r.sync, 254));
+        assert!(Raster::bit(&r.sync, 254 + 512) && Raster::bit(&r.sync, 254 + 512 + 63));
+        // Random data: most of its bits have changed after four frames.
+        let changed = (0..r.cols).filter(|&i| Raster::bit(&r.changed, i)).count();
+        assert!(changed > 1200, "{changed}");
+        // The rows are the frames: each starts with the preamble.
+        let p = preamble();
+        for row in &r.rows {
+            assert!((0..FIRST_BLOCK_AT).all(|i| Raster::bit(row, i) == (p[i] == 1)));
+        }
     }
 
     #[test]
