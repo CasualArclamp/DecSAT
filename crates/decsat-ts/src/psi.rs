@@ -472,6 +472,12 @@ impl TsAnalyser {
                     0x05 if d.len() >= 4 && d[..4] == crate::av1::FORMAT_ID => {
                         es.kind = Some("AV1 video");
                     }
+                    // Private data indicator (ISO/IEC 13818-1 §2.6.28):
+                    // `APTx` on a user-private stream type is Enhanced
+                    // apt-X (decsat_modem::aptx_ts, found on a feed). Not
+                    // called "… audio": the player would hand it to
+                    // ffmpeg, which has no decoder for it.
+                    0x0F if d == b"APTx" => es.kind = Some("Enhanced apt-X"),
                     0x6A => es.kind = Some("AC-3 audio"),
                     0x7A => es.kind = Some("E-AC-3 audio"),
                     0x7C => es.kind = Some("AAC audio"),

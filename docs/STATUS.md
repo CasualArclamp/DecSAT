@@ -6284,3 +6284,45 @@ Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
   the sample), whole-orbit data in L blocks.
 - A values line of exactly 64 characters ran into the next (QO-100's K
   block in 2019 form): telemetry is now read line by line.
+
+## Enhanced apt-X in a transport stream (2026-11-10)
+
+Rory's 39 s TS from a Ku-band DVB-S2 carrier at 11 696.76 MHz: six radio
+services, each one elementary stream of type 9Bh that ffmpeg calls MP3 or
+VVC and cannot play.
+
+- **What marks it**: a private data indicator descriptor `APTx`, a maximum
+  bitrate of 600 kbit/s. PES private stream 1, 1152 bytes each with a PTS.
+- **Framing** (`decsat-modem::aptx_ts`): the payloads are one byte stream of
+  frames, a 24-byte header (`AA 55 AA 55 00 00 00 00`…) and 3456 bytes of
+  audio, 3480 in about one frame of 25. Decoding the headers as audio was
+  what first hid everything else (a click every 48 ms, step sizes blown).
+- **Codec**: 24-bit codewords, left then right: 576 kbit/s is Enhanced apt-X
+  at 24 bits, stereo, 48 kHz. Bit-pair statistics give the fields: two bits,
+  then 4, 4, 5 and 9, two's complement. The 9-bit band decodes with aptX
+  HD's tables as it is. The 5-bit and 4-bit bands are aptX HD's 6-bit and
+  5-bit values less their last bit: with those tables the power either side
+  of 6 kHz and of 12 kHz matches to 1 dB (it is 15 and 30 dB out with a
+  5-bit and a 4-bit table).
+- **The two first bits** carry the missing last bits as parity (found by
+  trying XORs of the candidate bits against each field's sign: a last bit
+  leans with the sign, 0.48/0.52 for 6 bits, 0.45/0.54 for 5):
+  `y` = MLF's last bit XOR MHF's last bit; `x` = the channel's parity as
+  FFmpeg's `aptx_quantized_parity` has it (right channel), and the left
+  `x` is the two channels' parities XORed, which is where aptX HD hides its
+  sync. Here the left `x` is AutoSync (`0 0 0 0 1 0 1 1` on a frame's even
+  pairs) and auxiliary data (odd pairs). So it is aptX HD's decoder with
+  another packing: `Channel::decode24`, bit-exact against FFmpeg's aptX HD
+  on its own encoder's output repacked.
+- **On the recording**: all six services decode (the same network programme
+  at different delays: the same channel of two services correlates at 0.6),
+  harmonics unbroken across the band edges up to the 15 kHz low-pass,
+  AutoSync right on 99.9% of pairs or more. Left and right are nearly uncorrelated and
+  peaks sit near −16 dBFS: as sent, as far as can be told.
+- **In the app**: the programme list names the stream "Enhanced apt-X";
+  `cargo run --release -p decsat-modem --example aptx_wav -- IN.ts OUTDIR`
+  writes a `.wav` a service. A PES with a packet lost is dropped and its
+  time filled with silence by the PTS.
+- Not done: playing it in the app (the player hands audio to ffmpeg, which
+  has no decoder for this), the header's other 16 bytes, the auxiliary data,
+  16- and 20-bit Enhanced apt-X, mono.
