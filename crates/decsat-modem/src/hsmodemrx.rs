@@ -58,9 +58,15 @@ const PHASE_WINDOW: usize = 96;
 const CENTRE_RADIUS: f32 = RING_RADIUS / 2.0;
 /// The window slid along the spectrum to find the signal (Hz).
 const SEARCH_WIDTH_HZ: f64 = 2400.0;
-/// Spectrum bins are clipped at this many medians, so a carrier beside the
-/// beacon (the CW beacon is 5 kHz up) does not pull the window to itself.
-const CLIP_MEDIANS: f32 = 8.0;
+/// Spectrum bins are clipped at this many times the signal's own level, so
+/// a carrier beside the beacon (there is one at its lower edge, and the CW
+/// beacon 5 kHz up) does not pull the window to itself. The signal's level
+/// is taken as that of the strongest bins a window's width down the list:
+/// not the median, which in a sound card's 24 kHz is the silence above the
+/// receiver's audio.
+const CLIP_OVER_SIGNAL: f32 = 2.0;
+/// A receiver's audio: where [`HsRx::audio`] looks (Hz).
+const AUDIO_BAND_HZ: (f64, f64) = (10.0, 4000.0);
 /// Frames kept for the view, and points for the scatter.
 const KEEP: usize = 32;
 const SCATTER: usize = 1024;
@@ -347,6 +353,27 @@ impl Timing {
     }
 }
 
+/// The 2400 Hz line of the squared envelope over the power, for samples at
+/// 4 a symbol: about 0.02 when the filter is on the signal's centre.
+fn symbol_line(filtered: &[Iq]) -> f32 {
+    let (mut line, mut power) = (Iq::new(0.0, 0.0), 0.0f32);
+    for (i, y) in filtered.iter().enumerate() {
+        let p = y.norm_sqr();
+        power += p;
+        line += match i & 3 {
+            0 => Iq::new(p, 0.0),
+            1 => Iq::new(0.0, -p),
+            2 => Iq::new(-p, 0.0),
+            _ => Iq::new(0.0, p),
+        };
+    }
+    if power > 0.0 {
+        line.norm() / power
+    } else {
+        0.0
+    }
+}
+
 /// A symbol turned seven times, the centre point (by its size) left out.
 #[inline]
 fn seventh(s: Iq) -> Iq {
@@ -407,6 +434,9 @@ pub struct HsRx {
     spec_frames: usize,
     /// Input held until the first search has a centre.
     held: Vec<Iq>,
+    /// Where the signal is looked for (Hz from the input's centre), when
+    /// that is not everywhere.
+    band: Option<(f64, f64)>,
     /// The centre the front end mixes from (Hz).
     centre_hz: Option<f64>,
     front: Option<Front>,
@@ -451,6 +481,7 @@ impl HsRx {
             spec_sum: vec![0.0; n],
             spec_frames: 0,
             held: Vec::new(),
+            band: None,
             centre_hz: None,
             front: None,
             filtered: Vec::new(),
@@ -476,6 +507,16 @@ impl HsRx {
                 message: "Looking for the beacon".into(),
                 ..Default::default()
             },
+        }
+    }
+
+    /// A receiver for a sound card's audio (real samples): the signal is
+    /// looked for between 10 Hz and 4 kHz only, where a receiver's audio
+    /// is, whatever the sound card's own rate.
+    pub fn audio(rate: f64) -> Self {
+        HsRx {
+            band: Some((AUDIO_BAND_HZ.0, AUDIO_BAND_HZ.1.min(rate / 2.0))),
+            ..Self::new(rate)
         }
     }
 
@@ -568,15 +609,41 @@ impl HsRx {
     fn search(&mut self) {
         let n = self.spec_sum.len();
         let bin_hz = self.rate / n as f64;
-        let mut sorted = self.spec_sum.clone();
-        sorted.sort_by(f32::total_cmp);
-        let clip = sorted[n / 2] * CLIP_MEDIANS;
         let width = ((SEARCH_WIDTH_HZ / bin_hz).round() as usize).clamp(1, n - 1);
-        let clipped = |i: usize| self.spec_sum[i % n].min(clip) as f64;
-        // The window over bins [k, k + width), slid once round.
-        let mut sum: f64 = (0..width).map(clipped).sum();
+        // The window's first bins that may be tried, and the bins the
+        // signal's level is judged from: the audio band only, when one was
+        // given, else once round the whole spectrum.
+        let (starts, judged) = match self.band {
+            Some((lo, hi)) => {
+                let lo = ((lo / bin_hz).ceil() as usize).min(n / 2 - 1);
+                let hi = ((hi / bin_hz).floor() as usize).clamp(lo + 1, n / 2);
+                // A band narrower than the window: the window goes on its
+                // middle.
+                let last = hi.saturating_sub(width).max(lo);
+                let first = if hi - lo < width {
+                    (lo + hi).saturating_sub(width) / 2
+                } else {
+                    lo
+                };
+                (first..=last.max(first), lo..hi)
+            }
+            None => (0..=n - 1, 0..n),
+        };
+        let mut sorted = self.spec_sum[judged].to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let clip = sorted[sorted
+            .len()
+            .saturating_sub(width.min(sorted.len() / 2).max(1))]
+            * CLIP_OVER_SIGNAL;
+        // Sums of the clipped spectrum up to each bin, twice round, so a
+        // window's power is one subtraction.
+        let mut upto = vec![0f64; 2 * n + 1];
+        for i in 0..2 * n {
+            upto[i + 1] = upto[i] + self.spec_sum[i % n].min(clip) as f64;
+        }
         let mut best = (f64::MIN, 0usize);
-        for k in 0..n {
+        for k in starts {
+            let sum = upto[k + width] - upto[k];
             // A real input's two images are as strong as each other: take
             // the one above the centre.
             let mid = (k + width / 2) % n;
@@ -584,7 +651,6 @@ impl HsRx {
             if score > best.0 {
                 best = (score, k);
             }
-            sum += clipped(k + width) - clipped(k);
         }
         let mid = best.1 as f64 + (width as f64 - 1.0) / 2.0;
         let hz = if mid >= n as f64 / 2.0 {
@@ -597,7 +663,7 @@ impl HsRx {
         // The window is good to some tens of Hz, and the matched filter
         // wants better: read the held samples once to measure the carrier
         // itself, and start from there.
-        let hz = hz + self.probe(hz).unwrap_or(0.0);
+        let hz = self.probe(hz).unwrap_or(hz);
         self.centre_hz = Some(hz);
         self.front = Some(Front::new(self.rate, hz));
         self.filtered.clear();
@@ -611,16 +677,42 @@ impl HsRx {
         self.deframer.reset();
     }
 
-    /// The carrier's offset from `centre_hz`, measured on the held input.
+    /// The carrier, measured on the held input from a centre good to a
+    /// couple of hundred Hz.
+    ///
+    /// The 7th power cannot tell carriers 2400/7 Hz apart, so the centres
+    /// that far either side are tried as well, and the one taken is where
+    /// the symbol-rate line is strongest: that line comes from the signal's
+    /// two edges together, and a filter a seventh of the symbol rate off
+    /// centre has lost one of them.
     fn probe(&mut self, centre_hz: f64) -> Option<f64> {
-        let mut filtered = Vec::new();
-        Front::new(self.rate, centre_hz).push(&self.held, &mut filtered);
-        let mut symbols = Vec::new();
-        Timing::new().push(&filtered, &mut symbols);
-        // The last whole chunk: the first symbols have the filter's start
-        // in them.
-        let from = symbols.len().checked_sub(CHUNK)?;
-        carrier_line(&*self.carrier_fft, &mut self.carrier_buf, &symbols[from..])
+        let mut best: Option<(f32, f64)> = None;
+        for k in [0.0, -1.0, 1.0] {
+            let centre = centre_hz + k * BAUD / 7.0;
+            let mut filtered = Vec::new();
+            Front::new(self.rate, centre).push(&self.held, &mut filtered);
+            let mut symbols = Vec::new();
+            Timing::new().push(&filtered, &mut symbols);
+            // The last whole chunk: the first symbols have the filter's
+            // start in them.
+            let Some(from) = symbols.len().checked_sub(CHUNK) else {
+                continue;
+            };
+            let Some(offset) =
+                carrier_line(&*self.carrier_fft, &mut self.carrier_buf, &symbols[from..])
+            else {
+                continue;
+            };
+            // The same again from where the carrier is, for the line.
+            let centre = centre + offset;
+            filtered.clear();
+            Front::new(self.rate, centre).push(&self.held, &mut filtered);
+            let strength = symbol_line(&filtered);
+            if best.is_none_or(|(s, _)| strength > s) {
+                best = Some((strength, centre));
+            }
+        }
+        best.map(|(_, centre)| centre)
     }
 
     fn run(&mut self, input: &[Iq]) {
@@ -853,7 +945,14 @@ mod tests {
     }
 
     fn receive(rate: f64, input: &[Iq]) -> (Vec<HsFrame>, HsView) {
-        let mut rx = HsRx::new(rate);
+        run(HsRx::new(rate), input)
+    }
+
+    fn receive_audio(rate: f64, input: &[Iq]) -> (Vec<HsFrame>, HsView) {
+        run(HsRx::audio(rate), input)
+    }
+
+    fn run(mut rx: HsRx, input: &[Iq]) -> (Vec<HsFrame>, HsView) {
         for part in input.chunks(1500) {
             rx.push(part);
         }
@@ -881,7 +980,52 @@ mod tests {
         // edge is at the band's end, as in the recording.
         let (iq, payloads) = signal(6, 8000.0, 2610.0, 16.0);
         let audio: Vec<Iq> = iq.iter().map(|x| Iq::new(x.re, 0.0)).collect();
-        let (frames, view) = receive(8000.0, &audio);
+        let (frames, view) = receive_audio(8000.0, &audio);
+        assert_eq!(frames.len(), 6, "{view:?}");
+        for (f, p) in frames.iter().zip(&payloads) {
+            assert_eq!(&f.payload, p);
+        }
+    }
+
+    #[test]
+    fn a_sound_card_at_48k() {
+        // A receiver's 3 kHz of audio in a sound card's 24 kHz: most of
+        // the spectrum is empty, the signal fills what is not, and a
+        // carrier sits at its lower edge (as the beacon's does).
+        let (iq, payloads) = signal(6, 48_000.0, 1870.0, 40.0);
+        let audio: Vec<Iq> = iq
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let tone = (TAU * 470.0 * i as f64 / 48_000.0).cos() as f32;
+                // And something louder up at 9 to 15 kHz, out of the audio.
+                let above: f32 = (0..60)
+                    .map(|k| (TAU * (9000.0 + 100.0 * k as f64) * i as f64 / 48_000.0).cos() as f32)
+                    .sum();
+                Iq::new(x.re + 0.1 * tone + 0.2 * above, 0.0)
+            })
+            .collect();
+        let (frames, view) = receive_audio(48_000.0, &audio);
+        assert_eq!(frames.len(), 6, "{view:?}");
+        for (f, p) in frames.iter().zip(&payloads) {
+            assert_eq!(&f.payload, p);
+        }
+    }
+
+    #[test]
+    fn a_strong_carrier_beside_it_does_not_mislead() {
+        // A carrier at the signal's lower edge, a third of its power in
+        // one line: the receiver still ends on the right centre.
+        let (iq, payloads) = signal(6, 8000.0, 1900.0, 20.0);
+        let audio: Vec<Iq> = iq
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let tone = (TAU * 500.0 * i as f64 / 8000.0).cos() as f32;
+                Iq::new(x.re + 0.3 * tone, 0.0)
+            })
+            .collect();
+        let (frames, view) = receive_audio(8000.0, &audio);
         assert_eq!(frames.len(), 6, "{view:?}");
         for (f, p) in frames.iter().zip(&payloads) {
             assert_eq!(&f.payload, p);
