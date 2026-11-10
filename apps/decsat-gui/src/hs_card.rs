@@ -25,9 +25,23 @@ pub fn show(ui: &mut Ui, v: &HsView, id: VfoId) {
             None => ui.colored_label(WAIT, "not seen"),
         };
         ui.end_row();
-        ui.label("Signal");
-        ui.label(format!("{:.1} dB over noise", v.snr_db))
-            .on_hover_text("Measured at the decided points.");
+        ui.label("Es/N0");
+        ui.label(format!(
+            "{:.1} dB · Eb/N0 {:.1} dB",
+            v.snr_db,
+            v.snr_db - 10.0 * 3f32.log10()
+        ))
+        .on_hover_text("Measured at the decided points; three bits a symbol.");
+        ui.end_row();
+        ui.label("BER");
+        match v.ber {
+            Some(b) => ui.label(format!("{b:.1e} before FEC")),
+            None => ui.weak("—"),
+        }
+        .on_hover_text(
+            "The channel's bit errors over the latest frames, counted from what the \
+             Reed–Solomon code corrected.",
+        );
         ui.end_row();
         ui.label("Frames");
         ui.horizontal(|ui| {

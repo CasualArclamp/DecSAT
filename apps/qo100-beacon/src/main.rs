@@ -73,6 +73,20 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
     Ok(o)
 }
 
+/// The window's icon: the multimedia beacon's constellation, one point at
+/// the centre and seven on a ring.
+fn icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("the icon is a PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn main() -> eframe::Result {
     let opts = match parse(std::env::args().skip(1)) {
         Ok(o) => o,
@@ -85,7 +99,8 @@ fn main() -> eframe::Result {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([w as f32, h as f32])
         .with_min_inner_size([1000.0, 780.0])
-        .with_title("QO-100 Beacon");
+        .with_title("QO-100 Beacon")
+        .with_icon(icon());
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()

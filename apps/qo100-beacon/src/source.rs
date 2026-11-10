@@ -262,7 +262,7 @@ fn decode(
     live: bool,
 ) {
     let mut p3 = P3Rx::new(rate);
-    let mut hs = HsRx::new(rate);
+    let mut hs = HsRx::audio(rate);
     let mut spectrum = Spectrum::new(rate);
     let mut levels = Levels::default();
     let mut power = 0.0f32;

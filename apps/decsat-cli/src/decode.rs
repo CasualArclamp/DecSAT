@@ -1957,10 +1957,11 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
 /// AMSAT's PSK beacon: the frames as text, and any housekeeping values.
 fn print_hs(v: &decsat_engine::beacon::hs::HsView) {
     println!(
-        "multimedia beacon: carrier {}, {:.1} dB, {} frames good, {} missed, {} NB and {} WB waterfall lines{}",
+        "multimedia beacon: carrier {}, Es/N0 {:.1} dB, BER {} before FEC, {} frames good, {} missed, {} NB and {} WB waterfall lines{}",
         v.carrier_hz
             .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
         v.snr_db,
+        v.ber.map_or("n/a".to_string(), |b| format!("{b:.1e}")),
         v.good,
         v.missed,
         v.nb_lines,
