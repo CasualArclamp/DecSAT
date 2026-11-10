@@ -124,6 +124,16 @@ impl P3Frame {
             .collect()
     }
 
+    /// The housekeeping values in the block's text, if it has any. Read
+    /// line by line: a line may fill all 64 characters, and must not run
+    /// into the next.
+    pub fn telemetry(&self) -> Option<Telemetry> {
+        if !self.is_text() {
+            return None;
+        }
+        parse_telemetry(&self.lines().join(" "))
+    }
+
     /// The block's text as one string (no line breaks).
     pub fn text(&self) -> String {
         let n = self.bytes.len().min(BLOCK_BYTES);
@@ -545,6 +555,32 @@ mod tests {
         assert_eq!(t.counters.len(), 6);
         assert_eq!(t.counters[0], ("TFL".to_string(), 0));
         assert_eq!(t.counters[5], ("HR".to_string(), 0));
+    }
+
+    #[test]
+    fn a_full_line_does_not_run_into_the_next() {
+        // As QO-100 sent it: the first values' line is 64 characters long.
+        let lines = [
+            "K HI de QO-100 (DL50AMSAT BOCHUM",
+            "UPT:    6d 12h 54m   CMD:   91   LEI_REQ:     0   LEI_ACT:     0",
+            "TEMP: 55 C VOLTAGES:  1.0 1.8 1.0 1.0 1.8 1.5 1.3 0.0 0.4 Volts",
+            "TFL:     0 TFE:     0 TFH:     0 HFF:     0 HTH:     0 HR:     0",
+        ];
+        assert_eq!(lines[1].len(), 64);
+        let f = P3Frame {
+            bytes: lines
+                .iter()
+                .flat_map(|l| format!("{l:<64}").into_bytes())
+                .collect(),
+            ..Default::default()
+        };
+        let t = f.telemetry().expect("telemetry");
+        assert_eq!(t.temperature_c, Some(55.0));
+        assert_eq!(t.leila_active, Some(0));
+        assert_eq!(t.uptime_s, Some(6 * 86_400 + 12 * 3600 + 54 * 60));
+        assert_eq!(t.voltages.len(), 9);
+        assert_eq!(t.counters.len(), 6);
+        assert_eq!(t.counters[0].0, "TFL");
     }
 
     #[test]

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
-use crate::p3beacon::{Deframer, parse_telemetry};
+use crate::p3beacon::Deframer;
 pub use crate::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use crate::p3fec::{FecBlock, FecFinder};
 use decsat_core::Iq;
@@ -753,9 +753,7 @@ impl P3Rx {
     /// unless what is held is better.
     fn keep(view: &mut P3View, f: P3Frame) {
         if let Some(b) = f.block() {
-            if f.is_text()
-                && let Some(t) = parse_telemetry(&f.text())
-            {
+            if let Some(t) = f.telemetry() {
                 view.telemetry = Some((b, t));
             }
             let better_held = view.blocks.get(&b).is_some_and(|old| {
