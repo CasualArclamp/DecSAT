@@ -20,6 +20,7 @@ pub mod plan_feed;
 pub mod programme;
 pub mod psk;
 pub mod radar;
+pub mod radio_mix;
 pub mod rf;
 pub mod spectrum;
 pub mod streams;

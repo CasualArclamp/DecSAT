@@ -2113,12 +2113,17 @@ impl IpStage {
             self.radio
                 .udp((info.src, sport), (info.dst, dport), payload, self.clock);
             // One stream heard at a time: the one talking keeps it until
-            // it has been quiet a moment.
+            // it has been quiet a moment. A muted radio is passed over (it
+            // gives the turn up within the hold if muted while talking);
+            // the others at their own volume (`crate::radio_mix`).
             for c in self.radio.take_voice() {
+                let Some(gain) = crate::radio_mix::gain(&c.stream) else {
+                    continue;
+                };
                 let free = self.clock > self.radio_talk_until;
                 if free || self.radio_heard.as_deref() == Some(c.stream.as_str()) {
                     self.radio_heard = Some(c.stream);
-                    self.radio_pcm.extend_from_slice(&c.pcm);
+                    self.radio_pcm.extend(c.pcm.iter().map(|s| s * gain));
                     self.radio_talk_until = self.clock + RADIO_TALK_HOLD;
                 }
             }
