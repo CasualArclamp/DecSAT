@@ -296,7 +296,7 @@ pub struct Page {
     picked: Option<u16>,
     /// The file on show, read into pieces: whose it is and how many of its
     /// frames were in.
-    read: Option<(u16, usize, bulletin::Bulletin)>,
+    read: Option<(u16, usize, bulletin::Bulletin, bulletin::Pictures)>,
 }
 
 /// The audio as the window already has it for the PSK page's waterfall:
@@ -777,6 +777,20 @@ impl Page {
                     self.picked = Some(f.id);
                 }
             }
+            // The file itself, as it was sent (unzipped), to keep.
+            if let Some(f) = shown.filter(|f| f.complete()) {
+                let (name, bytes) = match (&f.inside, &f.data) {
+                    (Some((name, bytes)), _) => (name.as_str(), Some(bytes)),
+                    (None, data) => (f.name.as_str(), data.as_ref()),
+                };
+                if let Some(bytes) = bytes
+                    && ui.small_button("Save…").clicked()
+                    && let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file()
+                    && let Err(e) = std::fs::write(&path, bytes)
+                {
+                    eprintln!("cannot save {}: {e}", path.display());
+                }
+            }
         });
         ui.add_space(4.0);
         let Some(f) = shown else { return };
@@ -785,18 +799,33 @@ impl Page {
         if self
             .read
             .as_ref()
-            .is_none_or(|(id, have, _)| (*id, *have) != (f.id, f.have))
+            .is_none_or(|(id, have, ..)| (*id, *have) != (f.id, f.have))
         {
-            self.read = Some((f.id, f.have, bulletin::parse(&file_text(f))));
+            self.read = Some((
+                f.id,
+                f.have,
+                bulletin::parse(&file_text(f)),
+                bulletin::Pictures::default(),
+            ));
         }
-        let Some((_, _, read)) = &self.read else {
+        let Some((_, _, read, pictures)) = &mut self.read else {
             return;
         };
         egui::ScrollArea::vertical()
             .id_salt(("hs-file", f.id))
             .auto_shrink(false)
             .show(ui, |ui| {
-                bulletin::show(ui, read);
+                if web_page(f) {
+                    ui.label(
+                        RichText::new(
+                            "A web page: its scripts and styles are left out here. Save… keeps all of it.",
+                        )
+                        .size(11.0)
+                        .color(MUTED),
+                    );
+                    ui.add_space(4.0);
+                }
+                bulletin::show(ui, read, pictures);
                 if !f.complete() {
                     ui.add_space(6.0);
                     ui.label(
@@ -823,6 +852,13 @@ fn spot_row(ui: &mut Ui, spot: &str) {
     cell(ui, station, TEXT);
     cell(ui, format!("de {spotter}"), MUTED);
     ui.add(egui::Label::new(RichText::new(plain(&comment)).size(12.0).color(MUTED)).truncate());
+}
+
+/// The file is a web page, by its name.
+fn web_page(f: &HsFile) -> bool {
+    let name = f.inside.as_ref().map_or(f.name.as_str(), |(name, _)| name);
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
 }
 
 /// A file's text when it is one, else a line saying what it is.
