@@ -41,10 +41,19 @@ const SPS: usize = 4;
 const SPAN: f64 = 8.0;
 /// Fractions of an input sample the filter is tabulated at.
 const PHASES: usize = 32;
-/// Samples (at 4 a symbol) per timing estimate: 256 symbols.
-const TIMING_HOP: usize = 1024;
-/// Estimates either side averaged with each one.
-const TIMING_SMOOTH: usize = 2;
+/// Samples (at 4 a symbol) the symbol-rate line is taken over at a time:
+/// 32 symbols, short enough that the line's phase hardly turns in one even
+/// with the clock 0.6 % out.
+const TIMING_SUB: usize = 128;
+/// Stretches in a window (1024 symbols), and stretches from one window to
+/// the next.
+const TIMING_WINDOW: usize = 32;
+const TIMING_STEP: usize = 16;
+/// The line's turn from one stretch to the next that is looked for, either
+/// way (radians): 1.3 is a clock 0.65 % out. And the step it is looked for
+/// in.
+const TIMING_TURN_MAX: f64 = 1.3;
+const TIMING_TURN_STEP: f64 = 0.02;
 /// Symbols per carrier-frequency estimate, and the FFT they are padded to
 /// (0.17 Hz of carrier a bin).
 const CHUNK: usize = 512;
@@ -96,6 +105,9 @@ pub struct HsView {
     pub carrier_hz: Option<f64>,
     /// The 7th power shows a carrier.
     pub locked: bool,
+    /// The symbol clock against 2400 baud, parts per million: a sound
+    /// card's or a WebSDR player's clock, not the satellite's.
+    pub clock_ppm: f32,
     /// Es/N0 (dB): the symbols' energy over the noise at the decided
     /// points. A little high below about 10 dB, where wrong decisions hide
     /// some of the noise.
@@ -247,21 +259,36 @@ impl Front {
     }
 }
 
-/// Symbol instants from the 2400 Hz line of the squared envelope.
+/// Symbol instants from the symbol-rate line of the squared envelope, with
+/// the symbol clock's own rate measured as well as its phase.
+///
+/// The rate has to be measured: a WebSDR's player in a browser changes its
+/// playback speed to manage its buffer. After a stutter the BATC WebSDR's
+/// audio ran 0.2 % fast for half a minute (2404.8 baud), then drifted back
+/// through 2400 to 2398.6. At 0.2 % the line's phase turns half a cycle
+/// every 250 symbols, which a phase-only estimate averages to nothing.
+///
+/// The line is taken over short stretches ([`TIMING_SUB`]); over a window
+/// of them ([`TIMING_WINDOW`]) the turn from one to the next that adds them
+/// up best is the rate, and the sum's angle the phase. Each window stands
+/// on its own: nothing is carried over that could be wrong after a gap.
 struct Timing {
     /// Samples at 4 a symbol and the absolute number of the first.
     buf: Vec<Iq>,
     first: i64,
-    /// The line's coefficient for each hop so far (hop 0 first; only the
-    /// last few are kept, `lines_first` the hop of the first held).
+    /// The line of each stretch so far (only the last few are kept,
+    /// `lines_first` the number of the first held).
     lines: Vec<Iq>,
     lines_first: usize,
-    /// Hops whose samples are all in.
-    hops: usize,
-    /// Hop centres up to this one have had their symbols taken.
+    /// Stretches whose samples are all in.
+    stretches: usize,
+    /// Windows whose symbols have been taken.
     done: usize,
     /// The last symbol instant.
     t: f64,
+    /// The symbol clock against the nominal one, parts per million, from
+    /// the last window.
+    rate_ppm: f32,
 }
 
 impl Timing {
@@ -271,32 +298,68 @@ impl Timing {
             first: 0,
             lines: Vec::new(),
             lines_first: 0,
-            hops: 0,
+            stretches: 0,
             done: 0,
             t: 0.0,
+            rate_ppm: 0.0,
         }
     }
 
-    /// The smoothed line of hop `b`.
-    fn smoothed(&self, b: usize) -> Iq {
-        let lo = b.saturating_sub(TIMING_SMOOTH).max(self.lines_first);
-        let hi = (b + TIMING_SMOOTH).min(self.hops - 1);
-        (lo..=hi).map(|i| self.lines[i - self.lines_first]).sum()
+    /// The line over window `w`: the turn from one stretch to the next
+    /// (radians) that adds the stretches up best, and the sum's angle,
+    /// which is the line's phase at the window's middle.
+    fn fit(&self, w: usize) -> (f64, f64) {
+        let at = w * TIMING_STEP - self.lines_first;
+        let lines = &self.lines[at..at + TIMING_WINDOW];
+        let mid = (TIMING_WINDOW as f64 - 1.0) / 2.0;
+        let sum = |turn: f64| -> (f64, f64) {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (k, l) in lines.iter().enumerate() {
+                let (sin, cos) = (-turn * (k as f64 - mid)).sin_cos();
+                re += l.re as f64 * cos - l.im as f64 * sin;
+                im += l.re as f64 * sin + l.im as f64 * cos;
+            }
+            (re, im)
+        };
+        let size = |turn: f64| {
+            let (re, im) = sum(turn);
+            re.hypot(im)
+        };
+        let steps = (2.0 * TIMING_TURN_MAX / TIMING_TURN_STEP).round() as usize;
+        let mut best = (f64::MIN, 0.0);
+        for n in 0..=steps {
+            let turn = -TIMING_TURN_MAX + n as f64 * TIMING_TURN_STEP;
+            let v = size(turn);
+            if v > best.0 {
+                best = (v, turn);
+            }
+        }
+        // A parabola through the best and its neighbours.
+        let (a, b, c) = (
+            size(best.1 - TIMING_TURN_STEP),
+            best.0,
+            size(best.1 + TIMING_TURN_STEP),
+        );
+        let bend = a - 2.0 * b + c;
+        let turn = if bend < 0.0 {
+            best.1 + 0.5 * (a - c) / bend * TIMING_TURN_STEP
+        } else {
+            best.1
+        };
+        let (re, im) = sum(turn);
+        (turn, im.atan2(re))
     }
 
     fn push(&mut self, input: &[Iq], symbols: &mut Vec<Iq>) {
         self.buf.extend_from_slice(input);
-        // The line of each hop that is now whole. e^(−jπn/2) is 1, −j, −1,
-        // j: no multiplies.
-        while self.first + self.buf.len() as i64 >= ((self.hops + 1) * TIMING_HOP) as i64 {
-            let start = (self.hops * TIMING_HOP) as i64 - self.first;
+        // The line of each stretch that is now whole. e^(−jπn/2) is 1, −j,
+        // −1, j: no multiplies.
+        while self.first + self.buf.len() as i64 >= ((self.stretches + 1) * TIMING_SUB) as i64 {
+            let start = ((self.stretches * TIMING_SUB) as i64 - self.first) as usize;
             let mut c = Iq::new(0.0, 0.0);
-            for (i, y) in self.buf[start as usize..start as usize + TIMING_HOP]
-                .iter()
-                .enumerate()
-            {
+            for (i, y) in self.buf[start..start + TIMING_SUB].iter().enumerate() {
                 let p = y.norm_sqr();
-                // TIMING_HOP is a multiple of 4, so `i` has the phase of
+                // TIMING_SUB is a multiple of 4, so `i` has the phase of
                 // the absolute sample number.
                 c += match i & 3 {
                     0 => Iq::new(p, 0.0),
@@ -306,31 +369,26 @@ impl Timing {
                 };
             }
             self.lines.push(c);
-            self.hops += 1;
+            self.stretches += 1;
         }
-        // Symbols between the centres of hops b − 1 and b, once hop b's
-        // smoothed line is final (TIMING_SMOOTH more hops are in).
-        while self.done + TIMING_SMOOTH < self.hops {
-            let b = self.done;
-            let centre = (b * TIMING_HOP + TIMING_HOP / 2) as f64;
-            let line_b = self.smoothed(b);
-            let (from, line_a) = if b == 0 {
-                (0.0, line_b)
-            } else {
-                (centre - TIMING_HOP as f64, self.smoothed(b - 1))
-            };
+        // Each window, once whole, gives the symbols of its middle part:
+        // from half a step before its centre to half a step after (the
+        // first window from the start).
+        while self.done * TIMING_STEP + TIMING_WINDOW <= self.stretches {
+            let w = self.done;
+            let (turn, phase) = self.fit(w);
+            self.rate_ppm = (turn / (TAU * TIMING_SUB as f64) * SPS as f64 * 1e6) as f32;
+            let centre = ((w * TIMING_STEP + TIMING_WINDOW / 2) * TIMING_SUB) as f64 - 0.5;
+            let until = centre + 0.5 + (TIMING_STEP * TIMING_SUB / 2) as f64;
             loop {
                 let mut t = self.t + SPS as f64;
-                if t >= centre {
+                if t >= until {
                     break;
                 }
-                // The line's phase at `t`, between the two hops' own. The
-                // complex values are interpolated, not their angles: no
-                // unwrapping, and a weak hop counts for less.
-                let w = ((t - from) / (centre - from)).clamp(0.0, 1.0) as f32;
-                let line = line_a * (1.0 - w) + line_b * w;
-                let tau = -(line.im as f64).atan2(line.re as f64) * SPS as f64 / TAU;
-                // Symbols sit where t − tau is a multiple of 4.
+                // The line's phase at `t`, and from it where the symbols
+                // sit: where t − tau is a multiple of 4.
+                let line = phase + turn * (t - centre) / TIMING_SUB as f64;
+                let tau = -line * SPS as f64 / TAU;
                 let off = (t - tau + SPS as f64 / 2.0).rem_euclid(SPS as f64) - SPS as f64 / 2.0;
                 t -= off;
                 if t <= self.t + 1.0 {
@@ -352,13 +410,13 @@ impl Timing {
                 symbols.push(s);
             }
             self.done += 1;
-            // Forget lines and samples no later symbol needs.
-            let oldest = self.done.saturating_sub(TIMING_SMOOTH + 1);
+            // Forget lines and samples no later window or symbol needs.
+            let oldest = self.done * TIMING_STEP;
             if oldest > self.lines_first {
                 self.lines.drain(..oldest - self.lines_first);
                 self.lines_first = oldest;
             }
-            let keep_from = (self.t.floor() as i64 - 2).min((self.hops * TIMING_HOP) as i64);
+            let keep_from = (self.t.floor() as i64 - 2).min((self.stretches * TIMING_SUB) as i64);
             if keep_from > self.first {
                 self.buf.drain(..(keep_from - self.first) as usize);
                 self.first = keep_from;
@@ -596,14 +654,15 @@ impl HsRx {
             self.run(&held);
         }
         // Zeros to push the last symbols through the timing's look-ahead.
-        let pad = (((TIMING_SMOOTH + 2) * TIMING_HOP / SPS + CHUNK + PHASE_WINDOW) as f64
-            * self.rate
+        let pad = ((2 * TIMING_WINDOW * TIMING_SUB / SPS + CHUNK + PHASE_WINDOW) as f64 * self.rate
             / BAUD) as usize;
         // The padding's own "symbols" are not the signal's: keep the
         // quality figure, the lock and the picture from before them.
         let (err, locked, scatter) = (self.err, self.locked, self.scatter.clone());
+        let clock = self.timing.rate_ppm;
         self.run(&vec![Iq::new(0.0, 0.0); pad]);
         (self.err, self.locked, self.scatter) = (err, locked, scatter);
+        self.timing.rate_ppm = clock;
         self.update_view();
     }
 
@@ -956,6 +1015,7 @@ impl HsRx {
     fn update_view(&mut self) {
         let v = &mut self.view;
         v.locked = self.locked;
+        v.clock_ppm = self.timing.rate_ppm;
         v.carrier_hz = match (self.centre_hz, self.offset_hz) {
             (Some(c), Some(o)) if self.locked => Some(c + o),
             _ => None,
@@ -1167,6 +1227,54 @@ mod tests {
         assert_eq!(&last.payload, payloads.last().unwrap());
         let carrier = view.carrier_hz.unwrap();
         assert!((carrier - 1850.0).abs() < 5.0, "{carrier}");
+    }
+
+    /// The signal played at `speed` times its rate (linear interpolation:
+    /// fine at 20 samples a symbol).
+    fn played_at(iq: &[Iq], speed: impl Fn(usize) -> f64) -> Vec<Iq> {
+        let mut out = Vec::new();
+        let mut at = 0.0f64;
+        while (at as usize) + 1 < iq.len() {
+            let i = at as usize;
+            let f = (at - i as f64) as f32;
+            out.push(iq[i] * (1.0 - f) + iq[i + 1] * f);
+            at += speed(out.len());
+        }
+        out
+    }
+
+    #[test]
+    fn a_player_running_fast_is_followed() {
+        // 0.2 % fast, as the WebSDR's player ran for half a minute.
+        let (iq, payloads) = signal(12, 48_000.0, 1900.0, 20.0);
+        let audio: Vec<Iq> = played_at(&iq, |_| 1.002)
+            .iter()
+            .map(|x| Iq::new(x.re, 0.0))
+            .collect();
+        let (frames, view) = receive_audio(48_000.0, &audio);
+        assert_eq!(frames.len(), 12, "{view:?}");
+        for (f, p) in frames.iter().zip(&payloads) {
+            assert_eq!(&f.payload, p);
+        }
+        assert!(
+            (view.clock_ppm - 2000.0).abs() < 150.0,
+            "{}",
+            view.clock_ppm
+        );
+    }
+
+    #[test]
+    fn a_player_changing_speed_is_followed() {
+        // From 0.25 % fast to 0.1 % slow over the recording.
+        let (iq, payloads) = signal(20, 48_000.0, 1900.0, 20.0);
+        let n = iq.len() as f64;
+        let audio: Vec<Iq> = played_at(&iq, |i| 1.0025 - 0.0035 * i as f64 / n)
+            .iter()
+            .map(|x| Iq::new(x.re, 0.0))
+            .collect();
+        let (frames, view) = receive_audio(48_000.0, &audio);
+        assert_eq!(frames.len(), 20, "{view:?}");
+        assert_eq!(&frames[19].payload, &payloads[19]);
     }
 
     #[test]

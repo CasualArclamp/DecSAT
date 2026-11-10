@@ -6,6 +6,11 @@
 //! cargo run --release -p decsat-modem --example hsmodem_wav -- FILE.wav [OUT_DIR]
 //! ```
 //!
+//! For looking into a recording, in the environment: `HS_AUDIO=1` searches
+//! the audio band only, as the sound-card app does; `HS_CHUNK=480` feeds it
+//! in blocks of that many samples, as a sound card would; `HS_TRACE=1`
+//! prints each stretch of more than a frame with nothing read.
+//!
 //! Prints each frame; with OUT_DIR, writes the two waterfalls the beacon
 //! streams as `nb.pgm` and `wb.pgm` (grey, one received line a row).
 
@@ -91,7 +96,15 @@ fn main() -> ExitCode {
         }
     };
     println!("{:.1} s at {rate} S/s", iq.len() as f64 / rate);
-    let mut rx = HsRx::new(rate);
+    let mut rx = if env::var("HS_AUDIO").is_ok() {
+        HsRx::audio(rate)
+    } else {
+        HsRx::new(rate)
+    };
+    let chunk: usize = env::var("HS_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(rate as usize);
     let (mut nb, mut wb) = (Vec::new(), Vec::new());
     let mut total_corrected = 0;
     let mut take = |rx: &mut HsRx| {
@@ -104,8 +117,30 @@ fn main() -> ExitCode {
             }
         }
     };
-    for part in iq.chunks(rate as usize) {
+    let trace = env::var("HS_TRACE").is_ok();
+    let (mut fed, mut last_good, mut last_t) = (0usize, 0u64, 0.0f64);
+    for part in iq.chunks(chunk) {
         rx.push(part);
+        fed += part.len();
+        if trace {
+            let v = rx.view();
+            let t = fed as f64 / rate;
+            if v.good > last_good {
+                if t - last_t > 0.45 {
+                    eprintln!(
+                        "gap {:.2} .. {:.2} s ({:.2} s), carrier {:?} locked {} snr {:.1}",
+                        last_t,
+                        t,
+                        t - last_t,
+                        v.carrier_hz.map(|c| c.round()),
+                        v.locked,
+                        v.snr_db
+                    );
+                }
+                last_good = v.good;
+                last_t = t;
+            }
+        }
         take(&mut rx);
     }
     rx.finish();
