@@ -388,7 +388,13 @@ impl Page {
         self.stats(ui, v, ended);
         ui.add_space(10.0);
         let rest = ui.available_size();
-        let left_w = (rest.x * 0.52).clamp(420.0, 640.0);
+        // The waterfalls' column: about half of an ordinary window. In a
+        // large one the text column stops growing and the waterfalls take
+        // the rest.
+        const TEXT_COLUMN: f32 = 560.0;
+        let left_w = (rest.x * 0.52)
+            .clamp(420.0, 640.0)
+            .max(rest.x - 8.0 - TEXT_COLUMN);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let down = Layout::top_down(Align::Min);
@@ -468,7 +474,7 @@ impl Page {
         let inner = width - 22.0;
         let none = Vec::new();
         // What is left under the two waterfalls is the constellation's.
-        let fall_h = ((ui.available_height() - 330.0) / 2.0).clamp(70.0, 220.0);
+        let fall_h = ((ui.available_height() - 330.0) / 2.0).max(70.0);
         card().show(ui, |ui| {
             ui.set_width(inner);
             ui.horizontal(|ui| {
