@@ -1979,7 +1979,33 @@ fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
             f.block().unwrap_or('?'),
             f.sync_errors
         );
-        if f.is_text() {
+        if let Some(w) = decsat_modem::ao40::whole_orbit(&f.bytes) {
+            let (lo, hi) = w
+                .values
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+            println!(
+                "    whole-orbit data: #{:03X} {}, every {}/256 orbit, {} samples{}",
+                w.address,
+                w.name.unwrap_or("(raw)"),
+                w.interval_ma,
+                w.values.len(),
+                if w.complete { ", complete" } else { "" },
+            );
+            if let (Some(a), Some(b)) = (&w.start, &w.last) {
+                println!(
+                    "    from {} {} (orbit ..{:02X}, MA {}) to {} {} (orbit ..{:02X}, MA {})",
+                    a.date, a.time, a.orbit, a.ma, b.date, b.time, b.orbit, b.ma
+                );
+            }
+            if !w.values.is_empty() {
+                println!("    range {lo:.2} to {hi:.2} {}", w.unit);
+                for row in w.values.chunks(16) {
+                    let line: Vec<String> = row.iter().map(|v| format!("{v:.2}")).collect();
+                    println!("    {}", line.join(" "));
+                }
+            }
+        } else if f.is_text() {
             for line in f.lines() {
                 println!("    {line}");
             }

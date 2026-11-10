@@ -792,6 +792,13 @@ fn block_text(ui: &mut Ui, f: &P3Frame, live: bool) {
                             let colour = if c.dead { MUTED } else { TEXT };
                             ui.label(RichText::new(line).monospace().size(12.0).color(colour));
                         }
+                    } else if let Some(w) = ao40::whole_orbit(&f.bytes) {
+                        let lines = f.lines();
+                        text_line(ui, lines[0].clone());
+                        ui.add_space(6.0);
+                        orbit_plot(ui, &w);
+                        ui.add_space(6.0);
+                        text_line(ui, lines.last().cloned().unwrap_or_default());
                     } else if f.is_text() {
                         f.lines().into_iter().for_each(|l| text_line(ui, l));
                     } else {
@@ -804,18 +811,109 @@ fn block_text(ui: &mut Ui, f: &P3Frame, live: bool) {
         });
 }
 
+/// A whole-orbit capture: the channel's values against time, oldest left.
+fn orbit_plot(ui: &mut Ui, w: &ao40::WholeOrbit) {
+    let title = format!(
+        "#{:03X}  {}  ·  {} samples, one every {}/256 of an orbit",
+        w.address,
+        w.name.unwrap_or("raw values"),
+        w.values.len(),
+        w.interval_ma
+    );
+    ui.label(RichText::new(title).size(12.0).color(MUTED));
+    let width = ui.available_width().max(200.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 150.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::ZERO, PANEL);
+    if w.values.len() < 2 {
+        return;
+    }
+    let (lo, hi) = w
+        .values
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    // A little room above and below, and never a flat scale.
+    let pad = ((hi - lo) * 0.1).max(0.05);
+    let (lo, hi) = (lo - pad, hi + pad);
+    let plot = Rect::from_min_max(
+        pos2(rect.min.x + 52.0, rect.min.y + 8.0),
+        pos2(rect.max.x - 8.0, rect.max.y - 20.0),
+    );
+    for k in 0..=2 {
+        let f = k as f32 / 2.0;
+        let y = plot.max.y - f * plot.height();
+        p.hline(plot.x_range(), y, Stroke::new(1.0, EDGE));
+        p.text(
+            pos2(plot.min.x - 6.0, y),
+            Align2::RIGHT_CENTER,
+            format!("{:.2}", lo + f * (hi - lo)),
+            FontId::monospace(10.5),
+            MUTED,
+        );
+    }
+    let last = (w.values.len() - 1) as f32;
+    let points: Vec<Pos2> = w
+        .values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| {
+            pos2(
+                plot.min.x + i as f32 / last * plot.width(),
+                plot.max.y - (v - lo) / (hi - lo) * plot.height(),
+            )
+        })
+        .collect();
+    p.add(egui::Shape::line(points, Stroke::new(1.5, ACCENT)));
+    let label = |at: Pos2, align: Align2, point: &Option<ao40::OrbitPoint>| {
+        if let Some(o) = point {
+            let text = format!("{} {}", o.date, o.time);
+            p.text(at, align, text, FontId::monospace(10.5), MUTED);
+        }
+    };
+    label(
+        pos2(plot.min.x, rect.max.y - 9.0),
+        Align2::LEFT_CENTER,
+        &w.start,
+    );
+    label(
+        pos2(plot.max.x, rect.max.y - 9.0),
+        Align2::RIGHT_CENTER,
+        &w.last,
+    );
+    if !w.unit.is_empty() {
+        p.text(
+            pos2(rect.min.x + 4.0, rect.min.y + 8.0),
+            Align2::LEFT_CENTER,
+            w.unit,
+            FontId::monospace(10.5),
+            MUTED,
+        );
+    }
+}
+
 fn log_row(ui: &mut Ui, l: &LogLine) {
     let (state, colour) = frame_state(&l.frame);
     let name = l.frame.block().unwrap_or('?');
     let lines = l.frame.lines();
-    // The second line says what the block is about: the first is the callsign.
-    let first = lines
-        .iter()
-        .skip(1)
-        .find(|s| !s.is_empty())
-        .or(lines.first())
-        .cloned()
-        .unwrap_or_default();
+    // AO-40's binary blocks say what they are; in a text block the second
+    // line says what it is about (the first is the callsign).
+    let first = if let Some(h) = ao40::housekeeping(&l.frame.bytes) {
+        format!("AO-40 housekeeping, {} {} UTC", h.date, h.time)
+    } else if let Some(w) = ao40::whole_orbit(&l.frame.bytes) {
+        format!(
+            "Whole-orbit data: {}, {} samples",
+            w.name.unwrap_or("raw values"),
+            w.values.len()
+        )
+    } else {
+        lines
+            .iter()
+            .skip(1)
+            .find(|s| !s.is_empty())
+            .or(lines.first())
+            .cloned()
+            .unwrap_or_default()
+    };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(&l.when).monospace().size(11.5).color(MUTED));

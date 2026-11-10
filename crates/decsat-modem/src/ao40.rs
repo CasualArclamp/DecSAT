@@ -9,6 +9,9 @@
 //! (tlmspec.txt), §8 (block formats) and §9 (analogue list). Checked on A
 //! blocks recorded by Pieter Ibelings N4IP on 2003-03-14. The digital half
 //! (§10) is not decoded.
+//!
+//! Also the whole-orbit data block (§8, "Whole Orbit Dump Format"): one
+//! channel sampled round the orbit, 384 bytes between two lines of text.
 
 /// Where the analogue bytes start in a block, and how many there are.
 const ANALOGUE_AT: usize = 256;
@@ -246,6 +249,120 @@ pub fn housekeeping(block: &[u8]) -> Option<Housekeeping> {
     })
 }
 
+/// When and where in the orbit a whole-orbit capture's sample was taken.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrbitPoint {
+    /// UTC, `hh:mm:ss`.
+    pub time: String,
+    /// The AMSAT day number (0 is 1978-01-01) and its date.
+    pub day: u32,
+    pub date: String,
+    /// The orbit number's low byte, and the mean anomaly in 256ths.
+    pub orbit: u8,
+    pub ma: u8,
+}
+
+/// One channel sampled round the orbit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WholeOrbit {
+    /// The channel's telemetry address, and its name when it is an
+    /// analogue one this module knows.
+    pub address: u16,
+    pub name: Option<&'static str>,
+    /// The unit; empty when the values are the raw bytes.
+    pub unit: &'static str,
+    /// Mean anomaly between samples, in 256ths of an orbit.
+    pub interval_ma: u32,
+    /// The samples taken so far, oldest first.
+    pub values: Vec<f32>,
+    pub start: Option<OrbitPoint>,
+    pub last: Option<OrbitPoint>,
+    /// The capture has finished ("End =" in place of "Last=").
+    pub complete: bool,
+}
+
+/// The date of an AMSAT day number (days from 1978-01-01), `yyyy-mm-dd`.
+fn amsat_date(day: u32) -> String {
+    // Days from 1970-01-01, then the civil-from-days algorithm (Howard
+    // Hinnant's), in eras of 400 years.
+    let z = i64::from(day) + 2922 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// "23:13:55 9202  #3F70": time, day, orbit and MA.
+fn orbit_point(text: &str) -> Option<OrbitPoint> {
+    let mut words = text.split_whitespace();
+    let time = words.next()?.to_string();
+    let day: u32 = words.next()?.parse().ok()?;
+    let place = u16::from_str_radix(words.next()?.strip_prefix('#')?, 16).ok()?;
+    Some(OrbitPoint {
+        time,
+        day,
+        date: amsat_date(day),
+        orbit: (place >> 8) as u8,
+        ma: place as u8,
+    })
+}
+
+/// Read a whole-orbit data block's 512 bytes; `None` for any other block.
+pub fn whole_orbit(block: &[u8]) -> Option<WholeOrbit> {
+    if block.len() < 512 {
+        return None;
+    }
+    let head = std::str::from_utf8(&block[..64]).ok()?;
+    if !head.contains("Whole Orbit Data") {
+        return None;
+    }
+    // "L  Whole Orbit Data V2.0   Samples: 2    Captured Channel: #0109"
+    let after = |key: &str| head.split(key).nth(1)?.split_whitespace().next();
+    let interval_ma: u32 = after("Samples:")?.parse().ok()?;
+    let address = u16::from_str_radix(after("Channel:")?.strip_prefix('#')?, 16).ok()?;
+    let entry = address
+        .checked_sub(0x100)
+        .and_then(|offset| CHANNELS.iter().find(|e| u16::from(e.0) == offset));
+    // "Start= 23:13:55 9202  #3F70     Last= 23:33:58 9203  #40B6"
+    let tail = String::from_utf8_lossy(&block[448..512]).into_owned();
+    let complete = tail.contains("End");
+    let start = tail.split("Start=").nth(1).and_then(orbit_point);
+    let last = tail
+        .split("Last=")
+        .nth(1)
+        .or_else(|| tail.split("End =").nth(1))
+        .or_else(|| tail.split("End=").nth(1))
+        .and_then(orbit_point);
+    let samples = &block[64..448];
+    // How many have been taken: from the two points when both are there,
+    // else all but the trailing fill (32, which a real sample may also be).
+    let taken = match (&start, &last, interval_ma) {
+        (Some(a), Some(b), 1..) => {
+            let orbits = u32::from(b.orbit.wrapping_sub(a.orbit));
+            let ma = (orbits * 256 + u32::from(b.ma)).saturating_sub(u32::from(a.ma));
+            (ma / interval_ma + 1) as usize
+        }
+        _ => samples.iter().rposition(|&b| b != 32).map_or(0, |i| i + 1),
+    }
+    .min(samples.len());
+    let cal = entry.map_or(Cal::Raw, |e| e.3);
+    Some(WholeOrbit {
+        address,
+        name: entry.map(|e| e.1),
+        unit: entry.map_or("", |e| e.2),
+        interval_ma,
+        values: samples[..taken].iter().map(|&b| cal.value(b)).collect(),
+        start,
+        last,
+        complete,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,8 +419,65 @@ mod tests {
         assert_eq!(h.channels.len(), 113);
     }
 
+    /// The L block AO-40 sent just before that A block: its samples.
+    const ORBIT_SAMPLES: &str = "1f1f1f1f1f1e1e1e1e1f1e1e1e1f1e1e1e1e201f1f1f1f1f1f1e1e1e1f1e1e1e\
+                                 1f1f1e303131311f1f1f201f1f1f1f1f1e1e1e1f1f1e1e1f1f1f1f1e1e1e1e1e\
+                                 1e242525252526262624262526232625251e1f1e1f1e1e1f1e1e1f1f1f1f1f1f\
+                                 1f1f1e1e1e1e1f1e1e1e1e1e1f1f1f1f1f1e1e1e1e1f1e1e1f1e1f1e1f1f1f1f\
+                                 1f1f1f1e1f1e1e1f1e1f1e1f1e1f1f1f1e1f1e1f1e1e1e1e1f1e1e1e1e1f1f1f\
+                                 1f1f1f31";
+
+    fn orbit_block() -> Vec<u8> {
+        let mut block =
+            b"L  Whole Orbit Data V2.0   Samples: 2    Captured Channel: #0109".to_vec();
+        let n = ORBIT_SAMPLES.len() / 2;
+        block.extend(
+            (0..n).map(|i| u8::from_str_radix(&ORBIT_SAMPLES[2 * i..2 * i + 2], 16).unwrap()),
+        );
+        block.resize(448, 32);
+        block.extend(
+            format!(
+                "{:<64}",
+                "Start= 23:13:55 9202  #3F70     Last= 23:33:58 9203  #40B6"
+            )
+            .into_bytes(),
+        );
+        block
+    }
+
+    #[test]
+    fn whole_orbit_data_reads_as_received() {
+        let w = whole_orbit(&orbit_block()).expect("whole-orbit data");
+        assert_eq!((w.address, w.interval_ma), (0x109, 2));
+        assert_eq!(w.name, Some("28V-S current (28V-U3)"));
+        assert_eq!(w.unit, "A");
+        // From MA 70h of orbit 3Fh to B6h of 40h, every 2: 164 samples,
+        // and that is where the fill starts in what was received.
+        assert_eq!(w.values.len(), 164);
+        assert_eq!(ORBIT_SAMPLES.len() / 2, 164);
+        assert!((w.values[0] - 0.517).abs() < 0.01, "{}", w.values[0]);
+        assert!((w.values[163] - 1.259).abs() < 0.01);
+        let (start, last) = (w.start.unwrap(), w.last.unwrap());
+        assert_eq!(
+            (start.date.as_str(), start.time.as_str()),
+            ("2003-03-13", "23:13:55")
+        );
+        assert_eq!(
+            (last.date.as_str(), last.orbit, last.ma),
+            ("2003-03-14", 0x40, 0xB6)
+        );
+        assert!(!w.complete);
+    }
+
+    #[test]
+    fn amsat_days_are_dates() {
+        assert_eq!(amsat_date(0), "1978-01-01");
+        assert_eq!(amsat_date(9203), "2003-03-14");
+    }
+
     #[test]
     fn other_blocks_are_not_housekeeping() {
+        assert_eq!(whole_orbit(&received_block()), None);
         let mut block = received_block();
         block[0] = b'L';
         assert_eq!(housekeeping(&block), None);
