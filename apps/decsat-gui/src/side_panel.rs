@@ -1174,6 +1174,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         crate::p3_card::show(ui, p, v.id);
     }
 
+    if v.settings.decoder == DecoderKind::BarkerTdm
+        && let Some(b) = &st.barker
+    {
+        crate::barker_card::show(ui, b, v.id);
+    }
+
     if v.settings.decoder == DecoderKind::HsBeacon
         && let Some(h) = &st.hs
     {

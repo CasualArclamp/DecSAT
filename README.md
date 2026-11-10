@@ -884,6 +884,23 @@ BPSK bi-phase chips, and Identify says so rather than calling them a code.
 decsat decode beacon_533333Sps.cf32 --decoder beacon   # carrier, telemetry, frames, the last few in hex
 ```
 
+### A Barker-11 spread carrier (C band, 4004 MHz)
+
+Decoder **Barker-11 spread BPSK** (`barker` on the command line): a VFO
+250 kHz or wider on a carrier whose BPSK symbols are each one period of the
+11-chip Barker code (166.667 kchip/s, 15 151.5 symbols/s). Two such carriers
+sit 250 kHz apart near 4004 MHz, each beside a comb of eight pilot tones. It
+despreads, follows the code and the carrier, cuts frames at the 255-symbol
+preamble, finds the 64-bit unique words and shows the data blocks in hex;
+the card draws the frames as a bitmap, a row a frame and a column a symbol
+(blue the preamble and unique words, grey the data that never changes).
+The format was measured from a recording — no specification is known, and
+neither is what the blocks carry (no text in them, in any reading tried).
+
+```bash
+decsat decode capture_8000000Sps.cs8 --decoder barker --offset -813000 --bandwidth 300000 --fast
+```
+
 ### QO-100's PSK beacon
 
 Decoder **AMSAT PSK beacon** (`p3` on the command line): a VFO a few kHz wide

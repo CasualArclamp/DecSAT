@@ -9,6 +9,7 @@ mod adsb_names;
 mod auto_pick;
 mod automation;
 mod band_view;
+mod barker_card;
 mod beacon_card;
 mod beacon_list;
 mod bgan_card;
