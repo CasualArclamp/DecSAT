@@ -6272,3 +6272,15 @@ Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
 - Not yet seen correcting real errors: the weak recording has no stretch of
   audio long enough to hold a block. Corrections tested on synthesised
   blocks only.
+
+## AO-40's housekeeping from an A block (2026-11-10)
+
+- `decsat-modem::ao40`: the 113 wired analogue channels (#100 to #17F) by
+  AMSAT-DL's tlmspec §9. N4IP's 2003-03-14 recording (Estévez's
+  satellite-recordings sample): 3 frames, 3 CRCs good; main battery 25.6 V,
+  28 V bus 25.5 V, spin 2.5 rpm, and the channels the spec lists as dead
+  read off the scale.
+- Not done: the 128 digital status bytes (§10), E blocks untested (none in
+  the sample), whole-orbit data in L blocks.
+- A values line of exactly 64 characters ran into the next (QO-100's K
+  block in 2019 form): telemetry is now read line by line.

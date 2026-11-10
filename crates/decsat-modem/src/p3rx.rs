@@ -114,6 +114,9 @@ pub struct P3View {
     pub blocks: BTreeMap<char, P3Frame>,
     /// The latest housekeeping values, with the block they came from.
     pub telemetry: Option<(char, Telemetry)>,
+    /// AO-40's housekeeping, from the latest A or E block whose CRC checks
+    /// (an old recording: the satellite fell silent in 2004).
+    pub ao40: Option<crate::ao40::Housekeeping>,
     pub message: String,
 }
 
@@ -753,6 +756,11 @@ impl P3Rx {
     /// unless what is held is better.
     fn keep(view: &mut P3View, f: P3Frame) {
         if let Some(b) = f.block() {
+            if f.crc_ok
+                && let Some(h) = crate::ao40::housekeeping(&f.bytes)
+            {
+                view.ao40 = Some(h);
+            }
             if let Some(t) = f.telemetry() {
                 view.telemetry = Some((b, t));
             }

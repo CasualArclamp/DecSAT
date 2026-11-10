@@ -2014,6 +2014,24 @@ fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
         for (name, n) in &t.counters {
             println!("    {name:<11} {n}");
         }
+    } else if let Some(h) = &v.ao40 {
+        println!(
+            "  AO-40 housekeeping ({} block, {} {} UTC, command {}):",
+            h.block, h.date, h.time, h.command
+        );
+        for c in &h.channels {
+            let value = if c.unit.is_empty() {
+                format!("{} (raw)", c.raw)
+            } else {
+                format!("{:.2} {}", c.value, c.unit)
+            };
+            let dead = if c.dead {
+                "  [sensor dead since 2000]"
+            } else {
+                ""
+            };
+            println!("    #{:03X} {:<28} {value}{dead}", c.address, c.name);
+        }
     } else if !v.blocks.is_empty() {
         println!("  no housekeeping values in the blocks received");
     }
