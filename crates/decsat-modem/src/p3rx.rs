@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
 use crate::p3beacon::{Deframer, parse_telemetry};
-pub use crate::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
+pub use crate::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_core::Iq;
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 
@@ -95,6 +95,11 @@ pub struct P3View {
     pub in_frame: bool,
     /// Bytes of the frame being received, out of [`crate::p3beacon::FRAME_BYTES`].
     pub frame_bytes: usize,
+    /// That frame's bytes so far: its text can be read as it arrives.
+    pub arriving: Vec<u8>,
+    /// Bits of the FEC block gone by since the last whole frame, out of
+    /// [`crate::p3beacon::FEC_BLOCK_BITS`] (it is not decoded).
+    pub fec_bits: Option<u64>,
     /// Complete frames, and those whose CRC checks.
     pub frames: u64,
     pub good: u64,
@@ -340,6 +345,8 @@ impl P3Rx {
         self.view.carrier_hz = None;
         self.view.in_frame = false;
         self.view.frame_bytes = 0;
+        self.view.arriving.clear();
+        self.view.fec_bits = None;
     }
 
     /// How strong the square's line is, looking `span` Hz either side of
@@ -512,6 +519,11 @@ impl P3Rx {
 
         self.view.in_frame = self.deframer.in_frame();
         self.view.frame_bytes = self.deframer.frame_bytes();
+        self.view.arriving.clear();
+        self.view
+            .arriving
+            .extend_from_slice(self.deframer.partial());
+        self.view.fec_bits = self.deframer.bits_after_frame();
         self.view.quality_db = if self.dev > 0.0 {
             20.0 * (self.mean / self.dev).max(1e-3).log10()
         } else {

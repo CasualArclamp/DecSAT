@@ -24,6 +24,10 @@ pub const FRAME_BYTES: usize = 514;
 pub const BLOCK_BYTES: usize = 512;
 /// A block's text lines.
 pub const LINE_CHARS: usize = 64;
+/// Bits QO-100 sends between one uncoded frame and the next sync word (as
+/// received in 2026): by its shape AO-40's FEC block with the same text.
+/// It is not decoded here.
+pub const FEC_BLOCK_BITS: u64 = 6016;
 
 /// Sync bits allowed wrong when hunting for a frame.
 const HUNT_ERRORS: u32 = 2;
@@ -138,6 +142,8 @@ pub struct Deframer {
     byte_bits: u8,
     /// Where the next sync word must end, after a whole frame.
     expect: Option<u64>,
+    /// The bit count when the last whole frame ended.
+    ended: Option<u64>,
 }
 
 impl Deframer {
@@ -153,6 +159,22 @@ impl Deframer {
     /// Bytes of the frame being gathered.
     pub fn frame_bytes(&self) -> usize {
         self.frame.as_ref().map_or(0, |f| f.bytes.len())
+    }
+
+    /// The bytes of the frame being gathered, so far.
+    pub fn partial(&self) -> &[u8] {
+        self.frame.as_ref().map_or(&[], |f| &f.bytes)
+    }
+
+    /// Bits since the last whole frame ended, while what follows it (the
+    /// FEC block) is going by; `None` in a frame, or once that is over.
+    pub fn bits_after_frame(&self) -> Option<u64> {
+        if self.frame.is_some() {
+            return None;
+        }
+        self.ended
+            .map(|e| self.bits - e)
+            .filter(|&n| n <= FEC_BLOCK_BITS)
     }
 
     /// Take one bit (0 or 1); any frame it ends goes on `out`.
@@ -195,6 +217,7 @@ impl Deframer {
         self.byte = 0;
         self.byte_bits = 0;
         self.expect = None;
+        self.ended = None;
     }
 
     fn start(&mut self, sync_errors: u32) {
@@ -230,6 +253,7 @@ impl Deframer {
             out.push(done);
             // The next sync word, if the frames follow without a gap.
             self.expect = Some(self.bits + 32);
+            self.ended = Some(self.bits);
         }
     }
 }
@@ -455,6 +479,25 @@ mod tests {
         let mut out = Vec::new();
         feed(&mut d, &only_bad, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn progress_is_reported_in_and_after_a_frame() {
+        let mut body = received_block();
+        body.extend_from_slice(&[0x5B, 0xB4]);
+        let mut d = Deframer::new();
+        let mut out = Vec::new();
+        feed(&mut d, &SYNC_WORD.to_be_bytes(), &mut out);
+        feed(&mut d, &body[..100], &mut out);
+        assert_eq!(d.partial(), &body[..100]);
+        assert_eq!(d.bits_after_frame(), None);
+        feed(&mut d, &body[100..], &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(d.partial().is_empty());
+        feed(&mut d, &[0x50; 10], &mut out);
+        assert_eq!(d.bits_after_frame(), Some(80));
+        feed(&mut d, &[0x50; 800], &mut out);
+        assert_eq!(d.bits_after_frame(), None);
     }
 
     #[test]

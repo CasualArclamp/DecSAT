@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
-use decsat_modem::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
+use decsat_modem::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_modem::p3rx::P3View;
 use eframe::egui::{
     self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Frame, Layout, Margin, Pos2,
@@ -56,7 +56,24 @@ pub struct App {
     /// Fraction of a point carried to the next frame.
     point_debt: f32,
     palette: Vec<Color32>,
-    rows_drawn: u64,
+    /// Bytes of the arriving frame, and bits of the FEC block, shown so
+    /// far: the decoder reports in half-second steps, these run on evenly.
+    shown_bytes: f32,
+    shown_fec: f32,
+    /// The waterfall's rows on show, newest first, and those waiting: rows
+    /// arrive in bursts and are let out at a steady pace.
+    rows: VecDeque<Vec<f32>>,
+    rows_waiting: VecDeque<Vec<f32>>,
+    row_debt: f32,
+    /// Rows have come out since the picture was made, and its size in
+    /// screen pixels.
+    rows_dirty: bool,
+    picture: [usize; 2],
+    levels: (f32, f32),
+    /// The decoder's last published state, and its version.
+    snap: Option<Snapshot>,
+    snap_version: u64,
+    stats: Stats,
     started: Instant,
     shot_sent: bool,
 }
@@ -85,7 +102,17 @@ impl App {
             points: VecDeque::new(),
             point_debt: 0.0,
             palette: palette(),
-            rows_drawn: 0,
+            shown_bytes: 0.0,
+            shown_fec: 0.0,
+            rows: VecDeque::new(),
+            rows_waiting: VecDeque::new(),
+            row_debt: 0.0,
+            rows_dirty: true,
+            picture: [0, 0],
+            levels: (-110.0, -40.0),
+            snap: None,
+            snap_version: 0,
+            stats: Stats::new(),
             started: Instant::now(),
             shot_sent: false,
             opts,
@@ -100,7 +127,9 @@ impl App {
 
     fn listen(&mut self) {
         self.running = None;
-        self.rows_drawn = 0;
+        self.rows.clear();
+        self.rows_waiting.clear();
+        self.snap = None;
         match source::from_device(self.device.as_deref()) {
             Ok(r) => {
                 self.running = Some(r);
@@ -120,7 +149,9 @@ impl App {
 
     fn open(&mut self, file: &std::path::Path) {
         self.running = None;
-        self.rows_drawn = 0;
+        self.rows.clear();
+        self.rows_waiting.clear();
+        self.snap = None;
         match source::from_file(file, self.opts.speed.unwrap_or(1.0)) {
             Ok(r) => {
                 self.running = Some(r);
@@ -178,41 +209,52 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        // Rust note: the lock is held just long enough to copy what is
-        // drawn, so the decoding thread never waits on the painting.
-        let snap = self.running.as_ref().map(|r| {
-            let s = r.shared.lock().unwrap();
-            Snapshot {
-                view: s.view.clone(),
-                level_db: s.level_db,
-                label: s.label.clone(),
-                ended: s.ended,
-                log: s.log.iter().take(200).cloned().collect(),
-                dropped: r.dropped.load(Ordering::Relaxed),
-                rate: s.rate,
-                rows_added: s.rows_added,
+        // Rust note: the lock is held just long enough to take what is new,
+        // so the decoding thread never waits on the painting. The view and
+        // the log are copied only when they have changed.
+        if let Some(r) = &self.running {
+            let mut s = r.shared.lock().unwrap();
+            self.rows_waiting.extend(s.new_rows.drain(..));
+            self.levels = s.levels;
+            if self.snap.is_none() || s.version != self.snap_version {
+                self.snap_version = s.version;
+                self.snap = Some(Snapshot {
+                    view: s.view.clone(),
+                    level_db: s.level_db,
+                    label: s.label.clone(),
+                    ended: s.ended,
+                    log: s.log.iter().take(200).cloned().collect(),
+                    dropped: 0,
+                    rate: s.rate,
+                });
             }
-        });
-        if let (Some(r), Some(sn)) = (&self.running, &snap)
-            && sn.rows_added != self.rows_drawn
-        {
-            self.rows_drawn = sn.rows_added;
-            let (rows, levels) = {
-                let s = r.shared.lock().unwrap();
-                (s.rows.clone(), s.levels)
-            };
-            let image = waterfall_image(&rows, levels, &self.palette);
-            match &mut self.waterfall {
-                Some(t) => t.set(image, TextureOptions::LINEAR),
-                None => {
-                    self.waterfall = Some(ui.ctx().load_texture(
-                        "waterfall",
-                        image,
-                        TextureOptions::LINEAR,
-                    ));
-                }
+            if let Some(sn) = &mut self.snap {
+                sn.dropped = r.dropped.load(Ordering::Relaxed);
             }
+        } else {
+            self.snap = None;
         }
+        // Rust note: `take` lifts the snapshot out of `self`, so `self`'s
+        // methods can be called while it is borrowed; it goes back below.
+        let snap = self.snap.take();
+
+        // Let rows out at their own rate, 60 a second, a little faster or
+        // slower to keep about six in hand: the scroll stays even whatever
+        // lumps they arrived in.
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        let waiting = self.rows_waiting.len() as f32;
+        let rate = (60.0 + (waiting - 6.0) * 6.0).clamp(20.0, 6000.0);
+        self.row_debt += rate * dt;
+        let n = (self.row_debt as usize).min(self.rows_waiting.len());
+        self.row_debt = (self.row_debt - n as f32).min(1.0);
+        for row in self.rows_waiting.drain(..n) {
+            self.rows.push_front(row);
+        }
+        self.rows.truncate(ROWS);
+        if self.stats.on {
+            self.stats.frame(n, self.rows_waiting.len());
+        }
+        self.rows_dirty |= n > 0;
 
         egui::Panel::top("header")
             .frame(
@@ -241,6 +283,49 @@ impl eframe::App for App {
                     });
                 });
             });
+        self.snap = snap;
+    }
+}
+
+/// `QO100_STATS=1`: the frame rate and how evenly the waterfall's rows
+/// came out, on stderr every two seconds.
+struct Stats {
+    on: bool,
+    since: Instant,
+    frames: u32,
+    rows: usize,
+    most_rows: usize,
+    most_waiting: usize,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Stats {
+            on: std::env::var_os("QO100_STATS").is_some(),
+            since: Instant::now(),
+            frames: 0,
+            rows: 0,
+            most_rows: 0,
+            most_waiting: 0,
+        }
+    }
+
+    fn frame(&mut self, rows: usize, waiting: usize) {
+        self.frames += 1;
+        self.rows += rows;
+        self.most_rows = self.most_rows.max(rows);
+        self.most_waiting = self.most_waiting.max(waiting);
+        let t = self.since.elapsed().as_secs_f32();
+        if t >= 2.0 {
+            eprintln!(
+                "{:.0} frames/s, {:.0} rows/s, at most {} rows in a frame, {} waiting",
+                self.frames as f32 / t,
+                self.rows as f32 / t,
+                self.most_rows,
+                self.most_waiting
+            );
+            *self = Stats::new();
+        }
     }
 }
 
@@ -253,7 +338,6 @@ struct Snapshot {
     log: Vec<LogLine>,
     dropped: u64,
     rate: f64,
-    rows_added: u64,
 }
 
 fn card() -> Frame {
@@ -413,8 +497,33 @@ impl App {
         let height = (ui.available_height() - 474.0).clamp(80.0, 320.0);
         let (rect, _) = ui.allocate_exact_size(vec2(width, height + 18.0), Sense::hover());
         let painter = ui.painter_at(rect);
-        let area = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 18.0));
+        // The picture is made one row to a screen pixel and laid on the
+        // pixel grid, unfiltered: scaled to fit, its rows fell between
+        // pixels and shimmered as they scrolled.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let size = [
+            ((rect.width() * ppp).round() as usize).max(1),
+            (((rect.height() - 18.0) * ppp).round() as usize).clamp(1, ROWS),
+        ];
+        let corner = pos2(snap(rect.min.x), snap(rect.min.y));
+        let area = Rect::from_min_size(corner, vec2(size[0] as f32 / ppp, size[1] as f32 / ppp));
         painter.rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
+        if self.rows_dirty || self.picture != size || self.waterfall.is_none() {
+            self.rows_dirty = false;
+            self.picture = size;
+            let image = waterfall_image(&self.rows, size, self.levels, &self.palette);
+            match &mut self.waterfall {
+                Some(t) => t.set(image, TextureOptions::NEAREST),
+                None => {
+                    self.waterfall = Some(ui.ctx().load_texture(
+                        "waterfall",
+                        image,
+                        TextureOptions::NEAREST,
+                    ));
+                }
+            }
+        }
         if let Some(t) = &self.waterfall
             && sn.is_some()
         {
@@ -458,6 +567,67 @@ impl App {
         }
     }
 
+    /// The two progress bars, and the arriving frame as far as it is shown.
+    fn progress(&mut self, ui: &mut Ui, view: Option<&P3View>) -> Option<P3Frame> {
+        let dt = ui.input(|i| i.stable_dt).min(0.25);
+        // Run on at the beacon's own pace (50 bytes, 400 bits a second),
+        // never past what has been received.
+        let run = |shown: &mut f32, target: Option<f32>, per_s: f32| match target {
+            Some(t) if *shown <= t => *shown = (*shown + per_s * dt).min(t),
+            Some(t) => *shown = t,
+            None => *shown = 0.0,
+        };
+        let in_frame = view.filter(|v| v.in_frame);
+        run(
+            &mut self.shown_bytes,
+            in_frame.map(|v| v.arriving.len() as f32),
+            50.0,
+        );
+        let fec = view.and_then(|v| v.fec_bits);
+        run(&mut self.shown_fec, fec.map(|b| b as f32), 400.0);
+
+        let frames = view.map_or(0, |v| v.frames);
+        let (crc_frac, crc_note, crc_colour) = match (in_frame, view.and_then(|v| v.recent.last()))
+        {
+            (Some(_), _) => {
+                let f = self.shown_bytes / FRAME_BYTES as f32;
+                (f, format!("{:.0} %", f * 100.0), ACCENT)
+            }
+            (None, Some(last)) if fec.is_some() || frames > 0 => {
+                let (state, colour) = frame_state(last);
+                (1.0, state, colour)
+            }
+            _ => (0.0, "waiting for sync".to_string(), MUTED),
+        };
+        let (fec_frac, fec_note) = match fec {
+            Some(_) => {
+                let f = self.shown_fec / FEC_BLOCK_BITS as f32;
+                (f, format!("{:.0} % · not decoded", f * 100.0))
+            }
+            None => (0.0, "follows each frame · not decoded".to_string()),
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let w = (ui.available_width() - 12.0) / 2.0;
+            bar(
+                ui,
+                w,
+                "UNCODED FRAME + CRC",
+                crc_frac,
+                crc_colour,
+                &crc_note,
+            );
+            bar(ui, w, "FEC BLOCK", fec_frac, MUTED, &fec_note);
+        });
+        in_frame.map(|v| {
+            let n = (self.shown_bytes as usize).min(v.arriving.len());
+            P3Frame {
+                bytes: v.arriving[..n].to_vec(),
+                ..Default::default()
+            }
+        })
+    }
+
     fn right(&mut self, ui: &mut Ui, sn: Option<&Snapshot>) {
         let view = sn.map(|s| &s.view);
         let height = ui.available_height();
@@ -466,6 +636,8 @@ impl App {
             ui.set_height((height * 0.60).max(260.0));
             caption(ui, "LATEST BLOCKS");
             ui.add_space(6.0);
+            let live = self.progress(ui, view);
+            ui.add_space(8.0);
             let names: Vec<char> = view.map(|v| v.blocks.keys().copied().collect()).unwrap_or_default();
             let latest = view.and_then(|v| v.recent.last()).and_then(P3Frame::block);
             let shown = self.picked.filter(|c| names.contains(c)).or(latest);
@@ -493,7 +665,12 @@ impl App {
             });
             ui.add_space(8.0);
             match (shown, view) {
-                (Some(name), Some(v)) => block_text(ui, &v.blocks[&name]),
+                // Following the latest: the frame coming in, as far as it
+                // has come.
+                (_, Some(_)) if self.picked.is_none() && live.is_some() => {
+                    block_text(ui, live.as_ref().unwrap(), true);
+                }
+                (Some(name), Some(v)) => block_text(ui, &v.blocks[&name], false),
                 _ => {
                     ui.label(RichText::new("Waiting for the first frame. One takes about 10 seconds, and they come every 25.").color(MUTED));
                 }
@@ -518,6 +695,26 @@ impl App {
     }
 }
 
+/// A labelled progress bar with a note at its right.
+fn bar(ui: &mut Ui, width: f32, label: &str, fraction: f32, colour: Color32, note: &str) {
+    ui.vertical(|ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.horizontal(|ui| {
+            caption(ui, label);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(note).size(11.0).monospace().color(colour));
+            });
+        });
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 8.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, BG);
+        let mut fill = rect;
+        fill.set_width(rect.width() * fraction.clamp(0.0, 1.0));
+        p.rect_filled(fill, CornerRadius::ZERO, colour);
+    });
+}
+
 fn frame_state(f: &P3Frame) -> (String, Color32) {
     if f.crc_ok {
         ("CRC good".into(), GOOD)
@@ -528,8 +725,15 @@ fn frame_state(f: &P3Frame) -> (String, Color32) {
     }
 }
 
-fn block_text(ui: &mut Ui, f: &P3Frame) {
-    let (state, colour) = frame_state(f);
+fn block_text(ui: &mut Ui, f: &P3Frame, live: bool) {
+    let (state, colour) = if live {
+        (
+            format!("receiving block {}", f.block().unwrap_or('?')),
+            ACCENT,
+        )
+    } else {
+        frame_state(f)
+    };
     ui.horizontal(|ui| {
         ui.label(RichText::new(state).size(12.0).color(colour));
         ui.label(
@@ -833,26 +1037,44 @@ fn satellite(ui: &mut Ui, v: Option<&P3View>, t: f32) {
     });
 }
 
-/// The waterfall as an image, newest row at the top, coloured between
-/// `levels` (dB) through `lut`.
-fn waterfall_image(rows: &VecDeque<Vec<f32>>, (lo, hi): (f32, f32), lut: &[Color32]) -> ColorImage {
+/// The waterfall as a picture of `width` by `height` screen pixels, newest
+/// row at the top, coloured between the levels (dB) through `lut`. Each
+/// pixel column reads a fixed place in the row (between two of its values).
+fn waterfall_image(
+    rows: &VecDeque<Vec<f32>>,
+    [width, height]: [usize; 2],
+    (lo, hi): (f32, f32),
+    lut: &[Color32],
+) -> ColorImage {
     let floor = [lut[0].r(), lut[0].g(), lut[0].b(), 255];
     let mut rgba: Vec<u8> = floor
         .iter()
         .copied()
         .cycle()
-        .take(COLUMNS * ROWS * 4)
+        .take(width * height * 4)
         .collect();
     let top = (lut.len() - 1) as f32;
     let scale = top / (hi - lo).max(1e-3);
-    for (y, row) in rows.iter().take(ROWS).enumerate() {
-        for (x, &db) in row.iter().take(COLUMNS).enumerate() {
+    // Where each pixel column falls in a row: index and weight of the next.
+    let places: Vec<(usize, f32)> = (0..width)
+        .map(|x| {
+            let at = (x as f32 + 0.5) / width as f32 * COLUMNS as f32 - 0.5;
+            let at = at.clamp(0.0, (COLUMNS - 1) as f32);
+            ((at as usize).min(COLUMNS - 2), at.fract())
+        })
+        .collect();
+    for (y, row) in rows.iter().take(height).enumerate() {
+        if row.len() < COLUMNS {
+            continue;
+        }
+        for (x, &(i, f)) in places.iter().enumerate() {
+            let db = row[i] + (row[i + 1] - row[i]) * f;
             let c = lut[((db - lo) * scale).clamp(0.0, top) as usize];
-            let at = (y * COLUMNS + x) * 4;
+            let at = (y * width + x) * 4;
             rgba[at..at + 3].copy_from_slice(&[c.r(), c.g(), c.b()]);
         }
     }
-    ColorImage::from_rgba_unmultiplied([COLUMNS, ROWS], &rgba)
+    ColorImage::from_rgba_unmultiplied([width, height], &rgba)
 }
 
 /// DecSAT's waterfall colour map (`decsat-gui/src/waterfall.rs`): dark

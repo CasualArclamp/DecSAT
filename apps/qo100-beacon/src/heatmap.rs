@@ -88,6 +88,10 @@ impl Grid {
             }
         }
         let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+        // On whole screen pixels, so its edges and marks stay sharp.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let rect = Rect::from_min_size(pos2(snap(rect.min.x), snap(rect.min.y)), rect.size());
         let painter = ui.painter_at(rect);
         if let Some(t) = &self.texture {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
