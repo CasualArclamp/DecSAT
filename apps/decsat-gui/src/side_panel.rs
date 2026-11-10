@@ -1295,8 +1295,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
             && let Some(g) = &f.gse
             && let Some(r) = g.radio.as_ref().filter(|r| !r.streams.is_empty())
         {
-            let talking: Vec<String> = r
-                .streams
+            // Of the streams still sending: one that ended, or that errors
+            // made, says what its last packet said for ever.
+            let (live, _) = r.live_and_gone();
+            let talking: Vec<String> = live
                 .iter()
                 .filter(|s| s.now.ptt.on() || s.now.squelch)
                 .map(|s| {
@@ -1312,17 +1314,20 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 title: "Radio voice (ED-137)",
                 talking: !talking.is_empty(),
                 talk_secs: r.streams.iter().map(|s| s.talk_secs).sum(),
-                place: if talking.is_empty() {
-                    format!(
+                // One talker is named; more are counted (the list below
+                // names them), as a long line here widens the whole panel.
+                place: match talking.as_slice() {
+                    [] => format!(
                         "{} stream{}",
-                        r.streams.len(),
-                        if r.streams.len() == 1 { "" } else { "s" }
-                    )
-                } else {
-                    talking.join(", ")
+                        live.len(),
+                        if live.len() == 1 { "" } else { "s" }
+                    ),
+                    [one] => one.clone(),
+                    many => format!("{} of {} streams talking", many.len(), live.len()),
                 },
                 about: "The radio's sound (G.711, A- or µ-law) in ED-137 RTP, played while \
-                        PTT or squelch is on — one stream at a time — and silence between.",
+                        PTT or squelch is on — every stream mixed, each with its own mute \
+                        and volume in the list below — and silence between.",
             };
             call_voice_card(ui, &call, g.radio_voice.as_ref(), v, &mut actions);
         }
@@ -5069,11 +5074,18 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
         }
         if !g.protocols.is_empty() {
             ui.label("Protocols");
-            let names: Vec<String> = g
-                .protocols
+            // The most seen first, and only those: errors in an unlocked
+            // carrier's data make packets of every protocol number, and a
+            // grid's label does not wrap, so the whole list on one line
+            // pushed the panel's other rows out of sight.
+            const SHOWN: usize = 8;
+            let mut by_count: Vec<(u8, u64)> = g.protocols.iter().map(|(&p, &n)| (p, n)).collect();
+            // Rust note: `Reverse` turns the ascending sort into most first;
+            // the protocol number breaks ties so the order stays put.
+            by_count.sort_by_key(|&(p, n)| (std::cmp::Reverse(n), p));
+            let names: Vec<String> = by_count
                 .iter()
-                .rev()
-                .map(|(&p, &n)| {
+                .map(|&(p, n)| {
                     let name = match p {
                         6 => "TCP".to_string(),
                         17 => "UDP".to_string(),
@@ -5084,7 +5096,20 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                     format!("{name} {n}")
                 })
                 .collect();
-            ui.label(names.join(" · "));
+            let mut line = names[..names.len().min(SHOWN)].join(" · ");
+            if names.len() > SHOWN {
+                let rest: u64 = by_count[SHOWN..].iter().map(|&(_, n)| n).sum();
+                line += &format!(" · {} more ({rest})", names.len() - SHOWN);
+            }
+            let r = ui.label(line);
+            if names.len() > SHOWN {
+                // The rest on hover, a few a line.
+                let all: Vec<String> = names.chunks(6).map(|c| c.join(" · ")).collect();
+                r.on_hover_text(all.join(
+                    "
+",
+                ));
+            }
             ui.end_row();
         }
         if g.encrypted_flows > 0 {
@@ -5352,8 +5377,8 @@ fn dns_section(ui: &mut Ui, d: &decsat_ip::dns::DnsView, id: VfoId, actions: &mu
 }
 
 /// One radio's own mute and volume (`decsat_engine::radio_mix`), under the
-/// app's volume: a muted radio is not heard and does not take the turn
-/// from the others.
+/// app's volume: the link's radios are heard together, a muted one left
+/// out.
 fn radio_level_control(ui: &mut Ui, stream: &str) {
     use decsat_engine::radio_mix;
     let mut l = radio_mix::level(stream);
@@ -5361,7 +5386,10 @@ fn radio_level_control(ui: &mut Ui, stream: &str) {
     let (icon, tip) = if l.muted {
         ("🔇", "Unmute this radio")
     } else {
-        ("🔊", "Mute this radio: the others are heard instead")
+        (
+            "🔊",
+            "Mute this radio: the link's radios are heard together, this one left out",
+        )
     };
     if ui.small_button(icon).on_hover_text(tip).clicked() {
         l.muted = !l.muted;
@@ -5385,8 +5413,6 @@ fn radio_level_control(ui: &mut Ui, stream: &str) {
 /// ED-137 radio over IP: each stream's signalling now and so far, the SIP
 /// dialogs, the latest changes.
 fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
-    let ptt_on = Color32::from_rgb(240, 90, 80);
-    let squelch_open = Color32::from_rgb(90, 200, 120);
     ui.add_space(6.0);
     ui.label(RichText::new("Radio over IP (ED-137)").strong())
         .on_hover_text(
@@ -5395,11 +5421,32 @@ fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
              type, squelch, the PTT's id, signal quality; R2S keep-alives (payload type 123) \
              carry it without sound. SIP sets the sessions up; its SDP says what the radio is.",
         );
-    egui::Grid::new("radio_streams")
+    // Those still sending; the rest folded away.
+    let (live, gone) = r.live_and_gone();
+    radio_streams(ui, "radio_streams", &live);
+    if !gone.is_empty() {
+        egui::CollapsingHeader::new(format!("Ended or stray streams ({})", gone.len()))
+            .id_salt("radio_gone")
+            .show(ui, |ui| radio_streams(ui, "radio_streams_gone", &gone))
+            .header_response
+            .on_hover_text(
+                "Streams with no packet for 10 s: sessions that ended, and ones that errors \
+                 in an address or SSRC made out of a few packets of a real stream",
+            );
+    }
+    radio_section_rest(ui, r);
+}
+
+/// A grid of ED-137 streams: each one's mute and volume, its PTT and
+/// squelch now, its counts so far.
+fn radio_streams(ui: &mut Ui, id: &str, streams: &[&decsat_ip::ed137::StreamView]) {
+    let ptt_on = Color32::from_rgb(240, 90, 80);
+    let squelch_open = Color32::from_rgb(90, 200, 120);
+    egui::Grid::new(id)
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
-            for s in &r.streams {
+            for s in streams {
                 let n = &s.now;
                 let label = s.label();
                 ui.label(RichText::new(&label).monospace().small());
@@ -5440,6 +5487,11 @@ fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
                 ui.end_row();
             }
         });
+}
+
+/// The radio section under its streams: stray packets, the SIP dialogs,
+/// the changes.
+fn radio_section_rest(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
     if r.stray > 0 {
         ui.label(
             RichText::new(format!(

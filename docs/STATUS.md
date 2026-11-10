@@ -3401,9 +3401,13 @@ Rory: "play the ED-137 voice when PTT or squelch is on".
 - Engine: the IP stage keeps a `CallVoice` (the Q-Flex calls' player,
   recorder and voice-floor gate) for the radio, made once ED-137 is seen;
   ▶/● are the call-voice settings (`tdm_play`, `tdm_record`), the voice
-  preset (`voice_auto`) plays it once a stream has talked. One stream is
-  heard at a time: the one talking keeps it until 0.3 s without a talking
-  packet; its PCM goes to the `CallVoice`, which `tick` feeds on the signal
+  preset (`voice_auto`) plays it once a stream has talked. Every stream is
+  heard, mixed (`radio_mix::Mixer`: a lane a stream, a stream behind waited
+  for 60 ms at most), each at its own volume and mute (`radio_mix`, set on
+  the stream's row); a stream's first two packets are not played, so one
+  made by an error in the SSRC stays silent. The link counts as talking
+  until 0.3 s without a talking packet; the mix goes to the `CallVoice`,
+  which `tick` feeds on the signal
   clock — silence between talk spurts, the floor deciding whether it is
   heard (one talker across the app). `GseView.radio_voice` for the GUI.
 - GUI: the call-voice card takes a title (and seconds of speech) and shows
