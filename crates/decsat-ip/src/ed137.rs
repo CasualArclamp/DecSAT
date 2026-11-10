@@ -788,7 +788,10 @@ impl RadioRx {
         if talking && let Some(law) = law {
             st.talk_packets += 1;
             st.talk_secs += r.payload.len() as f64 / 8000.0;
-            if self.want_voice {
+            // Not a stream's first packets: an SSRC or address hit by
+            // errors makes a stream of one packet, which would be heard as
+            // a click of a radio that may be muted under its real label.
+            if self.want_voice && st.packets >= MIN_PACKETS {
                 chunk = Some(VoiceChunk {
                     stream: st.label(),
                     pcm: r
@@ -1098,6 +1101,7 @@ mod tests {
             );
         };
         send(&mut rx, PT_PCMA, &off, &[0xD5; 160]); // no PTT, no squelch
+        send(&mut rx, PT_PCMA, &off, &[0xD5; 160]);
         send(&mut rx, PT_PCMA, &sq, &[0xAA; 160]);
         send(&mut rx, PT_PCMU, &sq, &[0x80; 160]);
         send(&mut rx, PT_R2S, &sq, &[0; 4]); // a keep-alive: no sound
@@ -1114,9 +1118,37 @@ mod tests {
                 .all(|&x| (x - 32124.0 / 32768.0).abs() < 1e-6)
         );
         let s = &rx.view().streams[0];
-        assert_eq!((s.voice, s.talk_packets), (3, 2));
+        assert_eq!((s.voice, s.talk_packets), (4, 2));
         assert!((s.talk_secs - 0.04).abs() < 1e-9);
         assert!(rx.take_voice().is_empty());
+    }
+
+    /// A stream's first packets are not handed on: a stray one (its SSRC
+    /// hit by an error) stays unheard.
+    #[test]
+    fn a_stray_packet_is_not_heard() {
+        let a: IpAddr = [172, 16, 82, 28].into();
+        let b: IpAddr = [10, 26, 185, 112].into();
+        let mut rx = RadioRx::new();
+        rx.want_voice(true);
+        let sq = (1u16 << 12).to_be_bytes();
+        let sq = [sq[0], sq[1], 0, 0];
+        for seq in 1..MIN_PACKETS as u16 {
+            rx.udp(
+                (a, 8602),
+                (b, 8580),
+                &packet(PT_PCMA, seq, &sq, &[0xAA; 160]),
+                f64::from(seq) * 0.02,
+            );
+        }
+        assert!(rx.take_voice().is_empty());
+        rx.udp(
+            (a, 8602),
+            (b, 8580),
+            &packet(PT_PCMA, MIN_PACKETS as u16, &sq, &[0xAA; 160]),
+            0.1,
+        );
+        assert_eq!(rx.take_voice().len(), 1);
     }
 
     #[test]

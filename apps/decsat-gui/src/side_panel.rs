@@ -5351,6 +5351,37 @@ fn dns_section(ui: &mut Ui, d: &decsat_ip::dns::DnsView, id: VfoId, actions: &mu
     });
 }
 
+/// One radio's own mute and volume (`decsat_engine::radio_mix`), under the
+/// app's volume: a muted radio is not heard and does not take the turn
+/// from the others.
+fn radio_level_control(ui: &mut Ui, stream: &str) {
+    use decsat_engine::radio_mix;
+    let mut l = radio_mix::level(stream);
+    let before = l;
+    let (icon, tip) = if l.muted {
+        ("🔇", "Unmute this radio")
+    } else {
+        ("🔊", "Mute this radio: the others are heard instead")
+    };
+    if ui.small_button(icon).on_hover_text(tip).clicked() {
+        l.muted = !l.muted;
+    }
+    // Rust note: `scope` keeps the narrower slider width to this slider.
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = 60.0;
+        let r = ui
+            .add(egui::Slider::new(&mut l.volume, 0.0..=1.0).show_value(false))
+            .on_hover_text(format!("This radio's volume {:.0} %", l.volume * 100.0));
+        // Turning it up is asking to hear it.
+        if r.changed() && l.volume > 0.0 {
+            l.muted = false;
+        }
+    });
+    if l != before {
+        radio_mix::set_level(stream, l);
+    }
+}
+
 /// ED-137 radio over IP: each stream's signalling now and so far, the SIP
 /// dialogs, the latest changes.
 fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
@@ -5370,8 +5401,10 @@ fn radio_section(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
         .show(ui, |ui| {
             for s in &r.streams {
                 let n = &s.now;
-                ui.label(RichText::new(s.label()).monospace().small());
+                let label = s.label();
+                ui.label(RichText::new(&label).monospace().small());
                 ui.horizontal(|ui| {
+                    radio_level_control(ui, &label);
                     if n.ptt.on() {
                         ui.colored_label(ptt_on, format!("{} · id {}", n.ptt.name(), n.ptt_id));
                     } else {
