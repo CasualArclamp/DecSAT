@@ -6373,6 +6373,6 @@ VVC and cannot play.
   identified, and the pilot tones are not used.
 - The GUI on the recording, two VFOs 300 kHz wide: both lock and count
   frames, 6 % of a core each. The card's bitmap (the last 96 frames, a row
-  each; fit or 1, 2, 4 points a symbol, scrolled sideways) shows the
+  each; 1, 2 or 4 screen pixels a symbol, never blended, scrolled sideways) shows the
   preamble, the unique words and the bit positions that never change.
   Not tried live.

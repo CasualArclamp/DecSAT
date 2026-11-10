@@ -117,16 +117,16 @@ fn bitmap(ui: &mut Ui, r: &Raster, id: VfoId) {
         return;
     }
     ui.add_space(6.0);
-    // Points a symbol; 0 fits the frame to the card.
+    // Screen pixels a symbol: whole numbers only, so every bit is sharp.
     let zoom_key = egui::Id::new(("barker_zoom", id));
-    let mut zoom: u8 = ui.data(|d| d.get_temp(zoom_key)).unwrap_or(0);
+    let mut zoom: u8 = ui.data(|d| d.get_temp(zoom_key)).unwrap_or(1);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Frames").strong()).on_hover_text(
             "Each row a frame, the latest at the bottom; each column a symbol. Blue: preamble \
              and unique words. Grey: data that has not changed since the decoder started. \
-             Dark and bright: data that changes.",
+             Dark and bright: data that changes. 1×, 2×, 4×: screen pixels a symbol; scroll sideways.",
         );
-        for (z, name) in [(0u8, "fit"), (1, "1×"), (2, "2×"), (4, "4×")] {
+        for (z, name) in [(1u8, "1×"), (2, "2×"), (4, "4×")] {
             if ui.selectable_label(zoom == z, name).clicked() {
                 zoom = z;
             }
@@ -150,11 +150,11 @@ fn bitmap(ui: &mut Ui, r: &Raster, id: VfoId) {
                 }
             }
             let img = ColorImage::from_rgba_unmultiplied([cols, rows], &rgba);
-            // Fitted, several symbols share a point: LINEAR averages them
-            // instead of showing every third.
+            // NEAREST: a symbol is a whole number of screen pixels, never
+            // blended with its neighbours.
             let tex =
                 ui.ctx()
-                    .load_texture(format!("barker_map_{id:?}"), img, TextureOptions::LINEAR);
+                    .load_texture(format!("barker_map_{id:?}"), img, TextureOptions::NEAREST);
             ui.data_mut(|d| {
                 d.insert_temp(
                     key,
@@ -167,19 +167,24 @@ fn bitmap(ui: &mut Ui, r: &Raster, id: VfoId) {
             tex
         }
     };
-    let row_h = (192.0 / rows as f32).clamp(2.0, 6.0);
+    // Sizes in screen pixels, turned into egui's points: a symbol is
+    // `zoom` pixels wide and a frame at least two tall, and the image's
+    // corner is put on a pixel.
+    let ppp = ui.ctx().pixels_per_point();
+    let px_w = usize::from(zoom);
+    let px_h = px_w.max(2);
     // Rust note: `id_salt` keeps this scroll area's position apart from
     // any other on the panel.
     egui::ScrollArea::horizontal()
         .id_salt(("barker_scroll", id))
         .show(ui, |ui| {
-            let width = if zoom == 0 {
-                ui.available_width()
-            } else {
-                cols as f32 * f32::from(zoom)
-            };
-            let (rect, resp) =
-                ui.allocate_exact_size(vec2(width, row_h * rows as f32), Sense::hover());
+            let size = vec2((cols * px_w) as f32, (rows * px_h) as f32) / ppp;
+            let (space, resp) = ui.allocate_exact_size(size, Sense::hover());
+            let corner = pos2(
+                (space.left() * ppp).round() / ppp,
+                (space.top() * ppp).round() / ppp,
+            );
+            let rect = Rect::from_min_size(corner, size);
             ui.painter().image(
                 tex.id(),
                 rect,
