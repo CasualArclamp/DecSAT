@@ -30,7 +30,7 @@
 use std::f64::consts::{PI, TAU};
 
 use crate::hsmodem::{BAUD, Deframer, FRAME_SYMBOLS, Point, RING_RADIUS, ROLLOFF};
-use crate::hsmodem::{Content, Files};
+use crate::hsmodem::{CODEWORD_BITS, Content, Files};
 pub use crate::hsmodem::{HsFile, HsFrame};
 use decsat_core::Iq;
 use rustfft::{Fft, FftPlanner};
@@ -76,8 +76,16 @@ pub struct HsView {
     pub carrier_hz: Option<f64>,
     /// The 7th power shows a carrier.
     pub locked: bool,
-    /// Signal over noise at the decided points (dB).
+    /// Es/N0 (dB): the symbols' energy over the noise at the decided
+    /// points. A little high below about 10 dB, where wrong decisions hide
+    /// some of the noise.
     pub snr_db: f32,
+    /// The channel's bit error rate before the Reed–Solomon code, over the
+    /// latest frames: exact, from what the code corrected. Frames it could
+    /// not correct are not in it, so it is low when frames are being missed.
+    pub ber: Option<f32>,
+    /// The codeword bits that figure is over.
+    pub ber_bits: usize,
     /// Frames whose code and CRC check, and frames' worth of symbols that
     /// gave none.
     pub good: u64,
@@ -716,6 +724,9 @@ impl HsRx {
             }
             self.view.corrected = f.corrected;
             self.view.recent.push(f.clone());
+            let wrong: usize = self.view.recent.iter().map(|f| f.bit_errors).sum();
+            self.view.ber_bits = self.view.recent.len() * CODEWORD_BITS;
+            self.view.ber = Some(wrong as f32 / self.view.ber_bits as f32);
             let v = &mut self.view;
             match f.content() {
                 Content::NbSpectrum(line) => {
@@ -860,6 +871,8 @@ mod tests {
         }
         assert!(!view.mirrored);
         assert!(view.snr_db > 10.0, "{view:?}");
+        // 16 dB: a bit in some thousands.
+        assert!(view.ber.is_some_and(|b| b < 3e-3), "{view:?}");
     }
 
     #[test]

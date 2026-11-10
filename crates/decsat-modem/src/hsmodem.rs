@@ -52,6 +52,8 @@ pub const SYNC_SYMBOLS: usize = 8;
 pub const CODEWORD_BYTES: usize = 255;
 pub const PARITY_BYTES: usize = 32;
 pub const DATA_BYTES: usize = CODEWORD_BYTES - PARITY_BYTES;
+/// Bits of a codeword.
+pub const CODEWORD_BITS: usize = CODEWORD_BYTES * 8;
 /// Payload bytes of a frame (`PAYLOADLEN`).
 pub const PAYLOAD_BYTES: usize = DATA_BYTES - 4;
 
@@ -317,6 +319,9 @@ pub struct HsFrame {
     pub payload: Vec<u8>,
     /// Bytes the Reed–Solomon code put right (16 at most).
     pub corrected: usize,
+    /// Bits that were wrong in those bytes, out of the codeword's
+    /// [`CODEWORD_BITS`]: the channel's bit errors, counted exactly.
+    pub bit_errors: usize,
 }
 
 /// What a frame carries.
@@ -475,6 +480,7 @@ pub fn encode(counter: u16, kind: u8, place: Place, payload: &[u8]) -> Vec<u8> {
 pub fn decode(codeword: &[u8]) -> Option<HsFrame> {
     let mut cw = codeword.to_vec();
     scramble(&mut cw);
+    let received = cw.clone();
     let corrected = rs_correct(&mut cw)?;
     let crc = u16::from_be_bytes([cw[DATA_BYTES - 2], cw[DATA_BYTES - 1]]);
     if crc16(&cw[..DATA_BYTES - 2]) != crc {
@@ -491,6 +497,12 @@ pub fn decode(codeword: &[u8]) -> Option<HsFrame> {
         },
         payload: cw[2..2 + PAYLOAD_BYTES].to_vec(),
         corrected,
+        // What the code changed is what the channel got wrong.
+        bit_errors: received
+            .iter()
+            .zip(&cw)
+            .map(|(a, b)| (a ^ b).count_ones() as usize)
+            .sum(),
     })
 }
 
@@ -827,6 +839,8 @@ mod tests {
         let f = received(NB_AIR);
         let want = hex(NB_DATA);
         assert_eq!(f.corrected, 7);
+        // Seven bytes wrong, a bit or a few in each.
+        assert!((7..=21).contains(&f.bit_errors), "{}", f.bit_errors);
         assert_eq!((f.kind, f.place), (KIND_STREAM, Place::Single));
         assert_eq!(f.payload, want[2..221]);
         let Content::NbSpectrum(levels) = f.content() else {

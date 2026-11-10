@@ -331,6 +331,15 @@ impl Page {
     }
 }
 
+/// A bit error rate as `2.1e-3`; none seen in the bits counted reads `0`.
+fn ber_text(ber: f32) -> String {
+    if ber <= 0.0 {
+        return "0".to_string();
+    }
+    let exp = ber.log10().floor();
+    format!("{:.1}e{}", ber / 10f32.powf(exp), exp as i32)
+}
+
 /// The eight points as sent: the centre, and seven round the ring.
 fn marks() -> Vec<Iq> {
     let mut m = vec![Iq::new(0.0, 0.0)];
@@ -417,11 +426,14 @@ impl Page {
             stat(
                 ui,
                 w,
-                "SIGNAL",
+                "Es/N0",
                 v.filter(|v| v.locked)
                     .map_or("—".to_string(), |v| format!("{:.1} dB", v.snr_db)),
                 TEXT,
-                "over noise, at the points".to_string(),
+                // Three bits a symbol.
+                v.filter(|v| v.locked).map_or(String::new(), |v| {
+                    format!("Eb/N0 {:.1} dB", v.snr_db - 10.0 * 3f32.log10())
+                }),
             );
             let (good, missed) = v.map_or((0, 0), |v| (v.good, v.missed));
             stat(
@@ -435,11 +447,12 @@ impl Page {
             stat(
                 ui,
                 w,
-                "CORRECTED",
-                v.filter(|v| v.good > 0)
-                    .map_or("—".to_string(), |v| format!("{} / 16", v.corrected)),
+                "BER",
+                v.and_then(|v| v.ber).map_or("—".to_string(), ber_text),
                 TEXT,
-                "bytes in the last frame".to_string(),
+                v.filter(|v| v.good > 0).map_or(String::new(), |v| {
+                    format!("before FEC · {} / 16 bytes fixed", v.corrected)
+                }),
             );
         });
     }
