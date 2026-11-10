@@ -67,6 +67,7 @@ real carriers stay put.
 | **Carrier ID (DVB-CID, ETSI TS 103 129)**: the spread-spectrum identifier under a carrier — the uplink modulator's unique ID (and MAC), position, telephone and text | ✅ to the specification, on synthetic carriers (no CID among the recordings yet) |
 | **Comtech CDM modems** (one decoder entry): the type found by itself — TPC 2964, K = 7 Viterbi or FastLink from the first look, the model from the data — or chosen: CDM-600L voice (TPC → D&I++ → G.728), CDM-570L TPC (→ IP / TS), CDM-570L Viterbi, CDM-570L trunk (voice + IP with ADS-B and radar); the G.728 voice in every channel played as soon as speech is found — no ▶, so several carriers can be heard at once, one voice at a time if you like | ✅ on live CDM-600L and CDM-570L carriers |
 | **IBS programme audio → apt-X**: IBS at n × 64 kbit/s (IESS-309: G.704-shaped frames under the IBS synchronous scrambler, x¹⁵+x¹⁴+1 restarted every 128 frames — found from the signal) carrying a studio link's Standard apt-X (apt-X 100): codeword alignment, stereo and its AutoSync word found blind, listen, record `.wav`. The 0–4 kHz band decodes exactly; 4–16 kHz uses step-size tables fitted to the carrier (Standard apt-X's are not published) | 🟡 on a live 256 kbit/s Comtech IBS carrier: stereo 32 kHz, full band (upper bands approximate) |
+| **Enhanced apt-X in a transport stream**: a broadcaster's contribution feed — stereo programmes as private streams (stream type 9Bh, private data indicator `APTx`, 576 kbit/s each). 24-bit Enhanced apt-X at 48 kHz, its framing and codeword packing worked out from the stream: it is aptX HD's decoder with the two last bits of the upper bands carried as parity. Named in the programme list; `aptx_wav` writes each service to a `.wav` | 🟡 on a recorded Ku-band multiplex (six services, bit-exact against FFmpeg's aptX HD on repacked vectors); not yet played in the app |
 | **E1 voice**: G.704 E1 or Comtech Drop & Insert++ timeslots, G.711 A-law — levels per channel, listen, record `.wav`; G.728 LD-CELP 16 kbit/s voice in two bits of a timeslot — up to three such channels in one timeslot — found and decoded | ✅ (G.728 confirmed on live CDM-600L and CDM-570L voice) |
 | **Radar feeds** on CDM-570/570L links: track reports in IBM bisync blocks, **ASTERIX** categories 034 and 048 in HDLC (the Mode S registers in them read too) and ADS-B (category 021) in IP — a track table, a CSV log, and the **radar scope**: a PPI with trails and leaders, a map, airports and runways, ADS-B aircraft over a radar's picture, callsigns from a decoded ADS-B feed or (switched on) adsb.lol | ✅ on live carriers |
 | **Radar station monitoring** (an RCMS multicast in Frame Relay on a CDM-570L trunk): the station's units and the points they report, beside the scope | ✅ on a live trunk (what the points mean is open) |
@@ -1162,6 +1163,7 @@ Checks without a radio (the radio cannot be reached from these):
 decsat-tx --source camera --codec h265 --sink iq:tx_2331000Sps.cs8 --start --run-secs 10   # prints the CPU
 decsat decode tx_2331000Sps.cs8 --decoder ts --symbol-rate 333000 --fast --out rx.ts
 cargo run --release -p decsat-ts --example av1_ivf -- rx.ts/….ts av1.ivf   # an AV1 stream out of a TS, for ffmpeg
+cargo run --release -p decsat-modem --example aptx_wav -- rx.ts/….ts wavs   # Enhanced apt-X services of a TS, a .wav each
 ```
 
 ### Command line
@@ -1406,8 +1408,8 @@ algorithms studied from and credited to:
   de-encapsulation, including the proprietary header-length and split
   fragment-ID variants found on real carriers
 - [FFmpeg](https://ffmpeg.org) libavcodec's aptX decoder (© 2017 Aurelien
-  Jacobs, LGPL-2.1-or-later) — the apt-X tables, ADPCM and QMF, ported to
-  Rust and bit-exact against it
+  Jacobs, LGPL-2.1-or-later) — the apt-X and aptX HD tables, ADPCM and QMF,
+  ported to Rust and bit-exact against it
 - [VLC](https://www.videolan.org) (`modules/demux/mpeg/csa.c`, Laurent
   Aimar) and [libdvbcsa](https://www.videolan.org/developers/libdvbcsa.html)
   (both GPL-2.0-or-later) — the DVB-CSA tables and round structure for BISS

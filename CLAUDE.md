@@ -21,6 +21,7 @@ cargo run --release -p decsat-tx-app -- --source test --sink null --start --scre
 cargo run --release -p decsat-tx --example txrun -- --source camera --codec av1 --out out/tx.cs8 --seconds 8   # the library alone, a status line a second
 cargo run --release -p decsat-cli -- decode out/tx.cs8 --rate 2331000 --decoder ts --symbol-rate 333000 --fast --out out/rx.ts   # read a transmission back
 cargo run --release -p decsat-ts --example av1_ivf -- out/rx.ts/x.ts out/av1.ivf   # AV1 (AOM's TS mapping) out of a TS for ffmpeg
+cargo run --release -p decsat-modem --example aptx_wav -- out/rx.ts/x.ts out/wavs   # Enhanced apt-X services (PMT indicator APTx) of a TS to .wav
 cargo run --release -p decsat-server -- --bind 0.0.0.0:5262 --password-file pw.txt   # a radio for a client elsewhere (docs/REMOTE.md); receive only
 cargo run --release -p decsat-server -- --file capture.cs8 --file-rate 8e6 --file-center 1100e6 --only file --bind 127.0.0.1:5262   # a capture as a remote radio
 cargo run --release -p decsat-cli -- remote 127.0.0.1:5262 --radio file --mhz 1100 --rate 8e6 --decoder dvbs2-ts --offset=1200000 --bandwidth=700000 --out out/   # smart mode: decodes on the server

@@ -33,6 +33,7 @@
 
 pub mod ao40;
 pub mod aptx;
+pub mod aptx_ts;
 pub mod asterix;
 pub mod bsc;
 pub mod ccsds;

@@ -12,3 +12,7 @@ rust-version.workspace = true
 serde.workspace = true
 decsat-core = { path = "../decsat-core" }
 rustfft.workspace = true
+
+[dev-dependencies]
+# The aptx_wav example reads a transport stream's tables.
+decsat-ts = { path = "../decsat-ts" }

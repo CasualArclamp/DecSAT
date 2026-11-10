@@ -32,6 +32,15 @@
 //!
 //! [`AptxRx`] takes the data bits of a link, finds where the codewords
 //! start and whether they alternate left and right, and decodes.
+//!
+//! Enhanced apt-X at 24 bits (a 24-bit codeword for four samples; stereo at
+//! 48 kHz is 576 kbit/s) is FFmpeg's aptX HD decoder whole: its tables, its
+//! dither, its ADPCM and QMF. Only the packing differs
+//! ([`Channel::decode24`], worked out from a contribution feed in a DVB
+//! transport stream, see [`crate::aptx_ts`]): aptX HD sends the 6-bit and
+//! 5-bit bands whole and hides its sync in the parity of the two channels;
+//! Enhanced apt-X sends their top 5 and 4 bits and two parity bits ahead of
+//! them, from which the two missing last bits follow.
 
 /// Sub-bands, lowest first (FFmpeg's LF, MLF, MHF, HF).
 const BANDS: usize = 4;
@@ -109,6 +118,41 @@ static TABLES: [Tables; BANDS] = [
         qi: &QI_HF,
         iqd: &IQD_HF,
         qfs: &QFS_HF,
+        factor_max: 0x15FF,
+        order: 12,
+    },
+];
+
+// FFmpeg aptx.c: the aptX HD quantisation tables.
+include!("aptx_hd_tables.in");
+
+/// aptX HD's bands (FFmpeg's `ff_aptx_quant_tables[1]`): 9, 6, 4 and 5 bits.
+static HD_TABLES: [Tables; BANDS] = [
+    Tables {
+        qi: &QI_HD_LF,
+        iqd: &IQD_HD_LF,
+        qfs: &QFS_HD_LF,
+        factor_max: 0x11FF,
+        order: 24,
+    },
+    Tables {
+        qi: &QI_HD_MLF,
+        iqd: &IQD_HD_MLF,
+        qfs: &QFS_HD_MLF,
+        factor_max: 0x14FF,
+        order: 12,
+    },
+    Tables {
+        qi: &QI_HD_MHF,
+        iqd: &IQD_HD_MHF,
+        qfs: &QFS_HD_MHF,
+        factor_max: 0x16FF,
+        order: 6,
+    },
+    Tables {
+        qi: &QI_HD_HF,
+        iqd: &IQD_HD_HF,
+        qfs: &QFS_HD_HF,
         factor_max: 0x15FF,
         order: 12,
     },
@@ -427,6 +471,40 @@ impl Channel {
                     band.process(code, 0, &TABLES[sb], BROADCAST_BIAS[sb]);
                 }
             }
+        }
+        self.synth()
+    }
+
+    /// One Enhanced apt-X 24-bit codeword in (first-sent bit as the MSB),
+    /// four samples out (24-bit). The codeword, first bit first:
+    ///
+    /// ```text
+    /// x | y | HF, top 4 of 5 | MHF, 4 | MLF, top 5 of 6 | LF, 9
+    /// ```
+    ///
+    /// The fields are two's complement, as aptX HD's, in aptX HD's order.
+    /// `y` is the MLF value's last bit XOR the MHF value's last bit. The HF
+    /// value's last bit is what makes the parity of the four values and the
+    /// dither (FFmpeg's `aptx_quantized_parity`) equal `parity`: the caller
+    /// gives the right channel's `x` for the right channel, and the two
+    /// channels' `x` XORed for the left. (The left `x` carries AutoSync and
+    /// auxiliary data, as aptX HD's sync is the XOR of its two channels'
+    /// parities; the encoder moves a quantised value to make it so.)
+    ///
+    /// Found from a stream (2026-11-10): each last bit follows its field's
+    /// sign as a last bit does (0.48/0.52 and 0.45/0.54), and with them the
+    /// bands meet at 6 and 12 kHz to 1 dB.
+    pub fn decode24(&mut self, word: u32, parity: u32) -> [i32; 4] {
+        self.generate_dither();
+        let y = (word >> 22) & 1;
+        let q0 = sign_extend(word, 9);
+        let q2 = sign_extend(word >> 14, 4);
+        let q1 = (sign_extend(word >> 9, 5) << 1) | (y ^ (word >> 14) & 1) as i32;
+        let last = self.dither_parity as u32 ^ (word & 1) ^ y ^ (parity & 1);
+        let q3 = (sign_extend(word >> 18, 4) << 1) | last as i32;
+        self.q = [q0, q1, q2, q3];
+        for (sb, band) in self.bands.iter_mut().enumerate() {
+            band.process(Code::Aptx(self.q[sb]), self.dither[sb], &HD_TABLES[sb], 0);
         }
         self.synth()
     }
@@ -769,6 +847,38 @@ fn sample(v: i32) -> f32 {
     (v as f32 / (1 << 23) as f32 * GAIN).clamp(-1.0, 1.0)
 }
 
+/// FFmpeg's aptX HD on a stream its encoder made, for the tests here and in
+/// [`crate::aptx_ts`].
+#[cfg(test)]
+pub(crate) mod hd_vector {
+    // Made with `ffmpeg … -c:a aptx_hd -f aptx_hd` (1 kHz and 7 kHz tones
+    // plus noise, stereo, 48 kHz) and decoded with `ffmpeg -f aptx_hd …
+    // -f s32le` (its samples, less the low 8 bits).
+    include!("aptx_hd_vector.in");
+
+    /// An aptX HD codeword pair (FFmpeg's `aptx_pack_codeword`: HF's top 4
+    /// bits, the parity bit, MHF 4, MLF 6, LF 9) packed as Enhanced apt-X
+    /// sends it: the inverse of [`Channel::decode24`].
+    fn hd_to_enhanced(l: u32, r: u32) -> (u32, u32) {
+        let one = |w: u32, x: u32| {
+            let (q3, q2, q1, q0) = (w >> 20, (w >> 15) & 15, (w >> 9) & 63, w & 511);
+            let y = (q1 ^ q2) & 1;
+            (x << 23) | (y << 22) | (q3 << 18) | (q2 << 14) | ((q1 >> 1) << 9) | q0
+        };
+        // aptX HD's bit 19 is the channel's parity.
+        let (pl, pr) = ((l >> 19) & 1, (r >> 19) & 1);
+        (one(l, pl ^ pr), one(r, pr))
+    }
+
+    /// The vector's codeword pairs as Enhanced apt-X sends them.
+    pub(crate) fn enhanced_pairs() -> Vec<(u32, u32)> {
+        FFMPEG_HD_WORDS
+            .chunks(2)
+            .map(|p| hd_to_enhanced(p[0], p[1]))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +909,24 @@ mod tests {
     // Made with `ffmpeg -f lavfi -i "sine=1000:sample_rate=32000"
     // … -c:a aptx -f aptx` and decoded with `ffmpeg -f aptx`.
     include!("aptx_vector.in");
+
+    /// FFmpeg's aptX HD decoder on a stream its encoder made (1 kHz and
+    /// 7 kHz tones plus noise, stereo, 48 kHz), repacked as Enhanced apt-X:
+    /// the same samples (24-bit), so the packing loses nothing.
+    #[test]
+    fn enhanced_24_is_ffmpegs_aptx_hd_repacked() {
+        let mut ch = [Channel::new(), Channel::new()];
+        let mut got = Vec::new();
+        for &(wl, wr) in &hd_vector::enhanced_pairs() {
+            let l = ch[0].decode24(wl, (wl ^ wr) >> 23);
+            let r = ch[1].decode24(wr, wr >> 23);
+            for i in 0..4 {
+                got.push(l[i]);
+                got.push(r[i]);
+            }
+        }
+        assert_eq!(got, hd_vector::FFMPEG_HD_PCM.to_vec());
+    }
 
     /// A broadcast-mapped encoder of the LL band alone, for tests: each
     /// codeword's LL code is the one whose reconstruction lands nearest the
