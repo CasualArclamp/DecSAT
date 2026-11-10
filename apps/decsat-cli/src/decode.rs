@@ -119,8 +119,9 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => DecoderKind::P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => DecoderKind::HsBeacon,
+        "barker" | "b11" | "barker-tdm" => DecoderKind::BarkerTdm,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon, p3)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon, p3, hs, barker)"
         ),
     })
 }
@@ -670,6 +671,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(v) = &st.hs {
         print_hs(v);
+    }
+    if let Some(v) = &st.barker {
+        print_barker(v);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text, guid_vendor};
@@ -1988,6 +1992,41 @@ fn print_hs(v: &decsat_engine::beacon::hs::HsView) {
         println!("  file \"{}\": {} bytes, complete", f.name, f.len);
         if let Some((inner, data)) = &f.inside {
             println!("    holds \"{inner}\", {} bytes", data.len());
+        }
+    }
+}
+
+fn print_barker(v: &decsat_modem::barker::BarkerView) {
+    println!(
+        "barker: {}, carrier {}, Es/N0 {:.1} dB, chip clock {:+.1} ppm, {} symbols, {} frames ({} slipped)",
+        if v.locked { "locked" } else { "not locked" },
+        v.carrier_hz
+            .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
+        v.esn0_db,
+        v.chip_ppm,
+        v.symbols,
+        v.frames,
+        v.slipped,
+    );
+    if let Some(n) = v.frame_symbols {
+        println!(
+            "  frame {n} symbols ({:.2} ms): {}",
+            n as f64 / decsat_modem::barker::SYMBOL_RATE * 1e3,
+            v.layout
+        );
+    }
+    for f in &v.recent {
+        println!(
+            "  frame: {} symbols, {} preamble bits wrong, {} unique words ({} bits wrong){}",
+            f.symbols,
+            f.preamble_errors,
+            f.unique_words,
+            f.unique_word_errors,
+            if f.slipped { ", carrier slipped" } else { "" }
+        );
+        for (k, (bits, bytes)) in f.blocks.iter().enumerate() {
+            let hex: String = bytes.iter().take(24).map(|b| format!("{b:02X}")).collect();
+            println!("    block {k}: {bits} bits  {hex}…");
         }
     }
 }

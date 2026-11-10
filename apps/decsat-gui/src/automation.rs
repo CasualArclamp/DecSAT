@@ -295,6 +295,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "beacon" | "tlm" | "telemetry" => Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => HsBeacon,
+        "barker" | "b11" | "barker-tdm" => BarkerTdm,
         "rec" | "iq" => IqRecord,
         "spec" | "spectrum" => Spectrum,
         _ => return None,

@@ -33,11 +33,14 @@
 //! - [`hsmodem`]: QO-100's multimedia beacon (AMSAT-DL's HSmodem, 2400 baud
 //!   8APSK): frames, Reed–Solomon, the streamed waterfalls and files;
 //!   [`hsmodemrx`]: its receiver.
+//! - [`barker`]: a Barker-11 spread BPSK carrier with TDM framing (C band,
+//!   4004 MHz; measured, no specification known): despreader and framer.
 
 pub mod ao40;
 pub mod aptx;
 pub mod aptx_ts;
 pub mod asterix;
+pub mod barker;
 pub mod bsc;
 pub mod ccsds;
 pub mod cdm8qam;

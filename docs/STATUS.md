@@ -6345,3 +6345,31 @@ VVC and cannot play.
 - Tested on made-up frames through the player with a null sound output, and
   the choice of sound in the window's own test. **Not tried on a live
   carrier**: the recording is a TS, and the GUI plays from a VFO.
+
+## A Barker-11 spread carrier at 4004 MHz (2026-11-11)
+
+- Asked "what is this, a C-band beacon? looks like OFDM" of an 8 MS/s
+  recording centred 1146.445 MHz (4004 MHz behind a 5150 MHz LNB). Not
+  OFDM: two carriers 250.000 kHz apart, each a comb of eight unmodulated
+  tones (unevenly spaced, 3.66–4.24 kHz) beside a direct-sequence BPSK
+  carrier — one period of Barker 11 a symbol, 6 µs chips. The comb of lines
+  15.15 kHz apart and the preamble bursts are what looked like OFDM.
+- `decsat-modem::barker`: code search, early/late code loop, Costas loop,
+  at whatever rate the VFO gives; framer on the preamble (128 ones and a
+  127-bit sequence) and the 64-bit unique word. Decoder
+  `DecoderKind::BarkerTdm` (`barker`), a GUI card, the CLI's report.
+- On the recording (27.4 s): the lower carrier 215 frames of 1919 symbols,
+  254 + 512 + 2×(64 + 512) + 1; the upper 66 frames of 6207 symbols,
+  254 + 576 + 7×(192 + 576) + 1. No preamble or unique-word bit wrong, no
+  carrier slip. 2.1 s of CPU for each on the CLI with `--fast`.
+- The Es/N0 shown reads 18–19.5 dB where the noise floor says more: the
+  carrier's own filtering leaves symbol-to-symbol interference that the
+  figure counts as noise.
+- **Not decoded:** the blocks. A quarter of their bit positions never
+  change from zero (a pattern 32 bits long on the lower carrier, 96 on the
+  upper), the rest look random with means of 1/3, 1/2 and 2/3 by position;
+  no text in any byte alignment, bit order, inversion or NRZI reading.
+  Coded or interleaved: the code is not found. The system is not
+  identified, and the pilot tones are not used.
+- The GUI on the recording, two VFOs 300 kHz wide: both lock and count
+  frames, 6 % of a core each. Not tried live.

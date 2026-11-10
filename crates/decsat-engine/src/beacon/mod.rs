@@ -27,6 +27,7 @@
 
 pub mod bits;
 pub mod carrier;
+pub use decsat_modem::barker;
 pub use decsat_modem::hsmodemrx as hs;
 pub use decsat_modem::p3rx as p3;
 pub mod pm;

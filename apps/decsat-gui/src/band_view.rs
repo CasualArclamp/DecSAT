@@ -456,6 +456,12 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             Some(h) if h.locked => "beacon found".to_string(),
             _ => "looking".to_string(),
         },
+        // "B11 212 frames" — a Barker-11 spread carrier.
+        DecoderKind::BarkerTdm => match st.barker.as_ref() {
+            Some(b) if b.frames > 0 => format!("{} frames", b.frames),
+            Some(b) if b.locked => "code found".to_string(),
+            _ => "looking".to_string(),
+        },
         DecoderKind::P3Beacon => match st.p3.as_ref() {
             Some(p) if p.frames + p.partial > 0 => {
                 format!("{} frames, {} good", p.frames + p.partial, p.good)
