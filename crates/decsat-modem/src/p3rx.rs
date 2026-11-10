@@ -18,8 +18,9 @@
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
-use crate::p3beacon::{Deframer, parse_telemetry};
+use crate::p3beacon::Deframer;
 pub use crate::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
+use crate::p3fec::{FecBlock, FecFinder};
 use decsat_core::Iq;
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 
@@ -105,12 +106,17 @@ pub struct P3View {
     pub good: u64,
     /// Frames cut short (the signal or the recording stopped).
     pub partial: u64,
+    /// FEC blocks decoded (each checked by its Reed–Solomon code).
+    pub fec_good: u64,
     /// The latest frames, oldest first.
     pub recent: Vec<P3Frame>,
     /// The latest frame of each block name.
     pub blocks: BTreeMap<char, P3Frame>,
     /// The latest housekeeping values, with the block they came from.
     pub telemetry: Option<(char, Telemetry)>,
+    /// AO-40's housekeeping, from the latest A or E block whose CRC checks
+    /// (an old recording: the satellite fell silent in 2004).
+    pub ao40: Option<crate::ao40::Housekeeping>,
     pub message: String,
 }
 
@@ -234,6 +240,9 @@ pub struct P3Rx {
     /// The last bits read: absolute instant and value.
     carried: Vec<(i64, f32)>,
     deframer: Deframer,
+    /// The FEC blocks between the frames, and those just decoded.
+    fec: FecFinder,
+    fec_done: Vec<FecBlock>,
     /// Amplitude and deviation of the bits, smoothed.
     mean: f32,
     dev: f32,
@@ -275,6 +284,8 @@ impl P3Rx {
             last_symbol: None,
             carried: Vec::with_capacity(CARRY),
             deframer: Deframer::new(),
+            fec: FecFinder::new(),
+            fec_done: Vec::new(),
             mean: 0.0,
             dev: 0.0,
             scatter: Vec::with_capacity(SCATTER),
@@ -306,7 +317,7 @@ impl P3Rx {
             self.fifo.drain(..HOP);
             self.fifo_abs += HOP as i64;
         }
-        if !self.done.is_empty() {
+        if !self.done.is_empty() || !self.fec_done.is_empty() {
             self.collect();
         }
     }
@@ -338,6 +349,7 @@ impl P3Rx {
     /// The signal stopped: forget timing and carrier, and close any frame.
     fn lost(&mut self) {
         self.deframer.flush(&mut self.done);
+        self.fec.reset();
         self.next_bit = None;
         self.last_symbol = None;
         self.carried.clear();
@@ -684,6 +696,13 @@ impl P3Rx {
             if let Some(prev) = self.last_symbol {
                 // A change of phase is a 1 (differential; polarity as sent).
                 self.deframer.push(u8::from(prev * s < 0.0), &mut out);
+                // The same bit, soft, for the FEC block: its size against
+                // the bits' usual one.
+                let scale = (self.mean * self.mean).max(1e-9);
+                let soft = (-prev * s / scale).clamp(-4.0, 4.0);
+                if let Some(block) = self.fec.push(soft) {
+                    self.fec_done.push(block);
+                }
             }
             self.last_symbol = Some(s);
             if self.carried.len() == CARRY {
@@ -719,19 +738,46 @@ impl P3Rx {
             } else {
                 self.view.partial += 1;
             }
-            if let Some(b) = f.block() {
-                if f.is_text() {
-                    let text = f.text();
-                    if let Some(t) = parse_telemetry(&text) {
-                        self.view.telemetry = Some((b, t));
-                    }
-                }
-                self.view.blocks.insert(b, f.clone());
+            Self::keep(&mut self.view, f);
+        }
+        for b in self.fec_done.drain(..) {
+            self.view.fec_good += 1;
+            let frame = P3Frame {
+                bytes: b.data,
+                fec: true,
+                fec_corrected: b.corrected,
+                ..Default::default()
+            };
+            Self::keep(&mut self.view, frame);
+        }
+    }
+
+    /// Add a frame to the view: the log, and the latest of its block
+    /// unless what is held is better.
+    fn keep(view: &mut P3View, f: P3Frame) {
+        if let Some(b) = f.block() {
+            if f.crc_ok
+                && let Some(h) = crate::ao40::housekeeping(&f.bytes)
+            {
+                view.ao40 = Some(h);
             }
-            self.view.recent.push(f);
-            if self.view.recent.len() > KEEP {
-                self.view.recent.remove(0);
+            if let Some(t) = f.telemetry() {
+                view.telemetry = Some((b, t));
             }
+            let better_held = view.blocks.get(&b).is_some_and(|old| {
+                // A whole checked frame beats the FEC block's half of the
+                // same text; a checked one beats an unchecked one.
+                let same_half =
+                    old.bytes.len() >= f.bytes.len() && old.bytes[..f.bytes.len()] == f.bytes[..];
+                (old.crc_ok && f.fec && same_half) || (old.verified() && !f.verified())
+            });
+            if !better_held {
+                view.blocks.insert(b, f.clone());
+            }
+        }
+        view.recent.push(f);
+        if view.recent.len() > KEEP {
+            view.recent.remove(0);
         }
     }
 }
@@ -748,7 +794,6 @@ mod tests {
     /// The beacon as sent: differential, Manchester, BPSK at `fc`.
     fn make_iq(frames: usize, fc: f64, rate: f64, snr_db: f64) -> Vec<Iq> {
         let mut bits: Vec<u8> = Vec::new();
-        let mut seed = 0x1234u32;
         for n in 0..frames {
             bits.extend((0..32).rev().map(|i| ((SYNC_WORD >> i) & 1) as u8));
             let mut body = format!("K frame {n:<500}").into_bytes();
@@ -760,6 +805,12 @@ mod tests {
                 bits.extend((0..8).rev().map(|i| (b >> i) & 1));
             }
         }
+        modulate(&bits, fc, rate, snr_db)
+    }
+
+    /// Bits as the beacon sends them: differential, Manchester, BPSK.
+    fn modulate(bits: &[u8], fc: f64, rate: f64, snr_db: f64) -> Vec<Iq> {
+        let mut seed = 0x1234u32;
         let mut level = 1.0f32;
         let per_bit = rate / 400.0;
         let total = (bits.len() as f64 * per_bit) as usize;
@@ -779,7 +830,7 @@ mod tests {
         };
         let mut out = Vec::with_capacity(total);
         let mut flips = Vec::with_capacity(bits.len());
-        for &b in &bits {
+        for &b in bits {
             if b == 1 {
                 level = -level;
             }
@@ -899,6 +950,28 @@ mod tests {
             "{}",
             brief(&v)
         );
+    }
+
+    #[test]
+    fn the_fec_block_after_a_frame_is_decoded() {
+        // Bits as sent: a frame, 51 bytes of filler, the FEC block, filler.
+        let mut body = format!("K {:<510}", "UPT: 1d 2h 03m TEMP: 40 C").into_bytes();
+        body.truncate(512);
+        let crc = crc16(&body);
+        let mut bits: Vec<u8> = vec![0; 300];
+        bits.extend((0..32).rev().map(|i| ((SYNC_WORD >> i) & 1) as u8));
+        for b in body.iter().chain(&crc.to_be_bytes()) {
+            bits.extend((0..8).rev().map(|i| (b >> i) & 1));
+        }
+        bits.extend([0, 1, 0, 1, 0, 0, 0, 0].iter().cycle().take(408));
+        bits.extend(crate::p3fec::encode(&body[..256]));
+        bits.extend(std::iter::repeat_n(0, 600));
+        let v = run(&modulate(&bits, 1100.0, 8000.0, 20.0), 8000.0);
+        assert_eq!((v.good, v.fec_good), (1, 1), "{}", brief(&v));
+        assert!(v.recent.last().unwrap().fec);
+        // The whole frame is kept as the block; the telemetry is read.
+        assert!(v.blocks[&'K'].crc_ok);
+        assert_eq!(v.telemetry.as_ref().unwrap().1.temperature_c, Some(40.0));
     }
 
     #[test]

@@ -31,6 +31,7 @@
 //!   randomiser, Reed–Solomon in the dual basis, the K = 7 code) and the
 //!   TM/AOS transfer frames.
 
+pub mod ao40;
 pub mod aptx;
 pub mod asterix;
 pub mod bsc;
@@ -55,6 +56,7 @@ pub mod mode_s;
 pub mod mpa;
 pub mod oui;
 pub mod p3beacon;
+pub mod p3fec;
 pub mod p3rx;
 pub mod paradise;
 pub mod payload;

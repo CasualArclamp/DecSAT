@@ -68,9 +68,19 @@ pub struct P3Frame {
     pub sync_errors: u32,
     /// Bits received before this frame's first (after its sync word).
     pub bit_index: u64,
+    /// From the FEC block ([`crate::p3fec`]): the block's first 256 bytes,
+    /// vouched for by its Reed–Solomon code rather than a CRC.
+    pub fec: bool,
+    /// Bytes that code put right.
+    pub fec_corrected: usize,
 }
 
 impl P3Frame {
+    /// Checked good: by its CRC, or by the FEC block's code.
+    pub fn verified(&self) -> bool {
+        self.crc_ok || self.fec
+    }
+
     /// The block's name, its first byte, when that is a letter.
     pub fn block(&self) -> Option<char> {
         self.bytes
@@ -112,6 +122,16 @@ impl P3Frame {
                     .to_string()
             })
             .collect()
+    }
+
+    /// The housekeeping values in the block's text, if it has any. Read
+    /// line by line: a line may fill all 64 characters, and must not run
+    /// into the next.
+    pub fn telemetry(&self) -> Option<Telemetry> {
+        if !self.is_text() {
+            return None;
+        }
+        parse_telemetry(&self.lines().join(" "))
     }
 
     /// The block's text as one string (no line breaks).
@@ -227,6 +247,8 @@ impl Deframer {
             crc_ok: false,
             sync_errors,
             bit_index: self.bits,
+            fec: false,
+            fec_corrected: 0,
         });
         self.byte = 0;
         self.byte_bits = 0;
@@ -533,6 +555,32 @@ mod tests {
         assert_eq!(t.counters.len(), 6);
         assert_eq!(t.counters[0], ("TFL".to_string(), 0));
         assert_eq!(t.counters[5], ("HR".to_string(), 0));
+    }
+
+    #[test]
+    fn a_full_line_does_not_run_into_the_next() {
+        // As QO-100 sent it: the first values' line is 64 characters long.
+        let lines = [
+            "K HI de QO-100 (DL50AMSAT BOCHUM",
+            "UPT:    6d 12h 54m   CMD:   91   LEI_REQ:     0   LEI_ACT:     0",
+            "TEMP: 55 C VOLTAGES:  1.0 1.8 1.0 1.0 1.8 1.5 1.3 0.0 0.4 Volts",
+            "TFL:     0 TFE:     0 TFH:     0 HFF:     0 HTH:     0 HR:     0",
+        ];
+        assert_eq!(lines[1].len(), 64);
+        let f = P3Frame {
+            bytes: lines
+                .iter()
+                .flat_map(|l| format!("{l:<64}").into_bytes())
+                .collect(),
+            ..Default::default()
+        };
+        let t = f.telemetry().expect("telemetry");
+        assert_eq!(t.temperature_c, Some(55.0));
+        assert_eq!(t.leila_active, Some(0));
+        assert_eq!(t.uptime_s, Some(6 * 86_400 + 12 * 3600 + 54 * 60));
+        assert_eq!(t.voltages.len(), 9);
+        assert_eq!(t.counters.len(), 6);
+        assert_eq!(t.counters[0].0, "TFL");
     }
 
     #[test]
