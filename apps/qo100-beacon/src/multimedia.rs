@@ -17,6 +17,7 @@ use eframe::egui::{
     Stroke, TextureHandle, TextureOptions, Ui, pos2, vec2,
 };
 
+use crate::bulletin::{self, plain};
 use crate::heatmap;
 use crate::source::{COLUMNS, SPAN_HZ};
 use crate::ui::{ACCENT, BG, GOOD, MUTED, TEXT, WARN, caption, card, stat, waterfall_image};
@@ -192,6 +193,8 @@ pub struct Page {
     point_debt: f32,
     /// The file whose text is shown (its identity); `None` shows the latest.
     picked: Option<u16>,
+    /// The file on show, read into pieces (and whose it is).
+    read: Option<(u16, bulletin::Bulletin)>,
 }
 
 /// The audio as the window already has it for the PSK page's waterfall:
@@ -659,13 +662,15 @@ impl Page {
         });
         ui.add_space(4.0);
         let Some(f) = shown else { return };
-        let text = file_text(f);
+        // Read into headings, paragraphs and lists once, not every frame.
+        if self.read.as_ref().is_none_or(|(id, _)| *id != f.id) {
+            self.read = Some((f.id, bulletin::parse(&file_text(f))));
+        }
+        let Some((_, read)) = &self.read else { return };
         egui::ScrollArea::vertical()
             .id_salt(("hs-file", f.id))
             .auto_shrink(false)
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(RichText::new(text).size(12.5).color(TEXT)).wrap());
-            });
+            .show(ui, |ui| bulletin::show(ui, read));
     }
 }
 
@@ -685,7 +690,7 @@ fn spot_row(ui: &mut Ui, spot: &str) {
     ui.add(egui::Label::new(RichText::new(plain(&comment)).size(12.0).color(MUTED)).truncate());
 }
 
-/// What to show of a file: its text when it is one, else what it is.
+/// A file's text when it is one, else a line saying what it is.
 fn file_text(f: &HsFile) -> String {
     let inner = f.inside.as_ref().map_or(f.name.as_str(), |(name, _)| name);
     let lower = inner.to_ascii_lowercase();
@@ -693,60 +698,7 @@ fn file_text(f: &HsFile) -> String {
         .iter()
         .any(|e| lower.ends_with(e));
     match f.text() {
-        Some(t) if texty => plain(&t),
+        Some(t) if texty => t,
         _ => format!("{inner}: {} bytes, not text", f.len),
-    }
-}
-
-/// Text with its HTML taken out: the bulletins are HTML fragments. Line
-/// and paragraph ends become new lines.
-fn plain(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let Some(close) = rest[open..].find('>') else {
-            rest = "";
-            break;
-        };
-        let tag = rest[open + 1..open + close].to_ascii_lowercase();
-        let name = tag.trim_start_matches('/');
-        if ["br", "p", "h1", "h2", "h3", "h4", "li", "tr", "div"]
-            .iter()
-            .any(|t| {
-                name == *t
-                    || name.starts_with(&format!("{t} "))
-                    || name.starts_with(&format!("{t}/"))
-            })
-            && !out.ends_with("\n\n")
-        {
-            out.push('\n');
-        }
-        rest = &rest[open + close + 1..];
-    }
-    out.push_str(rest);
-    for (from, to) in [
-        ("&nbsp;", " "),
-        ("&amp;", "&"),
-        ("&lt;", "<"),
-        ("&gt;", ">"),
-        ("&quot;", "\""),
-    ] {
-        out = out.replace(from, to);
-    }
-    out.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::plain;
-
-    #[test]
-    fn html_becomes_lines() {
-        let html = "~B:8:263~\n<h3 style=\"color:#1a639b\">AMSAT NEWS</h3>\n<p>In this edition:<br>* One &amp; two<br>* Three</p>";
-        let text = plain(html);
-        assert!(text.contains("AMSAT NEWS"));
-        assert!(text.contains("* One & two\n* Three"));
-        assert!(!text.contains('<'));
     }
 }
