@@ -1693,14 +1693,14 @@ struct IpStage {
     rcms: Option<decsat_ip::rcms::RcmsRx>,
     /// ED-137 radio over IP's signalling and SIP (`decsat_ip::ed137`).
     radio: decsat_ip::ed137::RadioRx,
-    /// Its voice: the player and recorder, the sound of the stream heard
-    /// waiting for them, that stream, and until when (signal time) it
+    /// Its voice: the player and recorder, the streams' sound mixed and
+    /// waiting for them, the mixer, and until when (signal time) the link
     /// counts as talking.
     radio_voice: Option<CallVoice>,
     /// The DNS in the UDP (`decsat_ip::dns`).
     dns: decsat_ip::dns::DnsRx,
     radio_pcm: Vec<f32>,
-    radio_heard: Option<String>,
+    radio_mix: crate::radio_mix::Mixer,
     radio_talk_until: f64,
     clock: f64,
     /// ASTERIX found in UDP datagrams (the ML–PH trunk's ADS-B), for the
@@ -1749,7 +1749,7 @@ impl IpStage {
             radio_voice: None,
             dns: decsat_ip::dns::DnsRx::new(),
             radio_pcm: Vec::new(),
-            radio_heard: None,
+            radio_mix: Default::default(),
             radio_talk_until: f64::NEG_INFINITY,
             clock: 0.0,
             asterix: Vec::new(),
@@ -2112,18 +2112,11 @@ impl IpStage {
             // ED-137 radio over IP: its RTP's signalling, its SIP.
             self.radio
                 .udp((info.src, sport), (info.dst, dport), payload, self.clock);
-            // One stream heard at a time: the one talking keeps it until
-            // it has been quiet a moment. A muted radio is passed over (it
-            // gives the turn up within the hold if muted while talking);
-            // the others at their own volume (`crate::radio_mix`).
+            // Every radio is heard, mixed, each at its own volume; a muted
+            // one is left out (`crate::radio_mix`).
             for c in self.radio.take_voice() {
-                let Some(gain) = crate::radio_mix::gain(&c.stream) else {
-                    continue;
-                };
-                let free = self.clock > self.radio_talk_until;
-                if free || self.radio_heard.as_deref() == Some(c.stream.as_str()) {
-                    self.radio_heard = Some(c.stream);
-                    self.radio_pcm.extend(c.pcm.iter().map(|s| s * gain));
+                if let Some(gain) = crate::radio_mix::gain(&c.stream) {
+                    self.radio_mix.push(&c.stream, &c.pcm, gain);
                     self.radio_talk_until = self.clock + RADIO_TALK_HOLD;
                 }
             }
@@ -2196,6 +2189,7 @@ impl IpStage {
         // The radio's voice to its player and recorder, silence between
         // talk spurts, on the signal's clock (8 kHz).
         if let Some(v) = &mut self.radio_voice {
+            self.radio_mix.take(&mut self.radio_pcm);
             let talking = self.clock <= self.radio_talk_until;
             v.feed(&mut self.radio_pcm, talking, (self.clock * 8000.0) as u64);
         }

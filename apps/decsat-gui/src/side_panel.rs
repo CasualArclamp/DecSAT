@@ -5352,8 +5352,8 @@ fn dns_section(ui: &mut Ui, d: &decsat_ip::dns::DnsView, id: VfoId, actions: &mu
 }
 
 /// One radio's own mute and volume (`decsat_engine::radio_mix`), under the
-/// app's volume: a muted radio is not heard and does not take the turn
-/// from the others.
+/// app's volume: the link's radios are heard together, a muted one left
+/// out.
 fn radio_level_control(ui: &mut Ui, stream: &str) {
     use decsat_engine::radio_mix;
     let mut l = radio_mix::level(stream);
@@ -5361,7 +5361,10 @@ fn radio_level_control(ui: &mut Ui, stream: &str) {
     let (icon, tip) = if l.muted {
         ("🔇", "Unmute this radio")
     } else {
-        ("🔊", "Mute this radio: the others are heard instead")
+        (
+            "🔊",
+            "Mute this radio: the link's radios are heard together, this one left out",
+        )
     };
     if ui.small_button(icon).on_hover_text(tip).clicked() {
         l.muted = !l.muted;
