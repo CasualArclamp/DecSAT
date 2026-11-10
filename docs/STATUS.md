@@ -6263,3 +6263,12 @@ Rory's 8 MS/s capture around 1964.8 MHz. Two QPSK K = 7 ½ carriers at 68.3 kS/s
 - The constellation is DecSAT's heat map. Square corners, neutral greys,
   monospace numbers.
 - Dials seen moving on synthesised frames only.
+
+## QO-100's FEC block decoded (2026-11-10)
+
+- `decsat-modem::p3fec`: AO-40's FEC format, every parameter confirmed on
+  the air (see DESIGN §3e). The clean WebSDR recording: 7 blocks of 7, no
+  byte corrected, each the first half of its K/L/M/N block.
+- Not yet seen correcting real errors: the weak recording has no stretch of
+  audio long enough to hold a block. Corrections tested on synthesised
+  blocks only.

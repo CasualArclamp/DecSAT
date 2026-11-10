@@ -587,8 +587,10 @@ impl App {
         run(&mut self.shown_fec, fec.map(|b| b as f32), 400.0);
 
         let frames = view.map_or(0, |v| v.frames);
-        let (crc_frac, crc_note, crc_colour) = match (in_frame, view.and_then(|v| v.recent.last()))
-        {
+        // The last frame of each kind.
+        let last_frame = view.and_then(|v| v.recent.iter().rev().find(|f| !f.fec));
+        let last_is_fec = view.and_then(|v| v.recent.last()).filter(|f| f.fec);
+        let (crc_frac, crc_note, crc_colour) = match (in_frame, last_frame) {
             (Some(_), _) => {
                 let f = self.shown_bytes / FRAME_BYTES as f32;
                 (f, format!("{:.0} %", f * 100.0), ACCENT)
@@ -599,12 +601,18 @@ impl App {
             }
             _ => (0.0, "waiting for sync".to_string(), MUTED),
         };
-        let (fec_frac, fec_note) = match fec {
-            Some(_) => {
+        let (fec_frac, fec_note, fec_colour) = match (last_is_fec, fec) {
+            // Decoded, and nothing newer has started.
+            (Some(f), _) if in_frame.is_none() => (
+                1.0,
+                format!("good · {} bytes corrected", f.fec_corrected),
+                GOOD,
+            ),
+            (_, Some(_)) => {
                 let f = self.shown_fec / FEC_BLOCK_BITS as f32;
-                (f, format!("{:.0} % · not decoded", f * 100.0))
+                (f, format!("{:.0} %", f * 100.0), ACCENT)
             }
-            None => (0.0, "follows each frame · not decoded".to_string()),
+            _ => (0.0, "follows each frame".to_string(), MUTED),
         };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
@@ -617,7 +625,7 @@ impl App {
                 crc_colour,
                 &crc_note,
             );
-            bar(ui, w, "FEC BLOCK", fec_frac, MUTED, &fec_note);
+            bar(ui, w, "FEC BLOCK", fec_frac, fec_colour, &fec_note);
         });
         in_frame.map(|v| {
             let n = (self.shown_bytes as usize).min(v.arriving.len());
@@ -718,6 +726,11 @@ fn bar(ui: &mut Ui, width: f32, label: &str, fraction: f32, colour: Color32, not
 fn frame_state(f: &P3Frame) -> (String, Color32) {
     if f.crc_ok {
         ("CRC good".into(), GOOD)
+    } else if f.fec {
+        (
+            format!("FEC good · {} bytes corrected", f.fec_corrected),
+            GOOD,
+        )
     } else if f.complete {
         ("CRC bad".into(), BAD)
     } else {
@@ -836,7 +849,7 @@ fn stat_row(ui: &mut Ui, sn: Option<&Snapshot>) {
             } else {
                 TEXT
             },
-            format!("CRC good · {} cut short", v.map_or(0, |v| v.partial)),
+            format!("CRC good · {} FEC blocks", v.map_or(0, |v| v.fec_good)),
         );
         level_stat(ui, w, sn);
     });

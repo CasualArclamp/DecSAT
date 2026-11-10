@@ -1954,7 +1954,7 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
 fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
     use decsat_modem::p3beacon::FRAME_BYTES;
     println!(
-        "p3 beacon: carrier {}, line {:.0} dB, bits {:.1} dB, {} frames, {} good CRC, {} cut short",
+        "p3 beacon: carrier {}, line {:.0} dB, bits {:.1} dB, {} frames, {} good CRC, {} cut short, {} FEC blocks",
         v.carrier_hz
             .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
         v.line_db,
@@ -1962,9 +1962,12 @@ fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
         v.frames,
         v.good,
         v.partial,
+        v.fec_good,
     );
     for f in &v.recent {
-        let state = if f.crc_ok {
+        let state = if f.fec {
+            format!("FEC good, {} bytes corrected, first half", f.fec_corrected)
+        } else if f.crc_ok {
             "CRC good".to_string()
         } else if f.complete {
             "CRC BAD".to_string()

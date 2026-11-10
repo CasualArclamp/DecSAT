@@ -48,6 +48,9 @@ pub fn show(ui: &mut Ui, v: &P3View, id: VfoId) {
             if v.partial > 0 {
                 ui.weak(format!("· {} cut short", v.partial));
             }
+            if v.fec_good > 0 {
+                ui.weak(format!("· {} FEC blocks", v.fec_good));
+            }
             if v.in_frame {
                 ui.weak("· receiving");
             }
@@ -116,6 +119,11 @@ fn telemetry_rows(ui: &mut Ui, block: char, t: &Telemetry) {
 fn block(ui: &mut Ui, name: char, f: &P3Frame, id: VfoId) {
     let (state, colour) = if f.crc_ok {
         ("CRC good".to_string(), GOOD)
+    } else if f.fec {
+        (
+            format!("FEC good, {} bytes corrected", f.fec_corrected),
+            GOOD,
+        )
     } else if f.complete {
         ("CRC bad".to_string(), BAD)
     } else {
