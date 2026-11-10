@@ -42,6 +42,10 @@ pub struct Bulletin {
     /// What is between the tildes of the first line (`R:1:44`).
     pub tag: Option<String>,
     pub blocks: Vec<Block>,
+    /// The pictures a web page carries inside itself (`data:` addresses),
+    /// as the files they are. They are shown first: where on the page each
+    /// belongs is the page's styling, which is not followed.
+    pub images: Vec<Vec<u8>>,
 }
 
 /// A heading's mark in text that came from HTML.
@@ -83,6 +87,99 @@ pub(crate) fn plain(html: &str) -> String {
         out = out.replace(from, to);
     }
     out.trim().to_string()
+}
+
+/// Base64 to bytes (RFC 4648's alphabet); `None` if it is not that.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in text.bytes().filter(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = acc << 6 | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// The pictures written into a page as `data:image/…;base64,…`, and the
+/// page without them (they are long, and may sit where text is kept).
+fn take_images(html: &str) -> (String, Vec<Vec<u8>>) {
+    const MARK: &str = "data:image/";
+    let mut images = Vec::new();
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find(MARK) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + MARK.len()..];
+        // "jpeg;base64," and then the picture, up to whatever closes it.
+        let coded = after
+            .find(";base64,")
+            .filter(|&i| i <= 16)
+            .map(|i| &after[i + 8..]);
+        match coded {
+            Some(coded) => {
+                let end = coded
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || "+/=".contains(c)))
+                    .unwrap_or(coded.len());
+                if let Some(bytes) = base64(&coded[..end]).filter(|b| !b.is_empty()) {
+                    images.push(bytes);
+                }
+                rest = &coded[end..];
+            }
+            None => {
+                out.push_str(MARK);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, images)
+}
+
+/// A page without what is not for reading: scripts, style sheets, comments
+/// and the head, whose title is kept as a heading.
+fn readable(html: &str) -> String {
+    let mut text = html.to_string();
+    let mut title = None;
+    for (open, close) in [
+        ("<!--", "-->"),
+        ("<script", "</script>"),
+        ("<style", "</style>"),
+        ("<head", "</head>"),
+    ] {
+        loop {
+            // Rust note: ASCII lower-casing keeps every byte where it was.
+            let lower = text.to_ascii_lowercase();
+            let Some(from) = lower.find(open) else { break };
+            // Cut short (a page still arriving): to the end.
+            let to = lower[from..]
+                .find(close)
+                .map_or(text.len(), |i| from + i + close.len());
+            if open == "<head"
+                && let Some(a) = lower[from..to].find("<title>")
+                && let Some(b) = lower[from..to].find("</title>")
+                && a + 7 <= b
+            {
+                title = Some(text[from + a + 7..from + b].trim().to_string());
+            }
+            text.replace_range(from..to, "");
+        }
+    }
+    match title.filter(|t| !t.is_empty()) {
+        Some(t) => format!("<h1>{t}</h1>{text}"),
+        None => text,
+    }
 }
 
 /// HTML to text, each heading on a line of its own behind [`HEADING_MARK`].
@@ -130,8 +227,11 @@ fn item(line: &str) -> Option<&str> {
 /// Read a bulletin's text.
 pub fn parse(text: &str) -> Bulletin {
     let html = ["</", "<br", "<p>", "<p "].iter().any(|t| text.contains(t));
+    let mut images = Vec::new();
     let text = if html {
-        html_to_text(text)
+        let (page, found) = take_images(text);
+        images = found;
+        html_to_text(&readable(&page))
     } else {
         text.replace('\r', "")
     };
@@ -139,7 +239,10 @@ pub fn parse(text: &str) -> Bulletin {
     // mark).
     let text = text.replace('\u{a0}', " ");
     let mut lines: Vec<&str> = text.lines().map(str::trim_end).collect();
-    let mut out = Bulletin::default();
+    let mut out = Bulletin {
+        images,
+        ..Default::default()
+    };
     // The first line with anything on it: the tag between tildes.
     if let Some(first) = lines.iter().position(|l| !l.is_empty()) {
         let l = lines[first].trim();
@@ -247,9 +350,51 @@ fn text(ui: &mut Ui, s: &str, size: f32) {
     });
 }
 
+/// A bulletin's pictures as textures, made the first time it is drawn
+/// (`None` for one that would not decode).
+#[derive(Default)]
+pub struct Pictures(Option<Vec<Option<egui::TextureHandle>>>);
+
+/// The largest picture taken, a side (pixels): these come off the air.
+const PICTURE_MAX: u32 = 4096;
+
+impl Pictures {
+    fn of(&mut self, ui: &Ui, b: &Bulletin) -> &[Option<egui::TextureHandle>] {
+        self.0.get_or_insert_with(|| {
+            b.images
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| {
+                    let picture = image::load_from_memory(bytes).ok()?.into_rgba8();
+                    let (w, h) = picture.dimensions();
+                    if w == 0 || h == 0 || w > PICTURE_MAX || h > PICTURE_MAX {
+                        return None;
+                    }
+                    let colour = egui::ColorImage::from_rgba_unmultiplied(
+                        [w as usize, h as usize],
+                        picture.as_raw(),
+                    );
+                    Some(ui.ctx().load_texture(
+                        format!("bulletin-{i}"),
+                        colour,
+                        egui::TextureOptions::LINEAR,
+                    ))
+                })
+                .collect()
+        })
+    }
+}
+
 /// Draw a bulletin.
-pub fn show(ui: &mut Ui, b: &Bulletin) {
+pub fn show(ui: &mut Ui, b: &Bulletin, pictures: &mut Pictures) {
     ui.spacing_mut().item_spacing.y = 2.0;
+    for texture in pictures.of(ui, b).iter().flatten() {
+        // Its own size, or the panel's width if that is less.
+        let size = texture.size_vec2();
+        let fit = (ui.available_width() / size.x).min(1.0);
+        ui.image((texture.id(), size * fit));
+        ui.add_space(4.0);
+    }
     if let Some(tag) = &b.tag {
         ui.label(
             RichText::new(format!("bulletin {tag}"))
@@ -398,6 +543,32 @@ Deutscher Amateur-Radio-Club e. V.
         assert!(b.blocks.contains(&Block::Item("Three".into())));
         assert!(b.blocks.contains(&Block::Heading("AO-7 Again".into())));
         assert!(b.blocks.contains(&Block::Para("Text of the item.".into())));
+    }
+
+    #[test]
+    fn a_web_page_is_read_without_its_scripts_and_styles() {
+        // A one-pixel PNG in a style sheet, as the beacon's own page has
+        // its banner.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let page = format!(
+            "<!DOCTYPE html><html><head><title>QO-100 Info</title>\n<style>\n.top {{ background-image:url('data:image/png;base64,{png}'); }}\n</style>\n<script>\nvar sockurl = \"ws://\" + \"localhost\";\nfunction go() {{ if (a < b) {{ c(); }} }}\n</script></head>\n<body><!-- a comment --><h2>DX Cluster</h2><p>Latest spots</p>\n<script>websocket.onopen = function () {{}};</script></body></html>"
+        );
+        let b = parse(&page);
+        assert_eq!(b.images.len(), 1);
+        assert_eq!(b.images[0][..8], *b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            b.blocks,
+            vec![
+                Block::Title("QO-100 Info".into()),
+                Block::Gap,
+                Block::Heading("DX Cluster".into()),
+                Block::Gap,
+                Block::Para("Latest spots".into()),
+            ]
+        );
+        // Cut off in the middle of its script, as while it arrives.
+        let part = parse(&page[..page.find("function go").unwrap()]);
+        assert_eq!(part.blocks, vec![Block::Title("QO-100 Info".into())]);
     }
 
     #[test]

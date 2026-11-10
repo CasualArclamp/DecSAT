@@ -19,8 +19,9 @@ rustfft.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 # Native file dialog for opening a recording.
 rfd = "0.17.2"
-# PNG output for --screenshot.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+# PNG output for --screenshot; PNG and JPEG for the pictures in the
+# multimedia beacon's web pages.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 [build-dependencies]
 # The exe's icon (a Windows resource).
