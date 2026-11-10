@@ -8,8 +8,8 @@ use std::collections::VecDeque;
 
 use decsat_core::Iq;
 use decsat_modem::hsmodem::{
-    FRAME_SYMBOLS, HsFile, NB_SPECTRUM_HZ, NB_SPECTRUM_LEVELS, NB_SPECTRUM_STEP_HZ, RING_RADIUS,
-    WB_SPECTRUM_HZ, WB_SPECTRUM_LEVELS, WB_SPECTRUM_STEP_HZ,
+    BAUD, FRAME_SYMBOLS, HsFile, NB_SPECTRUM_HZ, NB_SPECTRUM_LEVELS, NB_SPECTRUM_STEP_HZ,
+    RING_RADIUS, ROLLOFF, WB_SPECTRUM_HZ, WB_SPECTRUM_LEVELS, WB_SPECTRUM_STEP_HZ,
 };
 use decsat_modem::hsmodemrx::HsView;
 use eframe::egui::{
@@ -18,7 +18,8 @@ use eframe::egui::{
 };
 
 use crate::heatmap;
-use crate::ui::{ACCENT, BG, GOOD, MUTED, TEXT, WARN, caption, card, stat};
+use crate::source::{COLUMNS, SPAN_HZ};
+use crate::ui::{ACCENT, BG, GOOD, MUTED, TEXT, WARN, caption, card, stat, waterfall_image};
 
 /// Screen pixels to a line of a waterfall: lines come about every 0.7 s,
 /// so two pixels each keeps a minute or so on show.
@@ -182,6 +183,8 @@ pub struct Page {
     nb: Fall,
     wb: Fall,
     heat: heatmap::Grid,
+    /// The small audio waterfall's picture.
+    audio: Option<TextureHandle>,
     /// Constellation points waiting their turn, and the fraction of one
     /// carried to the next frame: the decoder hands symbols over in lumps,
     /// the display lets them out evenly.
@@ -189,6 +192,143 @@ pub struct Page {
     point_debt: f32,
     /// The file whose text is shown (its identity); `None` shows the latest.
     picked: Option<u16>,
+}
+
+/// The audio as the window already has it for the PSK page's waterfall:
+/// rows of dB per column over [`SPAN_HZ`], newest first, and the colour
+/// range.
+#[derive(Clone, Copy)]
+pub struct Audio<'a> {
+    pub rows: &'a VecDeque<Vec<f32>>,
+    pub levels: (f32, f32),
+}
+
+/// The signal's half width (Hz): half the symbol rate and the roll-off.
+const HALF_WIDTH_HZ: f64 = BAUD / 2.0 * (1.0 + ROLLOFF);
+/// Under this the receiver's audio has usually rolled off (Hz).
+const AUDIO_LOW_HZ: f64 = 200.0;
+
+/// Whether the signal sits inside the audio, in a few words.
+fn tuning_note(v: Option<&HsView>) -> &'static str {
+    match v.and_then(|v| v.carrier_hz).map(f64::abs) {
+        None => "centre the block near 2.2 kHz",
+        Some(fc) if fc + HALF_WIDTH_HZ > SPAN_HZ => "top edge cut off: tune the dial up",
+        Some(fc) if fc - HALF_WIDTH_HZ < AUDIO_LOW_HZ => "bottom edge cut off: tune the dial down",
+        Some(_) => "inside the audio band",
+    }
+}
+
+impl Page {
+    /// The audio's spectrum over a small waterfall, with the carrier found
+    /// and the signal's edges either side of it: for lining the receiver
+    /// up so the whole signal is inside its audio.
+    fn tuning(
+        &mut self,
+        ui: &mut Ui,
+        audio: Audio<'_>,
+        v: Option<&HsView>,
+        width: f32,
+        lut: &[Color32],
+    ) {
+        const TRACE_H: f32 = 56.0;
+        let height = (ui.available_height() - 18.0).max(TRACE_H + 20.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height + 16.0), Sense::hover());
+        // On the pixel grid, one row to a screen pixel, as the big one.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |x: f32| (x * ppp).round() / ppp;
+        let corner = pos2(snap(rect.min.x), snap(rect.min.y));
+        let size = [
+            ((width * ppp).round() as usize).max(1),
+            (((height - TRACE_H) * ppp).round() as usize).max(1),
+        ];
+        let trace = Rect::from_min_size(corner, vec2(size[0] as f32 / ppp, snap(TRACE_H)));
+        let fall = Rect::from_min_size(
+            pos2(corner.x, trace.max.y),
+            vec2(size[0] as f32 / ppp, size[1] as f32 / ppp),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(trace.union(fall), CornerRadius::ZERO, Color32::BLACK);
+        let x_of = |hz: f64| trace.min.x + (hz / SPAN_HZ) as f32 * trace.width();
+        if !audio.rows.is_empty() {
+            let image = waterfall_image(audio.rows, size, audio.levels, lut);
+            match &mut self.audio {
+                Some(t) => t.set(image, TextureOptions::NEAREST),
+                None => {
+                    self.audio = Some(ui.ctx().load_texture(
+                        "hs-audio",
+                        image,
+                        TextureOptions::NEAREST,
+                    ));
+                }
+            }
+            if let Some(t) = &self.audio {
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(t.id(), fall, uv, Color32::WHITE);
+            }
+            // The trace: the latest rows averaged (a fifth of a second).
+            let recent = audio.rows.iter().take(12).filter(|r| r.len() == COLUMNS);
+            let mut mean = vec![0.0f32; COLUMNS];
+            let mut n = 0.0f32;
+            for row in recent {
+                mean.iter_mut().zip(row).for_each(|(m, &db)| *m += db);
+                n += 1.0;
+            }
+            if n > 0.0 {
+                let (lo, hi) = audio.levels;
+                let line: Vec<egui::Pos2> = mean
+                    .iter()
+                    .enumerate()
+                    .map(|(c, &sum)| {
+                        let up = ((sum / n - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0);
+                        pos2(
+                            trace.min.x + (c as f32 + 0.5) / COLUMNS as f32 * trace.width(),
+                            trace.max.y - 2.0 - up * (trace.height() - 6.0),
+                        )
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(
+                    line,
+                    Stroke::new(1.2, Color32::from_rgb(250, 200, 110)),
+                ));
+            }
+        }
+        // The carrier, and where the signal's edges fall either side.
+        if let Some(fc) = v.and_then(|v| v.carrier_hz).map(f64::abs) {
+            let both = trace.union(fall);
+            for edge in [fc - HALF_WIDTH_HZ, fc + HALF_WIDTH_HZ] {
+                let inside = (AUDIO_LOW_HZ..=SPAN_HZ).contains(&edge);
+                let colour = if inside {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 110)
+                } else {
+                    WARN
+                };
+                let x = snap(x_of(edge.clamp(0.0, SPAN_HZ)));
+                painter.vline(x, both.y_range(), Stroke::new(1.0, colour));
+            }
+            let x = snap(x_of(fc));
+            painter.vline(x, both.y_range(), Stroke::new(1.5, ACCENT));
+            painter.text(
+                pos2((x + 5.0).min(both.max.x - 70.0), trace.min.y + 8.0),
+                Align2::LEFT_CENTER,
+                format!("{fc:.1} Hz"),
+                FontId::proportional(11.5),
+                ACCENT,
+            );
+        }
+        for khz in 0..=4 {
+            let x = x_of(f64::from(khz) * 1000.0);
+            painter.text(
+                pos2(
+                    x.clamp(fall.min.x + 12.0, fall.max.x - 14.0),
+                    fall.max.y + 8.0,
+                ),
+                Align2::CENTER_CENTER,
+                format!("{khz} kHz"),
+                FontId::proportional(10.5),
+                MUTED,
+            );
+        }
+    }
 }
 
 /// The eight points as sent: the centre, and seven round the ring.
@@ -228,7 +368,14 @@ impl Page {
         self.points.drain(..n).collect()
     }
 
-    pub fn show(&mut self, ui: &mut Ui, v: Option<&HsView>, ended: bool, lut: &[Color32]) {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        v: Option<&HsView>,
+        ended: bool,
+        audio: Audio<'_>,
+        lut: &[Color32],
+    ) {
         self.stats(ui, v, ended);
         ui.add_space(10.0);
         let rest = ui.available_size();
@@ -237,7 +384,7 @@ impl Page {
             ui.spacing_mut().item_spacing.x = 8.0;
             let down = Layout::top_down(Align::Min);
             ui.allocate_ui_with_layout(vec2(left_w, rest.y), down, |ui| {
-                self.left(ui, v, left_w, lut);
+                self.left(ui, v, audio, left_w, lut);
             });
             ui.allocate_ui_with_layout(vec2(ui.available_width(), rest.y), down, |ui| {
                 self.right(ui, v);
@@ -297,7 +444,14 @@ impl Page {
         });
     }
 
-    fn left(&mut self, ui: &mut Ui, v: Option<&HsView>, width: f32, lut: &[Color32]) {
+    fn left(
+        &mut self,
+        ui: &mut Ui,
+        v: Option<&HsView>,
+        audio: Audio<'_>,
+        width: f32,
+        lut: &[Color32],
+    ) {
         let inner = width - 22.0;
         let none = Vec::new();
         // What is left under the two waterfalls is the constellation's.
@@ -360,27 +514,17 @@ impl Page {
             });
             card().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width((inner - 180.0).max(220.0));
+                    let w = (inner - 180.0).max(220.0);
+                    ui.set_width(w);
                     ui.set_height(172.0);
-                    caption(ui, "CW SKIMMER");
-                    ui.add_space(4.0);
-                    let lines = v.map_or(&[][..], |v| &v.skimmer[..]);
-                    if lines.is_empty() {
-                        ui.label(RichText::new("Nothing yet").size(12.0).color(MUTED));
-                    }
-                    egui::ScrollArea::vertical()
-                        .id_salt("hs-skimmer")
-                        .auto_shrink(false)
-                        .show(ui, |ui| {
-                            for line in lines.iter().rev() {
-                                ui.label(
-                                    RichText::new(line.replace('~', "  "))
-                                        .size(12.0)
-                                        .monospace()
-                                        .color(TEXT),
-                                );
-                            }
+                    ui.horizontal(|ui| {
+                        caption(ui, "AUDIO · TUNING");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            caption(ui, tuning_note(v));
                         });
+                    });
+                    ui.add_space(4.0);
+                    self.tuning(ui, audio, v, w, lut);
                 });
             });
         });
@@ -390,7 +534,7 @@ impl Page {
         let width = ui.available_width() - 22.0;
         card().show(ui, |ui| {
             ui.set_width(width);
-            ui.set_height(190.0);
+            ui.set_height(150.0);
             caption(ui, "DX SPOTS");
             ui.add_space(4.0);
             let spots = v.map_or(&[][..], |v| &v.spots[..]);
@@ -410,6 +554,30 @@ impl Page {
                                 ui.end_row();
                             }
                         });
+                });
+        });
+        ui.add_space(8.0);
+        card().show(ui, |ui| {
+            ui.set_width(width);
+            ui.set_height(96.0);
+            caption(ui, "CW SKIMMER");
+            ui.add_space(4.0);
+            let lines = v.map_or(&[][..], |v| &v.skimmer[..]);
+            if lines.is_empty() {
+                ui.label(RichText::new("Nothing yet").size(12.0).color(MUTED));
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("hs-skimmer")
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    for line in lines.iter().rev() {
+                        ui.label(
+                            RichText::new(line.replace('~', "  "))
+                                .size(12.0)
+                                .monospace()
+                                .color(TEXT),
+                        );
+                    }
                 });
         });
         ui.add_space(8.0);

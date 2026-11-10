@@ -284,6 +284,10 @@ impl eframe::App for App {
                         ui,
                         sn.map(|s| &s.hs),
                         sn.is_some_and(|s| s.ended),
+                        multimedia::Audio {
+                            rows: &self.rows,
+                            levels: self.levels,
+                        },
                         &self.palette,
                     );
                     return;
@@ -1159,7 +1163,7 @@ fn satellite(ui: &mut Ui, v: Option<&P3View>, t: f32) {
 /// The waterfall as a picture of `width` by `height` screen pixels, newest
 /// row at the top, coloured between the levels (dB) through `lut`. Each
 /// pixel column reads a fixed place in the row (between two of its values).
-fn waterfall_image(
+pub(crate) fn waterfall_image(
     rows: &VecDeque<Vec<f32>>,
     [width, height]: [usize; 2],
     (lo, hi): (f32, f32),
