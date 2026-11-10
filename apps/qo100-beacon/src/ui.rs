@@ -10,6 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
 use decsat_modem::ao40::{self, Housekeeping};
+use decsat_modem::hsmodemrx::HsView;
 use decsat_modem::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_modem::p3rx::P3View;
 use eframe::egui::{
@@ -20,6 +21,7 @@ use eframe::egui::{
 use crate::Options;
 use crate::gauges::{Dial, dial};
 use crate::heatmap;
+use crate::multimedia;
 use crate::sat;
 use crate::source::{self, COLUMNS, LogLine, ROWS, Running, SPAN_HZ};
 
@@ -47,6 +49,9 @@ pub struct App {
     device: Option<String>,
     running: Option<Running>,
     error: Option<String>,
+    /// The multimedia beacon's page is the one on show, and its state.
+    multimedia: bool,
+    page: multimedia::Page,
     /// The block shown; `None` follows the latest.
     picked: Option<char>,
     waterfall: Option<TextureHandle>,
@@ -97,6 +102,8 @@ impl App {
             devices,
             running: None,
             error: None,
+            multimedia: opts.multimedia,
+            page: multimedia::Page::default(),
             picked: None,
             waterfall: None,
             heat: heatmap::Grid::default(),
@@ -216,11 +223,15 @@ impl eframe::App for App {
         if let Some(r) = &self.running {
             let mut s = r.shared.lock().unwrap();
             self.rows_waiting.extend(s.new_rows.drain(..));
+            if self.multimedia {
+                self.page.take_points(s.hs_points.drain(..));
+            }
             self.levels = s.levels;
             if self.snap.is_none() || s.version != self.snap_version {
                 self.snap_version = s.version;
                 self.snap = Some(Snapshot {
                     view: s.view.clone(),
+                    hs: s.hs.clone(),
                     level_db: s.level_db,
                     label: s.label.clone(),
                     ended: s.ended,
@@ -267,6 +278,16 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(16, 8)))
             .show(ui, |ui| {
+                if self.multimedia {
+                    let sn = snap.as_ref();
+                    self.page.show(
+                        ui,
+                        sn.map(|s| &s.hs),
+                        sn.is_some_and(|s| s.ended),
+                        &self.palette,
+                    );
+                    return;
+                }
                 stat_row(ui, snap.as_ref());
                 ui.add_space(10.0);
                 let rest = ui.available_size();
@@ -333,6 +354,7 @@ impl Stats {
 /// A copy of what the decoding thread has published.
 struct Snapshot {
     view: P3View,
+    hs: HsView,
     level_db: f32,
     label: String,
     ended: bool,
@@ -341,7 +363,7 @@ struct Snapshot {
     rate: f64,
 }
 
-fn card() -> Frame {
+pub(crate) fn card() -> Frame {
     Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0, EDGE))
@@ -349,7 +371,7 @@ fn card() -> Frame {
         .inner_margin(Margin::same(10))
 }
 
-fn caption(ui: &mut Ui, text: &str) {
+pub(crate) fn caption(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(11.0).color(MUTED));
 }
 
@@ -374,11 +396,28 @@ impl App {
                     .color(TEXT),
             );
             ui.add_space(6.0);
-            ui.label(
-                RichText::new("400 bit/s PSK · AO-40 format")
+            ui.add_space(6.0);
+            // The two beacons' pages. Both are received all the time.
+            for (multimedia, name, hint) in [
+                (
+                    false,
+                    "PSK beacon",
+                    "10489.750 MHz · 400 bit/s PSK, AO-40's format",
+                ),
+                (
+                    true,
+                    "Multimedia beacon",
+                    "10489.995 MHz · 2400 baud 8APSK, AMSAT-DL's HSmodem",
+                ),
+            ] {
+                let on = self.multimedia == multimedia;
+                let text = RichText::new(name)
                     .size(12.5)
-                    .color(MUTED),
-            );
+                    .color(if on { TEXT } else { MUTED });
+                if ui.selectable_label(on, text).on_hover_text(hint).clicked() {
+                    self.multimedia = multimedia;
+                }
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let running = self
                     .running
@@ -883,7 +922,14 @@ fn frame_detail(sn: Option<&Snapshot>) -> String {
     }
 }
 
-fn stat(ui: &mut Ui, w: f32, title: &str, value: String, colour: Color32, detail: String) {
+pub(crate) fn stat(
+    ui: &mut Ui,
+    w: f32,
+    title: &str,
+    value: String,
+    colour: Color32,
+    detail: String,
+) {
     card()
         .inner_margin(Margin::symmetric(12, 9))
         .show(ui, |ui| {

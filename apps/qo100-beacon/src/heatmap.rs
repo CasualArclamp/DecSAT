@@ -74,6 +74,12 @@ impl Grid {
 
     /// Add `pts` (new ones only) and draw the grid in a square of `side`, with a mark at each BPSK point.
     pub fn show(&mut self, ui: &mut Ui, pts: &[Iq], side: f32) {
+        self.show_marked(ui, pts, side, &[Iq::new(-1.0, 0.0), Iq::new(1.0, 0.0)]);
+    }
+
+    /// The same, with a mark at each of `marks` (the constellation's own
+    /// points).
+    pub fn show_marked(&mut self, ui: &mut Ui, pts: &[Iq], side: f32, marks: &[Iq]) {
         let now = ui.input(|i| i.time);
         self.add(pts, now);
         let image = self.image();
@@ -98,10 +104,10 @@ impl Grid {
             painter.image(t.id(), rect, uv, Color32::WHITE);
         }
         let mark = Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 110));
-        for x in [-1.0f32, 1.0] {
+        for m in marks {
             let c: Pos2 = pos2(
-                rect.left() + (x + RANGE) / (2.0 * RANGE) * side,
-                rect.center().y,
+                rect.left() + (m.re + RANGE) / (2.0 * RANGE) * side,
+                rect.top() + (RANGE - m.im) / (2.0 * RANGE) * side,
             );
             painter.hline((c.x - 4.0)..=(c.x + 4.0), c.y, mark);
             painter.vline(c.x, (c.y - 4.0)..=(c.y + 4.0), mark);

@@ -495,6 +495,166 @@ pub fn decode(codeword: &[u8]) -> Option<HsFrame> {
 }
 
 // ---------------------------------------------------------------------------
+// Files
+
+/// A file being received, or received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HsFile {
+    pub name: String,
+    /// The CRC-16 of the bytes sent: the file's identity.
+    pub id: u16,
+    /// The frame type it came as, one of the `KIND_` values.
+    pub kind: u8,
+    /// Bytes sent (a ZIP archive's, for text, HTML and binary files).
+    pub len: usize,
+    /// Frames received and frames in all.
+    pub have: usize,
+    pub frames: usize,
+    /// The bytes sent, once every frame is in and their CRC is the `id`.
+    pub data: Option<Vec<u8>>,
+    /// The file inside, when what was sent is a ZIP archive: its name and
+    /// contents.
+    pub inside: Option<(String, Vec<u8>)>,
+}
+
+impl HsFile {
+    pub fn complete(&self) -> bool {
+        self.data.is_some()
+    }
+
+    /// The contents as text, unzipped when they were zipped.
+    pub fn text(&self) -> Option<String> {
+        let bytes = match (&self.inside, &self.data) {
+            (Some((_, inner)), _) => inner,
+            (None, Some(data)) => data,
+            _ => return None,
+        };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+/// The first file of a ZIP archive: its name and contents (stored or
+/// deflated). Read from the local file header (PKWARE APPNOTE 4.3.7);
+/// the lengths come from the central directory when the local header
+/// leaves them to a data descriptor.
+pub fn unzip_first(zip: &[u8]) -> Option<(String, Vec<u8>)> {
+    use std::io::Read;
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*zip.get(at)?, *zip.get(at + 1)?]) as usize);
+    let u32_at = |at: usize| Some(u16_at(at)? | u16_at(at + 2)? << 16);
+    if zip.get(..4)? != b"PK\x03\x04" {
+        return None;
+    }
+    let method = u16_at(8)?;
+    let (mut packed, mut size) = (u32_at(18)?, u32_at(22)?);
+    let name_len = u16_at(26)?;
+    let body = 30 + name_len + u16_at(28)?;
+    let name = String::from_utf8_lossy(zip.get(30..30 + name_len)?).into_owned();
+    if u16_at(6)? & 8 != 0 {
+        // Sizes follow the data: take them from the central directory.
+        let dir = zip.windows(4).rposition(|w| w == b"PK\x01\x02")?;
+        (packed, size) = (u32_at(dir + 20)?, u32_at(dir + 24)?);
+    }
+    let data = zip.get(body..body + packed)?;
+    let out = match method {
+        0 => data.to_vec(),
+        8 => {
+            let mut out = Vec::with_capacity(size);
+            flate2::read::DeflateDecoder::new(data)
+                .read_to_end(&mut out)
+                .ok()?;
+            out
+        }
+        _ => return None,
+    };
+    (out.len() == size).then_some((name, out))
+}
+
+/// Puts files together from their frames. The beacon sends each file over
+/// and over: frames missed one time round are filled in the next.
+#[derive(Debug, Default)]
+pub struct Files {
+    /// The file whose frames are arriving, and each frame's payload.
+    current: Option<(HsFile, Vec<Option<Vec<u8>>>)>,
+    /// Files finished, oldest first.
+    pub done: Vec<HsFile>,
+}
+
+/// Finished files kept.
+const FILES_KEPT: usize = 8;
+
+impl Files {
+    /// The file now arriving, if it is not yet whole.
+    pub fn arriving(&self) -> Option<&HsFile> {
+        self.current
+            .as_ref()
+            .map(|(f, _)| f)
+            .filter(|f| !f.complete())
+    }
+
+    pub fn push(&mut self, frame: &HsFrame) {
+        match frame.content() {
+            Content::FileStart { name, id, len, .. } => {
+                let same = self
+                    .current
+                    .as_ref()
+                    .is_some_and(|(f, _)| f.id == id && f.len == len);
+                if !same {
+                    let frames = (len + FILE_HEADER_BYTES).div_ceil(PAYLOAD_BYTES);
+                    let file = HsFile {
+                        name,
+                        id,
+                        kind: frame.kind,
+                        len,
+                        have: 0,
+                        frames,
+                        data: None,
+                        inside: None,
+                    };
+                    self.current = Some((file, vec![None; frames]));
+                }
+            }
+            Content::FileData => {}
+            _ => return,
+        }
+        let Some((file, parts)) = self.current.as_mut() else {
+            return;
+        };
+        let n = frame.counter as usize;
+        // A frame that cannot be this file's: another file's, its start
+        // missed. Wait for the next start.
+        let last = frame.place == Place::Last || frame.place == Place::Single;
+        if frame.kind != file.kind || n >= parts.len() || last != (n + 1 == parts.len()) {
+            if !file.complete() {
+                self.current = None;
+            }
+            return;
+        }
+        if file.complete() || parts[n].is_some() {
+            return;
+        }
+        parts[n] = Some(frame.payload.clone());
+        file.have += 1;
+        if file.have < file.frames {
+            return;
+        }
+        let all: Vec<u8> = parts.iter().flatten().flatten().copied().collect();
+        let data = all[FILE_HEADER_BYTES..FILE_HEADER_BYTES + file.len].to_vec();
+        if crc16(&data) != file.id {
+            // Frames of two files were mixed: start again.
+            self.current = None;
+            return;
+        }
+        file.inside = unzip_first(&data);
+        file.data = Some(data);
+        self.done.retain(|f| f.id != file.id);
+        self.done.push(file.clone());
+        if self.done.len() > FILES_KEPT {
+            self.done.remove(0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // From decided points to frames
 
 /// A received point: 0 for the centre, 1–7 for the ring's places
@@ -768,6 +928,75 @@ mod tests {
         // Past the code's reach: refused, or "corrected" to another
         // codeword, never back to this one with 17 errors claimed.
         assert_ne!(rs_correct(&mut worse), Some(17));
+    }
+
+    #[test]
+    fn a_file_comes_together_over_two_sendings() {
+        // A stored (not deflated) ZIP of one small text file, by hand.
+        let inner = b"QO-100 multimedia beacon test bulletin. ".repeat(12);
+        let crc = {
+            // CRC-32 as ZIP has it, bit by bit.
+            let mut c = 0xFFFF_FFFFu32;
+            for &b in &inner {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        c >> 1 ^ 0xEDB8_8320
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        };
+        let mut zip = b"PK\x03\x04\x14\0\0\0\0\0\0\0\0\0".to_vec();
+        zip.extend(crc.to_le_bytes());
+        zip.extend((inner.len() as u32).to_le_bytes());
+        zip.extend((inner.len() as u32).to_le_bytes());
+        zip.extend([5, 0, 0, 0]);
+        zip.extend(b"a.blt");
+        zip.extend(&inner);
+        let mut sent = vec![0u8; FILE_HEADER_BYTES];
+        sent[..5].copy_from_slice(b"a.blt");
+        sent[50..52].copy_from_slice(&crc16(&zip).to_be_bytes());
+        sent[52..55].copy_from_slice(&(zip.len() as u32).to_be_bytes()[1..]);
+        sent.extend(&zip);
+        let chunks: Vec<&[u8]> = sent.chunks(PAYLOAD_BYTES).collect();
+        let frames: Vec<HsFrame> = chunks
+            .iter()
+            .enumerate()
+            .map(|(n, part)| {
+                let place = match n {
+                    0 => Place::First,
+                    n if n + 1 == chunks.len() => Place::Last,
+                    _ => Place::Middle,
+                };
+                let air = encode(n as u16, KIND_ASCII_FILE, place, part);
+                decode(&air[SYNC.len()..]).unwrap()
+            })
+            .collect();
+        assert_eq!(frames.len(), 3);
+        let mut files = Files::default();
+        // First time round the middle frame is lost; second time the last.
+        files.push(&frames[0]);
+        files.push(&frames[2]);
+        assert_eq!(files.arriving().map(|f| (f.have, f.frames)), Some((2, 3)));
+        files.push(&frames[0]);
+        files.push(&frames[1]);
+        assert!(files.arriving().is_none());
+        let file = &files.done[0];
+        assert_eq!(file.name, "a.blt");
+        assert_eq!(file.text().unwrap().as_bytes(), inner);
+    }
+
+    #[test]
+    fn half_a_zip_is_not_unzipped() {
+        // The received first frame holds the ZIP's header and the name of
+        // the file inside, but only the start of its data.
+        let f = received(FILE_AIR);
+        let zip = &f.payload[FILE_HEADER_BYTES..];
+        assert_eq!(zip[30..41], *b"ANS-263.blt");
+        assert_eq!(unzip_first(zip), None);
     }
 
     #[test]

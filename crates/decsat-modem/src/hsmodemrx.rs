@@ -29,8 +29,9 @@
 
 use std::f64::consts::{PI, TAU};
 
-pub use crate::hsmodem::HsFrame;
 use crate::hsmodem::{BAUD, Deframer, FRAME_SYMBOLS, Point, RING_RADIUS, ROLLOFF};
+use crate::hsmodem::{Content, Files};
+pub use crate::hsmodem::{HsFile, HsFrame};
 use decsat_core::Iq;
 use rustfft::{Fft, FftPlanner};
 
@@ -63,6 +64,9 @@ const CLIP_MEDIANS: f32 = 8.0;
 /// Frames kept for the view, and points for the scatter.
 const KEEP: usize = 32;
 const SCATTER: usize = 1024;
+/// Waterfall lines and text lines kept for the view.
+const WATERFALL_LINES: usize = 256;
+const TEXT_LINES: usize = 40;
 
 /// What a card shows.
 #[derive(Debug, Clone, Default)]
@@ -87,7 +91,27 @@ pub struct HsView {
     pub mirrored: bool,
     /// The latest frames, oldest first.
     pub recent: Vec<HsFrame>,
+    /// The streamed waterfalls' latest lines, oldest first (levels 0 to
+    /// 63), and how many lines have come in all.
+    pub nb: Vec<Vec<u8>>,
+    pub wb: Vec<Vec<u8>>,
+    pub nb_lines: u64,
+    pub wb_lines: u64,
+    /// The latest DX-cluster spots and CW-skimmer lines, oldest first.
+    pub spots: Vec<String>,
+    pub skimmer: Vec<String>,
+    /// The file now arriving, and the files received whole.
+    pub arriving: Option<HsFile>,
+    pub files: Vec<HsFile>,
     pub message: String,
+}
+
+/// Add to a list that holds the latest `most`.
+fn keep<T>(list: &mut Vec<T>, item: T, most: usize) {
+    if list.len() == most {
+        list.remove(0);
+    }
+    list.push(item);
 }
 
 /// The root-raised-cosine pulse at `t` symbols from its centre.
@@ -328,6 +352,43 @@ fn seventh(s: Iq) -> Iq {
     u4 * u2 * u
 }
 
+/// The carrier's offset (Hz) in a chunk of symbols, from the line of
+/// their 7th power: 7 × the offset. `None` when no line stands out.
+fn carrier_line(fft: &dyn Fft<f32>, buf: &mut [Iq], symbols: &[Iq]) -> Option<f64> {
+    let power: f32 = symbols.iter().map(Iq::norm_sqr).sum::<f32>() / symbols.len() as f32;
+    if power <= 0.0 {
+        return None;
+    }
+    let gain = 1.0 / power.sqrt();
+    buf.fill(Iq::new(0.0, 0.0));
+    for (slot, &s) in buf.iter_mut().zip(symbols) {
+        *slot = seventh(s * gain);
+    }
+    fft.process(buf);
+    let n = buf.len();
+    let mags: Vec<f32> = buf.iter().map(|c| c.norm()).collect();
+    let (peak, &top) = mags
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .expect("not empty");
+    // The median of a zero-padded FFT's bins is still the noise's.
+    let mut sorted = mags.clone();
+    sorted.sort_by(f32::total_cmp);
+    if top <= LINE_OVER_MEDIAN * sorted[n / 2] {
+        return None;
+    }
+    // Parabola through the peak and its neighbours.
+    let a = mags[(peak + n - 1) % n];
+    let b = mags[(peak + 1) % n];
+    let fine = 0.5 * (a - b) / (a - 2.0 * top + b);
+    let mut bin = peak as f64 + fine as f64;
+    if bin > n as f64 / 2.0 {
+        bin -= n as f64;
+    }
+    Some(bin * BAUD / n as f64 / 7.0)
+}
+
 pub struct HsRx {
     rate: f64,
     /// Spectrum for the search: FFT, the frame being filled, the sum of
@@ -362,6 +423,7 @@ pub struct HsRx {
     /// Error power and signal power at the decided points, smoothed.
     err: f32,
     deframer: Deframer,
+    files: Files,
     points: Vec<Point>,
     scatter: Vec<Iq>,
     fresh: Vec<Iq>,
@@ -397,6 +459,7 @@ impl HsRx {
             phase7: 0.0,
             err: 0.0,
             deframer: Deframer::new(),
+            files: Files::default(),
             points: Vec::new(),
             scatter: Vec::with_capacity(SCATTER),
             fresh: Vec::new(),
@@ -452,10 +515,10 @@ impl HsRx {
             * self.rate
             / BAUD) as usize;
         // The padding's own "symbols" are not the signal's: keep the
-        // quality figure from before them.
-        let err = self.err;
+        // quality figure, the lock and the picture from before them.
+        let (err, locked, scatter) = (self.err, self.locked, self.scatter.clone());
         self.run(&vec![Iq::new(0.0, 0.0); pad]);
-        self.err = err;
+        (self.err, self.locked, self.scatter) = (err, locked, scatter);
         self.update_view();
     }
 
@@ -523,6 +586,10 @@ impl HsRx {
         };
         self.spec_sum.fill(0.0);
         self.spec_frames = 0;
+        // The window is good to some tens of Hz, and the matched filter
+        // wants better: read the held samples once to measure the carrier
+        // itself, and start from there.
+        let hz = hz + self.probe(hz).unwrap_or(0.0);
         self.centre_hz = Some(hz);
         self.front = Some(Front::new(self.rate, hz));
         self.filtered.clear();
@@ -534,6 +601,18 @@ impl HsRx {
         self.locked = false;
         self.unlocked_chunks = 0;
         self.deframer.reset();
+    }
+
+    /// The carrier's offset from `centre_hz`, measured on the held input.
+    fn probe(&mut self, centre_hz: f64) -> Option<f64> {
+        let mut filtered = Vec::new();
+        Front::new(self.rate, centre_hz).push(&self.held, &mut filtered);
+        let mut symbols = Vec::new();
+        Timing::new().push(&filtered, &mut symbols);
+        // The last whole chunk: the first symbols have the filter's start
+        // in them.
+        let from = symbols.len().checked_sub(CHUNK)?;
+        carrier_line(&*self.carrier_fft, &mut self.carrier_buf, &symbols[from..])
     }
 
     fn run(&mut self, input: &[Iq]) {
@@ -559,40 +638,22 @@ impl HsRx {
             return;
         }
         let gain = 1.0 / power.sqrt();
-        // The 7th power's line: 7 × the carrier's offset.
-        for (slot, &s) in self.carrier_buf.iter_mut().zip(&self.symbols[..CHUNK]) {
-            *slot = seventh(s * gain);
-        }
-        self.carrier_buf[CHUNK..].fill(Iq::new(0.0, 0.0));
-        self.carrier_fft.process(&mut self.carrier_buf);
-        let mags: Vec<f32> = self.carrier_buf.iter().map(|c| c.norm()).collect();
-        let (peak, &top) = mags
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .expect("not empty");
-        // The median of a zero-padded FFT's bins is still the noise's.
-        let mut sorted = mags.clone();
-        sorted.sort_by(f32::total_cmp);
-        self.locked = top > LINE_OVER_MEDIAN * sorted[CARRIER_FFT / 2];
-        if self.locked {
-            self.unlocked_chunks = 0;
-            // Parabola through the peak and its neighbours.
-            let a = mags[(peak + CARRIER_FFT - 1) % CARRIER_FFT];
-            let b = mags[(peak + 1) % CARRIER_FFT];
-            let fine = 0.5 * (a - b) / (a - 2.0 * top + b);
-            let mut bin = peak as f64 + fine as f64;
-            if bin > CARRIER_FFT as f64 / 2.0 {
-                bin -= CARRIER_FFT as f64;
+        let line = carrier_line(
+            &*self.carrier_fft,
+            &mut self.carrier_buf,
+            &self.symbols[..CHUNK],
+        );
+        self.locked = line.is_some();
+        match line {
+            Some(hz) => {
+                self.unlocked_chunks = 0;
+                self.offset_hz = Some(match self.offset_hz {
+                    // Near the last: average. Far: it has moved, go to it.
+                    Some(old) if (hz - old).abs() < 1.0 => old + 0.3 * (hz - old),
+                    _ => hz,
+                });
             }
-            let hz = bin * BAUD / CARRIER_FFT as f64 / 7.0;
-            self.offset_hz = Some(match self.offset_hz {
-                // Near the last: average. Far: it has moved, go to it.
-                Some(old) if (hz - old).abs() < 1.0 => old + 0.3 * (hz - old),
-                _ => hz,
-            });
-        } else {
-            self.unlocked_chunks += 1;
+            None => self.unlocked_chunks += 1,
         }
         let step = -TAU * self.offset_hz.unwrap_or(0.0) / BAUD;
         for &s in &self.symbols[..CHUNK] {
@@ -655,6 +716,28 @@ impl HsRx {
             }
             self.view.corrected = f.corrected;
             self.view.recent.push(f.clone());
+            let v = &mut self.view;
+            match f.content() {
+                Content::NbSpectrum(line) => {
+                    keep(&mut v.nb, line, WATERFALL_LINES);
+                    v.nb_lines += 1;
+                }
+                Content::WbSpectrum(line) => {
+                    keep(&mut v.wb, line, WATERFALL_LINES);
+                    v.wb_lines += 1;
+                }
+                // Each is sent several times over.
+                Content::DxSpot(t) if !v.spots.contains(&t) => keep(&mut v.spots, t, TEXT_LINES),
+                Content::CwSkimmer(t) if !v.skimmer.contains(&t) => {
+                    keep(&mut v.skimmer, t, TEXT_LINES);
+                }
+                Content::FileStart { .. } | Content::FileData => {
+                    self.files.push(f);
+                    v.arriving = self.files.arriving().cloned();
+                    v.files.clone_from(&self.files.done);
+                }
+                _ => {}
+            }
         }
     }
 
