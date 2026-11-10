@@ -450,6 +450,12 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             None => format!("acq {:.0} %", st.progress * 100.0),
         },
         // "P3 12 frames" — AMSAT's PSK beacon.
+        // "HS 212 frames" — QO-100's multimedia beacon.
+        DecoderKind::HsBeacon => match st.hs.as_ref() {
+            Some(h) if h.good > 0 => format!("{} frames", h.good),
+            Some(h) if h.locked => "beacon found".to_string(),
+            _ => "looking".to_string(),
+        },
         DecoderKind::P3Beacon => match st.p3.as_ref() {
             Some(p) if p.frames + p.partial > 0 => {
                 format!("{} frames, {} good", p.frames + p.partial, p.good)

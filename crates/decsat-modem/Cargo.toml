@@ -12,6 +12,8 @@ rust-version.workspace = true
 serde.workspace = true
 decsat-core = { path = "../decsat-core" }
 rustfft.workspace = true
+# Inflate, for the ZIP archives the multimedia beacon sends its files in.
+flate2 = "1"
 
 [dev-dependencies]
 # The aptx_wav example reads a transport stream's tables.

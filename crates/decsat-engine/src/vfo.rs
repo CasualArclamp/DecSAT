@@ -92,6 +92,10 @@ pub enum DecoderKind {
     /// uncoded format): frames, their text and any housekeeping values. See
     /// [`crate::beacon::p3`].
     P3Beacon,
+    /// QO-100's multimedia beacon (AMSAT-DL's HSmodem, 2400 baud 8APSK at
+    /// 10489.995 MHz): waterfalls, DX spots, bulletin files. See
+    /// [`crate::beacon::hs`].
+    HsBeacon,
     /// Inmarsat BGAN forward link (F80T4.5X-8B, 16-QAM, 151.2 kBd, ETSI TS
     /// 102 744): carrier and frame sync, turbo decoding of every block at any
     /// of ten coding levels, then the bearer-control, IP and payload layers.
@@ -129,7 +133,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 30] = [
+    pub const ALL: [DecoderKind; 31] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -145,6 +149,7 @@ impl DecoderKind {
         DecoderKind::Is19Outbound,
         DecoderKind::Beacon,
         DecoderKind::P3Beacon,
+        DecoderKind::HsBeacon,
         DecoderKind::Bgan,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
@@ -181,6 +186,9 @@ impl DecoderKind {
             }
             DecoderKind::Beacon => "Satellite beacon (carrier, PCM/PM telemetry, CCSDS)",
             DecoderKind::P3Beacon => "AMSAT PSK beacon (QO-100, AO-40 format) → text, telemetry",
+            DecoderKind::HsBeacon => {
+                "QO-100 multimedia beacon (HSmodem 8APSK) → waterfalls, spots, files"
+            }
             DecoderKind::Bgan => "Inmarsat BGAN forward (16-QAM turbo) → payload, IP, findings",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
@@ -218,6 +226,7 @@ impl DecoderKind {
             DecoderKind::Is19Outbound => "is19-outbound",
             DecoderKind::Beacon => "beacon",
             DecoderKind::P3Beacon => "p3-beacon",
+            DecoderKind::HsBeacon => "hs-beacon",
             DecoderKind::Bgan => "bgan",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
@@ -338,6 +347,7 @@ impl DecoderKind {
                 | DecoderKind::Is19Outbound
                 | DecoderKind::Beacon
                 | DecoderKind::P3Beacon
+                | DecoderKind::HsBeacon
                 | DecoderKind::Bgan
         )
     }
@@ -359,6 +369,7 @@ impl DecoderKind {
             DecoderKind::Is19Outbound => "I19",
             DecoderKind::Beacon => "BCN",
             DecoderKind::P3Beacon => "P3",
+            DecoderKind::HsBeacon => "HS",
             DecoderKind::Bgan => "BGAN",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
@@ -703,6 +714,8 @@ pub struct VfoStatus {
     pub beacon: Option<crate::beacon::BeaconView>,
     /// AMSAT's PSK beacon: its frames, text and housekeeping values.
     pub p3: Option<crate::beacon::p3::P3View>,
+    /// QO-100's multimedia beacon: its frames and what they carry.
+    pub hs: Option<crate::beacon::hs::HsView>,
     /// Inmarsat BGAN forward link: lock, blocks, payload, findings.
     pub bgan: Option<decsat_bgan::session::BganView>,
 }
@@ -1050,6 +1063,8 @@ enum Decoder {
     },
     /// AMSAT's 400 bit/s PSK beacon.
     P3(Box<crate::beacon::p3::P3Rx>),
+    /// QO-100's multimedia beacon.
+    Hs(Box<crate::beacon::hs::HsRx>),
     Psk {
         buf: Vec<Iq>,
         demod: Option<Box<PskDemod>>,
@@ -1458,6 +1473,9 @@ impl Worker {
             },
             DecoderKind::P3Beacon => {
                 Decoder::P3(Box::new(crate::beacon::p3::P3Rx::new(ddc.out_rate())))
+            }
+            DecoderKind::HsBeacon => {
+                Decoder::Hs(Box::new(crate::beacon::hs::HsRx::new(ddc.out_rate())))
             }
             DecoderKind::Tdma => Decoder::Tdma(Box::new(crate::tdma::TdmaAnalyser::new(
                 ddc.out_rate(),
@@ -2232,6 +2250,7 @@ impl Worker {
                 }
             }
             Decoder::P3(rx) => rx.push(&self.bb),
+            Decoder::Hs(rx) => rx.push(&self.bb),
             Decoder::Pool(p, b, i) => {
                 p.push_at(&self.bb, self.block_s.0);
                 let tag = format!(
@@ -2726,6 +2745,13 @@ impl Worker {
                 st.symbol_rate = Some(400.0);
                 st.message = v.message.clone();
                 st.p3 = Some(v);
+            }
+            Decoder::Hs(rx) => {
+                let v = rx.view();
+                st.scatter = rx.scatter();
+                st.symbol_rate = Some(decsat_modem::hsmodem::BAUD);
+                st.message = v.message.clone();
+                st.hs = Some(v);
             }
             Decoder::Pool(p, b, i) => {
                 let mut v = p.view().clone();

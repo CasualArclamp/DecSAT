@@ -118,6 +118,7 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "bgan" | "inmarsat" => DecoderKind::Bgan,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => DecoderKind::P3Beacon,
+        "hs" | "hs-beacon" | "hsmodem" | "multimedia" => DecoderKind::HsBeacon,
         other => bail!(
             "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon, p3)"
         ),
@@ -666,6 +667,9 @@ pub(crate) fn report(st: &VfoStatus) {
     }
     if let Some(v) = &st.p3 {
         print_p3(v);
+    }
+    if let Some(v) = &st.hs {
+        print_hs(v);
     }
     if let Some(c) = &st.cid {
         use decsat_engine::cid::{guid_mac, guid_text, guid_vendor};
@@ -1951,6 +1955,42 @@ pub(crate) fn print_tdm(t: &decsat_modem::tdm257::TdmStats) {
 }
 
 /// AMSAT's PSK beacon: the frames as text, and any housekeeping values.
+fn print_hs(v: &decsat_engine::beacon::hs::HsView) {
+    println!(
+        "multimedia beacon: carrier {}, {:.1} dB, {} frames good, {} missed, {} NB and {} WB waterfall lines{}",
+        v.carrier_hz
+            .map_or("not seen".to_string(), |f| format!("{f:+.1} Hz")),
+        v.snr_db,
+        v.good,
+        v.missed,
+        v.nb_lines,
+        v.wb_lines,
+        if v.mirrored {
+            ", spectrum mirrored"
+        } else {
+            ""
+        },
+    );
+    for s in &v.spots {
+        println!("  DX spot     {s}");
+    }
+    for s in &v.skimmer {
+        println!("  CW skimmer  {s}");
+    }
+    if let Some(f) = &v.arriving {
+        println!(
+            "  file \"{}\": {} of {} frames so far",
+            f.name, f.have, f.frames
+        );
+    }
+    for f in &v.files {
+        println!("  file \"{}\": {} bytes, complete", f.name, f.len);
+        if let Some((inner, data)) = &f.inside {
+            println!("    holds \"{inner}\", {} bytes", data.len());
+        }
+    }
+}
+
 fn print_p3(v: &decsat_engine::beacon::p3::P3View) {
     use decsat_modem::p3beacon::FRAME_BYTES;
     println!(

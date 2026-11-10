@@ -21,6 +21,7 @@ mod filename;
 mod format;
 mod freq_display;
 mod freqplan;
+mod hs_card;
 mod orbit;
 mod p3_card;
 mod player;
