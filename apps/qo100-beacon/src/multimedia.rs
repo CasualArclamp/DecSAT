@@ -427,7 +427,11 @@ impl Page {
                 v.and_then(|v| v.carrier_hz)
                     .map_or("—".to_string(), |f| format!("{:.1} Hz", f.abs())),
                 TEXT,
-                "10489.995 MHz on the air".to_string(),
+                // The audio's clock against the beacon's 2400 baud: a WebSDR's
+                // player speeds up and slows down to manage its buffer.
+                v.filter(|v| v.locked).map_or(String::new(), |v| {
+                    format!("audio clock {:+.2} %", v.clock_ppm / 1e4)
+                }),
             );
             stat(
                 ui,
