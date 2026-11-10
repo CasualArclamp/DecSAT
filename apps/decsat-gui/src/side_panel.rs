@@ -5069,11 +5069,18 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
         }
         if !g.protocols.is_empty() {
             ui.label("Protocols");
-            let names: Vec<String> = g
-                .protocols
+            // The most seen first, and only those: errors in an unlocked
+            // carrier's data make packets of every protocol number, and a
+            // grid's label does not wrap, so the whole list on one line
+            // pushed the panel's other rows out of sight.
+            const SHOWN: usize = 8;
+            let mut by_count: Vec<(u8, u64)> = g.protocols.iter().map(|(&p, &n)| (p, n)).collect();
+            // Rust note: `Reverse` turns the ascending sort into most first;
+            // the protocol number breaks ties so the order stays put.
+            by_count.sort_by_key(|&(p, n)| (std::cmp::Reverse(n), p));
+            let names: Vec<String> = by_count
                 .iter()
-                .rev()
-                .map(|(&p, &n)| {
+                .map(|&(p, n)| {
                     let name = match p {
                         6 => "TCP".to_string(),
                         17 => "UDP".to_string(),
@@ -5084,7 +5091,20 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
                     format!("{name} {n}")
                 })
                 .collect();
-            ui.label(names.join(" · "));
+            let mut line = names[..names.len().min(SHOWN)].join(" · ");
+            if names.len() > SHOWN {
+                let rest: u64 = by_count[SHOWN..].iter().map(|&(_, n)| n).sum();
+                line += &format!(" · {} more ({rest})", names.len() - SHOWN);
+            }
+            let r = ui.label(line);
+            if names.len() > SHOWN {
+                // The rest on hover, a few a line.
+                let all: Vec<String> = names.chunks(6).map(|c| c.join(" · ")).collect();
+                r.on_hover_text(all.join(
+                    "
+",
+                ));
+            }
             ui.end_row();
         }
         if g.encrypted_flows > 0 {
