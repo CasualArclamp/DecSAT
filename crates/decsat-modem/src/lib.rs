@@ -30,6 +30,9 @@
 //! - [`ccsds`]: CCSDS TM synchronisation and channel coding (marker,
 //!   randomiser, Reed–Solomon in the dual basis, the K = 7 code) and the
 //!   TM/AOS transfer frames.
+//! - [`hsmodem`]: QO-100's multimedia beacon (AMSAT-DL's HSmodem, 2400 baud
+//!   8APSK): frames, Reed–Solomon, the streamed waterfalls and files;
+//!   [`hsmodemrx`]: its receiver.
 
 pub mod ao40;
 pub mod aptx;
@@ -48,6 +51,8 @@ pub mod ethblock;
 pub mod fastlink;
 pub mod g726;
 pub mod g728;
+pub mod hsmodem;
+pub mod hsmodemrx;
 pub mod ibs;
 pub mod ibssync;
 pub mod interleave;
