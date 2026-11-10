@@ -1,7 +1,8 @@
 // made by CasualArclamp
 //! The beacon's bulletins (`.blt` files) as something to read.
 //!
-//! A bulletin is text with a first line like `~R:1:44~` or `~B:8:263~`.
+//! A bulletin is text with a first line like `~R:1:44~` or `~B:8:263~`:
+//! type, page and title, by the beacon's own page (see [`tag_text`]).
 //! HSmodem's own program hands the file to a web page as it is
 //! (`oscardata/receivefile.cs`, `sendBulletin`) and its source says nothing
 //! of a format, so this goes by the bulletins received in November 2026.
@@ -385,6 +386,31 @@ impl Pictures {
     }
 }
 
+/// What a bulletin's tag says. It is `type:page:title`, and the beacon's
+/// own page (`qo100info.html`, version 0.98, message type 16) puts type B
+/// on the numbered tabs of its "AMSAT Bulletin" box, D in "QO-100 DX Club
+/// News", N in "News" and T in its ticker. Other types are shown as sent.
+fn tag_text(tag: &str) -> String {
+    let mut fields = tag.splitn(3, ':');
+    let (kind, page, title) = (
+        fields.next().unwrap_or(""),
+        fields.next().unwrap_or(""),
+        fields.next().unwrap_or(""),
+    );
+    let what = match kind {
+        "B" => format!("AMSAT bulletin, page {page}"),
+        "D" => "QO-100 DX Club news".to_string(),
+        "N" => "News".to_string(),
+        "T" => "Ticker".to_string(),
+        _ => return format!("bulletin {tag}"),
+    };
+    if title.is_empty() {
+        what
+    } else {
+        format!("{what} · {title}")
+    }
+}
+
 /// Draw a bulletin.
 pub fn show(ui: &mut Ui, b: &Bulletin, pictures: &mut Pictures) {
     ui.spacing_mut().item_spacing.y = 2.0;
@@ -396,11 +422,7 @@ pub fn show(ui: &mut Ui, b: &Bulletin, pictures: &mut Pictures) {
         ui.add_space(4.0);
     }
     if let Some(tag) = &b.tag {
-        ui.label(
-            RichText::new(format!("bulletin {tag}"))
-                .size(11.0)
-                .color(MUTED),
-        );
+        ui.label(RichText::new(tag_text(tag)).size(11.0).color(MUTED));
     }
     for block in &b.blocks {
         match block {
@@ -569,6 +591,13 @@ Deutscher Amateur-Radio-Club e. V.
         // Cut off in the middle of its script, as while it arrives.
         let part = parse(&page[..page.find("function go").unwrap()]);
         assert_eq!(part.blocks, vec![Block::Title("QO-100 Info".into())]);
+    }
+
+    #[test]
+    fn tags_are_named() {
+        assert_eq!(tag_text("B:8:263"), "AMSAT bulletin, page 8 · 263");
+        assert_eq!(tag_text("D:1:"), "QO-100 DX Club news");
+        assert_eq!(tag_text("R:1:44"), "bulletin R:1:44");
     }
 
     #[test]
