@@ -931,6 +931,7 @@ name = "decsat-video"
 version = "1.7.1"
 dependencies = [
  "decsat-audio",
+ "decsat-modem",
  "decsat-ts",
 ]
 

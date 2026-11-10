@@ -15,6 +15,11 @@
 //!   audio's timestamp less what is buffered ahead of the speaker; each
 //!   picture is shown once that time reaches its own. With no sound the
 //!   wall clock stands in.
+//!
+//! A radio service in Enhanced apt-X (`decsat_modem::aptx_ts`), which ffmpeg
+//! has no decoder for, is played without ffmpeg: one thread takes its
+//! packets, decodes them and hands the sound to the [`AudioPlayer`]
+//! ([`VideoPlayer::start_aptx`]).
 
 pub mod ffmpeg;
 pub mod mkv;
@@ -32,6 +37,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use decsat_audio::{AudioHandle, AudioPlayer, OutputKind, PlayState};
+use decsat_modem::aptx_ts::{self, AptxTsRx};
 use decsat_ts::TS_LEN;
 use decsat_ts::av1::{Av1Extractor, Av1Unit, find_sequence_header, ivf_frame, ivf_header};
 use std::net::TcpListener;
@@ -93,6 +99,9 @@ pub struct Selection {
     /// The video is AV1 in AOM's TS mapping, which ffmpeg cannot demux: the
     /// player takes it out itself and hands it over as IVF.
     pub av1: bool,
+    /// The sound is Enhanced apt-X (and there is no picture): decoded in
+    /// the app, no ffmpeg ([`VideoPlayer::start_aptx`]).
+    pub aptx: bool,
 }
 
 /// One picture, RGBA.
@@ -135,6 +144,9 @@ pub struct Status {
     /// refills", or "waiting for the sound".
     pub clock: &'static str,
     pub audio: Option<decsat_audio::Status>,
+    /// Decoded in the app, no ffmpeg (Enhanced apt-X): `running` is then
+    /// the decoder's thread, `errors` the PES packets lost.
+    pub in_app: bool,
 }
 
 struct AudioClock {
@@ -301,6 +313,43 @@ impl VideoPlayer {
         })
     }
 
+    /// Play the Enhanced apt-X stream on `pid` from the packets arriving on
+    /// `packets`: sound only, decoded here (`decsat_modem::aptx_ts`).
+    pub fn start_aptx(
+        packets: Receiver<Vec<[u8; TS_LEN]>>,
+        pid: u16,
+        output: OutputKind,
+    ) -> Result<VideoPlayer, String> {
+        let sh = Arc::new(Shared {
+            quit: AtomicBool::new(false),
+            frames: Mutex::new(VecDeque::new()),
+            generation: AtomicU64::new(0),
+            audio: Mutex::new(None),
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            status: Mutex::new(Status {
+                in_app: true,
+                ..Status::default()
+            }),
+            stdin: Mutex::new(None),
+            child: Mutex::new(None),
+            sound_child: Mutex::new(None),
+            sound_input: Mutex::new(None),
+            av1_queue: Mutex::new(VecDeque::new()),
+            av1_ready: Condvar::new(),
+            av1_connected: AtomicBool::new(false),
+        });
+        let s = sh.clone();
+        let thread = std::thread::Builder::new()
+            .name("decsat-aptx".into())
+            .spawn(move || play_aptx(packets, pid, &s, output))
+            .map_err(|e| e.to_string())?;
+        Ok(VideoPlayer {
+            sh,
+            threads: vec![thread],
+            sync: Sync::default(),
+        })
+    }
+
     pub fn status(&self) -> Status {
         let mut s = self.sh.status.lock().unwrap().clone();
         s.audio = self
@@ -432,6 +481,88 @@ impl Drop for VideoPlayer {
             let _ = t.join();
         }
     }
+}
+
+/// How the Enhanced apt-X stream is described, in ffmpeg's way (the GUI
+/// reads the streams' lines alike).
+const APTX_STREAM: &str = "Audio: Enhanced apt-X, 48000 Hz, stereo, s24, 576 kb/s";
+
+/// The Enhanced apt-X player's thread: the PID's packets to the decoder,
+/// its sound to an [`AudioPlayer`]. PES lost show as `errors`.
+fn play_aptx(rx: Receiver<Vec<[u8; TS_LEN]>>, pid: u16, sh: &Shared, output: OutputKind) {
+    let mut player = match AudioPlayer::start_pcm_buffered(
+        "Enhanced apt-X, decoded in the app",
+        output,
+        SOUND_START_MS,
+        SOUND_MAX_MS,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            let mut st = sh.status.lock().unwrap();
+            st.exit = Some(e.clone());
+            st.last_error = Some(e);
+            return;
+        }
+    };
+    player
+        .handle()
+        .set_volume(f32::from_bits(sh.volume.load(Ordering::Relaxed)));
+    *sh.audio.lock().unwrap() = Some(AudioClock {
+        handle: player.handle(),
+    });
+    {
+        let mut st = sh.status.lock().unwrap();
+        st.running = true;
+        st.starts = 1;
+        st.clock = "sound";
+        st.streams = vec![(Some(pid), APTX_STREAM.to_string())];
+    }
+    let mut dec = AptxTsRx::new();
+    while !sh.quit.load(Ordering::Relaxed) {
+        let batch = match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(b) => b,
+            Err(RecvTimeoutError::Timeout) => continue,
+            // The stream has ended (its VFO gone).
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let fed = aptx_batch(&mut dec, &batch, pid);
+        if !dec.pcm.is_empty() {
+            // Rust note: `take` hands the samples over and leaves the
+            // decoder an empty Vec to fill.
+            player.push_pcm(aptx_ts::SAMPLE_RATE, std::mem::take(&mut dec.pcm));
+        }
+        let mut st = sh.status.lock().unwrap();
+        st.fed_bytes += fed;
+        st.playing = dec.stats.pairs > 0;
+        if dec.stats.lost > st.errors {
+            st.errors = dec.stats.lost;
+            st.last_error = Some(format!(
+                "{} PES lost ({:.1} s of silence put in)",
+                dec.stats.lost,
+                dec.stats.filled as f64 / f64::from(aptx_ts::SAMPLE_RATE)
+            ));
+        } else if dec.stats.frames > 8 && !dec.stats.locked() {
+            // Frames go by and no AutoSync: not the stream it was taken for.
+            st.last_error =
+                Some("no AutoSync in the stream: not Enhanced apt-X as known here".into());
+        }
+    }
+    let mut st = sh.status.lock().unwrap();
+    st.running = false;
+    st.exit = Some("the stream has ended".into());
+}
+
+/// A batch of the multiplex's packets: those of `pid` to the decoder. The
+/// bytes that went in come back.
+fn aptx_batch(dec: &mut AptxTsRx, batch: &[[u8; TS_LEN]], pid: u16) -> u64 {
+    let mut fed = 0;
+    for p in batch {
+        if u16::from_be_bytes([p[1] & 0x1F, p[2]]) == pid {
+            dec.packet(p);
+            fed += TS_LEN as u64;
+        }
+    }
+    fed
 }
 
 /// AV1 units held for ffmpeg's IVF input (a few seconds of pictures); the
@@ -902,6 +1033,112 @@ pub fn find_ffmpeg(configured: Option<&Path>) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Enhanced apt-X frames of silence (every field zero, AutoSync on the
+    /// left codewords of the even pairs) as PES in transport packets of
+    /// PID 0x65, among packets of another PID.
+    fn aptx_packets(frames: usize) -> Vec<[u8; TS_LEN]> {
+        const AUTOSYNC: [u8; 8] = [0, 0, 0, 0, 1, 0, 1, 1];
+        let mut stream = Vec::new();
+        for _ in 0..frames {
+            stream.extend([0xAA, 0x55, 0xAA, 0x55, 0, 0, 0, 0]);
+            stream.extend([1u8; 16]);
+            for k in 0..576 {
+                let x = if k % 2 == 0 { AUTOSYNC[(k / 2) % 8] } else { 0 };
+                stream.extend([x << 7, 0, 0, 0, 0, 0]);
+            }
+        }
+        let mut out = Vec::new();
+        let mut cc = 0u8;
+        for (k, chunk) in stream.chunks(1152).enumerate() {
+            let pts = 1000 + k as u64 * 1430;
+            let mut pes = vec![0, 0, 1, 0xBD];
+            pes.extend(((chunk.len() + 8) as u16).to_be_bytes());
+            pes.extend([0x82, 0x80, 5]);
+            pes.extend([
+                0x21 | ((pts >> 29) & 0x0E) as u8,
+                (pts >> 22) as u8,
+                1 | (pts >> 14) as u8,
+                (pts >> 7) as u8,
+                1 | (pts << 1) as u8,
+            ]);
+            pes.extend_from_slice(chunk);
+            for (j, body) in pes.chunks(184).enumerate() {
+                let mut p = [0xFFu8; TS_LEN];
+                p[0] = 0x47;
+                p[1] = if j == 0 { 0x40 } else { 0 };
+                p[2] = 0x65;
+                let stuff = 184 - body.len();
+                if stuff == 0 {
+                    p[3] = 0x10 | cc;
+                } else {
+                    // Stuffing in an adaptation field.
+                    p[3] = 0x30 | cc;
+                    p[4] = (stuff - 1) as u8;
+                    if stuff > 1 {
+                        p[5] = 0;
+                    }
+                }
+                p[4 + stuff..].copy_from_slice(body);
+                cc = (cc + 1) & 0x0F;
+                out.push(p);
+                // Another service's packet between.
+                let mut other = [0u8; TS_LEN];
+                other[..4].copy_from_slice(&[0x47, 0x00, 0xC9, 0x10]);
+                out.push(other);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn aptx_batches_take_only_their_pid() {
+        let packets = aptx_packets(4);
+        let mut dec = AptxTsRx::new();
+        let fed = aptx_batch(&mut dec, &packets, 0x65);
+        dec.finish();
+        assert_eq!(fed as usize, packets.len() / 2 * TS_LEN);
+        assert_eq!(dec.stats.frames, 4);
+        assert_eq!(dec.stats.pairs, 4 * 576);
+        assert_eq!(dec.stats.lost, 0);
+        assert!(dec.stats.locked());
+        assert_eq!(dec.pcm.len(), 4 * 576 * 8);
+    }
+
+    /// The player with no ffmpeg: packets in on the tap, sound to a (null)
+    /// audio player, and a status the window can show.
+    #[test]
+    fn aptx_plays_without_ffmpeg() {
+        let (tx, rx) = sync_channel(64);
+        let mut player = VideoPlayer::start_aptx(rx, 0x65, OutputKind::Null).unwrap();
+        // 40 frames: 1.9 s of sound, past the start cushion.
+        for batch in aptx_packets(40).chunks(200) {
+            tx.send(batch.to_vec()).unwrap();
+        }
+        let t0 = Instant::now();
+        let mut st = player.status();
+        while t0.elapsed() < Duration::from_secs(10)
+            && !(st.playing && st.fed_bytes >= 40 * 3480 && st.audio.is_some())
+        {
+            std::thread::sleep(Duration::from_millis(20));
+            st = player.status();
+        }
+        assert!(st.in_app && st.running && st.playing, "{st:?}");
+        assert_eq!(st.streams, [(Some(0x65), APTX_STREAM.to_string())]);
+        assert_eq!((st.errors, st.last_error.clone()), (0, None));
+        assert!(st.audio.is_some());
+        // No pictures, and asking for one is harmless.
+        assert!(player.poll().is_none());
+        // The stream ends: the thread says so and stops.
+        drop(tx);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && player.status().running {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let st = player.status();
+        assert!(!st.running);
+        assert_eq!(st.exit.as_deref(), Some("the stream has ended"));
+    }
+
     fn pic(ms: i64) -> Frame {
         Frame {
             width: 0,
@@ -1074,6 +1311,7 @@ mod tests {
             deint: Deinterlace::default(),
             gpu: false,
             av1,
+            aptx: false,
         };
         let p = VideoPlayer::start(exe, rx, sel, OutputKind::Null).unwrap();
         std::thread::spawn(move || {

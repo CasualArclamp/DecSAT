@@ -392,13 +392,15 @@ fn services(ui: &mut Ui, r: &TsReport) -> Option<u16> {
                     .id_salt(("svc", p.number))
                     .default_open(true)
                     .show(ui, |ui| {
-                        if p.streams.iter().any(|e| e.is_video() || e.is_audio())
-                            && ui
-                                .button("▶ Play in the app")
-                                .on_hover_text(
-                                    "Decode it with ffmpeg and show it in a window, with its sound",
-                                )
-                                .clicked()
+                        if p.streams.iter().any(|e| {
+                            e.is_video() || e.is_audio() || e.kind == Some("Enhanced apt-X")
+                        }) && ui
+                            .button("▶ Play in the app")
+                            .on_hover_text(
+                                "Decode it with ffmpeg and show it in a window, with its sound \
+                                     (Enhanced apt-X radio is decoded by the app itself)",
+                            )
+                            .clicked()
                         {
                             watch = Some(p.number);
                         }

@@ -6326,3 +6326,18 @@ VVC and cannot play.
 - Not done: playing it in the app (the player hands audio to ffmpeg, which
   has no decoder for this), the header's other 16 bytes, the auxiliary data,
   16- and 20-bit Enhanced apt-X, mono.
+
+## Enhanced apt-X played in the app (2026-11-10)
+
+- **Play in the app** on a service whose only sound is Enhanced apt-X now
+  plays it: `VideoPlayer::start_aptx` (decsat-video) runs one thread, the
+  PID's packets through `AptxTsRx` to the app's audio player, with no
+  ffmpeg (none need be installed for it). The TV window says "sound only",
+  "playing · decoded in the app", and lists the stream as ffmpeg's are;
+  PES lost show where ffmpeg's complaints do, with the silence put in.
+- The PMT name stays "Enhanced apt-X" (not "… audio"): beside a picture the
+  sound goes to ffmpeg, which cannot play it, so such a service plays its
+  picture with its other sound or none.
+- Tested on made-up frames through the player with a null sound output, and
+  the choice of sound in the window's own test. **Not tried on a live
+  carrier**: the recording is a TS, and the GUI plays from a VFO.
