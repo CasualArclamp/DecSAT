@@ -3,12 +3,13 @@
 //! the satellite reports), what it says on the right (the latest of each
 //! block, and a log of every frame).
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use decsat_core::Iq;
-use decsat_modem::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
+use decsat_modem::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_modem::p3rx::P3View;
 use eframe::egui::{
     self, Align, Align2, Color32, ColorImage, CornerRadius, FontId, Frame, Layout, Margin, Pos2,
@@ -16,17 +17,28 @@ use eframe::egui::{
 };
 
 use crate::Options;
+use crate::gauges::{Dial, dial};
+use crate::heatmap;
+use crate::sat;
 use crate::source::{self, COLUMNS, LogLine, ROWS, Running, SPAN_HZ};
 
-const BG: Color32 = Color32::from_rgb(13, 17, 23);
-const PANEL: Color32 = Color32::from_rgb(22, 27, 34);
-const EDGE: Color32 = Color32::from_rgb(48, 54, 61);
-const TEXT: Color32 = Color32::from_rgb(230, 237, 243);
-const MUTED: Color32 = Color32::from_rgb(139, 148, 158);
-const ACCENT: Color32 = Color32::from_rgb(88, 166, 255);
-const GOOD: Color32 = Color32::from_rgb(63, 185, 80);
-const WARN: Color32 = Color32::from_rgb(210, 153, 34);
-const BAD: Color32 = Color32::from_rgb(248, 81, 73);
+pub(crate) const BG: Color32 = Color32::from_rgb(22, 23, 25);
+pub(crate) const PANEL: Color32 = Color32::from_rgb(30, 32, 35);
+pub(crate) const EDGE: Color32 = Color32::from_rgb(58, 61, 66);
+pub(crate) const TEXT: Color32 = Color32::from_rgb(222, 224, 227);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(140, 144, 150);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(77, 148, 222);
+pub(crate) const GOOD: Color32 = Color32::from_rgb(72, 176, 96);
+pub(crate) const WARN: Color32 = Color32::from_rgb(214, 160, 48);
+pub(crate) const BAD: Color32 = Color32::from_rgb(220, 80, 72);
+
+/// The 2019 beacon's voltages (EA4GPZ's reception), the only reference
+/// there is: a dial is green within [`GOOD_V`] of its one. Which rail each
+/// is has not been published.
+const REFERENCE_V: [f32; 9] = [1.0, 1.8, 1.0, 1.0, 1.8, 1.5, 1.3, 0.0, 0.5];
+const GOOD_V: f32 = 0.2;
+/// The temperature taken as good, degrees C (2019's was 56).
+const GOOD_TEMP: (f32, f32) = (-10.0, 65.0);
 
 pub struct App {
     opts: Options,
@@ -37,7 +49,31 @@ pub struct App {
     /// The block shown; `None` follows the latest.
     picked: Option<char>,
     waterfall: Option<TextureHandle>,
-    rows_drawn: u64,
+    heat: heatmap::Grid,
+    /// Constellation points waiting their turn: the decoder hands bits
+    /// over half a second at a time, the display lets them out evenly.
+    points: VecDeque<Iq>,
+    /// Fraction of a point carried to the next frame.
+    point_debt: f32,
+    palette: Vec<Color32>,
+    /// Bytes of the arriving frame, and bits of the FEC block, shown so
+    /// far: the decoder reports in half-second steps, these run on evenly.
+    shown_bytes: f32,
+    shown_fec: f32,
+    /// The waterfall's rows on show, newest first, and those waiting: rows
+    /// arrive in bursts and are let out at a steady pace.
+    rows: VecDeque<Vec<f32>>,
+    rows_waiting: VecDeque<Vec<f32>>,
+    row_debt: f32,
+    /// Rows have come out since the picture was made, and its size in
+    /// screen pixels.
+    rows_dirty: bool,
+    picture: [usize; 2],
+    levels: (f32, f32),
+    /// The decoder's last published state, and its version.
+    snap: Option<Snapshot>,
+    snap_version: u64,
+    stats: Stats,
     started: Instant,
     shot_sent: bool,
 }
@@ -62,7 +98,21 @@ impl App {
             error: None,
             picked: None,
             waterfall: None,
-            rows_drawn: 0,
+            heat: heatmap::Grid::default(),
+            points: VecDeque::new(),
+            point_debt: 0.0,
+            palette: palette(),
+            shown_bytes: 0.0,
+            shown_fec: 0.0,
+            rows: VecDeque::new(),
+            rows_waiting: VecDeque::new(),
+            row_debt: 0.0,
+            rows_dirty: true,
+            picture: [0, 0],
+            levels: (-110.0, -40.0),
+            snap: None,
+            snap_version: 0,
+            stats: Stats::new(),
             started: Instant::now(),
             shot_sent: false,
             opts,
@@ -77,7 +127,9 @@ impl App {
 
     fn listen(&mut self) {
         self.running = None;
-        self.rows_drawn = 0;
+        self.rows.clear();
+        self.rows_waiting.clear();
+        self.snap = None;
         match source::from_device(self.device.as_deref()) {
             Ok(r) => {
                 self.running = Some(r);
@@ -97,7 +149,9 @@ impl App {
 
     fn open(&mut self, file: &std::path::Path) {
         self.running = None;
-        self.rows_drawn = 0;
+        self.rows.clear();
+        self.rows_waiting.clear();
+        self.snap = None;
         match source::from_file(file, self.opts.speed.unwrap_or(1.0)) {
             Ok(r) => {
                 self.running = Some(r);
@@ -105,6 +159,20 @@ impl App {
             }
             Err(e) => self.error = Some(e),
         }
+    }
+
+    /// The constellation points due this frame: 400 a second, faster when
+    /// more than a second's worth is waiting.
+    fn release_points(&mut self, dt: f32) -> Vec<Iq> {
+        if let Some(r) = &self.running {
+            self.points
+                .extend(r.shared.lock().unwrap().points.drain(..));
+        }
+        let rate = 400.0f32.max(self.points.len() as f32);
+        self.point_debt += rate * dt.min(0.25);
+        let n = (self.point_debt as usize).min(self.points.len());
+        self.point_debt = (self.point_debt - n as f32).min(1.0);
+        self.points.drain(..n).collect()
     }
 
     fn screenshot(&mut self, ctx: &egui::Context) {
@@ -135,43 +203,58 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.screenshot(ctx);
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // Every frame: the waterfall and the constellation move at the
+        // display's rate.
+        ctx.request_repaint();
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        // Rust note: the lock is held just long enough to copy what is
-        // drawn, so the decoding thread never waits on the painting.
-        let snap = self.running.as_ref().map(|r| {
-            let s = r.shared.lock().unwrap();
-            Snapshot {
-                view: s.view.clone(),
-                scatter: s.scatter.clone(),
-                level_db: s.level_db,
-                label: s.label.clone(),
-                ended: s.ended,
-                log: s.log.iter().take(200).cloned().collect(),
-                dropped: r.dropped.load(Ordering::Relaxed),
-                rate: s.rate,
-                rows_added: s.rows_added,
+        // Rust note: the lock is held just long enough to take what is new,
+        // so the decoding thread never waits on the painting. The view and
+        // the log are copied only when they have changed.
+        if let Some(r) = &self.running {
+            let mut s = r.shared.lock().unwrap();
+            self.rows_waiting.extend(s.new_rows.drain(..));
+            self.levels = s.levels;
+            if self.snap.is_none() || s.version != self.snap_version {
+                self.snap_version = s.version;
+                self.snap = Some(Snapshot {
+                    view: s.view.clone(),
+                    level_db: s.level_db,
+                    label: s.label.clone(),
+                    ended: s.ended,
+                    log: s.log.iter().take(200).cloned().collect(),
+                    dropped: 0,
+                    rate: s.rate,
+                });
             }
-        });
-        if let (Some(r), Some(sn)) = (&self.running, &snap)
-            && sn.rows_added != self.rows_drawn
-        {
-            self.rows_drawn = sn.rows_added;
-            let rows = r.shared.lock().unwrap().rows.clone();
-            let image = waterfall_image(&rows);
-            match &mut self.waterfall {
-                Some(t) => t.set(image, TextureOptions::LINEAR),
-                None => {
-                    self.waterfall = Some(ui.ctx().load_texture(
-                        "waterfall",
-                        image,
-                        TextureOptions::LINEAR,
-                    ));
-                }
+            if let Some(sn) = &mut self.snap {
+                sn.dropped = r.dropped.load(Ordering::Relaxed);
             }
+        } else {
+            self.snap = None;
         }
+        // Rust note: `take` lifts the snapshot out of `self`, so `self`'s
+        // methods can be called while it is borrowed; it goes back below.
+        let snap = self.snap.take();
+
+        // Let rows out at their own rate, 60 a second, a little faster or
+        // slower to keep about six in hand: the scroll stays even whatever
+        // lumps they arrived in.
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        let waiting = self.rows_waiting.len() as f32;
+        let rate = (60.0 + (waiting - 6.0) * 6.0).clamp(20.0, 6000.0);
+        self.row_debt += rate * dt;
+        let n = (self.row_debt as usize).min(self.rows_waiting.len());
+        self.row_debt = (self.row_debt - n as f32).min(1.0);
+        for row in self.rows_waiting.drain(..n) {
+            self.rows.push_front(row);
+        }
+        self.rows.truncate(ROWS);
+        if self.stats.on {
+            self.stats.frame(n, self.rows_waiting.len());
+        }
+        self.rows_dirty |= n > 0;
 
         egui::Panel::top("header")
             .frame(
@@ -188,7 +271,7 @@ impl eframe::App for App {
                 let rest = ui.available_size();
                 let left_w = (rest.x * 0.52).clamp(420.0, 640.0);
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.spacing_mut().item_spacing.x = 8.0;
                     // Rust note: a child `Ui` inherits its parent's layout, so
                     // the columns have to ask for top-to-bottom themselves.
                     let down = Layout::top_down(Align::Min);
@@ -200,32 +283,73 @@ impl eframe::App for App {
                     });
                 });
             });
+        self.snap = snap;
+    }
+}
+
+/// `QO100_STATS=1`: the frame rate and how evenly the waterfall's rows
+/// came out, on stderr every two seconds.
+struct Stats {
+    on: bool,
+    since: Instant,
+    frames: u32,
+    rows: usize,
+    most_rows: usize,
+    most_waiting: usize,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Stats {
+            on: std::env::var_os("QO100_STATS").is_some(),
+            since: Instant::now(),
+            frames: 0,
+            rows: 0,
+            most_rows: 0,
+            most_waiting: 0,
+        }
+    }
+
+    fn frame(&mut self, rows: usize, waiting: usize) {
+        self.frames += 1;
+        self.rows += rows;
+        self.most_rows = self.most_rows.max(rows);
+        self.most_waiting = self.most_waiting.max(waiting);
+        let t = self.since.elapsed().as_secs_f32();
+        if t >= 2.0 {
+            eprintln!(
+                "{:.0} frames/s, {:.0} rows/s, at most {} rows in a frame, {} waiting",
+                self.frames as f32 / t,
+                self.rows as f32 / t,
+                self.most_rows,
+                self.most_waiting
+            );
+            *self = Stats::new();
+        }
     }
 }
 
 /// A copy of what the decoding thread has published.
 struct Snapshot {
     view: P3View,
-    scatter: Vec<Iq>,
     level_db: f32,
     label: String,
     ended: bool,
     log: Vec<LogLine>,
     dropped: u64,
     rate: f64,
-    rows_added: u64,
 }
 
 fn card() -> Frame {
     Frame::new()
         .fill(PANEL)
         .stroke(Stroke::new(1.0, EDGE))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(12))
+        .corner_radius(CornerRadius::ZERO)
+        .inner_margin(Margin::same(10))
 }
 
 fn caption(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.5).color(MUTED).strong());
+    ui.label(RichText::new(text).size(11.0).color(MUTED));
 }
 
 /// The state of the receiver, for the pill and the band.
@@ -244,7 +368,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("QO-100 Beacon")
-                    .size(20.0)
+                    .size(16.0)
                     .strong()
                     .color(TEXT),
             );
@@ -308,48 +432,98 @@ impl App {
     }
 
     fn left(&mut self, ui: &mut Ui, sn: Option<&Snapshot>, width: f32) {
+        let inner = width - 22.0;
+        let view = sn.map(|s| &s.view);
         card().show(ui, |ui| {
-            ui.set_width(width - 26.0);
+            ui.set_width(inner);
             ui.horizontal(|ui| {
                 caption(ui, "AUDIO SPECTRUM");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some(s) = sn {
-                        ui.label(RichText::new(&s.label).size(11.5).color(MUTED));
+                        ui.label(RichText::new(&s.label).size(11.0).color(MUTED));
                     }
                 });
             });
             ui.add_space(4.0);
-            self.waterfall_view(ui, sn, width - 26.0);
+            self.waterfall_view(ui, sn, inner);
         });
-        ui.add_space(10.0);
+        ui.add_space(8.0);
         ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
             card().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(164.0);
-                    ui.set_height(186.0);
+                    ui.set_width(150.0);
+                    ui.set_height(172.0);
                     caption(ui, "CONSTELLATION");
                     ui.add_space(6.0);
-                    constellation(ui, sn.map(|s| s.scatter.as_slice()).unwrap_or(&[]));
+                    let points = self.release_points(ui.input(|i| i.stable_dt));
+                    self.heat.show(ui, &points, 150.0);
                 });
             });
             card().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width((width - 26.0 - 164.0 - 38.0).max(120.0));
-                    ui.set_height(186.0);
-                    caption(ui, "HOUSEKEEPING");
+                    ui.set_width((inner - 180.0).max(220.0));
+                    ui.set_height(172.0);
+                    ui.horizontal(|ui| {
+                        caption(ui, "SATELLITE");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let note = "wings from the time, not telemetry";
+                            ui.label(RichText::new(note).size(11.0).color(MUTED));
+                        });
+                    });
                     ui.add_space(6.0);
-                    housekeeping(ui, sn.map(|s| &s.view));
+                    satellite(ui, view, self.started.elapsed().as_secs_f32());
                 });
+            });
+        });
+        ui.add_space(8.0);
+        card().show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(inner);
+                let telemetry = view.and_then(|v| v.telemetry.as_ref());
+                ui.horizontal(|ui| {
+                    caption(ui, "TELEMETRY");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(telemetry_note(view)).size(11.0).color(MUTED));
+                    });
+                });
+                ui.add_space(4.0);
+                dials(ui, telemetry.map(|(_, t)| t), inner);
             });
         });
     }
 
     fn waterfall_view(&mut self, ui: &mut Ui, sn: Option<&Snapshot>, width: f32) {
-        let height = (ui.available_height() - 260.0).clamp(120.0, 300.0);
+        let height = (ui.available_height() - 474.0).clamp(80.0, 320.0);
         let (rect, _) = ui.allocate_exact_size(vec2(width, height + 18.0), Sense::hover());
         let painter = ui.painter_at(rect);
-        let area = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y - 18.0));
-        painter.rect_filled(area, CornerRadius::same(4), Color32::BLACK);
+        // The picture is made one row to a screen pixel and laid on the
+        // pixel grid, unfiltered: scaled to fit, its rows fell between
+        // pixels and shimmered as they scrolled.
+        let ppp = ui.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let size = [
+            ((rect.width() * ppp).round() as usize).max(1),
+            (((rect.height() - 18.0) * ppp).round() as usize).clamp(1, ROWS),
+        ];
+        let corner = pos2(snap(rect.min.x), snap(rect.min.y));
+        let area = Rect::from_min_size(corner, vec2(size[0] as f32 / ppp, size[1] as f32 / ppp));
+        painter.rect_filled(area, CornerRadius::ZERO, Color32::BLACK);
+        if self.rows_dirty || self.picture != size || self.waterfall.is_none() {
+            self.rows_dirty = false;
+            self.picture = size;
+            let image = waterfall_image(&self.rows, size, self.levels, &self.palette);
+            match &mut self.waterfall {
+                Some(t) => t.set(image, TextureOptions::NEAREST),
+                None => {
+                    self.waterfall = Some(ui.ctx().load_texture(
+                        "waterfall",
+                        image,
+                        TextureOptions::NEAREST,
+                    ));
+                }
+            }
+        }
         if let Some(t) = &self.waterfall
             && sn.is_some()
         {
@@ -393,6 +567,67 @@ impl App {
         }
     }
 
+    /// The two progress bars, and the arriving frame as far as it is shown.
+    fn progress(&mut self, ui: &mut Ui, view: Option<&P3View>) -> Option<P3Frame> {
+        let dt = ui.input(|i| i.stable_dt).min(0.25);
+        // Run on at the beacon's own pace (50 bytes, 400 bits a second),
+        // never past what has been received.
+        let run = |shown: &mut f32, target: Option<f32>, per_s: f32| match target {
+            Some(t) if *shown <= t => *shown = (*shown + per_s * dt).min(t),
+            Some(t) => *shown = t,
+            None => *shown = 0.0,
+        };
+        let in_frame = view.filter(|v| v.in_frame);
+        run(
+            &mut self.shown_bytes,
+            in_frame.map(|v| v.arriving.len() as f32),
+            50.0,
+        );
+        let fec = view.and_then(|v| v.fec_bits);
+        run(&mut self.shown_fec, fec.map(|b| b as f32), 400.0);
+
+        let frames = view.map_or(0, |v| v.frames);
+        let (crc_frac, crc_note, crc_colour) = match (in_frame, view.and_then(|v| v.recent.last()))
+        {
+            (Some(_), _) => {
+                let f = self.shown_bytes / FRAME_BYTES as f32;
+                (f, format!("{:.0} %", f * 100.0), ACCENT)
+            }
+            (None, Some(last)) if fec.is_some() || frames > 0 => {
+                let (state, colour) = frame_state(last);
+                (1.0, state, colour)
+            }
+            _ => (0.0, "waiting for sync".to_string(), MUTED),
+        };
+        let (fec_frac, fec_note) = match fec {
+            Some(_) => {
+                let f = self.shown_fec / FEC_BLOCK_BITS as f32;
+                (f, format!("{:.0} % · not decoded", f * 100.0))
+            }
+            None => (0.0, "follows each frame · not decoded".to_string()),
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            let w = (ui.available_width() - 12.0) / 2.0;
+            bar(
+                ui,
+                w,
+                "UNCODED FRAME + CRC",
+                crc_frac,
+                crc_colour,
+                &crc_note,
+            );
+            bar(ui, w, "FEC BLOCK", fec_frac, MUTED, &fec_note);
+        });
+        in_frame.map(|v| {
+            let n = (self.shown_bytes as usize).min(v.arriving.len());
+            P3Frame {
+                bytes: v.arriving[..n].to_vec(),
+                ..Default::default()
+            }
+        })
+    }
+
     fn right(&mut self, ui: &mut Ui, sn: Option<&Snapshot>) {
         let view = sn.map(|s| &s.view);
         let height = ui.available_height();
@@ -401,6 +636,8 @@ impl App {
             ui.set_height((height * 0.60).max(260.0));
             caption(ui, "LATEST BLOCKS");
             ui.add_space(6.0);
+            let live = self.progress(ui, view);
+            ui.add_space(8.0);
             let names: Vec<char> = view.map(|v| v.blocks.keys().copied().collect()).unwrap_or_default();
             let latest = view.and_then(|v| v.recent.last()).and_then(P3Frame::block);
             let shown = self.picked.filter(|c| names.contains(c)).or(latest);
@@ -428,7 +665,12 @@ impl App {
             });
             ui.add_space(8.0);
             match (shown, view) {
-                (Some(name), Some(v)) => block_text(ui, &v.blocks[&name]),
+                // Following the latest: the frame coming in, as far as it
+                // has come.
+                (_, Some(_)) if self.picked.is_none() && live.is_some() => {
+                    block_text(ui, live.as_ref().unwrap(), true);
+                }
+                (Some(name), Some(v)) => block_text(ui, &v.blocks[&name], false),
                 _ => {
                     ui.label(RichText::new("Waiting for the first frame. One takes about 10 seconds, and they come every 25.").color(MUTED));
                 }
@@ -453,6 +695,26 @@ impl App {
     }
 }
 
+/// A labelled progress bar with a note at its right.
+fn bar(ui: &mut Ui, width: f32, label: &str, fraction: f32, colour: Color32, note: &str) {
+    ui.vertical(|ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.y = 3.0;
+        ui.horizontal(|ui| {
+            caption(ui, label);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(note).size(11.0).monospace().color(colour));
+            });
+        });
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 8.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::ZERO, BG);
+        let mut fill = rect;
+        fill.set_width(rect.width() * fraction.clamp(0.0, 1.0));
+        p.rect_filled(fill, CornerRadius::ZERO, colour);
+    });
+}
+
 fn frame_state(f: &P3Frame) -> (String, Color32) {
     if f.crc_ok {
         ("CRC good".into(), GOOD)
@@ -463,8 +725,15 @@ fn frame_state(f: &P3Frame) -> (String, Color32) {
     }
 }
 
-fn block_text(ui: &mut Ui, f: &P3Frame) {
-    let (state, colour) = frame_state(f);
+fn block_text(ui: &mut Ui, f: &P3Frame, live: bool) {
+    let (state, colour) = if live {
+        (
+            format!("receiving block {}", f.block().unwrap_or('?')),
+            ACCENT,
+        )
+    } else {
+        frame_state(f)
+    };
     ui.horizontal(|ui| {
         ui.label(RichText::new(state).size(12.0).color(colour));
         ui.label(
@@ -476,7 +745,7 @@ fn block_text(ui: &mut Ui, f: &P3Frame) {
     ui.add_space(4.0);
     Frame::new()
         .fill(BG)
-        .corner_radius(CornerRadius::same(4))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -591,7 +860,7 @@ fn stat(ui: &mut Ui, w: f32, title: &str, value: String, colour: Color32, detail
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 caption(ui, title);
-                ui.label(RichText::new(value).size(19.0).strong().color(colour));
+                ui.label(RichText::new(value).size(17.0).monospace().color(colour));
                 ui.add(egui::Label::new(RichText::new(detail).size(11.0).color(MUTED)).truncate());
             });
         });
@@ -611,7 +880,7 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
                 let (rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(rect, CornerRadius::same(3), BG);
+                p.rect_filled(rect, CornerRadius::ZERO, BG);
                 let mut fill = rect;
                 fill.set_width(rect.width() * frac);
                 let colour = if db > -6.0 {
@@ -621,11 +890,11 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
                 } else {
                     GOOD
                 };
-                p.rect_filled(fill, CornerRadius::same(3), colour);
+                p.rect_filled(fill, CornerRadius::ZERO, colour);
                 ui.label(
                     RichText::new(format!("{db:.0} dBFS"))
                         .size(13.0)
-                        .strong()
+                        .monospace()
                         .color(TEXT),
                 );
                 let detail = match sn {
@@ -642,155 +911,195 @@ fn level_stat(ui: &mut Ui, w: f32, sn: Option<&Snapshot>) {
         });
 }
 
-fn constellation(ui: &mut Ui, points: &[Iq]) {
-    let side = 150.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(4), BG);
-    let c = rect.center();
-    let axis = Stroke::new(1.0, EDGE);
-    p.hline(rect.x_range(), c.y, axis);
-    p.vline(c.x, rect.y_range(), axis);
-    // Bits are scaled to a mean of 1: both points land inside ±2.
-    let scale = side / 4.0;
-    for z in points {
-        let at = pos2(
-            c.x + z.re.clamp(-2.0, 2.0) * scale,
-            c.y - z.im.clamp(-2.0, 2.0) * scale,
+/// What the telemetry card's corner says.
+fn telemetry_note(v: Option<&P3View>) -> String {
+    if let Some((block, _)) = v.and_then(|v| v.telemetry.as_ref()) {
+        return format!("block {block} · green: within {GOOD_V} V of the 2019 values");
+    }
+    let blank_k = v
+        .and_then(|v| v.blocks.get(&'K'))
+        .is_some_and(|f| f.crc_ok && f.lines().iter().skip(1).all(String::is_empty));
+    if blank_k {
+        "not being sent: the K block came through blank".into()
+    } else {
+        "none received yet".into()
+    }
+}
+
+/// Nine voltage dials and the temperature, five to a row.
+fn dials(ui: &mut Ui, t: Option<&Telemetry>, width: f32) {
+    let cell = vec2((width / 5.0).floor(), 88.0);
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    let voltage = |ui: &mut Ui, i: usize| {
+        let reference = REFERENCE_V[i];
+        dial(
+            ui,
+            cell,
+            &Dial {
+                label: &format!("V{}", i + 1),
+                unit: "V",
+                value: t.and_then(|t| t.voltages.get(i).copied()),
+                min: 0.0,
+                max: 3.0,
+                good: Some(((reference - GOOD_V).max(0.0), reference + GOOD_V)),
+                decimals: 1,
+            },
         );
-        p.circle_filled(at, 1.4, Color32::from_rgba_unmultiplied(88, 166, 255, 150));
-    }
+    };
+    ui.horizontal(|ui| (0..5).for_each(|i| voltage(ui, i)));
+    ui.horizontal(|ui| {
+        (5..9).for_each(|i| voltage(ui, i));
+        dial(
+            ui,
+            cell,
+            &Dial {
+                label: "TEMP",
+                unit: "C",
+                value: t.and_then(|t| t.temperature_c),
+                min: -20.0,
+                max: 80.0,
+                good: Some(GOOD_TEMP),
+                decimals: 0,
+            },
+        );
+    });
 }
 
-fn housekeeping(ui: &mut Ui, v: Option<&P3View>) {
-    match v.and_then(|v| v.telemetry.as_ref().map(|(b, t)| (*b, t))) {
-        Some((block, t)) => telemetry(ui, block, t),
-        None => {
-            let blank_k = v
-                .and_then(|v| v.blocks.get(&'K'))
-                .is_some_and(|f| f.crc_ok && f.lines().iter().skip(1).all(String::is_empty));
-            let text = if blank_k {
-                "The satellite is not sending any right now: its K block, where \
-                 voltages and temperature have appeared, came through blank."
-            } else {
-                "None received yet. Voltages, temperature and uptime appear here \
-                 if the beacon sends them."
-            };
-            ui.label(RichText::new(text).size(12.5).color(MUTED));
-        }
-    }
-}
-
-fn telemetry(ui: &mut Ui, block: char, t: &Telemetry) {
-    egui::Grid::new("housekeeping")
-        .num_columns(2)
-        .spacing([14.0, 3.0])
-        .show(ui, |ui| {
-            let row = |ui: &mut Ui, name: &str, value: String| {
-                ui.label(RichText::new(name).size(12.0).color(MUTED));
-                ui.label(RichText::new(value).size(12.5).color(TEXT));
-                ui.end_row();
-            };
-            if let Some(u) = t.uptime_text() {
-                row(ui, "Uptime", u);
-            }
-            if let Some(c) = t.temperature_c {
-                row(ui, "Temperature", format!("{c:.0} °C"));
-            }
-            if let Some(c) = t.commands {
-                row(ui, "Commands", c.to_string());
-            }
-            if t.leila_requests.is_some() || t.leila_active.is_some() {
-                row(
-                    ui,
-                    "LEILA",
-                    format!(
-                        "{} req · {} active",
-                        t.leila_requests.unwrap_or(0),
-                        t.leila_active.unwrap_or(0)
-                    ),
-                );
-            }
-            if !t.counters.is_empty() {
-                let list = t
-                    .counters
-                    .iter()
-                    .map(|(n, v)| format!("{n} {v}"))
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                row(ui, "Counters", list);
-            }
-            row(ui, "From block", block.to_string());
+/// The satellite with its wings to the sun, and the values that are not
+/// dials.
+fn satellite(ui: &mut Ui, v: Option<&P3View>, t: f32) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let sun = sat::sun_at(now);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(180.0, 150.0), Sense::hover());
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, CornerRadius::ZERO, BG);
+        sat::draw(&p, rect, &sun, t, TEXT, MUTED);
+        ui.vertical(|ui| {
+            egui::Grid::new("satellite")
+                .num_columns(2)
+                .spacing([10.0, 2.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut Ui, name: &str, value: String| {
+                        ui.label(RichText::new(name).size(11.5).color(MUTED));
+                        ui.label(RichText::new(value).size(12.0).monospace().color(TEXT));
+                        ui.end_row();
+                    };
+                    row(ui, "Wing angle", format!("{:.0}°", sun.wing_deg));
+                    row(
+                        ui,
+                        "Sun off wing",
+                        format!("{:.1}°", sun.off_normal_deg.abs()),
+                    );
+                    let light = if sun.eclipse {
+                        "eclipse".to_string()
+                    } else {
+                        format!("{:.0} %", 100.0 * sun.off_normal_deg.to_radians().cos())
+                    };
+                    row(ui, "Sunlight", light);
+                    if let Some((_, t)) = v.and_then(|v| v.telemetry.as_ref()) {
+                        if let Some(u) = t.uptime_text() {
+                            row(ui, "Uptime", u);
+                        }
+                        if let Some(c) = t.commands {
+                            row(ui, "Commands", c.to_string());
+                        }
+                        if t.leila_requests.is_some() || t.leila_active.is_some() {
+                            row(
+                                ui,
+                                "LEILA",
+                                format!(
+                                    "{} req, {} act",
+                                    t.leila_requests.unwrap_or(0),
+                                    t.leila_active.unwrap_or(0)
+                                ),
+                            );
+                        }
+                        if !t.counters.is_empty() {
+                            let set: Vec<String> = t
+                                .counters
+                                .iter()
+                                .filter(|(_, n)| *n != 0)
+                                .map(|(name, n)| format!("{name} {n}"))
+                                .collect();
+                            let shown = if set.is_empty() {
+                                "all 0".to_string()
+                            } else {
+                                set.join(" ")
+                            };
+                            row(ui, "Counters", shown);
+                        }
+                    }
+                });
         });
-    if !t.voltages.is_empty() {
-        ui.add_space(6.0);
-        voltages(ui, &t.voltages);
-    }
+    });
 }
 
-/// One bar per voltage; AMSAT has not said which rail each is.
-fn voltages(ui: &mut Ui, volts: &[f32]) {
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 52.0), Sense::hover());
-    let p = ui.painter_at(rect);
-    let n = volts.len() as f32;
-    let full = volts.iter().fold(2.0f32, |m, v| m.max(*v));
-    let slot = rect.width() / n;
-    for (i, v) in volts.iter().enumerate() {
-        let x = rect.min.x + slot * i as f32;
-        let bar_h = (v / full).clamp(0.0, 1.0) * 30.0;
-        let bar = Rect::from_min_max(
-            pos2(x + 3.0, rect.min.y + 34.0 - bar_h),
-            pos2(x + slot - 3.0, rect.min.y + 34.0),
-        );
-        p.rect_filled(bar, CornerRadius::same(2), ACCENT);
-        p.text(
-            pos2(x + slot / 2.0, rect.min.y + 44.0),
-            Align2::CENTER_CENTER,
-            format!("{v:.1}"),
-            FontId::proportional(10.5),
-            TEXT,
-        );
-    }
-}
-
-/// The waterfall as an image, newest row at the top: levels scaled to each
-/// row's floor so the display needs no gain control.
-fn waterfall_image(rows: &std::collections::VecDeque<Vec<f32>>) -> ColorImage {
-    let mut rgba = vec![0u8; COLUMNS * ROWS * 4];
-    for (y, row) in rows.iter().take(ROWS).enumerate() {
-        let mut sorted = row.clone();
-        sorted.sort_by(f32::total_cmp);
-        let floor = sorted[sorted.len() / 5];
-        for (x, v) in row.iter().enumerate() {
-            let t = ((v - floor - 2.0) / 38.0).clamp(0.0, 1.0);
-            let [r, g, b] = heat(t);
-            let at = (y * COLUMNS + x) * 4;
-            rgba[at] = r;
-            rgba[at + 1] = g;
-            rgba[at + 2] = b;
-            rgba[at + 3] = 255;
+/// The waterfall as a picture of `width` by `height` screen pixels, newest
+/// row at the top, coloured between the levels (dB) through `lut`. Each
+/// pixel column reads a fixed place in the row (between two of its values).
+fn waterfall_image(
+    rows: &VecDeque<Vec<f32>>,
+    [width, height]: [usize; 2],
+    (lo, hi): (f32, f32),
+    lut: &[Color32],
+) -> ColorImage {
+    let floor = [lut[0].r(), lut[0].g(), lut[0].b(), 255];
+    let mut rgba: Vec<u8> = floor
+        .iter()
+        .copied()
+        .cycle()
+        .take(width * height * 4)
+        .collect();
+    let top = (lut.len() - 1) as f32;
+    let scale = top / (hi - lo).max(1e-3);
+    // Where each pixel column falls in a row: index and weight of the next.
+    let places: Vec<(usize, f32)> = (0..width)
+        .map(|x| {
+            let at = (x as f32 + 0.5) / width as f32 * COLUMNS as f32 - 0.5;
+            let at = at.clamp(0.0, (COLUMNS - 1) as f32);
+            ((at as usize).min(COLUMNS - 2), at.fract())
+        })
+        .collect();
+    for (y, row) in rows.iter().take(height).enumerate() {
+        if row.len() < COLUMNS {
+            continue;
+        }
+        for (x, &(i, f)) in places.iter().enumerate() {
+            let db = row[i] + (row[i + 1] - row[i]) * f;
+            let c = lut[((db - lo) * scale).clamp(0.0, top) as usize];
+            let at = (y * width + x) * 4;
+            rgba[at..at + 3].copy_from_slice(&[c.r(), c.g(), c.b()]);
         }
     }
-    ColorImage::from_rgba_unmultiplied([COLUMNS, ROWS], &rgba)
+    ColorImage::from_rgba_unmultiplied([width, height], &rgba)
 }
 
-/// A blue-to-amber colour ramp.
-fn heat(t: f32) -> [u8; 3] {
-    const STOPS: [[f32; 3]; 5] = [
-        [8.0, 12.0, 24.0],
-        [16.0, 52.0, 110.0],
-        [32.0, 140.0, 170.0],
-        [230.0, 200.0, 70.0],
-        [255.0, 245.0, 220.0],
+/// DecSAT's waterfall colour map (`decsat-gui/src/waterfall.rs`): dark
+/// violet through orange to pale yellow, the "inferno" family.
+fn palette() -> Vec<Color32> {
+    const STOPS: [(f32, [u8; 3]); 6] = [
+        (0.0, [0, 0, 4]),
+        (0.2, [40, 11, 84]),
+        (0.4, [101, 21, 110]),
+        (0.6, [159, 42, 99]),
+        (0.8, [237, 105, 37]),
+        (1.0, [252, 255, 164]),
     ];
-    let scaled = t * (STOPS.len() - 1) as f32;
-    let i = (scaled as usize).min(STOPS.len() - 2);
-    let f = scaled - i as f32;
-    let mix = |a: f32, b: f32| (a + (b - a) * f) as u8;
-    [
-        mix(STOPS[i][0], STOPS[i + 1][0]),
-        mix(STOPS[i][1], STOPS[i + 1][1]),
-        mix(STOPS[i][2], STOPS[i + 1][2]),
-    ]
+    (0..256)
+        .map(|i| {
+            let t = i as f32 / 255.0;
+            let k = STOPS
+                .windows(2)
+                .position(|w| t <= w[1].0)
+                .unwrap_or(STOPS.len() - 2);
+            let ((t0, c0), (t1, c1)) = (STOPS[k], STOPS[k + 1]);
+            let f = (t - t0) / (t1 - t0);
+            let mix =
+                |a: u8, b: u8| (f32::from(a) + f * (f32::from(b) - f32::from(a))).round() as u8;
+            Color32::from_rgb(mix(c0[0], c1[0]), mix(c0[1], c1[1]), mix(c0[2], c1[2]))
+        })
+        .collect()
 }

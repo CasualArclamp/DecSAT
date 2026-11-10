@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
 use crate::p3beacon::{Deframer, parse_telemetry};
-pub use crate::p3beacon::{FRAME_BYTES, P3Frame, Telemetry};
+pub use crate::p3beacon::{FEC_BLOCK_BITS, FRAME_BYTES, P3Frame, Telemetry};
 use decsat_core::Iq;
 use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 
@@ -95,6 +95,11 @@ pub struct P3View {
     pub in_frame: bool,
     /// Bytes of the frame being received, out of [`crate::p3beacon::FRAME_BYTES`].
     pub frame_bytes: usize,
+    /// That frame's bytes so far: its text can be read as it arrives.
+    pub arriving: Vec<u8>,
+    /// Bits of the FEC block gone by since the last whole frame, out of
+    /// [`crate::p3beacon::FEC_BLOCK_BITS`] (it is not decoded).
+    pub fec_bits: Option<u64>,
     /// Complete frames, and those whose CRC checks.
     pub frames: u64,
     pub good: u64,
@@ -233,6 +238,8 @@ pub struct P3Rx {
     mean: f32,
     dev: f32,
     scatter: Vec<Iq>,
+    /// Points not yet taken by [`P3Rx::take_points`].
+    fresh: Vec<Iq>,
     done: Vec<P3Frame>,
     view: P3View,
     // Working buffers, kept between blocks.
@@ -271,6 +278,7 @@ impl P3Rx {
             mean: 0.0,
             dev: 0.0,
             scatter: Vec::with_capacity(SCATTER),
+            fresh: Vec::new(),
             done: Vec::new(),
             view: P3View {
                 message: "Looking for the beacon".into(),
@@ -321,6 +329,12 @@ impl P3Rx {
         self.scatter.clone()
     }
 
+    /// The points read since the last call, oldest first: for a display
+    /// that adds each bit once. (At most a few seconds' worth are kept.)
+    pub fn take_points(&mut self) -> Vec<Iq> {
+        std::mem::take(&mut self.fresh)
+    }
+
     /// The signal stopped: forget timing and carrier, and close any frame.
     fn lost(&mut self) {
         self.deframer.flush(&mut self.done);
@@ -331,6 +345,8 @@ impl P3Rx {
         self.view.carrier_hz = None;
         self.view.in_frame = false;
         self.view.frame_bytes = 0;
+        self.view.arriving.clear();
+        self.view.fec_bits = None;
     }
 
     /// How strong the square's line is, looking `span` Hz either side of
@@ -503,6 +519,11 @@ impl P3Rx {
 
         self.view.in_frame = self.deframer.in_frame();
         self.view.frame_bytes = self.deframer.frame_bytes();
+        self.view.arriving.clear();
+        self.view
+            .arriving
+            .extend_from_slice(self.deframer.partial());
+        self.view.fec_bits = self.deframer.bits_after_frame();
         self.view.quality_db = if self.dev > 0.0 {
             20.0 * (self.mean / self.dev).max(1e-3).log10()
         } else {
@@ -679,7 +700,11 @@ impl P3Rx {
                 self.scatter.remove(0);
             }
             let scale = self.mean.max(1e-9);
-            self.scatter.push(Iq::new(s / scale, self.mfq[i] / scale));
+            let point = Iq::new(s / scale, self.mfq[i] / scale);
+            self.scatter.push(point);
+            if self.fresh.len() < 4 * SCATTER {
+                self.fresh.push(point);
+            }
             t = t_bit + SAMPLES_PER_BIT as i64;
         }
         self.next_bit = Some(t);

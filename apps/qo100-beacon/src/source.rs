@@ -21,8 +21,11 @@ use rustfft::{FftPlanner, num_complex::Complex32};
 /// Columns of the waterfall, and the audio span they cover (Hz).
 pub const COLUMNS: usize = 512;
 pub const SPAN_HZ: f64 = 4000.0;
-/// Waterfall rows kept.
-pub const ROWS: usize = 220;
+/// Waterfall rows kept: one to a screen pixel, so as many as a tall
+/// window on a dense display shows.
+pub const ROWS: usize = 1600;
+/// Waterfall rows a second of signal.
+const ROWS_PER_S: f64 = 60.0;
 /// Lines kept in the log.
 const LOG: usize = 400;
 /// Blocks of samples queued for the decoder before a sound card's are dropped.
@@ -39,10 +42,15 @@ pub struct LogLine {
 #[derive(Default)]
 pub struct Shared {
     pub view: P3View,
-    pub scatter: Vec<Iq>,
+    /// Constellation points the window has not yet drawn, oldest first.
+    pub points: VecDeque<Iq>,
+    /// The waterfall's colour range, dB (low, high): see [`Levels`].
+    pub levels: (f32, f32),
     /// Newest row first; dB per column.
-    pub rows: VecDeque<Vec<f32>>,
-    pub rows_added: u64,
+    /// Waterfall rows the window has not yet taken, oldest first.
+    pub new_rows: VecDeque<Vec<f32>>,
+    /// Counts up whenever `view` or `log` change.
+    pub version: u64,
     pub level_db: f32,
     pub rate: f64,
     pub label: String,
@@ -169,7 +177,7 @@ where
 /// Play a recording (a mono audio WAV, or two-channel IQ) at `speed` × real
 /// time.
 pub fn from_file(path: &Path, speed: f64) -> Result<Running, String> {
-    let mut reader = IqFileReader::open(path, SampleFormat::Cs16, 8000.0, 2048)
+    let mut reader = IqFileReader::open(path, SampleFormat::Cs16, 8000.0, 128)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let rate = reader.sample_rate();
     let name = path
@@ -250,6 +258,7 @@ fn decode(
 ) {
     let mut p3 = P3Rx::new(rate);
     let mut spectrum = Spectrum::new(rate);
+    let mut levels = Levels::default();
     let mut power = 0.0f32;
     let mut seen_total = 0u64;
     let mut stream_s = 0.0f64;
@@ -267,16 +276,35 @@ fn decode(
             block.iter().map(|x| x.norm_sqr()).sum::<f32>() / block.len().max(1) as f32;
         // Rust note: `0.1 * ..` is a one-pole average of the blocks' power.
         power += 0.1 * (block_power - power);
-        p3.push(&block);
         stream_s += block.len() as f64 / rate;
+        // The waterfall's rows go out before the decoder's work, which
+        // comes in half-second lumps and would hold them up.
         let mut rows = Vec::new();
         spectrum.push(&block, &mut rows);
-        // Publish at most ten times a second (a slow recording may come in
-        // blocks far smaller than that).
-        if !rows.is_empty() || last_publish.elapsed().as_millis() >= 100 {
+        if !rows.is_empty() {
+            let mut s = shared.lock().unwrap();
+            for row in rows {
+                levels.follow(&row);
+                s.new_rows.push_back(row);
+            }
+            s.levels = levels.range();
+            // A window that is not drawing must not let them pile up.
+            let extra = s.new_rows.len().saturating_sub(4 * ROWS);
+            s.new_rows.drain(..extra);
+        }
+        p3.push(&block);
+        let points = p3.take_points();
+        let due = last_publish.elapsed().as_millis() >= 100;
+        if !points.is_empty() || due {
+            let mut s = shared.lock().unwrap();
+            s.points.extend(points);
+            let extra = s.points.len().saturating_sub(4000);
+            s.points.drain(..extra);
+        }
+        // The view at most ten times a second.
+        if due {
             last_publish = Instant::now();
             let v = p3.view();
-            let scatter = p3.scatter();
             let when = if live {
                 utc()
             } else {
@@ -287,11 +315,6 @@ fn decode(
                 )
             };
             let mut s = shared.lock().unwrap();
-            for row in rows {
-                s.rows.push_front(row);
-                s.rows.truncate(ROWS);
-                s.rows_added += 1;
-            }
             s.level_db = 10.0 * power.max(1e-12).log10();
             let total = v.frames + v.partial;
             let new = (total - seen_total) as usize;
@@ -305,14 +328,47 @@ fn decode(
             }
             s.log.truncate(LOG);
             s.view = v;
-            s.scatter = scatter;
+            s.version += 1;
         }
     }
     p3.finish();
     let v = p3.view();
     let mut s = shared.lock().unwrap();
     s.view = v;
+    s.version += 1;
     s.ended = true;
+}
+
+/// The waterfall's automatic levels, as DecSAT's (`decsat-gui/src/
+/// waterfall.rs`): the floor (20th percentile) and the peak (99.5th) of each
+/// row, followed with some inertia so the colours do not pump.
+#[derive(Default)]
+struct Levels {
+    floor: Option<f32>,
+    peak: Option<f32>,
+}
+
+impl Levels {
+    /// Smallest range shown, dB.
+    const MIN_RANGE_DB: f32 = 25.0;
+    /// DecSAT moves 5 % a row at 25 rows a second; the same pace here.
+    const STEP: f32 = 0.05 * 25.0 / ROWS_PER_S as f32;
+
+    fn follow(&mut self, row: &[f32]) {
+        let mut sorted = row.to_vec();
+        sorted.sort_unstable_by(f32::total_cmp);
+        let q = |p: f32| sorted[((sorted.len() - 1) as f32 * p) as usize];
+        let (f, p) = (q(0.2), q(0.995));
+        self.floor = Some(self.floor.map_or(f, |x| x + Self::STEP * (f - x)));
+        self.peak = Some(self.peak.map_or(p, |x| x + Self::STEP * (p - x)));
+    }
+
+    fn range(&self) -> (f32, f32) {
+        match (self.floor, self.peak) {
+            (Some(f), Some(p)) => (f - 3.0, (p + 3.0).max(f + Self::MIN_RANGE_DB)),
+            _ => (-110.0, -40.0),
+        }
+    }
 }
 
 /// The waterfall's columns: FFTs of the input, the audio band only.
@@ -329,14 +385,15 @@ struct Spectrum {
 
 impl Spectrum {
     fn new(rate: f64) -> Self {
-        // About 0.25 s, so a bin of a few hertz: the two lobes stand clear.
-        let n = ((rate * 0.25) as usize).next_power_of_two().max(1024);
+        // About 0.1 s: bins of some 10 Hz, and rows that follow the signal
+        // closely at 60 a second.
+        let n = ((rate * 0.085) as usize).next_power_of_two().max(1024);
         let window: Vec<f32> = (0..n)
             .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / (n - 1) as f32).cos())
             .collect();
         Spectrum {
             n,
-            hop: n / 2,
+            hop: ((rate / ROWS_PER_S) as usize).max(1),
             buf: Vec::with_capacity(2 * n),
             fft: FftPlanner::new().plan_fft_forward(n),
             work: vec![Complex32::new(0.0, 0.0); n],
