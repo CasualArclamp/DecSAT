@@ -1244,7 +1244,10 @@ mod tests {
     fn locks_an_inverted_spectrum() {
         // The conjugate of a carrier 0.3 % of the symbol rate off centre: as
         // a high-side LO delivers it.
-        let schedule = [FrameSpec::new(14, false, true), FrameSpec::new(4, true, false)];
+        let schedule = [
+            FrameSpec::new(14, false, true),
+            FrameSpec::new(4, true, false),
+        ];
         let x: Vec<Iq> = signal(&schedule, 250_000, 4, 0.2, 5)
             .iter()
             .enumerate()

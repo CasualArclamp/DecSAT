@@ -1204,7 +1204,10 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         let turned: Vec<Iq> = sym.iter().map(|s| s.conj()).collect();
         let t = detect_dvbs2(&turned);
         if t.confirmed() {
-            s2 = Dvbs2Info { inverted: true, ..t };
+            s2 = Dvbs2Info {
+                inverted: true,
+                ..t
+            };
             sym = turned;
             cfo = cfo.map(|hz| -hz);
         }
