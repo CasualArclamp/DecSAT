@@ -157,6 +157,7 @@ impl App {
                     // Added right to left: the trim, its label, the satellite.
                     self.lo_trim(ui);
                     ui.label("LO trim");
+                    self.lo_side(ui);
                     self.satellite_choice(ui);
                 });
                 ui.allocate_ui_with_layout(egui::vec2(w, h), line, |ui| {
@@ -577,6 +578,21 @@ impl App {
                     "Scroll or click a digit to change; right-click zeroes from that digit.",
                 );
         });
+    }
+
+    /// Which way round the band is: the LNB's side for a radio, Flip for a
+    /// file.
+    fn lo_side(&mut self, ui: &mut egui::Ui) {
+        if self.path.is_some() {
+            ui.checkbox(&mut self.flip_file, "Flip").on_hover_text(
+                "Turn the recording's spectrum over, for one made behind an LNB whose                  oscillator is above the band (C band, 5150 MHz). DVB-S2 locks either                  way; this puts every carrier at the right end of the span.",
+            );
+            return;
+        }
+        ui.checkbox(&mut self.lo_high_side, "LO above")
+            .on_hover_text(
+                "The LNB's oscillator is above the band, as in C band (5150 MHz):                  RF = LO − tuned, and the mirrored band is turned back over. Leave                  unticked for Ku (9750, 10600 MHz): RF = LO + tuned. Not applied                  while a remote server does the decoding.",
+            );
     }
 
     /// The LNB's error, trimmed out of the RF scale on the fly.

@@ -200,6 +200,9 @@ pub struct RadioPanel {
     pub sdrplay: SdrplaySettings,
     /// LNB local oscillator, MHz: the axis shows tuned + LO (0 = no LNB).
     pub lnb_lo_mhz: f64,
+    /// The LO is above the band (RF = LO − tuned): a copy of the app's
+    /// setting, kept by `App::sync_mirror`.
+    pub lo_high_side: bool,
     pub error: Option<String>,
 }
 
@@ -219,6 +222,7 @@ impl Default for RadioPanel {
             // A Ku LNB's 10.6 GHz LO (a universal LNB's high band; 9750
             // for its low band and QO-100).
             lnb_lo_mhz: 10_600.0,
+            lo_high_side: false,
             error: None,
         }
     }
@@ -228,7 +232,11 @@ impl Default for RadioPanel {
 impl RadioPanel {
     /// The RF frequency the span's centre corresponds to, Hz.
     pub fn rf_center(&self) -> f64 {
-        self.settings.center_hz as f64 + self.lnb_lo_mhz * 1e6
+        crate::lnb::rf(
+            self.lnb_lo_mhz * 1e6,
+            self.settings.center_hz as f64,
+            self.lo_high_side,
+        )
     }
 
     /// The chosen receiver's sample rate, S/s.
@@ -312,7 +320,7 @@ impl RadioPanel {
 
                     ui.label("LNB LO");
                     ui.add(egui::DragValue::new(&mut self.lnb_lo_mhz).speed(1.0).range(0.0..=30_000.0).max_decimals(3).suffix(" MHz"))
-                        .on_hover_text("Only labels the axis: RF = tuned + LO. 10600 for a universal Ku LNB's high band, 9750 for its low band or QO-100, 0 without one.");
+                        .on_hover_text("Only labels the axis: RF = tuned + LO, or LO − tuned with LO above ticked in the top bar (5150 for C band). 10600 for a universal Ku LNB's high band, 9750 for its low band or QO-100, 0 without one.");
                     ui.end_row();
 
                     ui.label("RF centre");
