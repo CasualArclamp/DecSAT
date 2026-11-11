@@ -140,6 +140,10 @@ pub struct Dvbs2Info {
     /// (2·[`GRID_TOLERANCE`] + 1)-symbol window where another would confirm
     /// it, among this many seen in the symbols looked at.
     pub chance_confirmations: f64,
+    /// The headers only confirmed with the spectrum turned over (the
+    /// symbols conjugated): the carrier arrives inverted, as behind a
+    /// down-converter whose LO is above it (a 5150 MHz C-band LNB).
+    pub inverted: bool,
 }
 
 impl Dvbs2Info {
@@ -449,7 +453,12 @@ impl Identification {
                     } else {
                         mods.join(", ")
                     },
-                    if d.with_pilots > 0 { ", pilots" } else { "" }
+                    match (d.with_pilots > 0, d.inverted) {
+                        (false, false) => "",
+                        (true, false) => ", pilots",
+                        (false, true) => ", spectrum inverted",
+                        (true, true) => ", pilots, spectrum inverted",
+                    }
                 )
             }
             // A beacon's hint says it all (no symbol rate of its own).
@@ -1186,7 +1195,20 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     //    that grid to within ±2 symbols is vanishingly unlikely. Asking for
     //    one rather than two halves the listen a slow carrier needs (a normal
     //    QPSK frame lasts 3.3 s at 10 kS/s).
-    let s2 = detect_dvbs2(&sym);
+    let mut s2 = detect_dvbs2(&sym);
+    // Headers that recur but do not confirm: an inverted spectrum does that
+    // (the correlator takes a magnitude and finds the conjugate's headers as
+    // well; their PLS codes then read as other codes). Look again turned over.
+    let mut cfo = cfo;
+    if !s2.confirmed() && s2.headers_seen >= 2 {
+        let turned: Vec<Iq> = sym.iter().map(|s| s.conj()).collect();
+        let t = detect_dvbs2(&turned);
+        if t.confirmed() {
+            s2 = Dvbs2Info { inverted: true, ..t };
+            sym = turned;
+            cfo = cfo.map(|hz| -hz);
+        }
+    }
     let is_s2 = s2.confirmed();
 
     // 7. Carrier lock, so the constellation shows points rather than a ring.
@@ -1215,6 +1237,10 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         lock = best;
     }
     id.set_lock(&lock, rs);
+    if s2.inverted {
+        // Measured on the conjugate: the offset in the VFO is its negative.
+        id.carrier_offset_hz = id.carrier_offset_hz.map(|f| -f);
+    }
 
     // 8. Not DVB-S2: the unique word of an Intelsat TPC 2964 carrier, every
     //    2964 bits, or a Comtech TPC 7/8 one, every 16 320, is quick to look

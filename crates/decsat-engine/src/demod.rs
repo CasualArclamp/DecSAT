@@ -119,6 +119,10 @@ const FREQ_WATCH_MAX: usize = 8;
 /// being a long way out.
 const FREQ_WATCH_SIGMAS: f64 = 3.5;
 const FREQ_WATCH_FLOOR: f64 = 5.0e-5;
+/// Headers in a row whose SOF reads mirrored (see `Demod::watch_spectrum`)
+/// before the demodulator turns the spectrum over. One header's reading is
+/// wrong a few times in a thousand at −3 dB Es/N0; three in a row never.
+const MIRRORED_HEADERS: u32 = 3;
 
 /// One demodulated PLFRAME.
 #[derive(Debug, Clone)]
@@ -263,6 +267,12 @@ pub struct Demod {
     /// between timing and framing.
     superframes: SfStripper,
     stripped: Vec<Iq>,
+    /// The carrier arrives with its spectrum inverted (I and Q swapped: a
+    /// down-converter whose LO is above the carrier, as a C-band LNB's
+    /// 5150 MHz): the recovered symbols are conjugated before framing.
+    inverted: bool,
+    /// Headers in a row whose SOF read mirrored.
+    mirrored: u32,
 }
 
 impl Demod {
@@ -315,6 +325,8 @@ impl Demod {
             level_fresh: true,
             superframes: SfStripper::new(),
             stripped: Vec::new(),
+            inverted: false,
+            mirrored: 0,
         }
     }
 
@@ -368,9 +380,21 @@ impl Demod {
         }
     }
 
-    /// Residual carrier offset the loop is tracking, Hz.
+    /// Residual carrier offset the loop is tracking, Hz, as the input has it
+    /// (the loop runs on the conjugate when the spectrum is inverted).
     pub fn carrier_offset_hz(&self) -> f64 {
-        self.pll.freq_cycles() * self.symbol_rate()
+        self.spectrum_sign() * self.pll.freq_cycles() * self.symbol_rate()
+    }
+
+    /// The carrier's spectrum was found inverted, and is being turned over.
+    pub fn spectrum_inverted(&self) -> bool {
+        self.inverted
+    }
+
+    /// −1 when the symbols are conjugated on the way in: a frequency at the
+    /// input is its negative to the carrier loop.
+    fn spectrum_sign(&self) -> f64 {
+        if self.inverted { -1.0 } else { 1.0 }
     }
 
     /// The PL scrambling sequence (gold code) in use: the one given, or a
@@ -401,7 +425,7 @@ impl Demod {
     /// moved onto the carrier by that much): take it out of the loop's
     /// frequency and of the hint kept for re-acquisition.
     pub fn retune_hz(&mut self, delta_hz: f64) {
-        let d = delta_hz / self.symbol_rate();
+        let d = self.spectrum_sign() * delta_hz / self.symbol_rate();
         self.pll.set_freq_cycles(self.pll.freq_cycles() - d);
         if let Some(s) = &mut self.seed {
             *s -= d;
@@ -453,6 +477,13 @@ impl Demod {
             self.agc.process(&mut self.filtered);
             self.new_sym.clear();
             self.sync.process(&self.filtered, &mut self.new_sym);
+            // An inverted spectrum is the conjugate, and everything before
+            // here (real filter taps, AGC, Gardner timing) is blind to that.
+            if self.inverted {
+                for s in &mut self.new_sym {
+                    *s = s.conj();
+                }
+            }
             // Super-frames' own symbols out (none until some are found).
             self.stripped.clear();
             self.superframes.push(&self.new_sym, &mut self.stripped);
@@ -470,6 +501,46 @@ impl Demod {
             .dec
             .decode(&self.sym[hdr_end - 64..=hdr_end], PlscDemap::Differential);
         self.frame_pls(pls)
+    }
+
+    /// Is the spectrum inverted? Judged on the header ending at `hdr_end`;
+    /// true once [`MIRRORED_HEADERS`] in a row say so, the buffered symbols
+    /// then turned over and the caller to search again.
+    ///
+    /// The header correlator cannot tell: conjugating the symbols negates
+    /// every differential (each is ±j as sent), and it takes the magnitude.
+    /// So an inverted carrier is found and timed like any other, and then
+    /// nothing fits — the PLS codes read as other codes, the pilots and
+    /// payload are the conjugates of what was sent (a 5150 MHz C-band LNB's
+    /// 8PSK 3/4 carrier held "found a PLHEADER" for ever, every frame failing
+    /// BCH). The SOF tells: its 25 differentials against those sent sum to
+    /// `+25·exp(-j2πf)` for a carrier offset of `f` cycles a symbol
+    /// (`sof_differential`), and to `-25·exp(+j2πf)` when conjugated. A real
+    /// offset is a few per cent of the symbol rate at most (the matched
+    /// filter passes no more), so the sign of the real part is the answer.
+    fn watch_spectrum(&mut self, hdr_end: usize) -> bool {
+        let h0 = hdr_end + 1 - PLHEADER_LEN;
+        let d = decsat_frame::sof_differential(&self.sym[h0..h0 + SOF_LEN]);
+        if d.re >= 0.0 {
+            self.mirrored = 0;
+            return false;
+        }
+        self.mirrored += 1;
+        if self.mirrored < MIRRORED_HEADERS {
+            return false;
+        }
+        self.mirrored = 0;
+        self.inverted = !self.inverted;
+        for s in &mut self.sym {
+            *s = s.conj();
+        }
+        // What was known of the carrier was known of its mirror image.
+        self.pll.set_freq_cycles(-self.pll.freq_cycles());
+        if let Some(s) = &mut self.seed {
+            *s = -*s;
+        }
+        self.pll_live = false;
+        true
     }
 
     fn advance(&mut self, out: &mut Vec<PlFrame>) {
@@ -512,6 +583,14 @@ impl Demod {
                     let next = hdr_end + pls.plframe_len as usize;
                     if next + TOLERANCE >= len {
                         return; // wait for the rest of the frame
+                    }
+                    // (Once a header: every pass from here on moves on to
+                    // another.) Turned over, this header reads differently:
+                    // found again at once, from the same correlation peak.
+                    if self.watch_spectrum(hdr_end) {
+                        self.sync.set_bandwidth(TIMING_BN_SEARCH);
+                        self.state = State::Searching { scan_from: hdr_end };
+                        continue;
                     }
                     // Best differential correlation around where the next
                     // header should end.
@@ -1159,6 +1238,35 @@ mod tests {
             assert_eq!(f.pls.short_fecframe, want.short_fecframe, "frame {k}");
             assert_eq!(f.payload.len(), f.pls.payload_len as usize);
         }
+    }
+
+    #[test]
+    fn locks_an_inverted_spectrum() {
+        // The conjugate of a carrier 0.3 % of the symbol rate off centre: as
+        // a high-side LO delivers it.
+        let schedule = [FrameSpec::new(14, false, true), FrameSpec::new(4, true, false)];
+        let x: Vec<Iq> = signal(&schedule, 250_000, 4, 0.2, 5)
+            .iter()
+            .enumerate()
+            .map(|(n, s)| (s * cis(TAU * 0.003 / 4.0 * n as f64)).conj())
+            .collect();
+        let mut d = Demod::new(4.0, 1.0, 0.2, 0);
+        let mut frames = Vec::new();
+        for chunk in x.chunks(12_345) {
+            d.process(chunk, &mut frames);
+        }
+        assert!(d.spectrum_inverted());
+        assert_eq!(d.lock_state(), LockState::Locked);
+        assert!(d.carrier_locked(), "MER {:.1} dB", d.mer_db());
+        assert!(frames.len() >= 6, "only {} frames", frames.len());
+        // The offset is reported as the input has it: mirrored too.
+        let f = d.carrier_offset_hz();
+        assert!((f + 0.003).abs() < 2e-4, "offset {f}");
+        // And the pilots come out as sent, not as their conjugates.
+        let f = frames.iter().rev().find(|f| f.pls.has_pilots).unwrap();
+        let p = &f.payload[16 * 90..16 * 90 + 36];
+        let mean = p.iter().sum::<Iq>() / 36.0;
+        assert!((mean - PILOT * f.gain).norm() < 0.2, "pilot mean {mean}");
     }
 
     #[test]

@@ -2623,6 +2623,9 @@ impl Worker {
                             None => format!("locked, {} frames", d.frames()),
                         },
                     };
+                    if d.spectrum_inverted() {
+                        st.message.push_str(" · spectrum inverted");
+                    }
                     st.fec = fec;
                 }
             },
