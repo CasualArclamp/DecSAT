@@ -190,6 +190,8 @@ pub struct Span {
     pub lo: f64,
     pub hi: f64,
     pub rf_offset: f64,
+    /// The LO is above the band: RF = `rf_offset` − tuner.
+    pub high_side: bool,
 }
 
 /// Add the profile `bins` of a step centred on `center` to `points`, keeping
@@ -199,7 +201,7 @@ fn add_points(points: &mut Vec<(f64, f32)>, bins: &[f32], center: f64, fs: f64, 
         let f =
             center + ((i as f64 + EDGE_GROUPS as f64 + 0.5) / GROUPS_PER_STEP as f64 - 0.5) * fs;
         if f >= span.lo && f <= span.hi {
-            points.push((f + span.rf_offset, *p));
+            points.push((crate::lnb::rf(span.rf_offset, f, span.high_side), *p));
         }
     }
 }
@@ -576,6 +578,7 @@ mod tests {
             lo: 950e6,
             hi: 2150e6,
             rf_offset: 9750e6,
+            high_side: false,
         };
         add_points(&mut points, &bins, 1000e6, 20e6, span);
         assert!(!points.is_empty());

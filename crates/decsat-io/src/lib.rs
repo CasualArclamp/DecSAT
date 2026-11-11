@@ -96,6 +96,56 @@ pub trait IqSource: Send {
     }
 }
 
+/// A source with its spectrum turned over on request: every sample conjugated,
+/// so a carrier at +f comes out at -f.
+///
+/// An LNB whose oscillator is above the band (C band: 5150 MHz) delivers the
+/// band mirrored, RF = LO - IF. Conjugating at the input puts it the right
+/// way round for everything after: the axis, the VFOs and the demodulators.
+///
+/// Rust note: `Arc<AtomicBool>` is a flag shared between threads without a
+/// lock; the GUI flips it and the engine's thread sees it at its next block.
+pub struct Mirror {
+    inner: Box<dyn IqSource>,
+    on: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Mirror {
+    pub fn new(
+        inner: Box<dyn IqSource>,
+        on: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self { inner, on }
+    }
+}
+
+impl IqSource for Mirror {
+    fn read(&mut self, out: &mut Vec<Iq>) -> Result<usize> {
+        let n = self.inner.read(out)?;
+        if self.on.load(std::sync::atomic::Ordering::Relaxed) {
+            for s in out.iter_mut() {
+                *s = s.conj();
+            }
+        }
+        Ok(n)
+    }
+    fn sample_rate(&self) -> f64 {
+        self.inner.sample_rate()
+    }
+    fn center_freq(&self) -> f64 {
+        self.inner.center_freq()
+    }
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+    fn rewind(&mut self) -> Result<bool> {
+        self.inner.rewind()
+    }
+    fn is_live(&self) -> bool {
+        self.inner.is_live()
+    }
+}
+
 #[cfg(all(windows, feature = "rtl"))]
 pub mod rtl;
 #[cfg(all(windows, feature = "rtl"))]

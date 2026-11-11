@@ -23,6 +23,7 @@ mod format;
 mod freq_display;
 mod freqplan;
 mod hs_card;
+mod lnb;
 mod orbit;
 mod p3_card;
 mod player;
@@ -79,7 +80,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -136,6 +137,8 @@ fn main() -> eframe::Result {
             if let Some(k) = opts.decoder {
                 app.new_decoder = k;
             }
+            app.lo_high_side |= opts.lo_high;
+            app.flip_file = opts.flip;
             if let Some(p) = opts.file.clone() {
                 app.open_file(p);
             }
@@ -384,6 +387,13 @@ struct App {
     /// is unchanged. Kept aligned with the plan every few seconds when
     /// `plan_keep`.
     lo_trim_hz: f64,
+    /// The LNB's LO is above the band (C band, 5150 MHz): RF = LO − tuned,
+    /// and the source turns the mirrored band back over.
+    lo_high_side: bool,
+    /// Turn a file's spectrum over (a recording made behind such an LNB).
+    flip_file: bool,
+    /// The flag the running source reads: see `decsat_io::Mirror`.
+    mirror: std::sync::Arc<std::sync::atomic::AtomicBool>,
     plan_keep: bool,
     plan_keep_at: std::time::Instant,
     /// The voice floor's hold, kept while it is off.
@@ -516,6 +526,9 @@ impl Default for App {
             session_at: std::time::Instant::now(),
             plan: Vec::new(),
             lo_trim_hz: 0.0,
+            lo_high_side: false,
+            flip_file: false,
+            mirror: Default::default(),
             plan_keep: false,
             plan_keep_at: std::time::Instant::now(),
             voice_hold_s: decsat_engine::floor::hold().unwrap_or(3.0),
@@ -554,6 +567,10 @@ impl App {
     fn session_pairs(&self) -> Vec<(String, String)> {
         let mut p = vec![
             ("radio.lo_trim_hz".to_string(), self.lo_trim_hz.to_string()),
+            (
+                "radio.lo_high_side".to_string(),
+                (self.lo_high_side as u8).to_string(),
+            ),
             (
                 "radio.plan_keep".to_string(),
                 u8::from(self.plan_keep).to_string(),
@@ -941,6 +958,7 @@ impl App {
         if let Some(v) = get("radio.lo_trim_hz").and_then(|v| v.parse().ok()) {
             self.lo_trim_hz = v;
         }
+        self.lo_high_side = get("radio.lo_high_side") == Some("1");
         self.plan_keep = get("radio.plan_keep") == Some("1");
         if let Some(v) = get("source.rate").and_then(|v| v.parse().ok()) {
             self.sample_rate = v;
@@ -1181,6 +1199,48 @@ impl App {
         }
     }
 
+    /// Whether the LNB's LO is taken as above the band (RF = LO − tuned).
+    /// Not when the server decodes: its engine has the samples, unmirrored.
+    fn high_side(&self) -> bool {
+        self.lo_high_side && !matches!(self.engine, Some(remote_panel::AnyEngine::Remote(_)))
+    }
+
+    /// RF for a tuner frequency through an LO, Hz, on the chosen side.
+    fn mix(&self, lo: f64, tuned: f64) -> f64 {
+        lnb::rf(lo, tuned, self.high_side())
+    }
+
+    /// Tuner frequency for an RF through an LO, Hz, on the chosen side.
+    fn unmix(&self, lo: f64, rf: f64) -> f64 {
+        lnb::tuned(lo, rf, self.high_side())
+    }
+
+    /// Whether the source's spectrum is being turned over: a file ticked
+    /// Flip, or a radio behind a high-side LNB.
+    fn mirrored(&self) -> bool {
+        if self.path.is_some() {
+            self.flip_file
+        } else {
+            self.high_side() && self.overview_lo() > 0.0
+        }
+    }
+
+    /// −1 while mirrored, +1 otherwise: the way a carrier moves across the
+    /// span when the tuner moves up.
+    fn mirror_sign(&self) -> f64 {
+        if self.mirrored() { -1.0 } else { 1.0 }
+    }
+
+    /// Tell the running source which way round to deliver the band.
+    fn sync_mirror(&mut self) {
+        let on = self.mirrored();
+        self.mirror.store(on, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "hackrf")]
+        {
+            self.radio.lo_high_side = self.high_side();
+        }
+    }
+
     /// RF frequency at the span's centre. With no file open this is the
     /// radio's tuning (plus LO), whether or not it is running yet.
     fn rf_center(&self) -> f64 {
@@ -1192,22 +1252,25 @@ impl App {
     /// centre) give it, before the LO trim.
     fn rf_untrimmed(&self) -> f64 {
         if self.path.is_none() && self.remote.selected {
-            return self.remote.center_hz + self.remote.lo_hz;
+            return self.mix(self.remote.lo_hz, self.remote.center_hz);
         }
         #[cfg(all(windows, feature = "uhd"))]
         if self.path.is_none() && self.uhd_selected {
-            return self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz;
+            return self.mix(self.uhd_settings.lnb_lo_hz, self.uhd_settings.center_hz);
         }
         #[cfg(feature = "pluto")]
         if self.path.is_none() && self.pluto_selected {
-            return self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz;
+            return self.mix(self.pluto_settings.lnb_lo_hz, self.pluto_settings.center_hz);
         }
         #[cfg(all(windows, feature = "rtl"))]
         if self.path.is_none() && self.rtl_selected {
-            return self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz;
+            return self.mix(
+                self.rtl_settings.lnb_lo_hz,
+                self.rtl_settings.center_hz as f64,
+            );
         }
         if self.path.is_none() && self.net_selected {
-            return self.net_settings.center_hz + self.net_lo_hz;
+            return self.mix(self.net_lo_hz, self.net_settings.center_hz);
         }
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
@@ -1283,6 +1346,12 @@ impl App {
     /// Run `source` through a fresh engine, keeping the VFOs.
     fn start_engine(&mut self, source: Box<dyn decsat_io::IqSource>) {
         let rate = source.sample_rate();
+        // Every local source goes through the mirror: off, it costs a flag
+        // read a block; on (a high-side LNB, or a file ticked Flip), the
+        // band comes out the right way round.
+        self.engine = None;
+        self.sync_mirror();
+        let source = Box::new(decsat_io::Mirror::new(source, self.mirror.clone()));
         let mut eng = remote_panel::AnyEngine::Local(Engine::start(source, self.opts.clone()));
         if self.paused {
             eng.set_paused(true);
@@ -1326,7 +1395,7 @@ impl App {
     /// Retune the server's radio, carrying the VFOs so they stay on their
     /// carriers.
     fn retune_remote(&mut self, tuner_hz: f64) {
-        let by = self.remote.center_hz - tuner_hz;
+        let by = (self.remote.center_hz - tuner_hz) * self.mirror_sign();
         self.remote.center_hz = tuner_hz;
         let Some(c) = &self.remote.control else {
             return;
@@ -1456,7 +1525,7 @@ impl App {
                 self.net_running = true;
                 self.net_selected = true;
                 self.sample_rate = decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                self.rf_center_mhz = self.mix(self.net_lo_hz, self.net_settings.center_hz) / 1e6;
                 self.note = format!("Network IQ: {}", decsat_io::IqSource::describe(&src));
                 self.start_engine(Box::new(src));
             }
@@ -1511,7 +1580,7 @@ impl App {
                         if let Some(c) = &self.net_control {
                             let _ = c.tune(self.net_settings.center_hz);
                         }
-                        self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                        self.rf_center_mhz = self.mix(self.net_lo_hz, self.net_settings.center_hz) / 1e6;
                     }
                 });
                 ui.horizontal(|ui| {
@@ -1519,7 +1588,7 @@ impl App {
                     let mut f = self.net_lo_hz / 1e6;
                     if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed() {
                         self.net_lo_hz = f * 1e6;
-                        self.rf_center_mhz = (self.net_settings.center_hz + self.net_lo_hz) / 1e6;
+                        self.rf_center_mhz = self.mix(self.net_lo_hz, self.net_settings.center_hz) / 1e6;
                     }
                 });
                 if let Some(c) = &self.net_control {
@@ -1559,8 +1628,10 @@ impl App {
                 self.rtl_running = true;
                 self.rtl_selected = true;
                 self.sample_rate = decsat_io::IqSource::sample_rate(&src);
-                self.rf_center_mhz =
-                    (self.rtl_settings.center_hz as f64 + self.rtl_settings.lnb_lo_hz) / 1e6;
+                self.rf_center_mhz = self.mix(
+                    self.rtl_settings.lnb_lo_hz,
+                    self.rtl_settings.center_hz as f64,
+                ) / 1e6;
                 self.note = format!("RTL-SDR started @ {:.3} MS/s", self.sample_rate / 1e6);
                 self.start_engine(Box::new(src));
             }
@@ -1584,10 +1655,10 @@ impl App {
             else {ui.label("Tuner: detected at receiver start; upper range depends on tuner chip");}
             ui.horizontal(|ui|{ui.label("Device index");ui.add(egui::DragValue::new(&mut self.rtl_settings.device_index).range(0..=31));});
             ui.horizontal(|ui|{ui.label("Tuner MHz");let mut f=self.rtl_settings.center_hz as f64/1e6;
-                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(min_mhz..=max_mhz)).changed(){self.rtl_settings.center_hz=(f*1e6) as u32;if let Some(c)=&self.rtl_control{c.tune(self.rtl_settings.center_hz);}self.rf_center_mhz=(self.rtl_settings.center_hz as f64+self.rtl_settings.lnb_lo_hz)/1e6;}
+                if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(min_mhz..=max_mhz)).changed(){self.rtl_settings.center_hz=(f*1e6) as u32;if let Some(c)=&self.rtl_control{c.tune(self.rtl_settings.center_hz);}self.rf_center_mhz=self.mix(self.rtl_settings.lnb_lo_hz,self.rtl_settings.center_hz as f64)/1e6;}
             });
             ui.horizontal(|ui|{ui.label("LNB LO MHz");let mut f=self.rtl_settings.lnb_lo_hz/1e6;
-                if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){self.rtl_settings.lnb_lo_hz=f*1e6;self.rf_center_mhz=(self.rtl_settings.center_hz as f64+self.rtl_settings.lnb_lo_hz)/1e6;}
+                if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){self.rtl_settings.lnb_lo_hz=f*1e6;self.rf_center_mhz=self.mix(self.rtl_settings.lnb_lo_hz,self.rtl_settings.center_hz as f64)/1e6;}
             });
             ui.horizontal(|ui|{ui.label("Sample rate MS/s");egui::ComboBox::from_id_salt("rtl_rate")
                 .selected_text(format!("{:.3}",self.rtl_settings.rate as f64/1e6)).show_ui(ui,|ui|{
@@ -1664,7 +1735,7 @@ impl App {
                 self.uhd_control = Some(src.control());
                 self.sample_rate = decsat_io::IqSource::sample_rate(&src);
                 self.rf_center_mhz =
-                    (self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz) / 1e6;
+                    self.mix(self.uhd_settings.lnb_lo_hz, self.uhd_settings.center_hz) / 1e6;
                 self.note = format!("UHD receiver started @ {:.2} MS/s", self.sample_rate / 1e6);
                 self.start_engine(Box::new(src));
             }
@@ -1710,11 +1781,12 @@ impl App {
                         .changed()
                     {
                         self.uhd_settings.lnb_lo_hz = lo * 1e6;
-                        self.rf_center_mhz =
-                            (self.uhd_settings.center_hz + self.uhd_settings.lnb_lo_hz) / 1e6;
+                        self.rf_center_mhz = self
+                            .mix(self.uhd_settings.lnb_lo_hz, self.uhd_settings.center_hz)
+                            / 1e6;
                     }
                 });
-                ui.label("Main frequency = tuner IF + LNB LO. LNB power is external.");
+                ui.label("Main frequency = LNB LO ± tuner IF. LNB power is external.");
                 ui.horizontal(|ui| {
                     ui.label("Sample rate MS/s");
                     let rate = &mut self.uhd_settings.rate;
@@ -2181,7 +2253,8 @@ impl App {
         if was == now || self.path.is_some() {
             return;
         }
-        let by = was as f64 - now as f64;
+        // Mirrored, a carrier moves the other way across the span.
+        let by = (was as f64 - now as f64) * self.mirror_sign();
         for v in &mut self.vfos {
             v.settings.offset_hz += by;
             if let Some(e) = &self.engine {
@@ -2365,12 +2438,12 @@ impl App {
         // The readout shows the trimmed RF; the tuning is without the trim.
         let rf = if rf > 0.0 { rf - self.lo_trim_hz } else { rf };
         if self.remote.selected && self.path.is_none() {
-            self.retune_remote((rf - self.remote.lo_hz).max(0.0));
+            self.retune_remote(self.unmix(self.remote.lo_hz, rf).max(0.0));
             self.rf_center_mhz = rf / 1e6;
             return;
         }
         if self.net_selected && self.path.is_none() {
-            let if_hz = (rf - self.net_lo_hz).max(0.0);
+            let if_hz = self.unmix(self.net_lo_hz, rf).max(0.0);
             self.net_settings.center_hz = if_hz.round();
             self.rf_center_mhz = rf / 1e6;
             self.note = match self.net_control.as_ref().map(|c| c.tune(if_hz)) {
@@ -2382,7 +2455,7 @@ impl App {
         }
         #[cfg(all(windows, feature = "rtl"))]
         if self.rtl_selected && self.path.is_none() {
-            let if_hz = rf - self.rtl_settings.lnb_lo_hz;
+            let if_hz = self.unmix(self.rtl_settings.lnb_lo_hz, rf);
             let info = self.rtl_control.as_ref().and_then(|c| c.tuner_info());
             let (lo, hi) = info
                 .as_ref()
@@ -2409,7 +2482,7 @@ impl App {
         }
         #[cfg(feature = "pluto")]
         if self.pluto_running || (self.pluto_selected && self.path.is_none()) {
-            let if_hz = rf - self.pluto_settings.lnb_lo_hz;
+            let if_hz = self.unmix(self.pluto_settings.lnb_lo_hz, rf);
             if !(70e6..=6e9).contains(&if_hz) {
                 self.note = "Pluto IF must be within 70-6000 MHz".into();
                 return;
@@ -2425,7 +2498,7 @@ impl App {
         }
         #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_running {
-            let if_hz = rf - self.uhd_settings.lnb_lo_hz;
+            let if_hz = self.unmix(self.uhd_settings.lnb_lo_hz, rf);
             if !(50e6..=6e9).contains(&if_hz) {
                 self.note = "UHD: requested RF/LO produces an IF outside 50-6000 MHz".into();
                 return;
@@ -2439,7 +2512,7 @@ impl App {
         }
         #[cfg(all(windows, feature = "uhd"))]
         if self.uhd_selected && self.path.is_none() {
-            let if_hz = rf - self.uhd_settings.lnb_lo_hz;
+            let if_hz = self.unmix(self.uhd_settings.lnb_lo_hz, rf);
             if !(50e6..=6e9).contains(&if_hz) {
                 self.note = "UHD: requested RF/LO produces an IF outside 50–6000 MHz".into();
                 return;
@@ -2451,7 +2524,10 @@ impl App {
         #[cfg(feature = "hackrf")]
         if self.path.is_none() {
             let (min, max) = (self.radio.device.min_hz(), self.radio.device.max_hz());
-            let tuned = (rf - self.radio.lnb_lo_mhz * 1e6).clamp(min, max).round() as u64;
+            let tuned = self
+                .unmix(self.radio.lnb_lo_mhz * 1e6, rf)
+                .clamp(min, max)
+                .round() as u64;
             self.radio.settings.center_hz = tuned;
             if let Some(c) = &self.live
                 && let Err(e) = c.set_center(tuned)
@@ -2582,6 +2658,10 @@ impl App {
     fn overview_range(&self) -> (f64, f64) {
         let (min, max) = self.overview_tuner_range();
         let lo = self.overview_lo();
+        if self.high_side() && lo > 0.0 {
+            // Mirrored: the top of the tuner's range is the bottom of the band.
+            return (lo - max, lo - min);
+        }
         (min + lo, max + lo)
     }
 
@@ -2623,10 +2703,14 @@ impl App {
         // The sweep tunes the radio, so it works in tuner frequencies and puts
         // its points back on the RF axis.
         let rf_offset = self.overview_lo();
+        let high_side = self.high_side() && rf_offset > 0.0;
+        let a = lnb::tuned(rf_offset, lo, high_side);
+        let b = lnb::tuned(rf_offset, hi, high_side);
         let span = sweep_overview::Span {
-            lo: lo - rf_offset,
-            hi: hi - rf_offset,
+            lo: a.min(b),
+            hi: a.max(b),
             rf_offset,
+            high_side,
         };
         let was_running = self.engine.is_some();
         self.stop_source();
@@ -2977,6 +3061,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // First, before anything reads a VFO's RF.
+        self.sync_mirror();
         #[cfg(feature = "hackrf")]
         self.carry_vfos();
         self.sync_clock_ppm();

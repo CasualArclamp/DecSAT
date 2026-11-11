@@ -58,6 +58,10 @@ pub struct Options {
     pub vga_db: Option<u16>,
     /// LNB LO for the axis, MHz.
     pub lo_mhz: Option<f64>,
+    /// The LNB's LO is above the band (C band): RF = LO − tuned.
+    pub lo_high: bool,
+    /// Turn a file's spectrum over.
+    pub flip: bool,
     /// Decoder for claimed carriers (default Identify).
     pub decoder: Option<decsat_engine::DecoderKind>,
     /// `--decoder a,b,…`: one a claimed carrier, in frequency order (the
@@ -261,6 +265,8 @@ impl Options {
                         _ => o.lo_mhz = Some(v),
                     }
                 }
+                Some("--lo-high") => o.lo_high = true,
+                Some("--flip") => o.flip = true,
                 Some(s) if s.starts_with("--") => return Err(format!("unknown option {s}")),
                 _ => o.file = Some(a.into()),
             }

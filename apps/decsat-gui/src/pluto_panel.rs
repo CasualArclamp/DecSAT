@@ -107,7 +107,7 @@ impl App {
                 self.pluto_selected = true;
                 self.sample_rate = decsat_io::IqSource::sample_rate(&src);
                 self.rf_center_mhz =
-                    (self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz) / 1e6;
+                    self.mix(self.pluto_settings.lnb_lo_hz, self.pluto_settings.center_hz) / 1e6;
                 self.note = format!(
                     "PlutoSDR started on {} @ {:.3} MS/s, {}-bit IQ",
                     info.link,
@@ -156,8 +156,9 @@ impl App {
                         {
                             self.note = format!("PlutoSDR: {e}");
                         }
-                        self.rf_center_mhz =
-                            (self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz) / 1e6;
+                        self.rf_center_mhz = self
+                            .mix(self.pluto_settings.lnb_lo_hz, self.pluto_settings.center_hz)
+                            / 1e6;
                     }
                 });
                 ui.horizontal(|ui| {
@@ -168,11 +169,12 @@ impl App {
                         .changed()
                     {
                         self.pluto_settings.lnb_lo_hz = f * 1e6;
-                        self.rf_center_mhz =
-                            (self.pluto_settings.center_hz + self.pluto_settings.lnb_lo_hz) / 1e6;
+                        self.rf_center_mhz = self
+                            .mix(self.pluto_settings.lnb_lo_hz, self.pluto_settings.center_hz)
+                            / 1e6;
                     }
                 });
-                ui.label("Main frequency = tuner IF + LNB LO. LNB power is external.");
+                ui.label("Main frequency = LNB LO ± tuner IF. LNB power is external.");
                 ui.horizontal(|ui| {
                     ui.label("Sample rate MS/s").on_hover_text(
                         "A Pluto's USB 2.0 carries about 6.8 MS/s of 16-bit IQ, about 13 \
