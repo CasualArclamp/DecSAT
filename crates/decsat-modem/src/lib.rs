@@ -72,6 +72,7 @@ pub mod payload;
 pub mod pcm;
 pub mod radar;
 pub mod rs;
+pub mod scid;
 pub mod slotpkt;
 pub mod tdm257;
 pub mod tdmfast;

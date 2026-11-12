@@ -2275,6 +2275,26 @@ pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
                 vc.frames, vc.idle, vc.last_count
             );
         }
+        // The registry's names for the identifier (any band: the CLI does
+        // not know the LNB) and the command receiver's report.
+        if let Some(h) = &s.last {
+            match decsat_modem::scid::describe(h.version, h.scid, None) {
+                Some(names) => println!("    CCSDS registry: {names}"),
+                None => println!("    CCSDS registry: {} is not listed", h.scid),
+            }
+        }
+        if let Some(w) = s.ocf {
+            match s.clcw() {
+                Some(k) => println!(
+                    "    command link ({w:08X}h): {} · command VC {} · next frame {} · changed {} time(s)",
+                    k.text(),
+                    k.vcid,
+                    k.report,
+                    s.ocf_changes
+                ),
+                None => println!("    control field {w:08X}h (not a link control word)"),
+            }
+        }
     }
     let log = v.log.lock().unwrap_or_else(|e| e.into_inner());
     let good: Vec<_> = log.frames.iter().filter(|f| f.good).collect();
