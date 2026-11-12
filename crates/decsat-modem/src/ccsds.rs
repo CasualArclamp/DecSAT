@@ -577,6 +577,81 @@ impl Header {
     }
 }
 
+/// A communications link control word: what the spacecraft's command
+/// receiver reports back in a TM frame's operational control field
+/// (CCSDS 232.0-B-4 §4.2.1; the field itself, 132.0-B-3 §4.1.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clcw {
+    /// Status field (3 bits): the mission's own use.
+    pub status: u8,
+    /// COP in effect (2 bits): 1 is COP-1, the only one defined.
+    pub cop: u8,
+    /// The command (TC) virtual channel this word reports on.
+    pub vcid: u8,
+    /// No RF available: the command receiver sees no uplink it can use.
+    pub no_rf: bool,
+    /// No bit lock: its bit synchroniser is not locked to an uplink.
+    pub no_bit_lock: bool,
+    /// Lockout: a command frame failed the acceptance check, and nothing
+    /// more is taken until the ground sends an unlock.
+    pub lockout: bool,
+    /// Wait: no room for more command data for now.
+    pub wait: bool,
+    /// Retransmit: frames were lost; the ground is to send them again.
+    pub retransmit: bool,
+    /// FARM-B counter: the low two bits of the count of bypass (type B)
+    /// command frames accepted.
+    pub farm_b: u8,
+    /// Report value N(R): the number of the next command frame expected.
+    pub report: u8,
+}
+
+impl Clcw {
+    /// Read the 32-bit field. `None` when it is not a CLCW: control word
+    /// type 1 (the project's own report) or a version other than 00b.
+    pub fn parse(w: u32) -> Option<Clcw> {
+        // Rust note: `w >> 29` leaves the top three bits; a CLCW has all
+        // three clear (type 0, version 00).
+        if w >> 29 != 0 {
+            return None;
+        }
+        let bit = |n: u32| (w >> n) & 1 == 1;
+        Some(Clcw {
+            status: ((w >> 26) & 7) as u8,
+            cop: ((w >> 24) & 3) as u8,
+            vcid: ((w >> 18) & 0x3F) as u8,
+            no_rf: bit(15),
+            no_bit_lock: bit(14),
+            lockout: bit(13),
+            wait: bit(12),
+            retransmit: bit(11),
+            farm_b: ((w >> 9) & 3) as u8,
+            report: w as u8,
+        })
+    }
+
+    /// The command receiver's state in a few words: "uplink carrier, no
+    /// bit lock", with "locked out", "wait" and "retransmit" when set.
+    pub fn text(&self) -> String {
+        let mut s = String::from(match (self.no_rf, self.no_bit_lock) {
+            (true, _) => "no uplink",
+            (false, true) => "uplink carrier, no bit lock",
+            (false, false) => "uplink in bit lock",
+        });
+        for (on, name) in [
+            (self.lockout, "locked out"),
+            (self.wait, "wait"),
+            (self.retransmit, "retransmit"),
+        ] {
+            if on {
+                s.push_str(" · ");
+                s.push_str(name);
+            }
+        }
+        s
+    }
+}
+
 /// What a stream of transfer frames has shown.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Stats {
@@ -595,6 +670,17 @@ pub struct Stats {
     pub lost: u64,
     /// The header of the last good frame.
     pub last: Option<Header>,
+    /// The last good TM frame's operational control field, if it has one
+    /// (the header says), and how many times it has changed.
+    pub ocf: Option<u32>,
+    pub ocf_changes: u64,
+}
+
+impl Stats {
+    /// The operational control field as a command link control word.
+    pub fn clcw(&self) -> Option<Clcw> {
+        self.ocf.and_then(Clcw::parse)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -727,6 +813,22 @@ impl TmRx {
                 self.last_mc = Some(mc);
             }
             self.stats.last = Some(h);
+            // The operational control field: the four bytes that end a TM
+            // frame, before the error control field if there is one
+            // (132.0-B-3 §4.1.5).
+            let end = bytes.len() - if self.fecf == Some(true) { 2 } else { 0 };
+            if h.version == 0 && h.ocf && end >= 10 {
+                let w = u32::from_be_bytes([
+                    bytes[end - 4],
+                    bytes[end - 3],
+                    bytes[end - 2],
+                    bytes[end - 1],
+                ]);
+                if self.stats.ocf.is_some_and(|was| was != w) {
+                    self.stats.ocf_changes += 1;
+                }
+                self.stats.ocf = Some(w);
+            }
         }
         out.push(Frame {
             bytes,
@@ -819,6 +921,58 @@ mod tests {
             &GF.from_dual[..8],
             &[0x00, 0xcc, 0xac, 0x60, 0x79, 0xb5, 0xd5, 0x19]
         );
+    }
+
+    #[test]
+    fn the_command_link_control_word_is_read() {
+        // The 11 702.8 MHz beacon at 172°E (spacecraft 785): every frame
+        // ends 01 54 46 A7 and its CRC.
+        let c = Clcw::parse(0x0154_46A7).expect("a CLCW");
+        assert_eq!((c.status, c.cop, c.vcid), (0, 1, 21));
+        assert_eq!((c.no_rf, c.no_bit_lock), (false, true));
+        assert_eq!((c.lockout, c.wait, c.retransmit), (false, false, false));
+        assert_eq!((c.farm_b, c.report), (3, 167));
+        assert_eq!(c.text(), "uplink carrier, no bit lock");
+        let all = Clcw::parse(0x0100_B800).unwrap();
+        assert_eq!(all.text(), "no uplink · locked out · wait · retransmit");
+        assert_eq!(
+            Clcw::parse(0x0100_0000).unwrap().text(),
+            "uplink in bit lock"
+        );
+        // Control word type 1, and a version that is not 00.
+        assert_eq!(Clcw::parse(0x8154_46A7), None);
+        assert_eq!(Clcw::parse(0x2154_46A7), None);
+
+        // Out of frames: the field is before the CRC, and only where the
+        // header says there is one.
+        let fmt = Format {
+            block_bytes: 252,
+            rs: None,
+            randomised: false,
+        };
+        let mut rx = TmRx::new();
+        let mut out = Vec::new();
+        for i in 0..6u8 {
+            let mut f = tm_frame(252, 0x311, 0, i, i, &[]);
+            f[1] |= 1;
+            let w: u32 = if i < 4 { 0x0154_46A7 } else { 0x0154_06A8 };
+            f[246..250].copy_from_slice(&w.to_be_bytes());
+            let crc = crc16(&f[..250]);
+            f[250..].copy_from_slice(&crc.to_be_bytes());
+            rx.push(&encode_block(&fmt, &f), &mut out);
+        }
+        assert_eq!(out.len(), 6);
+        assert_eq!(rx.stats.ocf, Some(0x0154_06A8));
+        assert_eq!(rx.stats.ocf_changes, 1);
+        let c = rx.stats.clcw().unwrap();
+        assert_eq!((c.no_bit_lock, c.report), (false, 168));
+
+        let mut rx = TmRx::new();
+        for i in 0..4u8 {
+            rx.push(&tm_frame(252, 0x311, 0, i, i, &[]), &mut out);
+        }
+        assert_eq!(rx.stats.crc_ok, 4);
+        assert_eq!(rx.stats.ocf, None);
     }
 
     #[test]

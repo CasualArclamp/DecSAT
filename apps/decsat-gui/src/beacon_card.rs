@@ -64,7 +64,7 @@ pub fn show(ui: &mut Ui, b: &BeaconView, rf_center: f64, id: VfoId) {
         charts(ui, b, rf_center, id);
     }
     if let Some(c) = &b.ccsds {
-        ccsds_rows(ui, c, id);
+        ccsds_rows(ui, c, rf_center, id);
     }
     if b.framing.is_some() {
         frame_map(ui, b, id);
@@ -392,7 +392,7 @@ fn charts(ui: &mut Ui, b: &BeaconView, rf_center: f64, id: VfoId) {
     }
 }
 
-fn ccsds_rows(ui: &mut Ui, c: &decsat_engine::beacon::CcsdsView, id: VfoId) {
+fn ccsds_rows(ui: &mut Ui, c: &decsat_engine::beacon::CcsdsView, rf_center: f64, id: VfoId) {
     let s = &c.stats;
     ui.add_space(4.0);
     ui.label(RichText::new("CCSDS transfer frames").strong());
@@ -430,6 +430,38 @@ fn ccsds_rows(ui: &mut Ui, c: &decsat_engine::beacon::CcsdsView, id: VfoId) {
                     h.vcid,
                     h.vc_count
                 ));
+                ui.end_row();
+                // Who the registry says has that identifier, in this band.
+                ui.label("Spacecraft");
+                let hint = "The spacecraft identifier looked up in the CCSDS registry (SANA,                             sanaregistry.org). A hint, not proof: identifiers are given out again                             in other bands and after a mission ends, and many commercial                             satellites never register theirs.";
+                match decsat_engine::scid::describe(h.version, h.scid, Some(rf_center / 1e6)) {
+                    Some(names) => ui.label(names).on_hover_text(hint),
+                    None => ui
+                        .weak(format!("{} is not in the CCSDS registry", h.scid))
+                        .on_hover_text(hint),
+                };
+                ui.end_row();
+            }
+            // The command receiver's report, carried in every frame.
+            if let Some(w) = s.ocf {
+                ui.label("Command link");
+                match s.clcw() {
+                    Some(k) => ui
+                        .colored_label(
+                            if k.lockout || k.retransmit { WAIT } else { GOOD },
+                            format!(
+                                "{} · command VC {} · next frame {}",
+                                k.text(),
+                                k.vcid,
+                                k.report
+                            ),
+                        )
+                        .on_hover_text(format!(
+                            "The spacecraft's command receiver reporting back to the ground                              (the command link control word, {w:08X}h): whether it sees an                              uplink and is locked to its bits, and the number of the next                              command frame it expects. No bit lock is the usual state: nobody                              is sending it commands just now. The number going up, or bit lock                              coming and going, is the control station at work. Changed {}                              time(s) since the decoder started.",
+                            s.ocf_changes
+                        )),
+                    None => ui.label(format!("{w:08X}h (not a link control word)")),
+                };
                 ui.end_row();
             }
             for ((scid, vcid), vc) in &s.channels {
