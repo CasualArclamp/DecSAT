@@ -363,7 +363,61 @@ impl Framer {
             }
             (None, None) => None,
         };
-        pick.map(|(_, l)| l)
+        pick.map(|(_, l)| self.as_sent(l))
+    }
+
+    /// The lock with its word as the spacecraft sends it. A known word is
+    /// taken with a bit or two wrong (its tolerance), so a word that is
+    /// *always* those bits off — a beacon at 12 201.5 MHz sends FAF338
+    /// where IRIG has FAF320 — would lock, then count two errors in every
+    /// frame and have no tolerance left for real ones. Each bit is voted
+    /// on over the frames held; three in four must agree to change it.
+    /// CCSDS's marker is left alone: what follows depends on it being that.
+    fn as_sent(&self, mut lock: Lock) -> Lock {
+        if lock.blind || lock.word.is_ccsds() {
+            return lock;
+        }
+        let bits = self.reading(lock.reading);
+        let n = usize::from(lock.word.len);
+        let tol = lock.word.tolerance();
+        let mut ones = vec![0usize; n];
+        let mut hits = 0usize;
+        let mut at = lock.next.saturating_sub(self.base) as usize;
+        while at + n <= bits.len() {
+            let (errs, inv) = word_errors(bits, at, &lock.word);
+            if errs <= tol {
+                hits += 1;
+                for (k, o) in ones.iter_mut().enumerate() {
+                    *o += usize::from(bits[at + k] ^ u8::from(inv));
+                }
+            }
+            at += lock.frame_bits;
+        }
+        if hits < 2 {
+            return lock;
+        }
+        let mut sent = 0u64;
+        for (k, &o) in ones.iter().enumerate() {
+            let bit = if 4 * o >= 3 * hits {
+                1
+            } else if 4 * (hits - o) >= 3 * hits {
+                0
+            } else {
+                lock.word.bit(k)
+            };
+            sent = (sent << 1) | u64::from(bit);
+        }
+        let changed = (sent ^ lock.word.bits).count_ones();
+        if changed > 0 {
+            let was = std::mem::take(&mut lock.word.name);
+            lock.word.bits = sent;
+            lock.word.name = format!(
+                "{n}-bit {} ({was} with {changed} bit{} changed)",
+                lock.word.hex(),
+                if changed == 1 { "" } else { "s" }
+            );
+        }
+        lock
     }
 }
 
@@ -670,6 +724,81 @@ impl ClockWord {
     pub fn seconds(&self) -> f64 {
         self.value as f64 / self.per_second
     }
+
+    /// The clock as a time of day, if it keeps one: its reading counted
+    /// from one of [`CLOCK_EPOCHS`] lands within two minutes of `unix_now`
+    /// (the computer's clock, seconds since 1970). So only a live signal
+    /// can show it — a recording played later is minutes to years off —
+    /// and a clock started at switch-on (IS-19's) never does. Two minutes
+    /// takes in GPS and TAI time (18 s and 37 s ahead of UTC) and a
+    /// computer's clock left unset.
+    pub fn time_of_day(&self, unix_now: f64) -> Option<ClockTime> {
+        let s = self.seconds();
+        CLOCK_EPOCHS
+            .iter()
+            .map(|&(epoch, unix)| ClockTime {
+                epoch,
+                unix: unix as f64 + s,
+                ahead_s: unix as f64 + s - unix_now,
+            })
+            .filter(|t| t.ahead_s.abs() <= 120.0)
+            .min_by(|a, b| a.ahead_s.abs().total_cmp(&b.ahead_s.abs()))
+    }
+}
+
+/// The epochs a spacecraft clock is tried against, as (name, Unix seconds).
+/// 2000-01-01 12:00:00 UTC is what the 12 201.5 MHz beacon at 172°E counts
+/// from (the J2000 date, taken in UTC rather than terrestrial time); the
+/// rest are the usual ones: CCSDS 301.0-B-4 §3's 1958-01-01 (TAI), the GPS
+/// epoch (IS-GPS-200 §3.3.4) and Unix time.
+pub const CLOCK_EPOCHS: &[(&str, i64)] = &[
+    ("2000-01-01 12:00 UTC", 946_728_000),
+    ("2000-01-01 00:00 UTC", 946_684_800),
+    ("1980-01-06 (GPS)", 315_964_800),
+    ("1970-01-01 (Unix)", 0),
+    ("1958-01-01 (CCSDS)", -378_691_200),
+];
+
+/// A clock word read as a time of day ([`ClockWord::time_of_day`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockTime {
+    /// The epoch it counts from, as named in [`CLOCK_EPOCHS`].
+    pub epoch: &'static str,
+    /// Its reading, Unix seconds.
+    pub unix: f64,
+    /// How far that is ahead of the computer's clock, s.
+    pub ahead_s: f64,
+}
+
+impl ClockTime {
+    /// "2026-11-12 07:46:52".
+    pub fn text(&self) -> String {
+        utc_text(self.unix.floor() as i64)
+    }
+}
+
+/// Unix seconds as `yyyy-mm-dd hh:mm:ss` UTC.
+///
+/// Rust note: the standard library has no calendar; the date comes from the
+/// day number by the civil-from-days arithmetic (Howard Hinnant's, public
+/// domain), as in `ao40.rs`.
+pub fn utc_text(unix: i64) -> String {
+    let (days, sod) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        sod / 3600,
+        sod / 60 % 60,
+        sod % 60
+    )
 }
 
 /// A check byte at a frame's end.
@@ -928,6 +1057,59 @@ mod tests {
             (4, 0, Some(32), false)
         );
         assert_eq!(c.index(&out[0].bytes), Some(u32::from(out[0].bytes[4])));
+    }
+
+    #[test]
+    fn a_word_always_two_bits_off_a_known_one_is_read_as_sent() {
+        // The 12 201.5 MHz beacon's frames: FAF338 where IRIG has FAF320.
+        let mut fr = frames(24, 256, 5);
+        for f in &mut fr {
+            f[2] = 0x38;
+        }
+        let mut bits = bits_of(&fr);
+        // A bit error in one frame's word: outvoted.
+        bits[3 * 2048 + 6] ^= 1;
+        let mut f = Framer::new();
+        let mut out = Vec::new();
+        for c in bits.chunks(500) {
+            f.push(c, &mut out);
+        }
+        let l = f.lock().expect("locked");
+        assert_eq!(l.word.hex(), "FAF338");
+        assert_eq!(
+            l.word.name,
+            "24-bit FAF338 (IRIG 24-bit FAF320 with 2 bits changed)"
+        );
+        assert!(!l.blind);
+        assert!(out.len() >= 22, "{} frames", out.len());
+        // No errors counted against the word but the one put in.
+        assert_eq!(f.stats.sync_bit_errors, 1);
+        assert_eq!(f.stats.flywheel, 0);
+    }
+
+    #[test]
+    fn a_clock_keeping_utc_is_read_as_a_time_of_day() {
+        // The beacon's reading in a recording stamped 1794469620.74.
+        let c = ClockWord {
+            byte: 212,
+            len: 4,
+            per_second: 1.0,
+            value: 847_741_621,
+        };
+        let t = c.time_of_day(1_794_469_620.74).expect("a time of day");
+        assert_eq!(t.epoch, "2000-01-01 12:00 UTC");
+        assert_eq!(t.text(), "2026-11-12 07:47:01");
+        assert!((t.ahead_s - 0.26).abs() < 1e-3);
+        // The same reading played back an hour later; a clock started at
+        // switch-on (IS-19's, 14 years of seconds).
+        assert_eq!(c.time_of_day(1_794_473_220.0), None);
+        let is19 = ClockWord {
+            value: 453_000_000,
+            ..c
+        };
+        assert_eq!(is19.time_of_day(1_794_469_620.0), None);
+        assert_eq!(utc_text(951_782_400), "2000-02-29 00:00:00");
+        assert_eq!(utc_text(-1), "1969-12-31 23:59:59");
     }
 
     #[test]
