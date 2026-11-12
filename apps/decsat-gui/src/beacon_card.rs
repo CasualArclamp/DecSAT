@@ -276,6 +276,22 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
                      before launch), measured against this computer's clock.",
                 );
                 ui.end_row();
+                // A clock that keeps the time of day (live only: it is
+                // matched against this computer's clock).
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64());
+                if let Some(t) = c.time_of_day(now) {
+                    ui.label("");
+                    ui.colored_label(GOOD, format!("{} UTC", t.text()))
+                        .on_hover_text(format!(
+                            "The clock keeps the time of day: it counts from {}, and reads \
+                             {:+.1} s against this computer's clock (which includes the time \
+                             the signal takes to get here and through the decoder).",
+                            t.epoch, t.ahead_s
+                        ));
+                    ui.end_row();
+                }
             }
             if let Some(c) = &b.counter {
                 ui.label("Counter");

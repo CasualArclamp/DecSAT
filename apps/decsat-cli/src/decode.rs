@@ -2231,6 +2231,18 @@ pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
             c.value,
             c.seconds() / (365.25 * 86400.0)
         );
+        // Live only: matched against this computer's clock.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        if let Some(t) = c.time_of_day(now) {
+            println!(
+                "  clock: {} UTC, counting from {} ({:+.1} s against this computer)",
+                t.text(),
+                t.epoch,
+                t.ahead_s
+            );
+        }
     }
     if let Some(c) = &v.counter {
         println!(
