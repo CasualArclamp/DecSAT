@@ -275,16 +275,19 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     ui.separator();
     // A multistream carrier's stream picked for the TS card.
     let mut ts_pick = None;
+    // The RF scale only means something once the radio's tuning or a
+    // file's centre is known; at 0 Hz it is baseband.
+    let vfo_rf = (inp.rf_center.abs() > 1e6).then_some(inp.rf_center + v.settings.offset_hz);
     if matches!(
         v.settings.decoder,
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
     ) {
-        // The RF scale only means something once the radio's tuning or a
-        // file's centre is known; at 0 Hz it is baseband.
-        let vfo_rf = (inp.rf_center.abs() > 1e6).then_some(inp.rf_center + v.settings.offset_hz);
         ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
-        ui.add_space(6.0);
+    } else {
+        // Every other mode: the same header, with what it has to show.
+        mode_card(ui, v, &st, vfo_rf);
     }
+    ui.add_space(6.0);
 
     let mut s = v.settings.clone();
     if let Some(isi) = ts_pick {
@@ -5758,6 +5761,251 @@ const HEALTH_BAD: Color32 = Color32::from_rgb(230, 110, 110);
 /// Clear of the side panel's scroll bar, which egui floats over the content.
 const RIGHT_PAD: f32 = 6.0;
 
+/// A card's title bar, as the DVB card has it: the name in the mode's colour
+/// on a tint of it, ruled underneath, with the space-segment frequency and
+/// the symbol rate at the right. `width_hz` stands in for a symbol rate
+/// there is none of (an analogue mode's bandwidth); `exact` is whether the
+/// frequency is the carrier's as measured (else it is shown grey).
+fn title_bar(
+    ui: &mut Ui,
+    title: &str,
+    colour: Color32,
+    symbol_rate: Option<f64>,
+    width_hz: Option<f64>,
+    space_hz: Option<f64>,
+    exact: bool,
+) {
+    let grey = ui.visuals().weak_text_color();
+    let strong = ui.visuals().strong_text_color();
+    let (rate, unit) = match (symbol_rate, width_hz) {
+        (Some(r), _) if r >= 1e6 => (format!("{:.3}", r / 1e6), "MS/s"),
+        (Some(r), _) => (format!("{:.1}", r / 1e3), "kS/s"),
+        (None, Some(w)) if w >= 1e6 => (format!("{:.3}", w / 1e6), "MHz wide"),
+        (None, Some(w)) => (format!("{:.1}", w / 1e3), "kHz wide"),
+        (None, None) => ("–".to_string(), ""),
+    };
+    let bar = egui::Frame::new()
+        .fill(colour.gamma_multiply(0.15))
+        .corner_radius(CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 0,
+            se: 0,
+        })
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 8 + RIGHT_PAD as i8,
+            top: 3,
+            bottom: 3,
+        })
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .monospace()
+                        .size(14.0)
+                        .strong()
+                        .color(colour),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(unit).size(11.0).weak());
+                    ui.label(RichText::new(rate).monospace().size(20.0).color(strong));
+                    if let Some(f) = space_hz {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("MHz").size(11.0).weak());
+                        ui.label(
+                            RichText::new(format!("{:.3}", f / 1e6))
+                                .monospace()
+                                .size(16.0)
+                                .color(if exact { strong } else { grey }),
+                        )
+                        .on_hover_text(
+                            "Space-segment frequency: the carrier's downlink as received — \
+                             the radio's tuning, the LNB's LO and trim and the VFO, plus the \
+                             demodulator's offset once locked (grey: the VFO's centre only). \
+                             As good as the LO trim: an untrimmed LNB is off by kHz.",
+                        );
+                    }
+                });
+            });
+        })
+        .response;
+    ui.painter().hline(
+        bar.rect.x_range(),
+        bar.rect.bottom(),
+        egui::Stroke::new(2.0, colour),
+    );
+    ui.add_space(4.0);
+}
+
+/// A mode's name for its card's title bar.
+fn mode_title(decoder: DecoderKind) -> &'static str {
+    match decoder {
+        DecoderKind::Identify => "Identify",
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => "DVB-S2",
+        DecoderKind::DvbsTs => "DVB-S",
+        DecoderKind::CdmAuto => "Comtech CDM",
+        DecoderKind::Tpc2964 => "TPC",
+        DecoderKind::Cdm600Voice => "CDM-600L voice",
+        DecoderKind::Cdm570 => "CDM-570L",
+        DecoderKind::Cdm570Trunk => "CDM-570L trunk",
+        DecoderKind::FastLink => "Q-Flex FastLink",
+        DecoderKind::Viterbi => "Viterbi",
+        DecoderKind::CarrierId => "DVB-CID",
+        DecoderKind::Is19Outbound => "IS-19 DAMA",
+        DecoderKind::Beacon => "Beacon",
+        DecoderKind::P3Beacon => "AMSAT PSK beacon",
+        DecoderKind::HsBeacon => "QO-100 multimedia",
+        DecoderKind::BarkerTdm => "Barker-11 TDM",
+        DecoderKind::Bgan => "Inmarsat BGAN",
+        DecoderKind::PskSymbols => "PSK",
+        DecoderKind::Tdma => "TDMA",
+        DecoderKind::ReturnPool => "Return pool",
+        DecoderKind::Am => "AM",
+        DecoderKind::Nfm => "NFM",
+        DecoderKind::Wfm => "WFM",
+        DecoderKind::Usb => "USB",
+        DecoderKind::Lsb => "LSB",
+        DecoderKind::Dsb => "DSB",
+        DecoderKind::Cw => "CW",
+        DecoderKind::AtvAm => "ATV · AM",
+        DecoderKind::AtvFm => "ATV · FM",
+        DecoderKind::IqRecord => "IQ recorder",
+        DecoderKind::Spectrum => "Spectrum",
+    }
+}
+
+/// The header of every mode but DVB-S/S2, in the DVB card's shape: the title
+/// bar (mode, space-segment frequency, symbol rate or the VFO's width), then
+/// for a demodulated carrier its modulation and code in large type with the
+/// Es/N0 beside it and on a bar; for a mode with no carrier loop, the VFO's
+/// level on the bar instead. Green once the carrier is locked, half lit
+/// while it is not, grey while there is nothing yet.
+fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
+    let grey = ui.visuals().weak_text_color();
+    // The CDM type-found model's name, once it is known.
+    let decoder = st.cdm_model.unwrap_or(v.settings.decoder);
+    let demodulates = v.settings.decoder.demodulates();
+    let carrier = st.carrier;
+    // Rust note: `filter` keeps the Option only while its closure is true.
+    let carrier_lock = carrier.filter(|c| c.locked);
+    let colour = match carrier {
+        _ if !v.settings.enabled || st.out_of_span => grey,
+        Some(c) if c.locked => HEALTH_OK,
+        Some(_) => HEALTH_OK.gamma_multiply(0.55),
+        // Waiting for its carrier; a mode with no carrier loop just runs.
+        None if demodulates => grey,
+        None => HEALTH_OK,
+    };
+    let space_hz = vfo_rf.map(|f| f + carrier_lock.map_or(0.0, |c| c.offset_hz));
+    title_bar(
+        ui,
+        mode_title(decoder),
+        colour,
+        st.symbol_rate,
+        Some(v.settings.bandwidth_hz),
+        space_hz,
+        carrier_lock.is_some() || !demodulates,
+    );
+
+    // The bar's fixed scale, its fill and the line under it. Rust note:
+    // declared here and assigned once in each branch below.
+    let (lo, hi, fill, left, right): (f32, f32, Option<f32>, String, String);
+    if let Some(c) = carrier {
+        // ---- the modulation and its code, and the Es/N0
+        use decsat_engine::TpcCode as Code;
+        let f = st.fec.as_ref();
+        let code: Option<String> = f.and_then(|f| {
+            if let Some(r) = f.viterbi.as_ref().and_then(|v| v.rate) {
+                Some(r.name().to_string())
+            } else if f.conv.as_ref().is_some_and(|c| c.code.is_some()) {
+                // The blind search finds rate-½ codes only.
+                Some("1/2".to_string())
+            } else if let Some(c) = f.tpc.as_ref().and_then(|t| t.code) {
+                Some(
+                    match c {
+                        Code::Comtech78 => "TPC 7/8",
+                        Code::Tpc2964 => "TPC 2964",
+                        Code::Comtech8Qam => "0.8",
+                        Code::Comtech16Qam => "",
+                    }
+                    .to_string(),
+                )
+            } else if f.fastlink.is_some() {
+                Some("0.710".to_string())
+            } else {
+                None
+            }
+        });
+        let name = format!("{} {}", c.modulation.name(), code.unwrap_or_default());
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(name.trim_end())
+                    .monospace()
+                    .size(26.0)
+                    .color(colour),
+            );
+            if c.locked {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(RIGHT_PAD);
+                    ui.label(
+                        RichText::new(format!("{:5.1} dB", c.esn0_db()))
+                            .monospace()
+                            .size(18.0)
+                            .color(colour),
+                    );
+                });
+            }
+        })
+        .response
+        .on_hover_text(
+            "The carrier as the demodulator has it, with its code once found, and the \
+             symbols' Es/N0 (their modulation error ratio).",
+        );
+        (lo, hi) = (0.0, 20.0);
+        fill = c.locked.then(|| c.esn0_db());
+        left = if c.locked {
+            c.snr_text()
+        } else {
+            "not locked".to_string()
+        };
+        right = format!("{:+.0} Hz", c.offset_hz);
+    } else {
+        (lo, hi) = (-70.0, 0.0);
+        fill = (colour != grey).then_some(st.level_db);
+        left = if st.out_of_span {
+            "outside the receiver's span".to_string()
+        } else if demodulates {
+            "waiting for the carrier…".to_string()
+        } else {
+            format!("Level {:.1} dB", st.level_db)
+        };
+        right = String::new();
+    }
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, 10.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    if let Some(x) = fill {
+        let frac = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let bar = egui::Rect::from_min_max(
+            rect.min,
+            pos2(rect.left() + rect.width() * frac, rect.max.y),
+        );
+        p.rect_filled(bar, CornerRadius::same(2), HEALTH_OK);
+    }
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(left).size(12.0).weak());
+        if !right.is_empty() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(right).size(12.0).weak());
+            });
+        }
+    });
+}
+
 /// A DVB-S/S2/S2X VFO's card, at the top of its panel. A title bar in the
 /// standard's colour — DVB-S2X blue, DVB-S2 green, DVB-S yellow — names
 /// the standard, CCM or ACM, the space-segment frequency (`vfo_rf`, the
@@ -5906,11 +6154,6 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus, vfo_rf: Option<f6
         Some(m) => format!("{kind} · {m}"),
         None => kind.to_string(),
     };
-    let (rate, unit) = match st.symbol_rate {
-        Some(r) if r >= 1e6 => (format!("{:.3}", r / 1e6), "MS/s"),
-        Some(r) => (format!("{:.1}", r / 1e3), "kS/s"),
-        None => ("–".to_string(), ""),
-    };
     // The carrier's downlink frequency: the VFO's centre on the RF scale
     // (tuning, LNB LO and trim), moved by the carrier loop's offset while it
     // is locked — the VFO alone is only as close as it was placed.
@@ -5959,59 +6202,15 @@ fn dvb_card(ui: &mut Ui, decoder: DecoderKind, st: &VfoStatus, vfo_rf: Option<f6
         ui.label(RichText::new(ids.join(" · ")).monospace().size(11.0).weak());
         ui.add_space(2.0);
     }
-    let bar = egui::Frame::new()
-        .fill(colour.gamma_multiply(0.15))
-        .corner_radius(CornerRadius {
-            nw: 4,
-            ne: 4,
-            sw: 0,
-            se: 0,
-        })
-        .inner_margin(egui::Margin {
-            left: 8,
-            right: 8 + RIGHT_PAD as i8,
-            top: 3,
-            bottom: 3,
-        })
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(title)
-                        .monospace()
-                        .size(14.0)
-                        .strong()
-                        .color(colour),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(unit).size(11.0).weak());
-                    ui.label(RichText::new(rate).monospace().size(20.0).color(strong));
-                    if let Some(f) = space_hz {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new("MHz").size(11.0).weak());
-                        ui.label(
-                            RichText::new(format!("{:.3}", f / 1e6))
-                                .monospace()
-                                .size(16.0)
-                                .color(if carrier_lock.is_some() { strong } else { grey }),
-                        )
-                        .on_hover_text(
-                            "Space-segment frequency: the carrier's downlink as received — \
-                             the radio's tuning, the LNB's LO and trim and the VFO, plus the \
-                             demodulator's offset once locked (grey: the VFO's centre only). \
-                             As good as the LO trim: an untrimmed LNB is off by kHz.",
-                        );
-                    }
-                });
-            });
-        })
-        .response;
-    ui.painter().hline(
-        bar.rect.x_range(),
-        bar.rect.bottom(),
-        egui::Stroke::new(2.0, colour),
+    title_bar(
+        ui,
+        &title,
+        colour,
+        st.symbol_rate,
+        None,
+        space_hz,
+        carrier_lock.is_some(),
     );
-    ui.add_space(4.0);
 
     // ---- the MODCOD and its margin
     let resp = ui
