@@ -23,10 +23,11 @@
 //! The R820T2 tuner covers about 24–1750 MHz: behind a Ku LNB that is the IF
 //! up to ~1.7 GHz, not the top of the 950–2150 MHz band.
 //!
-//! **Receive only, bias tee always off.** The Airspy can put 4.5 V on its
-//! antenna port; DecSAT switches that off on every open and never on — it
-//! cannot power an LNB anyway (13/18 V), and on the wrong hardware it does
-//! damage.
+//! **Receive only; bias tee only when asked.** The Airspy can put 4.5 V
+//! (up to 50 mA) on its antenna port, for an active antenna or an L-band LNA.
+//! DecSAT sets it as [`AirspySettings::bias_tee`] says on every open (off by
+//! default) and switches it off again when the source closes — it cannot power
+//! an LNB anyway (13/18 V), and on the wrong hardware it does damage.
 //!
 //! The library's own threads read USB and convert; its callback hands each
 //! block over a bounded channel, dropping and counting whole blocks when the
@@ -113,6 +114,8 @@ pub struct AirspySettings {
     /// 3 or 6 MS/s on a Mini (the nearest the board offers is taken).
     pub sample_rate: u32,
     pub gains: AirspyGains,
+    /// 4.5 V on the antenna port (bias tee). Off unless asked for.
+    pub bias_tee: bool,
 }
 
 impl Default for AirspySettings {
@@ -121,6 +124,7 @@ impl Default for AirspySettings {
             center_hz: 1_200_000_000,
             sample_rate: 6_000_000,
             gains: AirspyGains::default(),
+            bias_tee: false,
         }
     }
 }
@@ -235,9 +239,9 @@ impl AirspySource {
                  (SDR#, SDR++), and on the WinUSB driver?"
             ))
         })?;
-        // Never power the antenna port (see the module comment).
-        dev.set_rf_bias(false)
-            .map_err(|e| map_err("bias tee off", e))?;
+        // Antenna power only when asked for (see the module comment).
+        dev.set_rf_bias(settings.bias_tee)
+            .map_err(|e| map_err("bias tee", e))?;
         dev.set_sample_type(SampleType::Float32Iq)
             .map_err(|e| map_err("sample type", e))?;
         let mut rates = dev.samplerates();
@@ -361,7 +365,7 @@ impl IqSource for AirspySource {
                 AirspyGainMode::Sensitivity => "sensitivity",
             },
             s.gains.step
-        )
+        ) + if s.bias_tee { ", bias-T on" } else { "" }
     }
 
     fn is_live(&self) -> bool {
@@ -376,6 +380,8 @@ impl Drop for AirspySource {
         while self.rx.try_recv().is_ok() {}
         if let Ok(mut d) = self.control.dev.lock() {
             let _ = d.stop_rx();
+            // Antenna power never outlives the session.
+            let _ = d.set_rf_bias(false);
         }
     }
 }

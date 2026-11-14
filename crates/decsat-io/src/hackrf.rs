@@ -6,12 +6,14 @@
 //! Windows the HackRF must be bound to the WinUSB driver (Zadig, or the in-box
 //! `winusb.inf` the official tools install).
 //!
-//! **Receive only, antenna power always off.** This module never puts the
+//! **Receive only; antenna power only when asked.** This module never puts the
 //! radio into transmit (that is `hackrf_tx`, used only by the GUI's armed
-//! transmit panel), and forces the antenna-port bias tee off on every
-//! configuration: switching DC onto the antenna port of whatever is connected
-//! (an LNB on an inserter, a filter, a preamp) can damage it, so DecSAT will not
-//! do it. An LNB needs 13/18 V from an external inserter anyway.
+//! transmit panel). The antenna-port bias tee (3.3 V, up to 50 mA, for an
+//! active antenna or an L-band LNA) is off unless [`HackRfSettings::bias_tee`]
+//! is set, and is switched off again when the source closes: DC on the port of
+//! whatever is connected (an LNB on an inserter, a DC-shorted filter) can
+//! damage it, so it is never on by default. An LNB needs 13/18 V from an
+//! external inserter anyway.
 //!
 //! A dedicated reader thread keeps three USB transfers in flight and hands the
 //! bytes over a bounded channel; if the consumer falls behind, whole buffers are
@@ -76,6 +78,8 @@ pub struct HackRfSettings {
     /// 2–20 MS/s. 8, 10, 12.5, 16 and 20 MS/s have the least clock jitter.
     pub sample_rate: u32,
     pub gains: HackRfGains,
+    /// 3.3 V on the antenna port (bias tee). Off unless asked for.
+    pub bias_tee: bool,
 }
 
 impl Default for HackRfSettings {
@@ -84,6 +88,7 @@ impl Default for HackRfSettings {
             center_hz: 739_500_000, // QO-100 wideband through a 9750 MHz LO
             sample_rate: 8_000_000,
             gains: HackRfGains::default(),
+            bias_tee: false,
         }
     }
 }
@@ -168,8 +173,8 @@ impl HackRfSource {
             txvga_db: 0,
             lna_db: gains.lna_db,
             amp_enable: gains.amp,
-            // Never: see the module comment.
-            antenna_enable: false,
+            // Off unless asked for: see the module comment.
+            antenna_enable: settings.bias_tee,
             frequency_hz: settings.center_hz,
             sample_rate_hz: settings.sample_rate,
             sample_rate_div: 1,
@@ -259,8 +264,8 @@ impl IqSource for HackRfSource {
             s.sample_rate as f64 / 1e6,
             s.gains.lna_db,
             s.gains.vga_db,
-            if s.gains.amp { " +amp" } else { "" }
-        )
+            if s.gains.amp { " +amp" } else { "" },
+        ) + if s.bias_tee { ", bias-T on" } else { "" }
     }
 
     fn is_live(&self) -> bool {
@@ -275,6 +280,13 @@ impl Drop for HackRfSource {
         while self.rx.try_recv().is_ok() {}
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        // Take the antenna power off again, so it never outlives the session
+        // (the firmware leaves it as set until the board resets).
+        if self.control.settings().bias_tee {
+            let _ = guarded("bias tee off", || {
+                self.control.dev.set_antenna_enable(false)
+            });
         }
     }
 }
@@ -324,6 +336,7 @@ mod tests {
             center_hz: 100_000_000,
             sample_rate: 8_000_000,
             gains: HackRfGains::default(),
+            bias_tee: false,
         })
         .expect("open");
         let mut buf = Vec::new();

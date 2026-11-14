@@ -81,7 +81,7 @@ real carriers stay put.
 | IQ file replay (`cs8`, `cu8`, `cs16`, `cs24`, `cf32`; two-channel `.wav` from SDR#, HDSDR, SDRuno, SDR++ with format, rate and centre from the header), rate/centre from file names | ✅ |
 | **Live HackRF One**, 2–20 MS/s, pure Rust over USB (no DLLs), LNB LO, an input-level warning when the gain is too high | ✅ |
 | **Live Fobos SDR** (RigExpert), 8–50 MS/s, 14 bits: RigExpert's library loaded at run time (agile or stock firmware), the same waterfall, VFOs, retuning and decoders as the HackRF | ✅ used on a real board under Windows, DVB-S2 TS and IP carriers at 20 and 50 MS/s |
-| **Live Airspy Mini / R2**, 3/6 MS/s (2.5/10 on an R2), 12 bits, 24–1750 MHz: pure Rust over USB (`libairspy-rs`, no DLL), bias tee always off | ✅ tested live: a Mini at 6 MS/s (QO-100), an R2 at 10 MS/s |
+| **Live Airspy Mini / R2**, 3/6 MS/s (2.5/10 on an R2), 12 bits, 24–1750 MHz: pure Rust over USB (`libairspy-rs`, no DLL), bias tee on request | ✅ tested live: a Mini at 6 MS/s (QO-100), an R2 at 10 MS/s |
 | **Live ADALM-PLUTO / Pluto+ / LibreSDR**, 0.26–61.44 MS/s, 70 MHz–6 GHz: pure Rust over USB or the network (no libiio, no DLL), 8-bit IQ on the Tezuka firmware, receive only | ⚠️ tested against a simulated Pluto only; not yet tried on hardware |
 | **📷 Snapshots** of the spectrum and waterfall (or the window) to PNG, captioned; **session log** to CSV; **PCAP in parts** for tools that read finished captures; the **satellite named** from the orbital position a NIT or RCS map signals | ✅ |
 | **Network IQ**: raw IQ from another program, so any radio it drives works (an SDRplay RSPduo under SDR++, say), on Windows or Linux. SDR++'s IQ Exporter, GNU Radio's TCP/UDP sinks, rtl_tcp (recognised and tuned); `tcp://` connects, `listen://` waits for a sender, `udp://` binds; int8, uint8, int16, int32, float32; the rate, the sender's frequency and the LNB LO entered (the stream carries none) | ✅ on simulated carriers over TCP and UDP |
@@ -1255,8 +1255,18 @@ say so ("N interference bursts coasted" after the Es/N0).
 The driver is pure Rust over USB ([`seify-hackrfone`](https://crates.io/crates/seify-hackrfone)
 on `nusb`): no libhackrf, no libusb, nothing to install beyond the WinUSB driver
 the HackRF already uses on Windows (Zadig, or the official tools). DecSAT only
-ever **receives**, and keeps the antenna-port power **off** — feed an LNB from
-an external inserter.
+ever **receives**.
+
+**Bias tee.** The *Bias tee* box beside the frequency in the radio window (HackRF 3.3 V, Airspy
+4.5 V, SDRplay 4.7 V — an RSPduo on Tuner B only; the RTL-SDR window has its
+own, 4.5 V on an RTL-SDR Blog V3/V4 with librtlsdr 0.6+) puts DC on the
+antenna port for an LNA or active antenna, e.g. an L-band patch for Inmarsat.
+It is off at every start of DecSAT (never saved), can only be changed while
+the radio is stopped, and is switched off again when the radio stops. On the
+command line: `decsat decode --hackrf|--airspy|--sdrplay MHz --bias-tee`.
+None of these can power an LNB (13/18 V): feed that from an external
+inserter, and never put the bias tee into a DC short or an inserter's RF
+port. The Fobos and Pluto have none; the transmitter never powers its port.
 
 **DC removal** (View menu, on by default) subtracts the IQ mean, tracked
 sample by sample with a 0.2 s time constant, before the waterfall and the
@@ -1314,8 +1324,8 @@ HackRF it needs no DLL: [`libairspy-rs`](https://crates.io/crates/libairspy-rs)
 bit-exact against the C library) speaks to it over USB through `nusb`; on
 Windows the board needs the WinUSB driver Airspy's installer or Zadig sets
 up. One gain step 0–21 on libairspy's *linearity* table (for an LNB's
-output) or its *sensitivity* table. The bias tee is switched off on every
-open and never on: 4.5 V cannot power an LNB.
+output) or its *sensitivity* table. The bias tee is off unless *Bias tee* is
+ticked (see the HackRF section), and off again on stop: 4.5 V cannot power an LNB.
 
 A **HydraSDR RFOne** (2.5, 5 or 10 MS/s, R828D tuner) works the same way:
 it speaks the R2's USB protocol and is picked as **Airspy Mini / R2 /

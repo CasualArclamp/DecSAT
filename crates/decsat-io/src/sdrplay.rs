@@ -7,18 +7,20 @@
 //! the SDK and only an SDRplay user needs it installed (from sdrplay.com, which
 //! also installs the "SDRplay API Service" the library talks to). The struct
 //! layouts and enums below are transcribed from the v3.15 headers
-//! (`sdrplay_api*.h`); only the leading fields of the big parameter structs
-//! are declared, because the tail (per-model extras: notch filters, bias-T,
-//! antenna select) is reached through pointers the API owns and DecSAT leaves
-//! at their defaults. That keeps the layout independent of the RSP models the
-//! header describes after those fields. API 3.07 to 3.x share this prefix.
+//! (`sdrplay_api*.h`, as printed in the SDRplay API Specification v3.15,
+//! §2.2.1 and §2.6–2.9); the parameter structs are declared up to the
+//! per-model blocks that hold the bias-T switch, and no further — the rest
+//! (RSPdx HDR bandwidth, RSPduo slave flags) is reached through pointers the
+//! API owns, so its size never matters here. API 3.07 to 3.x share this prefix.
 //!
 //! **RSPduo mode:** single tuner (the only mode a plain IQ source needs): the
 //! RSPduo is opened as `Single_Tuner` on Tuner A (the 50 ohm SMA, "Tuner 1") or
 //! Tuner B. Dual-tuner and master/slave modes are not used.
 //!
-//! **Receive only; bias-T stays off** (its default): DecSAT feeds an LNB from
-//! an external inserter.
+//! **Receive only; bias-T only when asked** ([`SdrplaySettings::bias_tee`],
+//! off by default, 4.7 V): RSP1A/1B, RSP2 and RSPdx on their antenna port, the
+//! RSPduo on Tuner 2 (B) only; the RSP1 has none. Set before `Init`, and put
+//! back off before `Uninit` so it never outlives the session.
 //!
 //! **Signal path:** zero-IF at the chosen rate (2–10.66 MS/s, the analogue
 //! bandwidth picked to match), the API's AGC off so the two gain stages below
@@ -78,6 +80,11 @@ const AGC_DISABLE: c_int = 0;
 const NORMAL_MIN_GR: c_int = 20;
 const MAX_BB_GR: u8 = 59;
 // sdrplay_api_ReasonForUpdateT
+const UPDATE_RSP1A_BIAST: c_uint = 0x0000_0010;
+const UPDATE_RSP2_BIAST: c_uint = 0x0000_0080;
+const UPDATE_RSPDUO_BIAST: c_uint = 0x0800_0000;
+// sdrplay_api_ReasonForUpdateExtension1T
+const UPDATE_EXT1_RSPDX_BIAST: c_uint = 0x0000_0002;
 const UPDATE_TUNER_GR: c_uint = 0x0000_8000;
 const UPDATE_TUNER_FRF: c_uint = 0x0002_0000;
 // sdrplay_api_EventT
@@ -171,12 +178,41 @@ struct ControlParamsT {
     adsb_mode: c_int,
 }
 
-/// The first two fields of `sdrplay_api_RxChannelParamsT`; the per-model tuner
-/// extras follow and are never touched.
+/// `sdrplay_api_Rsp1aTunerParamsT` (spec §2.6), also the RSP1B's.
+#[repr(C)]
+struct Rsp1aTunerParamsT {
+    bias_t_enable: u8,
+}
+
+/// `sdrplay_api_Rsp2TunerParamsT` (spec §2.7.3).
+#[repr(C)]
+struct Rsp2TunerParamsT {
+    bias_t_enable: u8,
+    am_port_sel: c_int,
+    antenna_sel: c_int,
+    rf_notch_enable: u8,
+}
+
+/// `sdrplay_api_RspDuoTunerParamsT` (spec §2.8.3) up to the notch flags; the
+/// trailing `resetSlaveFlags` is never touched.
+#[repr(C)]
+struct RspDuoTunerParamsT {
+    bias_t_enable: u8,
+    tuner1_am_port_sel: c_int,
+    tuner1_am_notch_enable: u8,
+    rf_notch_enable: u8,
+    rf_dab_notch_enable: u8,
+}
+
+/// `sdrplay_api_RxChannelParamsT` (spec §2.2.1) up to the RSPduo's tuner
+/// block; the RSPdx's (HDR bandwidth) follows and is never touched.
 #[repr(C)]
 struct RxChannelParamsT {
     tuner: TunerParamsT,
     ctrl: ControlParamsT,
+    rsp1a: Rsp1aTunerParamsT,
+    rsp2: Rsp2TunerParamsT,
+    rsp_duo: RspDuoTunerParamsT,
 }
 
 #[repr(C)]
@@ -199,7 +235,37 @@ struct ResetFlagsT {
     reset_fs_update: u8,
 }
 
-/// The first fields of `sdrplay_api_DevParamsT`.
+/// `sdrplay_api_Rsp1aParamsT` (spec §2.6).
+#[repr(C)]
+struct Rsp1aParamsT {
+    rf_notch_enable: u8,
+    rf_dab_notch_enable: u8,
+}
+
+/// `sdrplay_api_Rsp2ParamsT` (spec §2.7.3).
+#[repr(C)]
+struct Rsp2ParamsT {
+    ext_ref_output_en: u8,
+}
+
+/// `sdrplay_api_RspDuoParamsT` (spec §2.8.3).
+#[repr(C)]
+struct RspDuoParamsT {
+    ext_ref_output_en: c_int,
+}
+
+/// `sdrplay_api_RspDxParamsT` (spec §2.9.3): the RSPdx keeps its bias-T here,
+/// in the device block, not the tuner's.
+#[repr(C)]
+struct RspDxParamsT {
+    hdr_enable: u8,
+    bias_t_enable: u8,
+    antenna_sel: c_int,
+    rf_notch_enable: u8,
+    rf_dab_notch_enable: u8,
+}
+
+/// `sdrplay_api_DevParamsT` (spec §2.2.1).
 #[repr(C)]
 struct DevParamsT {
     ppm: f64,
@@ -208,6 +274,66 @@ struct DevParamsT {
     reset_flags: ResetFlagsT,
     mode: c_int,
     samples_per_pkt: c_uint,
+    rsp1a: Rsp1aParamsT,
+    rsp2: Rsp2ParamsT,
+    rsp_duo: RspDuoParamsT,
+    rsp_dx: RspDxParamsT,
+}
+
+/// Where a model keeps its bias-T switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BiasT {
+    /// RSP1A, RSP1B: `rxChannel*->rsp1aTunerParams`.
+    Rsp1a,
+    /// RSP2: `rxChannel*->rsp2TunerParams`.
+    Rsp2,
+    /// RSPduo (Tuner 2 only): `rxChannelB->rspDuoTunerParams`.
+    RspDuo,
+    /// RSPdx, RSPdx-R2: `devParams->rspDxParams`.
+    RspDx,
+}
+
+impl BiasT {
+    /// The model's bias-T, by `hw_ver` (the ids `model_name` knows); `None`
+    /// for the RSP1 and anything unknown.
+    fn of(hw_ver: u8) -> Option<BiasT> {
+        match hw_ver {
+            255 | 6 => Some(BiasT::Rsp1a),
+            2 => Some(BiasT::Rsp2),
+            RSPDUO_ID => Some(BiasT::RspDuo),
+            4 | 7 => Some(BiasT::RspDx),
+            _ => None,
+        }
+    }
+
+    /// The `Update` reasons that apply it while streaming (spec §2.2.1):
+    /// `(reason, reason extension 1)`.
+    fn reasons(self) -> (c_uint, c_uint) {
+        match self {
+            BiasT::Rsp1a => (UPDATE_RSP1A_BIAST, 0),
+            BiasT::Rsp2 => (UPDATE_RSP2_BIAST, 0),
+            BiasT::RspDuo => (UPDATE_RSPDUO_BIAST, 0),
+            BiasT::RspDx => (0, UPDATE_EXT1_RSPDX_BIAST),
+        }
+    }
+
+    /// Write the switch into the API's parameter blocks.
+    ///
+    /// # Safety
+    ///
+    /// `params` and `rx` must be the selected device's live blocks.
+    unsafe fn write(self, params: *mut DeviceParamsT, rx: *mut RxChannelParamsT, on: bool) {
+        let v = u8::from(on);
+        // SAFETY: caller's contract.
+        unsafe {
+            match self {
+                BiasT::Rsp1a => (*rx).rsp1a.bias_t_enable = v,
+                BiasT::Rsp2 => (*rx).rsp2.bias_t_enable = v,
+                BiasT::RspDuo => (*rx).rsp_duo.bias_t_enable = v,
+                BiasT::RspDx => (*(*params).dev_params).rsp_dx.bias_t_enable = v,
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -410,6 +536,9 @@ pub struct SdrplaySettings {
     pub gains: SdrplayGains,
     /// Use an RSPduo's Tuner B (Tuner 2) instead of Tuner A.
     pub tuner_b: bool,
+    /// 4.7 V on the antenna port (bias-T; an RSPduo's is on Tuner 2 only).
+    /// Off unless asked for.
+    pub bias_tee: bool,
 }
 
 impl Default for SdrplaySettings {
@@ -419,6 +548,7 @@ impl Default for SdrplaySettings {
             sample_rate: 8_000_000,
             gains: SdrplayGains::default(),
             tuner_b: false,
+            bias_tee: false,
         }
     }
 }
@@ -574,6 +704,8 @@ struct Device {
     /// Points into API-owned memory that lives until `ReleaseDevice`.
     params: *mut DeviceParamsT,
     tuner_b: bool,
+    /// The bias-T this session switched on, to switch off before `Uninit`.
+    bias_on: Option<BiasT>,
     /// Stream has stopped (`Uninit` done); control calls then fail quietly.
     stopped: AtomicBool,
     /// The callback context. Boxed so its address is stable; dropped only
@@ -611,6 +743,17 @@ impl Device {
     fn stop(&self) {
         if !self.stopped.swap(true, Ordering::SeqCst) {
             let h = self.handle();
+            if let Some(b) = self.bias_on {
+                let (reason, ext1) = b.reasons();
+                // SAFETY: the selected device's blocks, still streaming.
+                let code = unsafe {
+                    b.write(self.params, self.rx(), false);
+                    (self.lib.update)(h, self.tuner_sel(), reason, ext1)
+                };
+                if code != 0 {
+                    tracing::warn!("SDRplay: bias-T off: {}", self.lib.err_name(code));
+                }
+            }
             // SAFETY: a selected, initialised device.
             let code = unsafe { (self.lib.uninit)(h) };
             if code != 0 {
@@ -816,6 +959,27 @@ impl SdrplaySource {
             is_rspduo: is_duo,
         };
 
+        let bias = BiasT::of(chosen.hw_ver).filter(|_| settings.bias_tee);
+        let refuse = if !settings.bias_tee {
+            None
+        } else if bias.is_none() {
+            Some(format!("the {} has no bias-T", info.model))
+        } else if bias == Some(BiasT::RspDuo) && !tuner_b {
+            Some("the RSPduo's bias-T is on Tuner 2 only: pick Tuner B".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = refuse {
+            // SAFETY: undoes the selection and the Open.
+            unsafe {
+                (lib.lock_device_api)();
+                (lib.release_device)(&mut chosen);
+                (lib.unlock_device_api)();
+                (lib.close)();
+            }
+            return Err(Error::Other(format!("SDRplay: {why}")));
+        }
+
         let mut params: *mut DeviceParamsT = std::ptr::null_mut();
         // SAFETY: the selected device's handle; the API returns its own block.
         let code = unsafe { (lib.get_device_params)(chosen.dev, &mut params) };
@@ -855,6 +1019,10 @@ impl SdrplaySource {
             rx.tuner.gain.lna_state = lna;
             rx.tuner.gain.min_gr = NORMAL_MIN_GR;
             rx.ctrl.agc.enable = AGC_DISABLE;
+            // Before Init, writing the field is all it takes (spec §1).
+            if let Some(b) = bias {
+                b.write(params, rx, true);
+            }
         }
 
         let (tx, rx) = mpsc::sync_channel::<Vec<Iq>>(QUEUE);
@@ -889,6 +1057,7 @@ impl SdrplaySource {
             dev: Mutex::new(chosen),
             params,
             tuner_b,
+            bias_on: bias,
             stopped: AtomicBool::new(false),
             ctx,
         });
@@ -962,14 +1131,15 @@ impl IqSource for SdrplaySource {
         let s = self.control.settings();
         let i = &self.control.info;
         format!(
-            "SDRplay {} {} tuner {} @ {:.4} MHz, {:.2} MS/s, LNA state {} IF GR {} dB",
+            "SDRplay {} {} tuner {} @ {:.4} MHz, {:.2} MS/s, LNA state {} IF GR {} dB{}",
             i.model,
             i.serial,
             i.tuner,
             s.center_hz as f64 / 1e6,
             s.sample_rate as f64 / 1e6,
             s.gains.lna,
-            s.gains.gr
+            s.gains.gr,
+            if s.bias_tee { ", bias-T on" } else { "" }
         )
     }
 

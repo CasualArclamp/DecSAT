@@ -80,7 +80,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--bias-tee] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -127,6 +127,12 @@ fn main() -> eframe::Result {
                 app.load_plan(p);
             }
             app.tx.open |= opts.tx_panel;
+            #[cfg(feature = "hackrf")]
+            {
+                app.radio.open |= opts.radio_panel;
+                // Before `--hackrf` and friends start the radio below.
+                app.radio.settings.bias_tee |= opts.bias_tee;
+            }
             // PCAP parts and the session log, as last chosen.
             decsat_engine::fec::set_pcap_rotate_minutes(prefs::pcap_rotate_minutes());
             if (app.remember && prefs::session_log()) || opts.session_log {
@@ -1656,6 +1662,8 @@ impl App {
             ui.horizontal(|ui|{ui.label("Device index");ui.add(egui::DragValue::new(&mut self.rtl_settings.device_index).range(0..=31));});
             ui.horizontal(|ui|{ui.label("Tuner MHz");let mut f=self.rtl_settings.center_hz as f64/1e6;
                 if ui.add(egui::DragValue::new(&mut f).speed(0.1).range(min_mhz..=max_mhz)).changed(){self.rtl_settings.center_hz=(f*1e6) as u32;if let Some(c)=&self.rtl_control{c.tune(self.rtl_settings.center_hz);}self.rf_center_mhz=self.mix(self.rtl_settings.lnb_lo_hz,self.rtl_settings.center_hz as f64)/1e6;}
+                ui.checkbox(&mut self.rtl_settings.bias_tee,"Bias tee")
+                    .on_hover_text("4.5 V on the antenna port (RTL-SDR Blog V3/V4 and alike): powers an LNA or active antenna, not an LNB (13/18 V: use an inserter). Needs librtlsdr 0.6+ or the RTL-SDR Blog DLL. Applies at the next start; off again when the receiver stops and at every start of DecSAT.");
             });
             ui.horizontal(|ui|{ui.label("LNB LO MHz");let mut f=self.rtl_settings.lnb_lo_hz/1e6;
                 if ui.add(egui::DragValue::new(&mut f).range(0.0..=30000.0)).changed(){self.rtl_settings.lnb_lo_hz=f*1e6;self.rf_center_mhz=self.mix(self.rtl_settings.lnb_lo_hz,self.rtl_settings.center_hz as f64)/1e6;}
@@ -1681,7 +1689,8 @@ impl App {
                     ui.label("Gain steps available after starting the RTL receiver");
                 }
             }
-            ui.label("Frequency and gain apply live. Device index and sample rate require restart. LNB power is external.");
+            if self.rtl_settings.bias_tee {ui.colored_label(egui::Color32::from_rgb(255,190,80),"⚡ Bias tee on: DC goes up the coax when the receiver starts.");}
+            ui.label("Frequency and gain apply live. Device index, sample rate and bias tee require restart. LNB power is external.");
             if self.rtl_running && ui.button("Apply settings (restart RTL)").clicked(){self.start_rtl();}
             if self.note.starts_with("RTL-SDR"){ui.label(&self.note);}
         });
