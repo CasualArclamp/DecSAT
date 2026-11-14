@@ -1245,12 +1245,12 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     if matches!(
         chain,
         DecoderKind::Tpc2964 | DecoderKind::FastLink | DecoderKind::Viterbi
-    ) && let Some(c) = &st.carrier
+    ) && st.carrier.is_some()
     {
         match chain {
-            DecoderKind::FastLink => fastlink_card(ui, c, &st),
-            DecoderKind::Viterbi => viterbi_card(ui, c, &st, model),
-            _ => tpc_card(ui, c, &st, model),
+            DecoderKind::FastLink => fastlink_card(ui, &st),
+            DecoderKind::Viterbi => viterbi_card(ui, &st, model),
+            _ => tpc_card(ui, &st, model),
         }
         if let Some(e) = st.fec.as_ref().and_then(|f| f.e1.as_ref()) {
             e1_card(ui, e, v, &mut actions);
@@ -1351,18 +1351,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         }
     }
 
-    if v.settings.decoder == DecoderKind::PskSymbols
-        && let Some(c) = &st.carrier
-    {
+    if v.settings.decoder == DecoderKind::PskSymbols && st.carrier.is_some() {
         ui.add_space(6.0);
         ui.label(RichText::new("Demodulator").strong());
         egui::Grid::new("psk").num_columns(2).show(ui, |ui| {
-            carrier_rows(ui, c);
-            if let Some(rs) = st.symbol_rate {
-                ui.label("Symbol rate");
-                ui.label(format::rate(rs));
-                ui.end_row();
-            }
             if let Some((_, n)) = &st.recording {
                 ui.label("Written");
                 let txt = format!("{n} symbols ({:.1} MB)", *n as f64 / 1e6);
@@ -2146,7 +2138,7 @@ fn text_card(ui: &mut Ui, t: &decsat_engine::TextView) {
 /// A TPC VFO (TPC 2964, or Comtech TPC 7/8 once its UW is found): the
 /// carrier, the frame sync and structure found, the turbo decoder, and
 /// what the data carry.
-fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
+fn tpc_card(ui: &mut Ui, st: &VfoStatus, kind: DecoderKind) {
     use decsat_engine::TpcCode as Code;
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
@@ -2171,12 +2163,6 @@ fn tpc_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
         .strong(),
     );
     egui::Grid::new("tpc").num_columns(2).show(ui, |ui| {
-        carrier_rows(ui, c);
-        if let Some(rs) = st.symbol_rate {
-            ui.label("Symbol rate");
-            ui.label(format::rate(rs));
-            ui.end_row();
-        }
         ui.label("Unique word");
         match t {
             Some(t) if t.uw_locked => ui.colored_label(
@@ -3227,7 +3213,7 @@ fn cid_chips() -> f64 {
 
 /// A K = 7 convolutional-code VFO: the carrier, the rate found, and what the
 /// data carry.
-fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind) {
+fn viterbi_card(ui: &mut Ui, st: &VfoStatus, kind: DecoderKind) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
@@ -3246,12 +3232,6 @@ fn viterbi_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus, kind: DecoderKind
         .strong(),
     );
     egui::Grid::new("viterbi").num_columns(2).show(ui, |ui| {
-        carrier_rows(ui, c);
-        if let Some(rs) = st.symbol_rate {
-            ui.label("Symbol rate");
-            ui.label(format::rate(rs));
-            ui.end_row();
-        }
         code_row(ui, f, good, wait);
         payload_rows(ui, f);
     });
@@ -3325,7 +3305,7 @@ fn code_row(ui: &mut Ui, f: Option<&FecStats>, good: Color32, wait: Color32) {
 
 /// A Q-Flex FastLink VFO: the carrier, the sync word, the LDPC decoder,
 /// and what the data carry.
-fn fastlink_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
+fn fastlink_card(ui: &mut Ui, st: &VfoStatus) {
     let good = Color32::from_rgb(110, 220, 110);
     let wait = Color32::from_rgb(240, 200, 80);
     ui.add_space(6.0);
@@ -3333,12 +3313,6 @@ fn fastlink_card(ui: &mut Ui, c: &CarrierState, st: &VfoStatus) {
     let f = st.fec.as_ref();
     let t = f.and_then(|f| f.fastlink.as_ref());
     egui::Grid::new("fastlink").num_columns(2).show(ui, |ui| {
-        carrier_rows(ui, c);
-        if let Some(rs) = st.symbol_rate {
-            ui.label("Symbol rate");
-            ui.label(format::rate(rs));
-            ui.end_row();
-        }
         ui.label("Sync word");
         match t {
             Some(t) if t.locked => ui.colored_label(
@@ -5567,26 +5541,6 @@ fn radio_section_rest(ui: &mut Ui, r: &decsat_ip::ed137::RadioView) {
                 }
             });
     }
-}
-
-/// Carrier loop rows for a two-column grid.
-fn carrier_rows(ui: &mut Ui, c: &CarrierState) {
-    ui.label("Carrier");
-    if c.locked {
-        ui.colored_label(
-            Color32::from_rgb(110, 220, 110),
-            format!("{} locked · {}", c.modulation.name(), c.snr_text()),
-        );
-    } else {
-        ui.colored_label(
-            Color32::from_rgb(230, 150, 90),
-            format!("{} not locked", c.modulation.name()),
-        );
-    }
-    ui.end_row();
-    ui.label("Residual offset");
-    ui.label(format!("{:+.0} Hz", c.offset_hz));
-    ui.end_row();
 }
 
 fn psk_note(ui: &mut Ui) {

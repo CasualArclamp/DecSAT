@@ -364,8 +364,8 @@ impl Decoder {
         }
         let mut zsr = [0.0; IDIM];
         zsr[0] = self.et[0];
-        for k in 1..IDIM {
-            let mut a0 = self.et[k];
+        for (k, &e) in self.et.iter().enumerate().take(IDIM).skip(1) {
+            let mut a0 = e;
             for i in (1..=k).rev() {
                 zsr[i] = zsr[i - 1];
                 a0 -= a[i] * zsr[i];
