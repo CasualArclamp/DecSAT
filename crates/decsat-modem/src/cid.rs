@@ -587,8 +587,8 @@ impl CidReport {
     /// fields came.
     pub fn user_text(&self) -> Option<String> {
         let mut bits = Vec::with_capacity(168);
-        for k in 6..13 {
-            let v = self.fields[k]?;
+        for field in &self.fields[6..13] {
+            let v = (*field)?;
             bits.extend((0..24).map(|i| (v >> (23 - i)) & 1));
         }
         let s: String = bits
