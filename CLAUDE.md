@@ -57,7 +57,7 @@ apps): pure Rust over USB through `libairspy-rs`, no DLL.
 The SDRplay RSPduo / RSP is behind `--features sdrplay` (on by default in the apps):
 it loads SDRplay's `sdrplay_api.dll` (API v3, installed from sdrplay.com with its
 service) at run time, like the Fobos; `DECSAT_SDRPLAY_LIB` overrides the path. Single
-tuner mode only (RSPduo Tuner A or B), zero-IF 2-10.67 MS/s, AGC off, bias-T off.
+tuner mode only (RSPduo Tuner A or B), zero-IF 2-10.67 MS/s, AGC off, bias-T only on request (`bias_tee`).
 Gains are reductions (LNA state, IF GR 20-59 dB). Structs are transcribed from the
 v3.15 headers; the live test (`cargo test -p decsat-io --features sdrplay live_sdrplay
 -- --ignored --nocapture`) needs a radio. CLI `--sdrplay MHz`, GUI `--sdrplay MHz`, server key `sdrplay`.

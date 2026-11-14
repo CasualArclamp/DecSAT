@@ -120,6 +120,20 @@ impl Device {
         }
     }
 
+    /// The antenna-port power it can switch on, if any: the bias tee's
+    /// voltage, for the checkbox's label.
+    pub fn bias_tee(self) -> Option<&'static str> {
+        match self {
+            Device::HackRf => Some("3.3 V"),
+            #[cfg(feature = "fobos")]
+            Device::Fobos => None,
+            #[cfg(feature = "airspy")]
+            Device::Airspy => Some("4.5 V"),
+            #[cfg(feature = "sdrplay")]
+            Device::Sdrplay => Some("4.7 V"),
+        }
+    }
+
     /// The highest frequency it tunes to, Hz.
     pub fn max_hz(self) -> f64 {
         match self {
@@ -252,20 +266,24 @@ impl RadioPanel {
         }
     }
 
-    /// The settings the Airspy opens with: its own, at the shared tuning.
+    /// The settings the Airspy opens with: its own, at the shared tuning and
+    /// bias tee.
     #[cfg(feature = "airspy")]
     pub fn airspy_settings(&self) -> AirspySettings {
         AirspySettings {
             center_hz: self.settings.center_hz,
+            bias_tee: self.settings.bias_tee,
             ..self.airspy
         }
     }
 
-    /// The settings the SDRplay opens with: its own, at the shared tuning.
+    /// The settings the SDRplay opens with: its own, at the shared tuning and
+    /// bias tee.
     #[cfg(feature = "sdrplay")]
     pub fn sdrplay_settings(&self) -> SdrplaySettings {
         SdrplaySettings {
             center_hz: self.settings.center_hz,
+            bias_tee: self.settings.bias_tee,
             ..self.sdrplay
         }
     }
@@ -310,12 +328,30 @@ impl RadioPanel {
                     let mut mhz = self.settings.center_hz as f64 / 1e6;
                     let lo = self.device.min_hz() / 1e6;
                     let hi = self.device.max_hz() / 1e6;
-                    if ui
-                        .add(egui::DragValue::new(&mut mhz).speed(0.01).range(lo..=hi).max_decimals(6).suffix(" MHz"))
-                        .changed()
-                    {
-                        self.settings.center_hz = (mhz * 1e6).round() as u64;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::DragValue::new(&mut mhz).speed(0.01).range(lo..=hi).max_decimals(6).suffix(" MHz"))
+                            .changed()
+                        {
+                            self.settings.center_hz = (mhz * 1e6).round() as u64;
+                        }
+                        // One switch for every receiver that has a bias tee
+                        // (`settings.bias_tee`, shared like the tuning). Never
+                        // saved: off at every start of DecSAT.
+                        if let Some(volts) = self.device.bias_tee() {
+                            ui.add_enabled_ui(live.is_none(), |ui| {
+                                ui.checkbox(&mut self.settings.bias_tee, "Bias tee")
+                            })
+                            .response
+                            .on_hover_text(format!(
+                                "{volts} on the antenna port, for an active antenna or an L-band \
+                                 LNA. Not an LNB (13/18 V: use an inserter), and never into a DC \
+                                 short or an inserter's RF port. Off again when the radio stops \
+                                 and at every start."
+                            ))
+                            .on_disabled_hover_text("Stop the radio to change the bias tee.");
+                        }
+                    });
                     ui.end_row();
 
                     ui.label("LNB LO");
@@ -337,15 +373,21 @@ impl RadioPanel {
                         Device::Sdrplay => self.sdrplay_rows(ui, live),
                     }
                 });
+                if self.settings.bias_tee && self.device.bias_tee().is_some() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 190, 80),
+                        "⚡ Bias tee on: DC goes up the coax when the radio starts.",
+                    );
+                }
 
                 let note = match self.device {
-                    Device::HackRf => "Receive only. Antenna-port power stays off — feed an LNB from an external inserter.",
+                    Device::HackRf => "Receive only. The bias tee (3.3 V, 50 mA) can power an LNA or active antenna, not an LNB — feed an LNB from an external inserter.",
                     #[cfg(feature = "fobos")]
                     Device::Fobos => "Receive only, RF input (50–6000 MHz). The Fobos does not power its antenna port — feed an LNB from an external inserter. Needs RigExpert's fobos_sdr.dll (agile firmware) or fobos.dll (stock) beside DecSAT.",
                     #[cfg(feature = "airspy")]
-                    Device::Airspy => "Receive only, 24–1750 MHz: behind a Ku LNB, the IF up to about 1.7 GHz. The bias tee stays off — it cannot power an LNB; feed it from an external inserter. Pure Rust over USB (WinUSB driver), no DLL.",
+                    Device::Airspy => "Receive only, 24–1750 MHz: behind a Ku LNB, the IF up to about 1.7 GHz. The bias tee (4.5 V, 50 mA) cannot power an LNB; feed that from an external inserter. Pure Rust over USB (WinUSB driver), no DLL.",
                     #[cfg(feature = "sdrplay")]
-                    Device::Sdrplay => "Receive only, 1 kHz–2 GHz, single-tuner mode (an RSPduo uses Tuner A or B). The bias tee stays off — feed an LNB from an external inserter. Needs the SDRplay API installed (sdrplay.com), or sdrplay_api.dll beside DecSAT. Both gains are reductions: a lower number is more gain.",
+                    Device::Sdrplay => "Receive only, 1 kHz–2 GHz, single-tuner mode (an RSPduo uses Tuner A or B; its bias tee is on Tuner B). The bias tee (4.7 V) cannot power an LNB — feed that from an external inserter. Needs the SDRplay API installed (sdrplay.com), or sdrplay_api.dll beside DecSAT. Both gains are reductions: a lower number is more gain.",
                 };
                 ui.label(RichText::new(note).small().weak());
 

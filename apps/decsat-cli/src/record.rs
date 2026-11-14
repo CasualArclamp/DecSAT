@@ -79,6 +79,7 @@ pub fn run(a: &RecordArgs) -> Result<()> {
             vga_db: a.vga,
         }
         .snapped(),
+        bias_tee: false,
     })?;
     let ctl = src.control();
     println!("{} (receive only)", src.describe());

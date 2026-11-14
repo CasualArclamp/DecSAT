@@ -90,6 +90,10 @@ pub struct Options {
     pub plan: Option<PathBuf>,
     /// Open the transmit panel (for screenshots: it is never armed).
     pub tx_panel: bool,
+    /// Open the live radio's window.
+    pub radio_panel: bool,
+    /// Tick the radio's bias tee (antenna-port power) for this run.
+    pub bias_tee: bool,
     /// Open the survey and start it once the carriers are found.
     pub survey: bool,
     /// Open the Ku-band beacon list.
@@ -216,6 +220,8 @@ impl Options {
                     o.plan = Some(PathBuf::from(args.next().ok_or("--plan needs a file")?));
                 }
                 Some("--tx-panel") => o.tx_panel = true,
+                Some("--radio-panel") => o.radio_panel = true,
+                Some("--bias-tee") => o.bias_tee = true,
                 Some("--beacons") => o.beacons = true,
                 Some("--survey") => o.survey = true,
                 Some("--select") => {

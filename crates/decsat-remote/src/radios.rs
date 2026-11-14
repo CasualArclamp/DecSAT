@@ -395,6 +395,7 @@ impl RadioProvider for Devices {
                     center_hz: req.center_hz as u64,
                     sample_rate: req.sample_rate as u32,
                     gains: hackrf_of(&gains),
+                    bias_tee: false,
                 })?;
                 let live = Live {
                     ctl: s.control(),
@@ -414,6 +415,7 @@ impl RadioProvider for Devices {
                     center_hz: req.center_hz as u64,
                     sample_rate: req.sample_rate as u32,
                     gains: airspy_of(&gains),
+                    bias_tee: false,
                 })?;
                 let live = Live {
                     ctl: s.control(),
@@ -454,6 +456,7 @@ impl RadioProvider for Devices {
                     sample_rate: req.sample_rate as u32,
                     gains: sdrplay_of(&gains),
                     tuner_b: value(&gains, "tuner_b") >= 0.5,
+                    bias_tee: false,
                 })?;
                 let live = Live {
                     ctl: s.control(),

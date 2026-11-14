@@ -6,6 +6,13 @@
 //! The DLL's own dependency (a matching `libusb-1.0.dll`) is found in that same
 //! folder. Nothing here installs or replaces a USB driver.
 //!
+//! **Bias tee only when asked.** The RTL-SDR Blog V3/V4 (and other dongles
+//! wired the same way) can put 4.5 V on the antenna port from GPIO 0, through
+//! `rtlsdr_set_bias_tee` (librtlsdr 0.6 and later, and the rtl-sdr-blog fork).
+//! It is set as [`RtlSettings::bias_tee`] says on open (off by default) and
+//! switched off again on close. An older DLL without the export can still
+//! receive; asking it for the bias tee is an error.
+//!
 //! Provenance: merged in from the "VMA" snapshot, see `docs/STATUS.md`
 //! (2026-10-25). Not tested against real hardware by whoever restyled it.
 
@@ -86,6 +93,8 @@ type GetTunerType = unsafe extern "C" fn(*mut c_void) -> c_int;
 /// number of steps, otherwise fills the array (tenths of a dB) and returns the
 /// number written; negative on error.
 type GetTunerGains = unsafe extern "C" fn(*mut c_void, *mut c_int) -> c_int;
+/// `rtlsdr_set_bias_tee(dev, on)`: 1 = 4.5 V on the antenna port, 0 = off.
+type SetBiasTee = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 /// `rtlsdr_read_sync(dev, buf, len, &n_read)`.
 type ReadSync = unsafe extern "C" fn(*mut c_void, *mut c_void, c_int, *mut c_int) -> c_int;
 
@@ -102,6 +111,8 @@ struct Api {
     get_tuner_type: GetTunerType,
     get_tuner_gains: GetTunerGains,
     read: ReadSync,
+    /// Missing from DLLs older than librtlsdr 0.6.
+    bias_tee: Option<SetBiasTee>,
 }
 
 // SAFETY: `Api` is a module handle plus plain function pointers. They carry no
@@ -207,6 +218,9 @@ impl Api {
                 get_tuner_type: symbol(module, "rtlsdr_get_tuner_type")?,
                 get_tuner_gains: symbol(module, "rtlsdr_get_tuner_gains")?,
                 read: symbol(module, "rtlsdr_read_sync")?,
+                // Rust note: `.ok()` turns the lookup's `Result` into an
+                // `Option`, so a DLL without the export still loads.
+                bias_tee: symbol(module, "rtlsdr_set_bias_tee").ok(),
             })
         }
     }
@@ -291,6 +305,8 @@ pub struct RtlSettings {
     pub gain_tenths: i32,
     /// Manual gain on, or the tuner's automatic gain.
     pub manual_gain: bool,
+    /// 4.5 V on the antenna port (bias tee). Off unless asked for.
+    pub bias_tee: bool,
 }
 
 impl Default for RtlSettings {
@@ -302,6 +318,7 @@ impl Default for RtlSettings {
             rate: 2_400_000,
             gain_tenths: 200,
             manual_gain: false,
+            bias_tee: false,
         }
     }
 }
@@ -444,6 +461,21 @@ impl RtlSource {
                 return Err(Error::Other(format!("RTL-SDR: tuner gain failed ({code})")));
             }
         }
+        match (api.bias_tee, s.bias_tee) {
+            (Some(set), on) => {
+                let code = unsafe { set(dev, c_int::from(on)) };
+                if code != 0 && on {
+                    return Err(Error::Other(format!("RTL-SDR: bias tee failed ({code})")));
+                }
+            }
+            (None, true) => {
+                return Err(Error::Other(
+                    "RTL-SDR: this rtlsdr.dll has no rtlsdr_set_bias_tee;                      use librtlsdr 0.6+ or the RTL-SDR Blog build for the bias tee"
+                        .into(),
+                ));
+            }
+            (None, false) => {}
+        }
         let code = unsafe { (api.reset)(dev) };
         if code != 0 {
             return Err(Error::Other(format!("RTL-SDR: reset failed ({code})")));
@@ -523,6 +555,10 @@ impl Drop for RtlSource {
         // SAFETY: `dev` was opened by `RtlSource::open` and is closed only here.
         // The DLL is unloaded afterwards, when the `api` field drops.
         unsafe {
+            // Antenna power never outlives the session.
+            if let (Some(set), true) = (self.api.bias_tee, self.settings.bias_tee) {
+                set(self.dev, 0);
+            }
             (self.api.close)(self.dev);
         }
     }
@@ -582,10 +618,15 @@ impl IqSource for RtlSource {
 
     fn describe(&self) -> String {
         format!(
-            "RTL-SDR #{} @ {:.3} MS/s, USB recoveries {}",
+            "RTL-SDR #{} @ {:.3} MS/s, USB recoveries {}{}",
             self.settings.device_index,
             self.settings.rate as f64 / 1e6,
-            self.usb_errors
+            self.usb_errors,
+            if self.settings.bias_tee {
+                ", bias-T on"
+            } else {
+                ""
+            }
         )
     }
 

@@ -52,6 +52,8 @@ pub struct DecodeArgs {
     pub sdrplay_gr: u8,
     #[cfg_attr(not(feature = "sdrplay"), allow(dead_code))]
     pub sdrplay_tuner_b: bool,
+    /// Antenna-port power (bias tee) on the HackRF, Airspy or SDRplay.
+    pub bias_tee: bool,
     /// Live: the Pluto's centre frequency, MHz, how to reach it, its gain
     /// (dB or `agc`) and whether to refuse 8-bit IQ.
     pub pluto: Option<f64>,
@@ -153,6 +155,7 @@ fn hackrf_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<Box<dyn IqSource
             vga_db: a.vga,
         }
         .snapped(),
+        bias_tee: a.bias_tee,
     })?;
     Ok(Box::new(src))
 }
@@ -198,6 +201,7 @@ fn airspy_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSourc
             step: a.airspy_gain,
         }
         .snapped(),
+        bias_tee: a.bias_tee,
     })?;
     let rate = src.sample_rate();
     println!("{}", src.describe());
@@ -222,6 +226,7 @@ fn sdrplay_source(a: &DecodeArgs, mhz: f64, rate: f64) -> Result<(Box<dyn IqSour
         }
         .snapped(),
         tuner_b: a.sdrplay_tuner_b,
+        bias_tee: a.bias_tee,
     })?;
     let rate = src.sample_rate();
     println!("{}", src.describe());

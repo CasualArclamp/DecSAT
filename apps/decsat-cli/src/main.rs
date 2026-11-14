@@ -187,7 +187,7 @@ enum Command {
         fobos_vga: u16,
         /// Live from an Airspy Mini / R2 or a HydraSDR RFOne instead: its
         /// centre frequency, MHz (24–1750). Pure Rust over USB; the bias tee
-        /// stays off.
+        /// only with --bias-tee.
         #[arg(long, alias = "hydrasdr", conflicts_with_all = ["hackrf", "fobos"])]
         airspy: Option<f64>,
         /// Airspy gain step, 0–21 (libairspy's linearity table; add
@@ -200,7 +200,7 @@ enum Command {
         /// Live from an SDRplay RSP (an RSPduo is used in single-tuner mode)
         /// instead: its centre frequency, MHz (0.001–2000). Needs the SDRplay
         /// API (sdrplay_api.dll, from sdrplay.com) installed, or beside decsat,
-        /// or DECSAT_SDRPLAY_LIB. Receive only; the bias tee stays off.
+        /// or DECSAT_SDRPLAY_LIB. Receive only; the bias tee only with --bias-tee.
         #[arg(long, conflicts_with_all = ["hackrf", "fobos", "airspy", "net"])]
         sdrplay: Option<f64>,
         /// SDRplay LNA state, 0 = most gain (RSPduo: 0–9, 0–8 above 1 GHz).
@@ -212,6 +212,11 @@ enum Command {
         /// Use the RSPduo's Tuner B (Tuner 2) instead of Tuner A.
         #[arg(long)]
         sdrplay_tuner_b: bool,
+        /// Power the antenna port through the radio's bias tee (HackRF 3.3 V,
+        /// Airspy 4.5 V, SDRplay 4.7 V — an RSPduo on Tuner B only), for an
+        /// LNA or active antenna. Not an LNB (13/18 V). Off when decsat exits.
+        #[arg(long)]
+        bias_tee: bool,
         /// Live from an ADALM-PLUTO, Pluto+ or LibreSDR instead: its centre
         /// frequency, MHz (70–6000; an AD9363 Pluto that was not unlocked
         /// takes 325–3800). Pure Rust over USB or the network. Receive only:
@@ -446,6 +451,7 @@ fn main() -> Result<()> {
             sdrplay_lna,
             sdrplay_gr,
             sdrplay_tuner_b,
+            bias_tee,
             pluto,
             pluto_uri,
             pluto_gain,
@@ -496,6 +502,7 @@ fn main() -> Result<()> {
                 sdrplay_lna,
                 sdrplay_gr,
                 sdrplay_tuner_b,
+                bias_tee,
                 pluto,
                 pluto_uri,
                 pluto_gain,
