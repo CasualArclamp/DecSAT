@@ -255,7 +255,7 @@ enum Command {
         /// Live radios default to HackRF 2, Airspy 6, Fobos 8, SDRplay 8, Pluto 4 MS/s.
         #[arg(long)]
         rate: Option<f64>,
-        /// Decoder: id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19, beacon, p3 (QO-100's PSK beacon).
+        /// Decoder: id, ip, ns4, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, pool, is19, beacon, p3 (QO-100's PSK beacon).
         #[arg(long, default_value = "id")]
         decoder: String,
         /// VFO centre relative to the capture's centre, Hz.
@@ -267,10 +267,6 @@ enum Command {
         /// Symbol rate, if known (found blind otherwise).
         #[arg(long)]
         symbol_rate: Option<f64>,
-        /// ip/ts: the carrier is NovelSat NS4 (DVB-S2 framing, NovelSat's
-        /// own mode numbers and LDPC codes).
-        #[arg(long)]
-        ns4: bool,
         /// Modulation for tpc/psk (bpsk, qpsk, 8psk, 16qam…).
         #[arg(long)]
         modulation: Option<String>,
@@ -469,7 +465,6 @@ fn main() -> Result<()> {
             offset,
             bandwidth,
             symbol_rate,
-            ns4,
             modulation,
             out,
             fast,
@@ -520,7 +515,6 @@ fn main() -> Result<()> {
                 offset,
                 bandwidth,
                 symbol_rate,
-                ns4,
                 modulation,
                 out,
                 fast,

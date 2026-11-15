@@ -208,7 +208,7 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
 /// (TPC 2964) its payload's format known.
 fn decoded(kind: DecoderKind, s: &VfoSettings, st: &VfoStatus) -> bool {
     match kind {
-        DecoderKind::Dvbs2Ip => st.fec.as_ref().is_some_and(|f| f.ok > 0),
+        DecoderKind::Dvbs2Ip | DecoderKind::Ns4 => st.fec.as_ref().is_some_and(|f| f.ok > 0),
         _ => Caps::of(s, st).model.is_some(),
     }
 }

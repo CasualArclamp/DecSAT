@@ -73,7 +73,6 @@ pub struct DecodeArgs {
     pub offset: f64,
     pub bandwidth: Option<f64>,
     pub symbol_rate: Option<f64>,
-    pub ns4: bool,
     pub modulation: Option<String>,
     pub out: Option<PathBuf>,
     pub fast: bool,
@@ -104,6 +103,7 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
     Ok(match name {
         "id" | "identify" => DecoderKind::Identify,
         "ip" | "gse" => DecoderKind::Dvbs2Ip,
+        "ns4" => DecoderKind::Ns4,
         "ts" => DecoderKind::Dvbs2Ts,
         "dvbs" => DecoderKind::DvbsTs,
         "tpc" | "tpc2964" => DecoderKind::Tpc2964,
@@ -384,7 +384,6 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
     );
     let mut s = VfoSettings::new("decode", a.offset, a.bandwidth.unwrap_or(0.9 * rate), kind);
     s.symbol_rate = a.symbol_rate;
-    s.ns4 = a.ns4;
     if let Some(m) = &a.modulation {
         s.psk_modulation = Some(modulation_by_name(m)?);
     }

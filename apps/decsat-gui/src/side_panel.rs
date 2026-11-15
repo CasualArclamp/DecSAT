@@ -280,7 +280,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     let vfo_rf = (inp.rf_center.abs() > 1e6).then_some(inp.rf_center + v.settings.offset_hz);
     if matches!(
         v.settings.decoder,
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs | DecoderKind::Ns4
     ) {
         ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
     } else {
@@ -828,7 +828,10 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                     );
                 ui.end_row();
             }
-            if matches!(s.decoder, DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts) {
+            if matches!(
+                s.decoder,
+                DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::Ns4
+            ) {
                 ui.label("Gold code");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut s.gold_code).range(0..=262_141));
@@ -842,12 +845,6 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                             );
                     }
                 });
-                ui.end_row();
-                ui.label("Waveform");
-                ui.checkbox(&mut s.ns4, "NovelSat NS4")
-                    .on_hover_text(
-                        "The carrier comes from a NovelSat modem in NS4 mode: DVB-S2 framing, but its own numbering of the modes and its own LDPC codes. Left off, such a carrier locks under the wrong MODCOD name and every frame fails FEC. Known so far: QPSK 1/4, 1/2, 3/5, 2/3, 3/4 and 5/6 in normal frames, 1/5 and 4/9 in short ones.",
-                    );
                 ui.end_row();
             }
 
@@ -949,7 +946,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.end_row();
             }
 
-            if s.decoder == DecoderKind::Dvbs2Ip {
+            if s.decoder.chain() == DecoderKind::Dvbs2Ip {
                 ui.label("GSE");
                 let txt = s.gse_variant.map_or("auto (from the data)", |v| v.label());
                 egui::ComboBox::from_id_salt("gse_variant")
@@ -1153,7 +1150,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
     // the frames carry follows here.
     if matches!(
         v.settings.decoder,
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs | DecoderKind::Ns4
     ) && let Some(f) = &st.fec
     {
         if let Some(g) = &f.gse {
@@ -2044,7 +2041,7 @@ fn level_bar(ui: &mut Ui, db: f32) {
 fn data_text(ui: &mut Ui, f: &FecStats, decoder: DecoderKind) {
     let ts = f.ts.as_ref().map(|t| &t.text);
     let ip = f.gse.as_ref().map(|g| &g.text);
-    if decoder != DecoderKind::Dvbs2Ip
+    if decoder.chain() != DecoderKind::Dvbs2Ip
         && let Some(t) = ts
     {
         byte_text_card(ui, t, "Text in the transport stream", "ts");
@@ -5804,6 +5801,7 @@ fn mode_title(decoder: DecoderKind) -> &'static str {
     match decoder {
         DecoderKind::Identify => "Identify",
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => "DVB-S2",
+        DecoderKind::Ns4 => "NovelSat NS4",
         DecoderKind::DvbsTs => "DVB-S",
         DecoderKind::CdmAuto => "Comtech CDM",
         DecoderKind::Tpc2964 => "TPC",

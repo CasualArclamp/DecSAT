@@ -6402,6 +6402,11 @@ PSK decoder's symbol .bin, 33 kBd, 12481.99 MHz), pilots off at 1/4 and
   `LdpcCode::ns4`, `ParityStyle::Ns4`, tables in `ldpc/tables_ns4.rs`; the
   layered decoder is unchanged but for how parity is loaded and layer 0's
   corner.
+- **Its own decoder** (Rory: "can you make NS4 its own decoder in the
+  decoders drop down"): `DecoderKind::Ns4` (`ns4`), whose chain is
+  `Dvbs2Ip`; the demodulator reads the PLS codes as NS4's when the VFO's
+  decoder is that one. First done as a checkbox under the Gold code and
+  `--ns4`.
 - **How the tables were found:** the test mode's data field is PRBS-31
   (x^31 + x^28 + 1) with every 188th byte the S2 CRC-8, so the information
   bits of a recorded frame can be put right exactly and checked with BCH.

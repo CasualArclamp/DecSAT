@@ -1001,12 +1001,12 @@ carrier locks under the wrong MODCOD name (QPSK 1/2 shows as *QPSK 2/3*) or
 keeps losing lock, and every frame fails FEC. Nothing about NS4 is
 published; what is here was measured from a modem.
 
-Tick **NovelSat NS4** under the Gold code on a DVB-S2 VFO (`--ns4` on
-`decsat decode`), and the header is read as NS4 means it and the FEC takes
-NS4's LDPC code:
+Pick **NovelSat NS4 → GSE/IP (PCAP)** as the VFO's decoder (`--decoder ns4`
+on `decsat decode`): the DVB-S2 decoder with the header read as NS4 means
+it and NS4's LDPC codes, and everything after the BBFRAME as for DVB-S2.
 
 ```
-decsat decode ns4_645161Sps.cf32 --decoder ip --ns4 --symbol-rate 33000 --bandwidth 60000
+decsat decode ns4_645161Sps.cf32 --decoder ns4 --symbol-rate 33000 --bandwidth 60000
 ```
 
 | | PLS code (pilots off / on) | |

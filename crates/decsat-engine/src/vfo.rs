@@ -37,6 +37,10 @@ pub enum DecoderKind {
     Dvbs2Ip,
     /// DVB-S2/S2X → MPEG-TS.
     Dvbs2Ts,
+    /// A NovelSat modem's NS4 waveform: DVB-S2's framing with NovelSat's
+    /// own mode numbers and LDPC codes, then what [`DecoderKind::Dvbs2Ip`]
+    /// does with the BBFRAMEs (its chain).
+    Ns4,
     /// DVB-S (EN 300 421) → MPEG-TS: QPSK, Viterbi, Reed–Solomon.
     DvbsTs,
     /// Intelsat IESS-315 turbo product code `tpc_2964` (BPSK/QPSK): frame
@@ -138,10 +142,11 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 32] = [
+    pub const ALL: [DecoderKind; 33] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
+        DecoderKind::Ns4,
         DecoderKind::DvbsTs,
         DecoderKind::CdmAuto,
         DecoderKind::Tpc2964,
@@ -178,6 +183,7 @@ impl DecoderKind {
             DecoderKind::Identify => "Identify (what is this?)",
             DecoderKind::Dvbs2Ip => "DVB-S2/S2X → GSE/IP (PCAP)",
             DecoderKind::Dvbs2Ts => "DVB-S2/S2X → MPEG-TS",
+            DecoderKind::Ns4 => "NovelSat NS4 → GSE/IP (PCAP)",
             DecoderKind::DvbsTs => "DVB-S → MPEG-TS",
             DecoderKind::CdmAuto => "Comtech CDM modem (type found)",
             DecoderKind::Tpc2964 => "TPC (IESS-315 2964 or Comtech 7/8) → IP / TS",
@@ -221,6 +227,7 @@ impl DecoderKind {
             DecoderKind::Identify => "identify",
             DecoderKind::Dvbs2Ip => "dvbs2-ip",
             DecoderKind::Dvbs2Ts => "dvbs2-ts",
+            DecoderKind::Ns4 => "ns4",
             DecoderKind::DvbsTs => "dvbs-ts",
             DecoderKind::CdmAuto => "cdm-auto",
             DecoderKind::Tpc2964 => "tpc2964",
@@ -259,11 +266,13 @@ impl DecoderKind {
     }
 
     /// The decoder chain a preset runs: the CDM-600 voice and CDM-570L
-    /// trunk presets are TPC 2964's, the CDM-570L's the Viterbi; every other
-    /// kind its own (the CDM type-found model's is picked as it runs:
-    /// [`VfoStatus::chain`]).
+    /// trunk presets are TPC 2964's, the CDM-570L's the Viterbi, NS4's the
+    /// DVB-S2 to IP one (with its headers and LDPC codes read as NS4's);
+    /// every other kind its own (the CDM type-found model's is picked as
+    /// it runs: [`VfoStatus::chain`]).
     pub fn chain(self) -> DecoderKind {
         match self {
+            DecoderKind::Ns4 => DecoderKind::Dvbs2Ip,
             DecoderKind::Cdm600Voice | DecoderKind::Cdm570Trunk => DecoderKind::Tpc2964,
             DecoderKind::Cdm570 => DecoderKind::Viterbi,
             k => k,
@@ -366,6 +375,7 @@ impl DecoderKind {
             DecoderKind::Identify => "ID",
             DecoderKind::Dvbs2Ip => "S2→IP",
             DecoderKind::Dvbs2Ts => "S2→TS",
+            DecoderKind::Ns4 => "NS4",
             DecoderKind::DvbsTs => "S→TS",
             DecoderKind::CdmAuto => "CDM?",
             DecoderKind::Tpc2964 => "TPC",
@@ -505,9 +515,6 @@ pub struct VfoSettings {
     pub symbol_rate: Option<f64>,
     /// PL scrambling gold-code index.
     pub gold_code: u32,
-    /// The carrier is NovelSat NS4: DVB-S2's framing with NovelSat's own
-    /// mode numbers and LDPC codes.
-    pub ns4: bool,
     /// Generic PSK: the constellation to decide on; `None` takes Identify's.
     pub psk_modulation: Option<decsat_core::Modulation>,
     /// Generic PSK: look for text in the decided bits, every way of reading
@@ -614,7 +621,6 @@ impl VfoSettings {
             enabled: true,
             symbol_rate: None,
             gold_code: 0,
-            ns4: false,
             psk_modulation: None,
             find_text: true,
             symbol_labels: crate::psk::SymbolLabels::Standard,
@@ -1445,7 +1451,7 @@ impl Worker {
                     bytes: 0,
                 }
             }
-            DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => Decoder::Dvbs2 {
+            DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::Ns4 => Decoder::Dvbs2 {
                 buf: Vec::new(),
                 demod: None,
                 fec: None,
@@ -1552,7 +1558,6 @@ impl Worker {
         let new_decoder = new.decoder != self.settings.decoder
             || new.symbol_rate != self.settings.symbol_rate
             || new.gold_code != self.settings.gold_code
-            || new.ns4 != self.settings.ns4
             || new.psk_modulation != self.settings.psk_modulation;
         if rebuild_ddc {
             self.ddc = Ddc::new(
@@ -1930,7 +1935,7 @@ impl Worker {
                         if let Some(rs) = rs.filter(|&r| out_rate / r >= 2.0) {
                             // Start demodulating, from the gathered signal on.
                             let mut d = Demod::new(out_rate, rs, alpha, self.settings.gold_code)
-                                .with_ns4(self.settings.ns4);
+                                .with_ns4(self.settings.decoder == DecoderKind::Ns4);
                             // Identify's offset is averaged over every header
                             // it saw: the best seed for the carrier loop.
                             if let Some(f) = id.carrier_offset_hz {
@@ -2600,7 +2605,7 @@ impl Worker {
                         (LockState::Searching, _) => "searching for PLHEADERs".into(),
                         (LockState::Found, _) => "found a PLHEADER, confirming".into(),
                         (LockState::Locked, Some(f)) if f.frames > 0 => {
-                            let what = match (&f.gse, &f.ts, self.settings.decoder) {
+                            let what = match (&f.gse, &f.ts, self.settings.decoder.chain()) {
                                 (Some(g), _, DecoderKind::Dvbs2Ip) => {
                                     // No IP: name what the GSE carries.
                                     match g.other_protocols.iter().max_by_key(|e| *e.1) {
