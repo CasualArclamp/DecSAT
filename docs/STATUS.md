@@ -6377,6 +6377,61 @@ VVC and cannot play.
   preamble, the unique words and the bit positions that never change.
   Not tried live.
 
+## NovelSat NS4, from Rory's own modem (2026-11-15)
+
+Rory: "this is my NS4 at data frame size normal qpsk 1/2 pilots and isi69",
+then recordings of the modem's PRBS 2^31−1 test mode at each rate (the
+PSK decoder's symbol .bin, 33 kBd, 12481.99 MHz), pilots off at 1/4 and
+1/2, and short frames at 1/5 and 4/9.
+
+- **What NS4 is, measured:** DVB-S2's frame throughout — SOF, PLS RM(64,7)
+  and its scrambling, slots, pilots, Gold code 0, dummy frames, BBHEADER
+  and CRC-8, baseband scrambler, BCH (S2's t and K_bch for the rate, normal
+  and short) — with its own PLS numbering and its own LDPC codes. DecSAT
+  as it was locked the 1/2 carrier as "QPSK 2/3" with 0 of 100 frames good.
+- **PLS code** = a base for the rate, + 2 for a short frame, + 4 for
+  pilots. Bases seen: 1/4 4, 1/2 21, 3/5 28, 2/3 33, 3/4 40, 5/6 52 (normal
+  names; short 1/5 = 6, short 4/9 = 23). The +4 was recorded at 1/4 and
+  1/2, the +2 at those two rates' short codes.
+- **LDPC:** quasi-cyclic, 360 lanes, K/360 information groups and
+  q = (N−K)/360 parity groups sent whole. Check lane j of layer r:
+  information bits by the address table, parity group r, and group r−1 in
+  the same lane; layer 1 takes group 0 one lane on, layer 0 takes group
+  q−1 one lane back, layer ⌈q/2⌉ also takes group 0. Same structure in
+  every code solved (normal 1/4, 1/2, 3/5, 2/3, 3/4, 5/6; short 1/5, 4/9).
+  `LdpcCode::ns4`, `ParityStyle::Ns4`, tables in `ldpc/tables_ns4.rs`; the
+  layered decoder is unchanged but for how parity is loaded and layer 0's
+  corner.
+- **Its own decoder** (Rory: "can you make NS4 its own decoder in the
+  decoders drop down"): `DecoderKind::Ns4` (`ns4`), whose chain is
+  `Dvbs2Ip`; the demodulator reads the PLS codes as NS4's when the VFO's
+  decoder is that one. First done as a checkbox under the Gold code and
+  `--ns4`.
+- **How the tables were found:** the test mode's data field is PRBS-31
+  (x^31 + x^28 + 1) with every 188th byte the S2 CRC-8, so the information
+  bits of a recorded frame can be put right exactly and checked with BCH.
+  Every parity bit is a GF(2)-linear function of them, the same in each
+  lane: with more than K/360 frames one elimination gives every parity
+  group's generator (wrong parity bits found from the spare equations),
+  and neighbouring groups' generators differ by one sparse check. Groups
+  the solver could not get were filled from their neighbours, each check
+  being a subset of the entries its neighbours' difference leaves.
+- **Checked:** `decsat-fec/tests/ns4.rs` and `decsat-engine/tests/ns4.rs`
+  on one recorded frame a rate: every check holds, the encoder gives the
+  parity the modem sent, the FEC stage returns the BBFRAME (BCH 0 errors,
+  UPL 1504, the right DFL). On the first raw capture (QPSK 1/2, pilots,
+  33 kBd at 645 kS/s, Es/N0 8.3 dB, a sample drop in it): locked, 8 of 11
+  BBFRAMEs good, BBHEADER generic continuous, ACM, ISI 105, DFL 496.
+- **Short frames:** 1/5 and 4/9 (the short "1/4" and "1/2": K 3240 and
+  7200, S2's short BCH) solved the same way from 40 to 50 frames each, in
+  seconds; `tables_ns4::SHORT`, the PLS code plus 2.
+- **Open:** the other eleven normal rates, fourteen short ones and the
+  higher constellations need recordings; the
+  Ethernet payload ("00 3c" then a 60-byte ARP frame in the one capture)
+  is NovelSat's own wrapping and is not unpacked; Identify still names an
+  NS4 carrier by its S2 reading; 15 LDPC iterations a frame on that
+  capture is more than 8 dB should need (not looked into).
+
 ## A lone, weak inroute's frames not found (12358.8 MHz, 2026-11-15)
 
 Seen live (HackRF, 20 MS/s): a 1.666 MS/s S2 ACM outbound at 12357.3 MHz

@@ -38,6 +38,7 @@ pub fn model_tag(k: DecoderKind) -> Option<&'static str> {
         DecoderKind::FastLink => "Q-Flex",
         DecoderKind::Dvbs2Ip => "DVB-S2 IP",
         DecoderKind::Dvbs2Ts => "DVB-S2 TS",
+        DecoderKind::Ns4 => "NovelSat NS4",
         DecoderKind::DvbsTs => "DVB-S",
         DecoderKind::Is19Outbound => "IS-19 outbound",
         DecoderKind::Beacon => "BEACON",
@@ -142,7 +143,9 @@ fn modem(s: &VfoSettings, st: &VfoStatus) -> Option<DecoderKind> {
     }
     let f = st.fec.as_ref()?;
     match s.decoder {
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => return (f.ok > 0).then_some(s.decoder),
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::Ns4 => {
+            return (f.ok > 0).then_some(s.decoder);
+        }
         DecoderKind::DvbsTs => {
             return f
                 .dvbs

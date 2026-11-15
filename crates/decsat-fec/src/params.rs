@@ -104,6 +104,22 @@ impl FecParams {
         })
     }
 
+    /// NovelSat NS4's LDPC table for this frame length and rate
+    /// ([`crate::ldpc::tables_ns4`]); `None` for a rate whose code has not
+    /// been worked out. The sizes (and so the BCH code) are DVB-S2's.
+    pub fn ns4_ldpc_table(&self) -> Option<&'static Table> {
+        use crate::ldpc::tables_ns4 as ns4;
+        let tables: &[((u16, u16), &Table)] = match self.frame {
+            FecFrame::Normal => &ns4::NORMAL,
+            FecFrame::Short => &ns4::SHORT,
+            FecFrame::Medium => return None,
+        };
+        tables
+            .iter()
+            .find(|(rate, _)| *rate == (self.rate.num, self.rate.den))
+            .map(|(_, table)| *table)
+    }
+
     /// The LDPC parity address table (Annex B / C).
     pub fn ldpc_table(&self) -> &'static Table {
         let normal = self.frame == FecFrame::Normal;

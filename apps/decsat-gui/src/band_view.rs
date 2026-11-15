@@ -314,7 +314,7 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             },
             None => format!("{:.0} %", st.progress * 100.0),
         },
-        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts => match st.lock {
+        DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::Ns4 => match st.lock {
             Some(LockState::Locked) => {
                 let mc = st
                     .last_modcod

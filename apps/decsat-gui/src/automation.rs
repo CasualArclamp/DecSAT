@@ -289,6 +289,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
     Some(match name {
         "id" | "identify" => Identify,
         "ip" | "gse" => Dvbs2Ip,
+        "ns4" => Ns4,
         "ts" => Dvbs2Ts,
         "dvbs" => DvbsTs,
         "tpc" | "tpc2964" => Tpc2964,

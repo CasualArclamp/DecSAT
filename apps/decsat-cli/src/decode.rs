@@ -103,6 +103,7 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
     Ok(match name {
         "id" | "identify" => DecoderKind::Identify,
         "ip" | "gse" => DecoderKind::Dvbs2Ip,
+        "ns4" => DecoderKind::Ns4,
         "ts" => DecoderKind::Dvbs2Ts,
         "dvbs" => DecoderKind::DvbsTs,
         "tpc" | "tpc2964" => DecoderKind::Tpc2964,
