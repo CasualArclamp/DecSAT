@@ -126,6 +126,9 @@ fn main() -> eframe::Result {
             if let Some(p) = &opts.plan {
                 app.load_plan(p);
             }
+            if let Some(n) = opts.fft {
+                app.opts.fft_size = n;
+            }
             app.tx.open |= opts.tx_panel;
             #[cfg(feature = "hackrf")]
             {

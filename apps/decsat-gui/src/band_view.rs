@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use decsat_engine::{DecoderKind, FrontStatus, LockState, Verdict, VfoId, VfoSettings, VfoStatus};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Mesh, PointerButton, Pos2, Rect,
-    Sense, Stroke, StrokeKind, TextureId, Ui, pos2, vec2,
+    Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
 use crate::format;
@@ -75,7 +75,7 @@ pub struct BandInput<'a> {
     pub vfos: &'a [UiVfo],
     pub statuses: &'a BTreeMap<VfoId, VfoStatus>,
     pub selected: Option<VfoId>,
-    pub waterfall: Option<(TextureId, Rect)>,
+    pub waterfall: Option<crate::waterfall::Shown>,
     /// Display levels, dB.
     pub levels: (f32, f32),
     /// Decoder for VFOs created from the view.
@@ -598,12 +598,20 @@ impl BandView {
         let have_signal = !inp.front.spectrum_db.is_empty() && self.span > 0.0;
 
         // ---- waterfall
-        match inp.waterfall {
-            Some((tex, uv)) if have_signal => {
+        match &inp.waterfall {
+            Some(shown) if have_signal => {
                 let u0 = ((lo + self.span / 2.0) / self.span) as f32;
                 let u1 = ((hi + self.span / 2.0) / self.span) as f32;
-                let uv = Rect::from_min_max(pos2(u0, uv.min.y), pos2(u1, uv.max.y));
-                painter.image(tex, wf, uv, Color32::WHITE);
+                // One tile for most FFT sizes; several side by side for
+                // rows wider than a texture.
+                for (tex, (x0, x1), (t0, t1)) in shown.pieces(u0, u1) {
+                    let at = Rect::from_min_max(
+                        pos2(wf.left() + x0 * wf.width(), wf.top()),
+                        pos2(wf.left() + x1 * wf.width(), wf.bottom()),
+                    );
+                    let uv = Rect::from_min_max(pos2(t0, shown.v.0), pos2(t1, shown.v.1));
+                    painter.image(tex, at, uv, Color32::WHITE);
+                }
             }
             _ => {
                 painter.text(

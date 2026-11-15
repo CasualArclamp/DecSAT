@@ -8,13 +8,16 @@
 //! is drawn with its texture coordinates shifted so the newest row is at the
 //! top — the texture repeats vertically. Each row keeps the colours of the
 //! levels it arrived with, as in most SDR waterfalls.
+//!
+//! A row is as wide as the FFT, and a GPU texture is at most 8192 or 16384
+//! pixels a side: a wider row (32k and 64k FFTs) is cut into tiles side by
+//! side, each a ring of its own, drawn edge to edge.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 
 use eframe::egui::{
-    self, Color32, ColorImage, Rect, TextureHandle, TextureId, TextureOptions, TextureWrapMode,
-    pos2,
+    self, Color32, ColorImage, TextureHandle, TextureId, TextureOptions, TextureWrapMode,
 };
 
 /// Rows kept: ~20 s at 25 rows/s.
@@ -133,10 +136,58 @@ const OPTIONS: TextureOptions = TextureOptions {
     ..TextureOptions::LINEAR
 };
 
-/// The waterfall's texture.
+/// The waterfall to draw: its tiles left to right (each `tile` bins wide,
+/// the last maybe narrower) across rows `width` bins wide, and the texture
+/// coordinates down each that put the newest row at the top.
+#[derive(Clone)]
+pub struct Shown {
+    pub tiles: Vec<TextureId>,
+    pub tile: usize,
+    pub width: usize,
+    pub v: (f32, f32),
+}
+
+/// A tile's part in a view: the tile, where it goes across what is drawn
+/// (0 to 1), and its own horizontal texture coordinates.
+pub type Piece = (TextureId, (f32, f32), (f32, f32));
+
+impl Shown {
+    /// The parts of the tiles that show the span `u0..u1` of the whole
+    /// width (0 to 1, left to right): the tile, where it goes across what
+    /// is drawn (0 to 1), and its own horizontal texture coordinates.
+    pub fn pieces(&self, u0: f32, u1: f32) -> Vec<Piece> {
+        let (a, b) = (u0.max(0.0), u1.min(1.0));
+        if b <= a || u1 <= u0 || self.width == 0 {
+            return Vec::new();
+        }
+        let across = |u: f32| (u - u0) / (u1 - u0);
+        self.tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &id)| {
+                let cols = (self.width - i * self.tile).min(self.tile);
+                // The tile's place in the whole width.
+                let t0 = (i * self.tile) as f32 / self.width as f32;
+                let t1 = (i * self.tile + cols) as f32 / self.width as f32;
+                let (p, q) = (a.max(t0), b.min(t1));
+                (q > p).then(|| {
+                    (
+                        id,
+                        (across(p), across(q)),
+                        ((p - t0) / (t1 - t0), (q - t0) / (t1 - t0)),
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
+/// The waterfall's texture: one tile, or several side by side for rows
+/// wider than a texture may be.
 #[derive(Default)]
 pub struct RingImage {
-    handle: Option<TextureHandle>,
+    handles: Vec<TextureHandle>,
+    tile: usize,
     size: [usize; 2],
     head: usize,
     uploaded: u64,
@@ -147,32 +198,52 @@ pub struct RingImage {
 impl RingImage {
     /// Bring the texture up to date and return it with the texture coordinates
     /// that put the newest row at the top; `None` while there are no rows.
-    pub fn update(&mut self, ctx: &egui::Context, h: &History) -> Option<(TextureId, Rect)> {
+    pub fn update(&mut self, ctx: &egui::Context, h: &History) -> Option<Shown> {
         let width = h.rows.back()?.len().max(1);
+        // Tiles of equal width, as few as the GPU's limit allows.
+        let side = ctx.input(|i| i.max_texture_side).max(1024);
+        let tile = width.div_ceil(width.div_ceil(side));
+        let tiles = width.div_ceil(tile);
+        // Columns `tile`·i onward of `rows` rows of pixels `width` wide.
+        let cut = |pixels: &[Color32], rows: usize, i: usize| -> ColorImage {
+            let cols = (width - i * tile).min(tile);
+            let mut out = Vec::with_capacity(cols * rows);
+            for line in pixels.chunks_exact(width) {
+                out.extend_from_slice(&line[i * tile..i * tile + cols]);
+            }
+            ColorImage::new([cols, rows], out)
+        };
         if self.lut.is_empty() {
             self.lut = palette();
         }
         let levels = h.levels();
         let new = h.pushed.saturating_sub(self.uploaded);
-        if self.handle.is_none()
+        if self.handles.len() != tiles
+            || self.tile != tile
             || self.epoch != Some(h.epoch)
             || self.size != [width, ROWS]
             || new >= ROWS as u64
         {
-            let image = ColorImage::new(
-                [width, ROWS],
-                render(
-                    h.rows.iter().rev().take(ROWS),
-                    width,
-                    ROWS,
-                    levels,
-                    &self.lut,
-                ),
+            let pixels = render(
+                h.rows.iter().rev().take(ROWS),
+                width,
+                ROWS,
+                levels,
+                &self.lut,
             );
-            match &mut self.handle {
-                Some(t) => t.set(image, OPTIONS),
-                None => self.handle = Some(ctx.load_texture("waterfall", image, OPTIONS)),
+            self.handles.truncate(tiles);
+            for i in 0..tiles {
+                let image = cut(&pixels, ROWS, i);
+                match self.handles.get_mut(i) {
+                    Some(t) => t.set(image, OPTIONS),
+                    None => self.handles.push(ctx.load_texture(
+                        format!("waterfall {i}"),
+                        image,
+                        OPTIONS,
+                    )),
+                }
             }
+            self.tile = tile;
             self.size = [width, ROWS];
             self.head = 0;
             self.epoch = Some(h.epoch);
@@ -180,23 +251,22 @@ impl RingImage {
             let k = (new as usize).min(h.rows.len());
             let block = render(h.rows.iter().rev().take(k), width, k, levels, &self.lut);
             let (head, parts) = plan(self.head, k, ROWS);
-            let handle = self.handle.as_mut()?;
             for (row, range) in parts {
-                let pixels = block[range.start * width..range.end * width].to_vec();
-                handle.set_partial(
-                    [0, row],
-                    ColorImage::new([width, range.len()], pixels),
-                    OPTIONS,
-                );
+                let pixels = &block[range.start * width..range.end * width];
+                for (i, handle) in self.handles.iter_mut().enumerate() {
+                    handle.set_partial([0, row], cut(pixels, range.len(), i), OPTIONS);
+                }
             }
             self.head = head;
         }
         self.uploaded = h.pushed;
         let v0 = self.head as f32 / ROWS as f32;
-        Some((
-            self.handle.as_ref()?.id(),
-            Rect::from_min_max(pos2(0.0, v0), pos2(1.0, v0 + 1.0)),
-        ))
+        Some(Shown {
+            tiles: self.handles.iter().map(|t| t.id()).collect(),
+            tile,
+            width,
+            v: (v0, v0 + 1.0),
+        })
     }
 }
 
@@ -238,6 +308,43 @@ fn render<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_waterfall_is_drawn_from_its_tiles() {
+        // 65536 bins in four tiles of 16384.
+        let s = Shown {
+            tiles: (0..4).map(TextureId::User).collect(),
+            tile: 16_384,
+            width: 65_536,
+            v: (0.0, 1.0),
+        };
+        // The whole width: each tile whole, a quarter of the picture each.
+        let all = s.pieces(0.0, 1.0);
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[2], (TextureId::User(2), (0.5, 0.75), (0.0, 1.0)));
+        // Zoomed across the seam between tiles 1 and 2.
+        let p = s.pieces(0.45, 0.55);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].0, TextureId::User(1));
+        assert!((p[0].1.0 - 0.0).abs() < 1e-5 && (p[0].1.1 - 0.5).abs() < 1e-4);
+        assert!((p[0].2.0 - 0.8).abs() < 1e-4 && (p[0].2.1 - 1.0).abs() < 1e-5);
+        assert!((p[1].2.0 - 0.0).abs() < 1e-5 && (p[1].2.1 - 0.2).abs() < 1e-4);
+        // A view running past the band's edge shows only what there is.
+        let p = s.pieces(-0.1, 0.1);
+        assert_eq!(p.len(), 1);
+        assert!((p[0].1.0 - 0.5).abs() < 1e-5 && (p[0].1.1 - 1.0).abs() < 1e-5);
+        // One tile when the row fits a texture.
+        let one = Shown {
+            tiles: vec![TextureId::User(9)],
+            tile: 4096,
+            width: 4096,
+            v: (0.0, 1.0),
+        };
+        assert_eq!(
+            one.pieces(0.25, 0.75),
+            vec![(TextureId::User(9), (0.0, 1.0), (0.25, 0.75))]
+        );
+    }
 
     #[test]
     fn ring_plan_wraps() {

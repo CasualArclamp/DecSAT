@@ -56,6 +56,9 @@ pub struct Options {
     /// saved ones otherwise).
     pub lna_db: Option<u16>,
     pub vga_db: Option<u16>,
+    /// The spectrum's FFT size for this run (`--fft N`: a power of two,
+    /// 1024 to 65536).
+    pub fft: Option<usize>,
     /// LNB LO for the axis, MHz.
     pub lo_mhz: Option<f64>,
     /// The LNB's LO is above the band (C band): RF = LO − tuned.
@@ -187,6 +190,15 @@ impl Options {
                 Some("--wireshark") => o.wireshark = true,
                 Some("--session-log") => o.session_log = true,
                 Some("--amp") => o.amp = true,
+                Some("--fft") => {
+                    let v = args.next().ok_or("--fft needs a size")?;
+                    o.fft = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .filter(|n| n.is_power_of_two() && (1024..=65_536).contains(n))
+                            .ok_or("--fft takes a power of two, 1024 to 65536")?,
+                    );
+                }
                 Some("--lna") => {
                     let v = args.next().ok_or("--lna needs dB")?;
                     o.lna_db = Some(
