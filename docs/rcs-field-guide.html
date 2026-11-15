@@ -1,0 +1,389 @@
+<!doctype html>
+<!-- made by CasualArclamp -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>html{color-scheme:light dark}body{margin:0;font-size:14px}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>DVB-RCS Field Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* layout: the DVB-T multipath guide's sister page: a key table, then one case per return-link type = prose column + the four panels DecSAT's Return pool draws */
+:root{
+  --bg:#f2f3f6; --fg:#1b1e25; --muted:#5d6472; --panel:#ffffff; --edge:#d7dbe3; --grid:#e4e7ee;
+  --trace:#1f6fd1; --known:#d47a12; --guard:#c3c8d2; --hot:#c8352b; --accent:#1f6fd1;
+  --good:#1e9449; --warn:#c27a0c; --bad:#c8352b;
+  --wf0:#0d1220; --wf1:#1b3a8a; --wf2:#2f8fd8; --wf3:#9fe3ff; --wf4:#fff6c8;
+  --font-body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0f1115; --fg:#e3e6ed; --muted:#8c93a3; --panel:#161a21; --edge:#272d38; --grid:#222834;
+  --trace:#5aa0ff; --known:#ffb347; --guard:#3a4252; --hot:#ff6b5e; --accent:#5aa0ff;
+  --good:#4fd37a; --warn:#ffb347; --bad:#ff6b5e; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0f1115; --fg:#e3e6ed; --muted:#8c93a3; --panel:#161a21; --edge:#272d38; --grid:#222834;
+  --trace:#5aa0ff; --known:#ffb347; --guard:#3a4252; --hot:#ff6b5e; --accent:#5aa0ff;
+  --good:#4fd37a; --warn:#ffb347; --bad:#ff6b5e; color-scheme:dark }
+
+body{ background:var(--bg); color:var(--fg); font-family:var(--font-body); font-size:15px; line-height:1.5;
+  padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px)); padding-block:2rem 4rem }
+.wrap{ max-width:1180px; margin:0 auto }
+h1{ font-size:2rem; font-weight:600; letter-spacing:-.01em; margin:0 0 .5rem; text-wrap:balance }
+.lede{ max-width:66ch; color:var(--muted); margin:0 0 1rem }
+.assume{ font-family:var(--font-mono); font-size:.8rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:.4rem 1.2rem; margin:0 0 1.5rem; padding:.75rem 1rem; border:1px solid var(--edge); border-radius:4px; background:var(--panel) }
+.assume span b{ color:var(--fg); font-weight:500 }
+
+.key{ margin:0 0 2rem }
+.key h2{ font-size:1.15rem; font-weight:600; margin:0 0 .5rem }
+.key p{ margin:0 0 .75rem; color:var(--muted); max-width:66ch }
+.tablewrap{ overflow-x:auto; border:1px solid var(--edge); border-radius:4px; background:var(--panel) }
+table{ border-collapse:collapse; width:100%; min-width:640px; font-size:.85rem }
+th,td{ text-align:left; padding:.45rem .7rem; border-bottom:1px solid var(--edge); vertical-align:top }
+th{ font-family:var(--font-mono); font-weight:500; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--muted) }
+tr:last-child td{ border-bottom:0 }
+td code{ font-family:var(--font-mono); font-size:.8rem }
+td a{ color:var(--accent) }
+
+.case{ display:grid; grid-template-columns:minmax(0,22rem) minmax(0,1fr); gap:1.5rem 2rem; padding-block:1.75rem; border-top:1px solid var(--edge); scroll-margin-top:1rem }
+.case h2{ font-size:1.15rem; font-weight:600; margin:0 0 .35rem; text-wrap:balance }
+.case h2 small{ font-family:var(--font-mono); font-weight:400; color:var(--muted); font-size:.75rem; letter-spacing:.06em; display:block; margin-bottom:.2rem }
+.chips{ display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 .9rem; font-family:var(--font-mono); font-size:.75rem; font-variant-numeric:tabular-nums }
+.chip{ padding:.15rem .5rem; border:1px solid var(--edge); border-radius:3px; background:var(--panel) }
+.chip.v{ border-color:transparent; color:var(--bg); font-weight:500 }
+.chip.good{ background:var(--good) } .chip.warn{ background:var(--warn) } .chip.bad{ background:var(--bad) }
+.prose{ min-width:0 } .prose p{ margin:0 0 .6rem } .prose p b{ font-weight:600 }
+
+.scopes{ display:grid; grid-template-columns:1.6fr 1fr; gap:.75rem; min-width:0; align-content:start }
+.panel{ margin:0; min-width:0; background:var(--panel); border:1px solid var(--edge); border-radius:4px; padding:.4rem .5rem .5rem }
+.panel figcaption{ font-family:var(--font-mono); font-size:.72rem; color:var(--muted); margin-bottom:.3rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.panel canvas{ display:block; width:100%; max-width:100%; aspect-ratio:1.9 }
+.panel.wf{ grid-column:1/-1 } .panel.wf canvas{ aspect-ratio:3.4 }
+.panel.layout{ grid-column:1/-1 } .panel.layout canvas{ aspect-ratio:7 }
+.panel.con canvas{ aspect-ratio:1.25 }
+.anim{ font-family:var(--font-mono); font-size:.72rem; color:var(--accent) }
+.foot{ margin-top:2rem; padding-top:1rem; border-top:1px solid var(--edge); color:var(--muted); font-size:.85rem; max-width:80ch }
+
+@media (max-width:960px){ .case{ grid-template-columns:1fr } }
+@media (max-width:520px){ .scopes{ grid-template-columns:1fr } .panel.layout canvas{ aspect-ratio:4.5 } }
+@media (prefers-reduced-motion: reduce){ .anim::after{ content:" · still under reduced motion" } }
+</style>
+
+<div class="wrap">
+  <h1>DVB-RCS Field Guide</h1>
+  <p class="lede">The kinds of satellite return link a hub's terminals send on, each drawn the way DecSAT's Return pool shows it: the pool's waterfall, one carrier over two frames, how a burst is laid out, and its constellation. The standard ones follow EN 301 790 and EN 301 545-2. The two vendor returns are drawn from what DecSAT measured on Eutelsat 172B. Traffic and noise are simulated; the layouts and numbers are the spec's or the measurement's.</p>
+  <div class="assume">
+    <span>waterfall <b>frequency across the pool, newest row on top</b></span>
+    <span>colours <b>blue the payload · amber the known symbols · grey the guard</b></span>
+    <span>chips <b>what DecSAT does with it today</b></span>
+    <span>display <b>live at 60 fps <span class="anim">· slowed so slots show</span></b></span>
+  </div>
+
+  <section class="key" aria-labelledby="key-h">
+    <h2 id="key-h">Which one is it? Look at the outbound first</h2>
+    <p>A return link is hard to name from its bursts alone. The hub's forward link names it: open the outbound's VFO and see what signalling it carries.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>On the outbound</th><th>Where DecSAT shows it</th><th>The return is</th></tr></thead>
+        <tbody>
+          <tr><td>TS with a PMT listing PIDs under an RCS content descriptor (A7h), tables SCT A0h, FCT A1h, TCT A2h, TBTP A5h, NCR as the PCR</td><td>TS card → <i>Interactive network (DVB-RCS)</i></td><td><a href="#rcs1">DVB-RCS MF-TDMA</a></td></tr>
+          <tr><td>FCT2 ABh, BCT ACh, TBTP2 ADh: in TS sections, or in GSE PDUs of protocol type <code>0082h</code> (NCR in <code>0081h</code>)</td><td>RCS card or GSE card → <i>DVB-RCS2 return link</i></td><td><a href="#rcs2-lm">RCS2 linear bursts</a>, <a href="#rcs2-ra">random access</a>, <a href="#rcs2-cpm">CPM</a>, <a href="#rcs2-ss">spread</a> or <a href="#rcs2-cc">continuous</a>: the BCT's format class says which</td></tr>
+          <tr><td>The RCS PMT declares SCT/FCT/TCT/TBTP but none is sent; private tables D0h and D1h instead (D1h every 40.2 ms)</td><td>RCS card → <i>burst plan (D1h)</i></td><td><a href="#newtec">Newtec Mx-DMA</a></td></tr>
+          <tr><td>S2 GSE outbound, no RCS tables; non-IP PDUs of type <code>0001h</code> (a 46.08 MHz clock) and <code>0004h</code> (a plan per inroute every 125 ms)</td><td>GSE card → <i>Hub signalling (inroutes)</i></td><td><a href="#gse-hub">125 ms inroutes</a>, or <a href="#lone">a lone weak inroute</a></td></tr>
+          <tr><td>Nothing of the above, but a block beside the outbound that bursts</td><td>Return pool VFO: <i>N carriers · repeats every …</i></td><td>An unknown TDMA return: the pool finds the frame and the slot grid blind</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div id="cases"></div>
+
+  <p class="foot">How the panels are made: each case is a model of its return (carriers, frame, slot grid, burst lengths, guard, the layout of known symbols, the constellation), and the waterfall, envelope and constellation are computed from it with noise. Load and terminal behaviour are made up; frame lengths, slot counts, symbol rates and layouts are from the spec (EN 301 790 V1.5.1, EN 301 545-2 V1.3.1, Table A-1) or from DecSAT's 172B recordings (docs/STATUS.md).</p>
+</div>
+
+<script>
+// ---------------------------------------------------------------- the cases
+// Frequencies are fractions of the pool's width (0..1), times in ms.
+// slotted(): carriers × frames × slots, each slot taken or not; bursts may
+// span several slots. `tail` is the silence at a frame's end; `guard` the
+// gap at a slot's end. `shape` 0..1 is how square the burst's spectrum is.
+
+function slotted(o){ return Object.assign({kind:"slotted", load:0.7, lens:[1], guard:0.04, tail:0, shape:0.9, level:1}, o) }
+
+const CASES = [
+{ id:"rcs1", name:"DVB-RCS, MF-TDMA", sub:"EN 301 790 · the first standard",
+  chips:[["warn","tables read · bursts not decoded"],["","QPSK · roll-off 0.35"],["","superframe → frames → timeslots"]],
+  text:`<p><b>What it is.</b> The original standard. The return is a few fixed carriers, cut in time into superframes, frames and timeslots (SCT, FCT, TCT). Every terminal is told its slots in the burst time plan (TBTP). Traffic bursts carry ATM cells or MPEG packets; CSC (logon), ACQ and SYNC bursts keep terminals in line. QPSK, roll-off 0.35, with either a concatenated Reed-Solomon + K = 7 convolutional code or an 8-state double-binary turbo code.</p>
+<p><b>What you see.</b> Equal carriers side by side with the 35 % roll-off's soft shoulders. The waterfall is a regular brick wall: every slot the same length, gaps at the same places on every carrier. The pool finds the grid quickly.</p>
+<p><b>In DecSAT.</b> The RCS card reads the RMT, SCT, FCT, TCT, TBTP, CMT and TIM and lists the superframes and timeslot types. The bursts themselves are not demodulated yet; none has been found on the air.</p>`,
+  model: slotted({carriers:[[.16,.17],[.38,.17],[.62,.17],[.84,.17]], frame:26.67, slots:12, lens:[1,1,2], shape:0.65, load:0.75}),
+  envSlots:true,
+  layout:{ total:"TRF burst, 1 ATM cell · example lengths", segs:[["preamble",24,"k"],["payload: 53 B cell + code",212,"p"],["guard",8,"g"]] },
+  con:{ mod:"qpsk", snr:16 } },
+
+{ id:"rcs2-lm", name:"DVB-RCS2, linear-modulation bursts", sub:"EN 301 545-2 · TC-LM",
+  chips:[["warn","tables read · burst decoder being built"],["","QPSK / 8PSK / 16QAM · roll-off 0.2"],["","bandwidth-time units"]],
+  text:`<p><b>What it is.</b> The second standard. A frame is a grid of bandwidth-time units (BTU) on one or more unit carriers (FCT2). A transmission type (BCT) sets how many BTUs a burst takes, its modulation, its 16-state double-binary turbo code and its known symbols. The plan (TBTP2) walks the frame's timeslots naming who sends in each, and may change a slot's type frame by frame.</p>
+<p><b>What you see.</b> Unit carriers of one width, roll-off 0.2, so squarer than DVB-RCS. Bursts of different lengths share a carrier: a 1-BTU control burst next to a 3-BTU traffic burst. Inside a burst, a preamble, single pilot symbols at a fixed period, a postamble. The layout below is annex A's reference waveform 3: 27 + 26 + 27 known symbols around 456 of payload.</p>
+<p><b>In DecSAT.</b> FCT2, BCT and TBTP2 are read from TS or GSE, and each planned burst is placed on its uplink frequency and time. The burst receiver (turbo decoder, CRC) is being written.</p>`,
+  model: slotted({carriers:[[.2,.2],[.42,.2],[.64,.2],[.86,.2]], frame:45, slots:15, lens:[1,1,3,3,2], shape:0.85, load:0.8, guard:0.05}),
+  envSlots:true,
+  layout:{ total:"reference waveform 3 · 536 symbols", segs:[["preamble 27",27,"k"],["456 payload, a pilot every 18",456,"p",18],["postamble 27",27,"k"]] },
+  con:{ mod:"qpsk", snr:11 } },
+
+{ id:"rcs2-ra", name:"DVB-RCS2, random access and logon", sub:"EN 301 545-2 · contention slots, CRDSA",
+  chips:[["warn","counted, not decoded"],["","collisions expected"],["","replicas (CRDSA, optional)"]],
+  text:`<p><b>What it is.</b> Some timeslots belong to nobody: the TBTP2 gives them to a random-access channel (the top of the assignment-id range) or the FCT2 fixes them so. Terminals logging on, or with a little traffic, send there when they like. With CRDSA a terminal sends the same burst two or three times in one frame; the hub cancels the copies it decoded and recovers the bursts they hid.</p>
+<p><b>What you see.</b> A sparse, irregular pattern on the slots set aside, sometimes two bursts on top of each other: a brighter, smeared slot whose constellation is a blur. With replicas, the same burst turns up again a few slots away in the same frame.</p>
+<p><b>In DecSAT.</b> The RCS2 card counts random-access timeslots apart from dedicated ones. Collisions would fail their CRC.</p>`,
+  model: slotted({carriers:[[.25,.22],[.5,.22],[.75,.22]], frame:45, slots:15, lens:[1], shape:0.85, load:0.22, replicas:2, guard:0.05}),
+  envSlots:true,
+  layout:{ total:"logon burst · example lengths", segs:[["preamble",32,"k"],["logon payload",250,"p",25],["postamble",16,"k"]] },
+  con:{ mod:"qpsk", snr:9, collide:true } },
+
+{ id:"rcs2-cpm", name:"DVB-RCS2, continuous-phase bursts", sub:"EN 301 545-2 · CC-CPM",
+  chips:[["bad","not decoded"],["","constant envelope · M = 4, L = 2"],["","convolutional code"]],
+  text:`<p><b>What it is.</b> For small terminals with cheap, saturated amplifiers. Four-level continuous-phase modulation with a raised-cosine phase pulse two symbols long, a convolutional code of constraint length 3 or 4, a bit interleaver. Unique words are spread through the burst in segments.</p>
+<p><b>What you see.</b> The envelope is flat: no amplitude ripple inside a burst, only its ramps. The spectrum has a rounded top and no sharp roll-off edge. The constellation is a ring: the phase moves smoothly between points instead of jumping.</p>
+<p><b>In DecSAT.</b> Not supported. The BCT names the format class (2) and DecSAT shows the burst type, unread.</p>`,
+  model: slotted({carriers:[[.22,.15],[.42,.15],[.62,.15],[.82,.15]], frame:45, slots:12, lens:[1,2], shape:0.25, load:0.7, guard:0.06}),
+  envSlots:true, flat:true,
+  layout:{ total:"UW segments among the data · example", segs:[["UW",32,"k"],["data",200,"p"],["UW",16,"k"],["data",200,"p"],["UW",16,"k"]] },
+  con:{ mod:"cpm", snr:18 } },
+
+{ id:"rcs2-ss", name:"DVB-RCS2, spread-spectrum bursts", sub:"EN 301 545-2 · SS-TC-LM",
+  chips:[["bad","not decoded"],["","under the noise"],["","for small antennas"]],
+  text:`<p><b>What it is.</b> Linear-modulation bursts with each symbol repeated by a spreading factor and scrambled chip by chip, so a terminal with a small dish can send without its signal standing out in the neighbouring satellite's band. The BCT gives the spreading factor and the scrambling sequence.</p>
+<p><b>What you see.</b> Very little: a wide burst a few dB under the noise raises the floor of a large part of the pool for a moment. The constellation only appears after despreading.</p>
+<p><b>In DecSAT.</b> Not supported. A Return pool sees it, at most, as the floor lifting.</p>`,
+  model: { kind:"ss", carriers:[[.5,.7]], frame:45, slots:4, level:0.45 },
+  envSlots:false,
+  layout:{ total:"every symbol spread over many chips · example", segs:[["preamble",16,"k"],["payload, spread",300,"p",30],["postamble",8,"k"]] },
+  con:{ mod:"bpsk", snr:7 } },
+
+{ id:"rcs2-cc", name:"DVB-RCS2, a continuous carrier", sub:"EN 301 545-2 · optional",
+  chips:[["warn","plan read · carrier not tried"],["","assigned by TBTP2 or TIM-U"]],
+  text:`<p><b>What it is.</b> A busy terminal can be given a whole carrier for a time and send continuously, like an SCPC return, while the others keep bursting. The TBTP2 (context 4) or the terminal's own TIM-U assigns it.</p>
+<p><b>What you see.</b> One carrier in the pool never switches off; the rest burst as usual. Annex A's continuous-carrier waveforms add known blocks at a fixed period.</p>
+<p><b>In DecSAT.</b> The RCS2 card shows the assignment context. Putting an SCPC VFO on the carrier has not been tried on one.</p>`,
+  model: slotted({carriers:[[.18,.18],[.4,.18],[.62,.18],[.84,.18]], frame:45, slots:15, lens:[1,3], shape:0.85, load:0.7, continuous:[2]}),
+  envSlots:true, envCarrier:2,
+  layout:{ total:"continuous: known blocks at a fixed period · example", segs:[["data",300,"p"],["known",32,"k"],["data",300,"p"],["known",32,"k"],["data",150,"p"]] },
+  con:{ mod:"qpsk", snr:14 } },
+
+{ id:"newtec", name:"Newtec Mx-DMA", sub:"vendor · measured on 172B, 12529 MHz",
+  chips:[["good","plan read · bursts demodulated"],["warn","FEC unknown"],["","16APSK 8+8 · roll-off 0.05"]],
+  text:`<p><b>What it is.</b> The hub's own scheme, signalled in private table D1h on the outbound's TS. A 40.200 ms frame of eight 5.000 ms slots. Each burst's code sets its symbol rate and how many slots it spans (1, 2, 4 or 8), so bursts of very different widths are packed edge to edge, about 1.066 × Rs + 5.7 kHz apart. Beside the block, continuous carriers whose width the hub changes every few seconds.</p>
+<p><b>What you see.</b> A block where every 5 ms the frequency packing changes, wide and narrow bursts side by side, roll-off so small the edges are nearly vertical. Most bursts are 16APSK 8+8 (rings 2.19 apart); a few 8PSK. Every terminal sends a sync burst about every 32 frames: 530 known symbols, then data.</p>
+<p><b>In DecSAT.</b> D1h is read and timed against the pool; each planned burst is cut out and demodulated with its terminal, code and level. The FEC is not known, so the payload is not read.</p>`,
+  model: { kind:"newtec", block:[.05,.62], conts:[[.66,.08],[.76,.12],[.9,.1]], frame:40.2, slot:5.0 },
+  envSlots:false,
+  layout:{ total:"16APSK 8+8 traffic burst, as measured", segs:[["preamble 76",76,"k"],["127 data",127,"p"],["known 66",66,"k"],["data, 2 known every 14–21",400,"p",17]] },
+  con:{ mod:"apsk88", snr:17 } },
+
+{ id:"gse-hub", name:"125 ms inroutes, GSE-signalled hub", sub:"vendor · measured on 172B, 12679 MHz",
+  chips:[["good","plans read · 8PSK bursts demodulated"],["","slots back to back"],["","3.1–3.3 ms silence a frame"]],
+  text:`<p><b>What it is.</b> A hub that sends its inroute table, burst configurations and a plan per inroute every 125 ms frame in GSE (types 0001h and 0004h). Each inroute is a carrier of its own, 666 kBd on 172B, with 113 or 129 slots a frame. A plan applies five frames after it arrives.</p>
+<p><b>What you see.</b> Four steady carriers that never seem to switch off: every slot holds a burst. Each falls silent for 3.1–3.3 ms at the end of every frame, the same moment on all of them. The bursts are 8PSK at roll-off 0.2: a 34-symbol preamble (with the terminal's 3-symbol tag inside), four known symbols every 30, a 14-symbol word 506 symbols in, a 16-symbol guard.</p>
+<p><b>In DecSAT.</b> The Return pool maps the inroutes on its spectrum, finds the frames from the silences, lines the plans up and demodulates each 8PSK burst with its terminal. Its payload coding is still unknown.</p>`,
+  model: slotted({carriers:[[.13,.2],[.37,.2],[.61,.2],[.85,.2]], frame:125, slots:113, lens:[1], shape:0.85, load:1, guard:0.022, tail:3.2}),
+  envSlots:true, envFrames:2,
+  layout:{ total:"one 717-symbol slot (inroute 2Eh)", segs:[["preamble 34",34,"k"],["data, 4 known every 30",472,"p",30],["word 14",14,"k"],["data",181,"p",30],["guard 16",16,"g"]] },
+  con:{ mod:"8psk", snr:15 } },
+
+{ id:"lone", name:"A lone weak inroute", sub:"vendor · BF9h, 12358.8 MHz, from a report",
+  chips:[["warn","frames found since PR 50"],["","not checked on the air"],["","6 dB over the noise"]],
+  text:`<p><b>What it is.</b> The same kind of hub with one inroute: BF9h, 832.661 kBd, 215 slots of 474 symbols, its carrier only 6 dB over the noise.</p>
+<p><b>What you see.</b> A single carrier on 98 % of the time. Its 3 ms silences at the frame ends are only about 6 dB deep, hard to see on the waterfall and easy to miss block by block.</p>
+<p><b>In DecSAT.</b> The Return pool stayed at "lining up: 1 frame starts found". It needed silences over 6 dB deep, 20 µs at a time. It now smooths over half a millisecond and takes 3 dB, and finds the frames on a copy of this carrier (PR 50). Nothing confirmed off air yet.</p>`,
+  model: slotted({carriers:[[.5,.62]], frame:125, slots:215, lens:[1], shape:0.85, load:1, guard:0.02, tail:3.0, level:0.2}),
+  envSlots:true, envFrames:2,
+  layout:{ total:"one 474-symbol slot · inner layout not yet read", segs:[["burst",458,"p"],["guard 16",16,"g"]] },
+  con:{ mod:"qpsk", snr:6 } },
+];
+
+// ---------------------------------------------------------------- helpers
+function hash(a,b,c,d){ let h=2166136261>>>0; for(const v of [a,b,c,d]){ h^=(v|0)+0x9e3779b9; h=Math.imul(h,16777619)>>>0; h^=h>>>13 } return (h>>>0)/4294967296 }
+function gauss(){ let u=Math.random()||1e-9, v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v) }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function rgb(s){ const c=document.createElement("canvas").getContext("2d"); c.fillStyle=s; const h=c.fillStyle; if(h[0]==="#") return [1,3,5].map(i=>parseInt(h.slice(i,i+2),16)); const m=h.match(/\d+/g); return m?m.slice(0,3).map(Number):[0,0,0] }
+let THEME=null;
+function readTheme(){ THEME={ panel:css("--panel"), fg:css("--fg"), muted:css("--muted"), grid:css("--grid"), edge:css("--edge"),
+  trace:css("--trace"), known:css("--known"), guard:css("--guard"), hot:css("--hot"),
+  ramp:["--wf0","--wf1","--wf2","--wf3","--wf4"].map(v=>rgb(css(v))) } }
+function ramp(x){ x=Math.max(0,Math.min(1,x))*(THEME.ramp.length-1); const i=Math.min(THEME.ramp.length-2,Math.floor(x)), f=x-i; const a=THEME.ramp[i], b=THEME.ramp[i+1]; return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f] }
+
+// The bursts on the air at time t (ms): [{c: centre, w: width, p: power, shape}]
+function bursts(m, t){
+  const out=[];
+  if(m.kind==="slotted"){
+    const F=m.frame, slotLen=(F-m.tail)/m.slots, fr=Math.floor(t/F), inF=t-fr*F;
+    m.carriers.forEach(([c,w],ci)=>{
+      if(m.continuous && m.continuous.includes(ci)){ out.push({c,w,p:m.level,shape:m.shape}); return }
+      if(inF>=F-m.tail) return;
+      const s=Math.floor(inF/slotLen);
+      // Walk the frame's bursts on this carrier to find the one over slot s.
+      let k=0;
+      while(k<m.slots){
+        const len=m.lens[Math.floor(hash(ci,fr,k,7)*m.lens.length)];
+        const on=hash(ci,fr,k,1)<m.load;
+        if(s<k+len){
+          if(!on) return;
+          const end=(k+len)*slotLen - m.guard*slotLen*Math.min(len,1);
+          if(inF>end) return;
+          out.push({c,w,p:m.level,shape:m.shape});
+          return;
+        }
+        k+=len;
+      }
+    });
+    if(m.replicas){
+      // Random access: a few bursts, each sent in `replicas` slots of the frame.
+      const fr2=fr, s=Math.floor(inF/slotLen);
+      for(let b=0;b<3;b++){ const ci=Math.floor(hash(b,fr2,3,3)*m.carriers.length);
+        for(let r=0;r<m.replicas;r++){ const sl=Math.floor(hash(b,fr2,r,5)*m.slots);
+          if(sl===s && inF<(s+1-m.guard)*slotLen){ const [c,w]=m.carriers[ci]; out.push({c,w,p:m.level,shape:m.shape}) } } }
+    }
+  } else if(m.kind==="ss"){
+    const fr=Math.floor(t/m.frame), inF=t-fr*m.frame, s=Math.floor(inF/(m.frame/m.slots));
+    if(hash(fr,s,1,1)<0.55 && (inF%(m.frame/m.slots))<(m.frame/m.slots)*0.9){ const [c,w]=m.carriers[0]; out.push({c,w,p:m.level,shape:0.9}) }
+  } else if(m.kind==="newtec"){
+    const fr=Math.floor(t/m.frame), inF=t-fr*m.frame;
+    if(inF<8*m.slot){
+      const s=Math.floor(inF/m.slot), [a,b]=m.block; let x=a, k=0;
+      while(x<b){ const w=[.025,.04,.06,.09,.13][Math.floor(hash(fr,s,k,2)*5)]; const ww=Math.min(w,b-x);
+        if(hash(fr,s,k,4)<0.82 && (inF-s*m.slot)<m.slot*0.97) out.push({c:x+ww/2,w:ww*0.94,p:1,shape:0.97});
+        x+=ww; k++ }
+    }
+    const era=Math.floor(t/3000);
+    m.conts.forEach(([c,w],i)=>{ const f=0.55+0.45*hash(era,i,9,9); out.push({c,w:w*f,p:0.8,shape:0.97}) });
+  }
+  return out;
+}
+// Power of a burst's spectrum at frequency x (raised-cosine edges).
+function spec(b,x){ const half=b.w/2, flat=half*b.shape, d=Math.abs(x-b.c); if(d<=flat) return b.p; if(d>=half+ (half-flat)) return 0; const r=(d-flat)/(2*(half-flat)); return b.p*0.5*(1+Math.cos(Math.PI*Math.min(1,r))) }
+
+// ---------------------------------------------------------------- panels
+function sizeCanvas(cv){ const r=cv.getBoundingClientRect(), dpr=Math.min(2,window.devicePixelRatio||1); const w=Math.max(10,Math.round(r.width*dpr)), h=Math.max(10,Math.round(r.height*dpr)); if(cv.width!==w||cv.height!==h){ cv.width=w; cv.height=h } return [w,h,dpr] }
+
+class Waterfall{
+  // A row a screen frame at 60 fps: 240 rows show the same stretch of
+  // signal as the old 110, in finer steps.
+  constructor(cv,m){ this.cv=cv; this.m=m; this.cols=360; this.rows=240; this.t=0;
+    this.dt = (m.kind==="newtec"? 1.0 : Math.max(0.25,(m.frame||45)/60))/2.2;
+    if(m.frame>100) this.dt=125/50/2.2;
+    this.img=null; this.buf=new Float32Array(this.cols*this.rows); }
+  row(t){ const r=new Float32Array(this.cols), bs=bursts(this.m,t);
+    for(let i=0;i<this.cols;i++){ const x=(i+.5)/this.cols; let p=0.05*(0.6+0.8*Math.random()); for(const b of bs) p+=spec(b,x)*(0.75+0.5*Math.random()); r[i]=p }
+    return r }
+  step(n){ for(let k=0;k<n;k++){ this.buf.copyWithin(this.cols,0,this.cols*(this.rows-1)); this.buf.set(this.row(this.t),0); this.t+=this.dt } }
+  fill(){ this.t=0; for(let k=0;k<this.rows;k++) this.step(1) }
+  draw(){ const [W,H]=sizeCanvas(this.cv), ctx=this.cv.getContext("2d");
+    const im=ctx.createImageData(this.cols,this.rows);
+    for(let i=0;i<this.buf.length;i++){ const v=this.buf[i], db=10*Math.log10(v+1e-4); const x=(db+13)/13; const c=ramp(x); im.data[4*i]=c[0]; im.data[4*i+1]=c[1]; im.data[4*i+2]=c[2]; im.data[4*i+3]=255 }
+    const off=this.off||(this.off=document.createElement("canvas")); off.width=this.cols; off.height=this.rows; off.getContext("2d").putImageData(im,0,0);
+    ctx.imageSmoothingEnabled=true; ctx.drawImage(off,0,0,W,H) }
+}
+
+// The envelope is computed once into an offscreen canvas (a resize or theme
+// change redraws it); each screen frame only copies it and moves the cursor.
+function drawEnvelope(cv,cs,cursor){
+  const [W,H,dpr]=sizeCanvas(cv), ctx=cv.getContext("2d");
+  const key=`${W}x${H}:${THEME.trace}:${THEME.panel}`;
+  if(!cv._env || cv._envKey!==key){ cv._env=document.createElement("canvas"); cv._env.width=W; cv._env.height=H; cv._envKey=key; envelopeTrace(cv._env,cs,dpr) }
+  ctx.drawImage(cv._env,0,0);
+  if(cursor!==undefined){ const pad=6*dpr, x=pad+(W-2*pad)*(cursor%1); ctx.strokeStyle=THEME.known; ctx.globalAlpha=.6; ctx.lineWidth=1.2*dpr; ctx.beginPath(); ctx.moveTo(x,8*dpr); ctx.lineTo(x,H-14*dpr); ctx.stroke(); ctx.globalAlpha=1 }
+}
+function envelopeTrace(cv,cs,dpr){
+  const W=cv.width, H=cv.height, ctx=cv.getContext("2d"), m=cs.model;
+  ctx.fillStyle=THEME.panel; ctx.fillRect(0,0,W,H);
+  const frames=cs.envFrames||2, F=(m.frame||45), span=F*frames, ci=cs.envCarrier||0;
+  const pad=6*dpr, y0=H-14*dpr, y1=8*dpr;
+  ctx.strokeStyle=THEME.grid; ctx.lineWidth=1;
+  for(let f=0;f<=frames;f++){ const x=pad+(W-2*pad)*f/frames; ctx.beginPath(); ctx.moveTo(x,y1); ctx.lineTo(x,y0); ctx.stroke() }
+  ctx.fillStyle=THEME.muted; ctx.font=`${10*dpr}px "IBM Plex Mono",monospace`; ctx.textBaseline="top";
+  ctx.fillText(`${frames} frames · ${(span).toFixed(1)} ms`, pad, y0+2*dpr);
+  const n=900, floor=m.level!==undefined && m.level<0.5 ? 0.25 : 0.1;
+  ctx.beginPath(); ctx.strokeStyle=THEME.trace; ctx.lineWidth=1.2*dpr;
+  const base = cs.id==="lone"? 3000 : 0;
+  for(let i=0;i<n;i++){ const t=base+span*i/n; let p=0;
+    for(const b of bursts(m,t)){ if(m.kind==="slotted"){ const c=m.carriers[ci]; if(Math.abs(b.c-c[0])<1e-6) p=b.p } else if(Math.abs(b.c-(m.carriers?m.carriers[0][0]:b.c))<0.02 || m.kind==="ss") p=Math.max(p,b.p) }
+    const amp = cs.flat ? (p>0?1:0) : p*(0.75+0.5*Math.abs(gauss())*0.6);
+    const v = Math.max(0, (p>0? amp/(m.level||1) : 0)*(1-floor) + floor*(0.5+0.5*Math.random()));
+    const x=pad+(W-2*pad)*i/n, y=y0-(y0-y1)*Math.min(1,v);
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y) }
+  ctx.stroke();
+}
+
+function drawLayout(cv,lay){
+  const [W,H,dpr]=sizeCanvas(cv), ctx=cv.getContext("2d");
+  ctx.fillStyle=THEME.panel; ctx.fillRect(0,0,W,H);
+  const total=lay.segs.reduce((a,s)=>a+s[1],0), pad=4*dpr, bh=Math.min(22*dpr,H*0.45), y=6*dpr;
+  let x=pad; const sc=(W-2*pad)/total;
+  ctx.font=`${10*dpr}px "IBM Plex Mono",monospace`; ctx.textBaseline="top";
+  let lastLabelEnd=-1, row=0;
+  for(const [label,len,kind,pilot] of lay.segs){
+    const w=len*sc; ctx.fillStyle = kind==="k"?THEME.known : kind==="g"?THEME.guard : THEME.trace; ctx.fillRect(x,y,Math.max(1,w-1),bh);
+    if(pilot){ ctx.fillStyle=THEME.known; for(let s=pilot;s<len;s+=pilot){ ctx.fillRect(x+s*sc-dpr*.6,y,Math.max(1.2*dpr,sc),bh) } }
+    const tw=ctx.measureText(label).width; let lx=x; row = (lx<lastLabelEnd)? (row+1)%2 : 0;
+    ctx.fillStyle=THEME.muted; ctx.fillText(label, Math.min(lx, W-pad-tw), y+bh+4*dpr+row*12*dpr); lastLabelEnd=lx+tw+6*dpr;
+    x+=w }
+}
+
+const POINTS = {
+  qpsk: [...Array(4)].map((_,k)=>[Math.cos(Math.PI/4+k*Math.PI/2),Math.sin(Math.PI/4+k*Math.PI/2)]),
+  bpsk: [[1,0],[-1,0]],
+  "8psk": [...Array(8)].map((_,k)=>[Math.cos(Math.PI/8+k*Math.PI/4),Math.sin(Math.PI/8+k*Math.PI/4)]),
+  apsk88: [...Array(16)].map((_,k)=>{ const r=k<8?0.42:0.92, a=Math.PI/8+(k%8)*Math.PI/4; return [r*Math.cos(a),r*Math.sin(a)] }),
+};
+function drawCon(cv,con){
+  const [W,H,dpr]=sizeCanvas(cv), ctx=cv.getContext("2d");
+  ctx.fillStyle=THEME.panel; ctx.fillRect(0,0,W,H);
+  const R=Math.min(W,H)*0.42, cx=W/2, cy=H/2;
+  ctx.strokeStyle=THEME.grid; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(cx-R*1.15,cy); ctx.lineTo(cx+R*1.15,cy); ctx.moveTo(cx,cy-R*1.15); ctx.lineTo(cx,cy+R*1.15); ctx.stroke();
+  const sigma=Math.pow(10,-con.snr/20)/Math.SQRT2;
+  ctx.fillStyle=THEME.trace; const s=Math.max(1.5,1.6*dpr);
+  for(let i=0;i<420;i++){
+    let p;
+    if(con.mod==="cpm"){ const a=Math.random()*2*Math.PI; p=[Math.cos(a),Math.sin(a)] }
+    else { const pts=POINTS[con.mod]; p=pts[Math.floor(Math.random()*pts.length)].slice() }
+    if(con.collide && Math.random()<0.25){ const q=POINTS.qpsk[Math.floor(Math.random()*4)], a=Math.random()*2*Math.PI; p=[p[0]+0.8*(q[0]*Math.cos(a)-q[1]*Math.sin(a)), p[1]+0.8*(q[0]*Math.sin(a)+q[1]*Math.cos(a))] ; ctx.fillStyle=THEME.hot } else ctx.fillStyle=THEME.trace;
+    const x=cx+R*(p[0]+sigma*gauss()), y=cy-R*(p[1]+sigma*gauss()); ctx.fillRect(x-s/2,y-s/2,s,s) }
+}
+
+// ---------------------------------------------------------------- build
+const host=document.getElementById("cases"), live=[];
+for(const cs of CASES){
+  const el=document.createElement("section"); el.className="case"; el.id=cs.id;
+  el.innerHTML=`<div class="prose"><h2><small>${cs.sub}</small>${cs.name}</h2>
+    <div class="chips">${cs.chips.map(([k,t])=>`<span class="chip${k?` v ${k}`:""}">${t}</span>`).join("")}</div>${cs.text}</div>
+    <div class="scopes">
+      <figure class="panel wf"><figcaption>pool waterfall · frequency → · time ↓</figcaption><canvas aria-label="Waterfall of ${cs.name}"></canvas></figure>
+      <figure class="panel env"><figcaption>one carrier's power · two frames</figcaption><canvas aria-label="Envelope"></canvas></figure>
+      <figure class="panel con"><figcaption>constellation</figcaption><canvas aria-label="Constellation"></canvas></figure>
+      <figure class="panel layout"><figcaption>burst layout · ${cs.layout.total}</figcaption><canvas aria-label="Burst layout"></canvas></figure>
+    </div>`;
+  host.appendChild(el);
+  const [wf,env,con,lay]=el.querySelectorAll("canvas");
+  live.push({cs, wf:new Waterfall(wf,cs.model), env, con, lay, el});
+}
+
+let visible=new Set(live);
+let frameNo=0;
+function drawAll(full){ for(const L of live){ if(!full && !visible.has(L)) continue; L.wf.draw(); drawEnvelope(L.env,L.cs,L.cursor);
+  // A fresh constellation every fourth frame (15 a second): every frame is a blur.
+  if(full || frameNo%4===0) drawCon(L.con,L.cs.con); if(full) drawLayout(L.lay,L.cs.layout) } }
+readTheme(); for(const L of live) L.wf.fill(); drawAll(true);
+
+const reduce=matchMedia("(prefers-reduced-motion: reduce)");
+if("IntersectionObserver" in window){ visible=new Set(); const io=new IntersectionObserver(es=>{ for(const e of es){ const L=live.find(l=>l.el===e.target); if(e.isIntersecting) visible.add(L); else visible.delete(L) } }); live.forEach(L=>io.observe(L.el)) }
+// 60 fps: a step a screen frame, held to 60 a second on faster screens.
+let last=0;
+function tick(ts){ if(!reduce.matches && ts-last>=1000/60-1){ last=ts; frameNo++; for(const L of visible){ L.wf.step(1); L.cursor=((L.cursor||0)+0.0025)%1 } drawAll(false) } requestAnimationFrame(tick) }
+requestAnimationFrame(tick);
+const redraw=()=>{ readTheme(); drawAll(true) };
+addEventListener("resize",()=>drawAll(true));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change",redraw);
+new MutationObserver(redraw).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+</script>
