@@ -49,6 +49,13 @@ An Es/N0 slider sets the noise in every pane, Pause freezes them, and the
 HackRF card's "Retune" button shows how spurs move with the tuning while
 real carriers stay put.
 
+[`docs/rcs-field-guide.html`](docs/rcs-field-guide.html) does the same for
+satellite return links: DVB-RCS, the DVB-RCS2 burst kinds and the two
+vendor returns measured on 172B, each with the pool waterfall, one
+carrier's envelope, the burst's layout and its constellation, and a table
+for telling them apart from the outbound
+([view it rendered](https://htmlpreview.github.io/?https://github.com/CasualArclamp/DecSAT/blob/main/docs/rcs-field-guide.html)).
+
 ## What works now
 
 | | |
