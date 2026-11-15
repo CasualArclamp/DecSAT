@@ -990,6 +990,47 @@ looks for fingerprints of proprietary waveforms:
   (their manuals describe S2-style headers, S2 frame sizes and Gold-code
   scrambling, with extra code rates) or a vendor's short frames.
 - **A 2 % roll-off**, sharper than DVB-S2X's 5 % — NovelSat NS4's.
+
+### NovelSat NS4
+
+A NovelSat modem in NS4 mode sends DVB-S2's frame — the same SOF and PLS
+coding, slots, pilots, Gold-code scrambling, BBHEADER, baseband scrambling
+and BCH code — with two things of its own: the PLS code numbers its modes
+differently, and the LDPC codes are NovelSat's. Read as DVB-S2 such a
+carrier locks under the wrong MODCOD name (QPSK 1/2 shows as *QPSK 2/3*) or
+keeps losing lock, and every frame fails FEC. Nothing about NS4 is
+published; what is here was measured from a modem.
+
+Tick **NovelSat NS4** under the Gold code on a DVB-S2 VFO (`--ns4` on
+`decsat decode`), and the header is read as NS4 means it and the FEC takes
+NS4's LDPC code:
+
+```
+decsat decode ns4_645161Sps.cf32 --decoder ip --ns4 --symbol-rate 33000 --bandwidth 60000
+```
+
+| | PLS code (pilots off / on) | |
+|---|---|---|
+| QPSK 1/4 | 4 / 8 | ✅ |
+| QPSK 1/2 | 21 / 25 | ✅ |
+| QPSK 3/5 | 28 / 32 | ✅ |
+| QPSK 2/3 | 33 / 37 | ✅ |
+| QPSK 3/4 | 40 / 44 | ✅ |
+| QPSK 5/6 | 52 / 56 | ✅ |
+
+Normal FECFRAMEs only so far. The other QPSK rates a modem offers (1/3,
+2/5, 13/30, 7/15, 8/15, 17/30, 19/30, 32/45, 4/5, 8/9, 9/10), short
+frames (a short frame's code is the normal one's plus 2) and the higher
+constellations are not decoded yet: their frames are skipped. The
+payload of the modem's Ethernet modes is NovelSat's own wrapping, not
+GSE, and is not unpacked: the BBFRAMEs are counted and their headers shown.
+
+The LDPC codes are quasi-cyclic like DVB-S2's, with their own address
+tables and a different parity part: the parity groups are sent whole (the
+order DVB-T2's parity interleaver gives), and the chain of parity bits
+closes on itself, with one parity group in three checks. Each table was
+worked out from the modem's PRBS test pattern and is tested against a
+frame as recorded.
 - **A convolutional code** on BPSK or QPSK: a rate-½ code makes its coded
   bits satisfy a parity check K steps long whose taps are its generators,
   so Identify finds the check in the hard decisions and names the code

@@ -252,9 +252,10 @@ impl LdpcCode {
         let (q, m) = (self.q, Self::ns4_middle(self.q));
         let s = |r: usize, c: usize| acc[(c % LANES) * q + r];
         let mut p = vec![0u8; q * LANES];
-        for c in 0..LANES {
-            p[c] = (1..q).fold(s(0, c + 1), |x, r| x ^ s(r, c));
-        }
+        let first: Vec<u8> = (0..LANES)
+            .map(|c| (1..q).fold(s(0, c + 1), |x, r| x ^ s(r, c)))
+            .collect();
+        p[..LANES].copy_from_slice(&first);
         for c in 0..LANES {
             p[LANES + c] = s(1, c) ^ p[(c + 1) % LANES];
             for r in 2..q {
