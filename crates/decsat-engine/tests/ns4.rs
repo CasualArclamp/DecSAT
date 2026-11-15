@@ -17,11 +17,9 @@ const PILOT_AFTER: usize = 16 * 90;
 const PILOT_PERIOD: usize = PILOT_AFTER + 36;
 
 /// (NS4 PLS code, K_bch − 80: the data field of a full TS frame, the frame).
-const FRAMES: [(u8, u16, &str); 1] = [(
-    8,
-    15_928,
-    include_str!("../../decsat-fec/tests/ns4/qpsk_1_4.hex"),
-)];
+fn frames() -> Vec<(u8, u16, &'static str)> {
+    include!("../../decsat-fec/tests/ns4/engine_frames.rs").to_vec()
+}
 
 fn bits(hex: &str) -> Vec<u8> {
     hex.trim()
@@ -34,7 +32,7 @@ fn bits(hex: &str) -> Vec<u8> {
 
 #[test]
 fn recorded_ns4_frames_decode_to_bbframes() {
-    for (plsc, dfl, hex) in FRAMES {
+    for (plsc, dfl, hex) in frames() {
         let pls = PlsInfo::parse_ns4(plsc);
         assert!(pls.ns4 && pls.has_pilots && !pls.reserved);
         let bits = bits(hex);

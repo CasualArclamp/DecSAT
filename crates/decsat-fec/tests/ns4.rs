@@ -12,13 +12,10 @@ use decsat_fec::{LdpcCode, LdpcDecoder};
 
 /// Every NS4 code with its recorded frame.
 fn codes() -> Vec<(&'static str, &'static Table, Vec<u8>)> {
-    // Rust note: `include_str!` puts the file in the test binary at compile
+    // Rust note: `include!` pastes the generated list in as an expression,
+    // and its `include_str!`s put each frame in the test binary at compile
     // time, so the test needs no working directory.
-    let all: [(&str, &Table, &str); 1] = [(
-        "1/4",
-        &tables_ns4::NORMAL_1_4,
-        include_str!("ns4/qpsk_1_4.hex"),
-    )];
+    let all: Vec<(&str, &Table, &str)> = include!("ns4/frames.rs").to_vec();
     all.into_iter()
         .map(|(name, table, hex)| {
             let hex = hex.trim().as_bytes();
