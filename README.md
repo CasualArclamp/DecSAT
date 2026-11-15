@@ -1017,11 +1017,14 @@ decsat decode ns4_645161Sps.cf32 --decoder ip --ns4 --symbol-rate 33000 --bandwi
 | QPSK 2/3 | 33 / 37 | ✅ |
 | QPSK 3/4 | 40 / 44 | ✅ |
 | QPSK 5/6 | 52 / 56 | ✅ |
+| QPSK 1/5, short frame | 6 / 10 | ✅ |
+| QPSK 4/9, short frame | 23 / 27 | ✅ |
 
-Normal FECFRAMEs only so far. The other QPSK rates a modem offers (1/3,
-2/5, 13/30, 7/15, 8/15, 17/30, 19/30, 32/45, 4/5, 8/9, 9/10), short
-frames (a short frame's code is the normal one's plus 2) and the higher
-constellations are not decoded yet: their frames are skipped. The
+A short frame's code is the normal one's plus 2 (the modem names short
+frames by their true rate: 1/5 is the short "1/4", 4/9 the short "1/2").
+The other QPSK rates a modem offers (normal 1/3, 2/5, 13/30, 7/15, 8/15,
+17/30, 19/30, 32/45, 4/5, 8/9, 9/10; fourteen more short ones) and the
+higher constellations are not decoded yet: their frames are skipped. The
 payload of the modem's Ethernet modes is NovelSat's own wrapping, not
 GSE, and is not unpacked: the BBFRAMEs are counted and their headers shown.
 

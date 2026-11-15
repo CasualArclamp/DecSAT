@@ -846,7 +846,7 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                 ui.label("Waveform");
                 ui.checkbox(&mut s.ns4, "NovelSat NS4")
                     .on_hover_text(
-                        "The carrier comes from a NovelSat modem in NS4 mode: DVB-S2 framing, but its own numbering of the modes and its own LDPC codes. Left off, such a carrier locks under the wrong MODCOD name and every frame fails FEC. QPSK 1/4, 1/2, 3/5, 2/3, 3/4 and 5/6 (normal frames) are known so far.",
+                        "The carrier comes from a NovelSat modem in NS4 mode: DVB-S2 framing, but its own numbering of the modes and its own LDPC codes. Left off, such a carrier locks under the wrong MODCOD name and every frame fails FEC. Known so far: QPSK 1/4, 1/2, 3/5, 2/3, 3/4 and 5/6 in normal frames, 1/5 and 4/9 in short ones.",
                     );
                 ui.end_row();
             }

@@ -109,10 +109,12 @@ impl FecParams {
     /// been worked out. The sizes (and so the BCH code) are DVB-S2's.
     pub fn ns4_ldpc_table(&self) -> Option<&'static Table> {
         use crate::ldpc::tables_ns4 as ns4;
-        if self.frame != FecFrame::Normal {
-            return None;
-        }
-        ns4::NORMAL
+        let tables: &[((u16, u16), &Table)] = match self.frame {
+            FecFrame::Normal => &ns4::NORMAL,
+            FecFrame::Short => &ns4::SHORT,
+            FecFrame::Medium => return None,
+        };
+        tables
             .iter()
             .find(|(rate, _)| *rate == (self.rate.num, self.rate.den))
             .map(|(_, table)| *table)

@@ -1,5 +1,6 @@
 // made by CasualArclamp
-//! NovelSat NS4 LDPC parity address tables, normal FECFRAME (64 800 bits).
+//! NovelSat NS4 LDPC parity address tables: normal FECFRAME (64 800 bits)
+//! and short (16 200).
 //!
 //! NovelSat publishes no description of these codes. The tables were
 //! worked out from a modem's own test pattern: its PRBS 2^31−1 test mode
@@ -12,7 +13,11 @@
 //! Same layout as the DVB-S2 tables ([`super::tables`]): one row of check
 //! addresses per group of 360 information bits, bit `k` of the group
 //! feeding check `(x + k·q) mod (N−K)`. The parity part is not DVB-S2's:
-//! see [`super::ParityStyle::Ns4`]. Do not edit by hand.
+//! see [`super::ParityStyle::Ns4`].
+//!
+//! A short code has DVB-S2's sizes and is listed under DVB-S2's name for
+//! them ("1/4" for K = 3240), as the rest of the code keys short frames;
+//! the modem calls it by its true rate (1/5). Do not edit by hand.
 
 use super::tables::Table;
 
@@ -330,7 +335,47 @@ pub const NORMAL_5_6: Table = Table {
     ],
 };
 
-/// Every table here: ((rate numerator, denominator), the table).
+/// NS4 rate 1/5, short FECFRAME: 63 addresses.
+pub const SHORT_1_5: Table = Table {
+    n: 16200,
+    k: 3240,
+    runs: &[
+        (3, 1),
+        (12, 1),
+        (3, 1),
+        (12, 1),
+        (3, 2),
+        (12, 1),
+        (3, 1),
+        (12, 1),
+    ],
+    addr: &[
+        6758, 9070, 10921, 345, 362, 2586, 5140, 5321, 6634, 8011, 9155, 9560, 10092, 11523, 12277,
+        4855, 5476, 10354, 3529, 4060, 4620, 4952, 5518, 7113, 7975, 9894, 10019, 10181, 11918,
+        12927, 11291, 11457, 11896, 1428, 9647, 10518, 196, 540, 1673, 3578, 4290, 5598, 6088,
+        6727, 7287, 8825, 9382, 10077, 3283, 9675, 9752, 745, 941, 2463, 2727, 3211, 3973, 6129,
+        7721, 8186, 9167, 12500, 12708,
+    ],
+};
+
+/// NS4 rate 4/9, short FECFRAME: 118 addresses.
+pub const SHORT_4_9: Table = Table {
+    n: 16200,
+    k: 7200,
+    runs: &[(20, 3), (4, 7), (3, 10)],
+    addr: &[
+        100, 499, 1351, 2848, 3611, 4060, 4532, 4669, 4758, 5027, 5346, 5655, 5768, 7184, 7306,
+        7391, 7645, 7747, 7938, 8553, 85, 947, 1154, 1342, 1581, 2425, 2543, 3121, 3764, 4182,
+        4255, 4703, 5394, 5598, 6715, 7536, 8483, 8584, 8645, 8966, 1240, 1292, 1897, 2031, 2314,
+        3634, 3977, 4854, 4955, 5601, 6036, 6366, 6525, 6769, 7070, 7543, 7621, 8157, 8337, 8573,
+        712, 6694, 7148, 7208, 179, 2441, 7824, 8182, 1024, 5360, 6517, 6902, 1390, 5081, 7675,
+        8471, 2278, 3187, 5205, 8093, 5639, 5910, 7643, 7746, 100, 230, 6484, 7426, 240, 1363,
+        3673, 5354, 6012, 6808, 3101, 6170, 7782, 2703, 7867, 8860, 152, 672, 5263, 36, 717, 4519,
+        4101, 6624, 8039, 4245, 6731, 8714, 5736, 8158, 8922, 1253, 3779, 8866,
+    ],
+};
+
+/// Every normal-frame table: ((DVB-S2's rate name for the sizes), the table).
 pub const NORMAL: [((u16, u16), &Table); 6] = [
     ((1, 4), &NORMAL_1_4),
     ((1, 2), &NORMAL_1_2),
@@ -339,3 +384,6 @@ pub const NORMAL: [((u16, u16), &Table); 6] = [
     ((3, 4), &NORMAL_3_4),
     ((5, 6), &NORMAL_5_6),
 ];
+
+/// Every short-frame table: ((DVB-S2's rate name for the sizes), the table).
+pub const SHORT: [((u16, u16), &Table); 2] = [((1, 4), &SHORT_1_5), ((1, 2), &SHORT_4_9)];

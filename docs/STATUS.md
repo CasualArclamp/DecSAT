@@ -6417,8 +6417,11 @@ PSK decoder's symbol .bin, 33 kBd, 12481.99 MHz), pilots off at 1/4 and
   UPL 1504, the right DFL). On the first raw capture (QPSK 1/2, pilots,
   33 kBd at 645 kS/s, Es/N0 8.3 dB, a sample drop in it): locked, 8 of 11
   BBFRAMEs good, BBHEADER generic continuous, ACM, ISI 105, DFL 496.
-- **Open:** the short tables are solved but not in the code; the other
-  eleven normal rates and the higher constellations need recordings; the
+- **Short frames:** 1/5 and 4/9 (the short "1/4" and "1/2": K 3240 and
+  7200, S2's short BCH) solved the same way from 40 to 50 frames each, in
+  seconds; `tables_ns4::SHORT`, the PLS code plus 2.
+- **Open:** the other eleven normal rates, fourteen short ones and the
+  higher constellations need recordings; the
   Ethernet payload ("00 3c" then a 60-byte ARP frame in the one capture)
   is NovelSat's own wrapping and is not unpacked; Identify still names an
   NS4 carrier by its S2 reading; 15 LDPC iterations a frame on that

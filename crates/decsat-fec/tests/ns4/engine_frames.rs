@@ -7,4 +7,6 @@
     (37, 42960, include_str!("qpsk_2_3.hex")),
     (44, 48328, include_str!("qpsk_3_4.hex")),
     (56, 53760, include_str!("qpsk_5_6.hex")),
+    (10, 2992, include_str!("qpsk_short_1_5.hex")),
+    (27, 6952, include_str!("qpsk_short_4_9.hex")),
 ]

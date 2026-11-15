@@ -67,13 +67,19 @@ pub struct PlsInfo {
 }
 
 /// NovelSat NS4's PLS codes, as far as they have been seen on a modem:
-/// (the 7-bit code with pilots off, the DVB-S2 MODCOD number of the same
-/// modulation and rate). All QPSK, normal FECFRAME. Pilots on is the code
-/// plus 4 ([`NS4_PILOTS`]): recorded both ways at 1/4 (4, 8) and 1/2
-/// (21, 25), the other rates with pilots on only, their pilots-off codes
+/// (the 7-bit code of a normal FECFRAME with pilots off, the DVB-S2 MODCOD
+/// number of the same modulation and rate). All QPSK. A short frame is the
+/// code plus 2 ([`NS4_SHORT`]) and pilots on the code plus 4
+/// ([`NS4_PILOTS`]): pilots were recorded both ways at 1/4 (4, 8) and 1/2
+/// (21, 25), short frames at those two rates (10 and 27, with pilots), the
+/// other rates as normal frames with pilots on only, their other codes
 /// taken to follow. NS4 keeps DVB-S2's SOF, PLS coding and frame layout
 /// but numbers its modes its own way, and nothing is published: each entry
-/// is a mode recorded and decoded. A short frame's codes are not known yet.
+/// is a mode recorded and decoded.
+///
+/// A short frame's rate goes by DVB-S2's name for a code of its sizes
+/// ("1/4" for what the modem calls 1/5, "1/2" for 4/9), as short frames do
+/// throughout.
 pub const NS4_PLS_CODES: [(u8, u8); 6] = [
     (4, 1),  // QPSK 1/4
     (21, 4), // QPSK 1/2
@@ -85,6 +91,9 @@ pub const NS4_PLS_CODES: [(u8, u8); 6] = [
 
 /// What pilots on adds to an NS4 PLS code.
 pub const NS4_PILOTS: u8 = 4;
+
+/// What a short FECFRAME adds to an NS4 PLS code.
+pub const NS4_SHORT: u8 = 2;
 
 impl PlsInfo {
     /// Derive the frame geometry from an 8-bit PLS code.
@@ -129,14 +138,17 @@ impl PlsInfo {
         if plsc == 0 {
             return Self::parse(0);
         }
-        // (DVB-S2 MODCOD, pilots) of a known code.
+        // (DVB-S2 MODCOD, short, pilots) of a known code.
         let known = NS4_PLS_CODES.iter().find_map(|&(c, m)| {
-            (c == plsc)
-                .then_some((m, false))
-                .or((c + NS4_PILOTS == plsc).then_some((m, true)))
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .find(|&(short, pilots)| {
+                    c + NS4_SHORT * short as u8 + NS4_PILOTS * pilots as u8 == plsc
+                })
+                .map(|(short, pilots)| (m, short, pilots))
         });
-        let (modcod, pilots) = known.unwrap_or((1, true));
-        let mut p = Self::from_fields(modcod, false, pilots);
+        let (modcod, short, pilots) = known.unwrap_or((1, false, true));
+        let mut p = Self::from_fields(modcod, short, pilots);
         p.plsc = plsc;
         p.ns4 = true;
         p.reserved = known.is_none();
@@ -375,9 +387,12 @@ impl PlscDecoder {
     /// For a NovelSat NS4 carrier: only the codes NS4 is known to send
     /// (and the dummy frame), read with [`PlsInfo::parse_ns4`].
     pub fn ns4() -> Self {
-        let codes = std::iter::once(0)
-            .chain(NS4_PLS_CODES.iter().flat_map(|&(c, _)| [c, c + NS4_PILOTS]))
-            .collect();
+        let codes =
+            std::iter::once(0)
+                .chain(NS4_PLS_CODES.iter().flat_map(|&(c, _)| {
+                    [c, c + NS4_SHORT, c + NS4_PILOTS, c + NS4_SHORT + NS4_PILOTS]
+                }))
+                .collect();
         PlscDecoder {
             ns4: true,
             ..Self::with_expected(codes)
@@ -766,6 +781,12 @@ mod ns4_tests {
             assert_eq!((p.has_pilots, p.plframe_len), (pilots, len), "{code}");
             // The code as sent stays in `plsc`: the header is rebuilt from it.
             assert_eq!(p.plsc, code);
+        }
+        // Short frames, with pilots: the modem's 1/5 and 4/9.
+        for code in [10, 27] {
+            let p = PlsInfo::parse_ns4(code);
+            assert!(p.ns4 && !p.reserved && p.short_fecframe && p.has_pilots);
+            assert_eq!(p.plframe_len, 8_370, "{code}");
         }
         assert_eq!(PlsInfo::parse_ns4(25).modcod().unwrap().rate.num, 1);
         assert!(PlsInfo::parse_ns4(0).dummy_frame);
