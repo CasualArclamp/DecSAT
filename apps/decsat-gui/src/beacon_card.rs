@@ -299,7 +299,7 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
                     ui.colored_label(GOOD, text).on_hover_text(
                         "Attitude and orbit words in the telemetry, in the layout JCSAT-17 sends: \
                          quaternions for the Earth's turn, the orbit frame and the body, the \
-                         Sun's direction in the body frame, the velocity, and two timers. \
+                         Sun's direction in the body frame, the velocity, the solar array's angle and two timers. \
                          Position: the point below the satellite, and its orbit's plane. \
                          Attitude: the body's turn from flying x along the velocity, y to \
                          the Earth. The speed's unit is inferred.",

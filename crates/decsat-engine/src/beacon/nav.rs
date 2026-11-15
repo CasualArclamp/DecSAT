@@ -21,12 +21,17 @@
 //! | 17          | 222–229 | J2000 → Earth-fixed quaternion, x y z w         |
 //! | 18          | 222–227 | velocity in J2000 (x, y, z)                     |
 //! | 1, 26       | 250–251 | timers counting down a second at a time         |
+//! | even        | 40–41   | solar array drive angle, 13 bits a turn         |
+//! | 6, 7        | 148–149 | the same for each wing                          |
 //!
 //! All words are big-endian signed 16 bits; unit vectors and quaternions are
 //! scaled by 2¹⁵. The orbit frame is x radial (outward), y along the
 //! velocity, z the orbit normal; the body flies x east, y to the Earth, z
 //! north. The velocity's unit (¼ m/s a count) is inferred from its length
-//! being a geostationary 3075 m/s, not confirmed.
+//! being a geostationary 3075 m/s, not confirmed. The array angles are
+//! analogue words, 13 bits left-justified in 16: they turn once a day and
+//! stayed 1.94° ahead of the Sun's azimuth (about the body's north axis,
+//! from the side away from the Earth) through 27 minutes of recordings.
 
 /// A frame of this format, bytes.
 const FRAME_BYTES: usize = 256;
@@ -61,6 +66,11 @@ pub struct Nav {
     /// angle from the Earth as the satellite sees them, degrees.
     pub sun_body: Option<[f64; 3]>,
     pub sun_earth_deg: Option<f64>,
+    /// The solar array drive's angle, degrees; each wing's; and how far the
+    /// drive is ahead of the Sun's azimuth in the body frame.
+    pub array_deg: Option<f64>,
+    pub wings_deg: [Option<f64>; 2],
+    pub array_lead_deg: Option<f64>,
     /// The two timers: seconds (negative: past) as sent, and the clock in
     /// the frame that carried them.
     pub timers_s: [Option<(i16, u32)>; 2],
@@ -75,6 +85,8 @@ pub struct NavRx {
     earth: Option<[i16; 4]>,
     velocity: Option<[i16; 3]>,
     sun: Option<[i16; 3]>,
+    array: Option<f64>,
+    wings: [Option<f64>; 2],
     timers: [Option<(i16, u32)>; 2],
     /// Frames carrying the format's marks, and frames that did not.
     matched: u32,
@@ -85,6 +97,13 @@ pub struct NavRx {
 /// two bytes are named rather than sliced.)
 fn word(f: &[u8], at: usize) -> i16 {
     i16::from_be_bytes([f[at], f[at + 1]])
+}
+
+/// An analogue angle (13 bits a turn, left-justified in a 16-bit word),
+/// degrees; `None` if the three spare bits are not clear.
+fn angle13(f: &[u8], at: usize) -> Option<f64> {
+    let w = u16::from_be_bytes([f[at], f[at + 1]]);
+    (w & 7 == 0).then(|| f64::from(w >> 3) * 360.0 / 8192.0)
 }
 
 type Mat = [[f64; 3]; 3];
@@ -155,6 +174,13 @@ impl NavRx {
         }
         if i % 2 == 1 {
             self.sun = Some([202, 204, 206].map(|b| word(f, b)));
+        } else {
+            self.array = angle13(f, 40);
+        }
+        match i {
+            6 => self.wings[0] = angle13(f, 148),
+            7 => self.wings[1] = angle13(f, 148),
+            _ => {}
         }
         match i {
             1 => self.timers[0] = Some((word(f, 250), self.j2000_s)),
@@ -196,7 +222,16 @@ impl NavRx {
             let n = dot(v, v).sqrt();
             ((n - UNIT).abs() <= NORM_SLACK).then(|| v.map(|a| a / n))
         });
+        // The Sun's azimuth about the body's north axis, from the side away
+        // from the Earth (where it stands at the satellite's noon).
+        let array_lead_deg = self.array.zip(sun_body).map(|(a, s)| {
+            let az = (-s[0]).atan2(-s[1]).to_degrees();
+            (a - az + 180.0).rem_euclid(360.0) - 180.0
+        });
         Some(Nav {
+            array_deg: self.array,
+            wings_deg: self.wings,
+            array_lead_deg,
             j2000_s: self.j2000_s,
             lon_deg: e[1].atan2(e[0]).to_degrees().rem_euclid(360.0),
             lat_deg: e[2].clamp(-1.0, 1.0).asin().to_degrees(),
@@ -253,6 +288,16 @@ impl Nav {
                     s[0], s[1], s[2]
                 ),
             ));
+        }
+        if let Some(a) = self.array_deg {
+            let mut s = format!("{a:.1}°");
+            if let [Some(n), Some(m)] = self.wings_deg {
+                s += &format!(" (wings {n:.1}° and {m:.1}°)");
+            }
+            if let Some(l) = self.array_lead_deg {
+                s += &format!(" · {l:+.1}° from the Sun");
+            }
+            out.push(("Solar array", s));
         }
         out.push((
             "Earth angle",
@@ -314,6 +359,15 @@ mod tests {
                         put(&mut f, 222 + 2 * k, v);
                     }
                 }
+                if i % 2 == 0 {
+                    put(&mut f, 40, 0x3030);
+                }
+                if i == 6 {
+                    put(&mut f, 148, 0x3030);
+                }
+                if i == 7 {
+                    put(&mut f, 148, 0x3070);
+                }
                 if i % 2 == 1 {
                     for (k, v) in [-28642, -12897, -9329].into_iter().enumerate() {
                         put(&mut f, 202 + 2 * k, v);
@@ -368,6 +422,12 @@ mod tests {
             n.timers_s,
             [Some((-2035, 847_998_498)), Some((12945, 847_998_498))]
         );
+        // 0x3030 >> 3 = 1542 counts of 8192 a turn.
+        let a = n.array_deg.expect("array");
+        assert!((a - 67.76).abs() < 0.01, "{a}");
+        assert!((n.wings_deg[1].unwrap() - 68.12).abs() < 0.01);
+        let lead = n.array_lead_deg.expect("lead");
+        assert!((lead - 1.95).abs() < 0.1, "{lead}");
         let lines = n.lines();
         assert!(lines[0].1.starts_with("136.1"), "{}", lines[0].1);
         assert!(
