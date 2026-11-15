@@ -17,6 +17,7 @@
 //! Rust loops over 360-lane arrays vectorise.
 
 pub mod tables;
+pub mod tables_ns4;
 pub mod tables_s2x;
 
 mod decoder;
@@ -38,12 +39,30 @@ pub(crate) struct Edge {
     pub shift: u16,
 }
 
+/// How a code's parity bits are tied together and sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParityStyle {
+    /// DVB-S2/S2X (§5.3.2): the accumulator chain `p_j = p_(j−1) ⊕ acc_j`,
+    /// parity sent in chain order.
+    S2,
+    /// NovelSat NS4, as measured from a modem's test pattern (there is no
+    /// published description): the q parity groups are sent whole, one
+    /// after the other (lane order, as DVB-T2's parity interleaver leaves
+    /// them), and the chain closes on itself. Check lane j of layer r ties
+    /// parity group r to group r−1 in the same lane; layer 1 takes group 0
+    /// one lane on, layer 0 takes group q−1 one lane back, and the middle
+    /// layer ⌈q/2⌉ takes group 0 as a third parity bit (a weight-3 column,
+    /// as in the IEEE 802.16e codes).
+    Ns4,
+}
+
 /// An LDPC code, expanded from its address table.
 pub struct LdpcCode {
     pub n: usize,
     pub k: usize,
     /// (N−K)/360: the number of layers.
     pub q: usize,
+    pub style: ParityStyle,
     table: &'static Table,
     /// Edges of every layer, back to back; layer r is
     /// `edges[layer_start[r]..layer_start[r + 1]]`. Information edges first,
@@ -53,7 +72,22 @@ pub struct LdpcCode {
 }
 
 impl LdpcCode {
+    /// A DVB-S2/S2X code.
     pub fn new(table: &'static Table) -> Self {
+        Self::with_style(table, ParityStyle::S2)
+    }
+
+    /// A NovelSat NS4 code ([`tables_ns4`]).
+    pub fn ns4(table: &'static Table) -> Self {
+        Self::with_style(table, ParityStyle::Ns4)
+    }
+
+    /// The NS4 layer whose checks take parity group 0 as a third parity bit.
+    fn ns4_middle(q: usize) -> usize {
+        q.div_ceil(2)
+    }
+
+    fn with_style(table: &'static Table, style: ParityStyle) -> Self {
         let (n, k) = (table.n, table.k);
         let q = (n - k) / LANES;
         assert_eq!(q * LANES, n - k);
@@ -73,6 +107,37 @@ impl LdpcCode {
         let mut layer_start = Vec::with_capacity(q + 1);
         for (r, mut layer) in per_layer.into_iter().enumerate() {
             layer_start.push(edges.len());
+            if style == ParityStyle::Ns4 {
+                let group = |g: usize| info_groups + g as u32;
+                layer.push(Edge {
+                    group: group(r),
+                    shift: 0,
+                });
+                // `shift` s means lane c sees bit c − s: one lane on is
+                // LANES − 1, one lane back is 1.
+                layer.push(match r {
+                    0 => Edge {
+                        group: group(q - 1),
+                        shift: 1,
+                    },
+                    1 => Edge {
+                        group: group(0),
+                        shift: LANES as u16 - 1,
+                    },
+                    _ => Edge {
+                        group: group(r - 1),
+                        shift: 0,
+                    },
+                });
+                if r == Self::ns4_middle(q) {
+                    layer.push(Edge {
+                        group: group(0),
+                        shift: 0,
+                    });
+                }
+                edges.extend(layer);
+                continue;
+            }
             // p_j: parity group r, same lane.
             layer.push(Edge {
                 group: info_groups + r as u32,
@@ -98,6 +163,7 @@ impl LdpcCode {
             n,
             k,
             q,
+            style,
             table,
             edges,
             layer_start,
@@ -122,9 +188,13 @@ impl LdpcCode {
                 }
             }
         }
-        // The accumulator chain: p_i = p_i ⊕ p_(i−1).
-        for i in 1..nk {
-            acc[i] ^= acc[i - 1];
+        if self.style == ParityStyle::Ns4 {
+            self.ns4_parity(&mut acc);
+        } else {
+            // The accumulator chain: p_i = p_i ⊕ p_(i−1).
+            for i in 1..nk {
+                acc[i] ^= acc[i - 1];
+            }
         }
         parity.fill(0);
         for (i, &bit) in acc.iter().enumerate() {
@@ -150,10 +220,49 @@ impl LdpcCode {
                 }
             }
         }
+        if self.style == ParityStyle::Ns4 {
+            let (q, m) = (self.q, Self::ns4_middle(self.q));
+            // Parity group g, lane c, as sent.
+            let p = |g: usize, c: usize| bit(self.k + g * LANES + c % LANES);
+            return (0..nk).all(|j| {
+                let (c, r) = (j / q, j % q);
+                let other = match r {
+                    0 => p(q - 1, c + LANES - 1),
+                    1 => p(0, c + 1),
+                    _ => p(r - 1, c),
+                };
+                let third = if r == m { p(0, c) } else { 0 };
+                acc[j] ^ p(r, c) ^ other ^ third == 0
+            });
+        }
         (0..nk).all(|j| {
             let prev = if j > 0 { bit(self.k + j - 1) } else { 0 };
             acc[j] ^ bit(self.k + j) ^ prev == 0
         })
+    }
+
+    /// NS4 parity from the check sums `acc` (indexed c·q + r: lane c of
+    /// layer r), written back in sending order (group r at r·360).
+    ///
+    /// Adding layers 1..q of one lane leaves p_(q−1)(c) ⊕ p_0(c+1) ⊕ p_0(c):
+    /// every other group meets twice, and the middle layer adds p_0(c).
+    /// Layer 0 of the next lane is p_0(c+1) ⊕ p_(q−1)(c). Their sum is
+    /// p_0(c) alone, and the rest follow down the chain.
+    fn ns4_parity(&self, acc: &mut [u8]) {
+        let (q, m) = (self.q, Self::ns4_middle(self.q));
+        let s = |r: usize, c: usize| acc[(c % LANES) * q + r];
+        let mut p = vec![0u8; q * LANES];
+        for c in 0..LANES {
+            p[c] = (1..q).fold(s(0, c + 1), |x, r| x ^ s(r, c));
+        }
+        for c in 0..LANES {
+            p[LANES + c] = s(1, c) ^ p[(c + 1) % LANES];
+            for r in 2..q {
+                let third = if r == m { p[c] } else { 0 };
+                p[r * LANES + c] = s(r, c) ^ p[(r - 1) * LANES + c] ^ third;
+            }
+        }
+        acc.copy_from_slice(&p);
     }
 }
 

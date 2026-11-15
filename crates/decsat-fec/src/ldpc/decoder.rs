@@ -22,7 +22,7 @@
 //!
 //! LLR convention: positive means bit 0.
 
-use super::{LANES, LdpcCode};
+use super::{LANES, LdpcCode, ParityStyle};
 
 /// Message magnitude cap (i8, symmetric so negation never overflows).
 const MSG_MAX: i16 = 127;
@@ -171,10 +171,17 @@ impl LdpcDecoder {
         for (d, &s) in self.v[..k].iter_mut().zip(&llr[..k]) {
             *d = s as i16;
         }
-        // Parity bit j = c·q + r lives at k + r·360 + c.
-        for (j, &s) in llr[k..].iter().enumerate() {
-            let (c, r) = (j / q, j % q);
-            self.v[k + r * LANES + c] = s as i16;
+        if self.code.style == ParityStyle::Ns4 {
+            // Sent group by group: already in place.
+            for (d, &s) in self.v[k..].iter_mut().zip(&llr[k..]) {
+                *d = s as i16;
+            }
+        } else {
+            // Parity bit j = c·q + r lives at k + r·360 + c.
+            for (j, &s) in llr[k..].iter().enumerate() {
+                let (c, r) = (j / q, j % q);
+                self.v[k + r * LANES + c] = s as i16;
+            }
         }
         self.r.fill(0);
 
@@ -242,7 +249,7 @@ impl LdpcDecoder {
         let deg = end - start;
         // Layer 0's last edge links p_(j−1) as group q−1 shifted by one;
         // lane 0 (check 0) has no such bit.
-        let corner = layer == 0;
+        let corner = layer == 0 && self.code.style == ParityStyle::S2;
 
         let mut min1 = [MSG_MAX; LANES];
         let mut min2 = [MSG_MAX; LANES];
@@ -316,7 +323,7 @@ impl LdpcDecoder {
                     edge.shift as usize,
                     &mut gathered,
                 );
-                if layer == 0 && start + e == end - 1 {
+                if layer == 0 && start + e == end - 1 && self.code.style == ParityStyle::S2 {
                     gathered[0] = 0;
                 }
                 for c in 0..LANES {
