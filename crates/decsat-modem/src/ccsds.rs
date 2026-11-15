@@ -488,20 +488,41 @@ pub fn find_format(blocks: &[&[u8]]) -> Option<Format> {
             if n > 255 || n <= 2 * e + 4 {
                 continue;
             }
-            for randomised in [true, false] {
-                for dual in [true, false] {
-                    let f = Format {
-                        block_bytes: len,
-                        rs: Some(RsLayout {
-                            e,
-                            interleave,
-                            n,
-                            dual,
-                        }),
-                        randomised,
-                    };
-                    if blocks.iter().all(|b| f.decode(b).is_ok()) {
-                        return Some(f);
+            for dual in [true, false] {
+                let with = |randomised: bool| Format {
+                    block_bytes: len,
+                    rs: Some(RsLayout {
+                        e,
+                        interleave,
+                        n,
+                        dual,
+                    }),
+                    randomised,
+                };
+                let fits: Vec<Format> = [true, false]
+                    .into_iter()
+                    .map(with)
+                    .filter(|f| blocks.iter().all(|b| f.decode(b).is_ok()))
+                    .collect();
+                // The randomiser's sequence is itself a codeword of these
+                // codes (its bytes are a linear recurrence whose spectrum
+                // has no line at the checks' roots), so a block decodes
+                // with it on or off, whichever the spacecraft does. The
+                // frame's version field tells: 00 (TM) or 01 (AOS), where
+                // the sequence's first byte, FFh, would turn it into 11 or
+                // 10. Still in doubt, it is taken as on, as the book has it.
+                let versions_fit = |f: &Format| {
+                    blocks.iter().all(|b| {
+                        f.decode(b)
+                            .is_ok_and(|(fr, _)| fr.first().is_some_and(|x| x >> 6 <= 1))
+                    })
+                };
+                match fits.as_slice() {
+                    [] => {}
+                    [one] => return Some(one.clone()),
+                    both => {
+                        let pick = both.iter().find(|f| versions_fit(f)).unwrap_or(&both[0]);
+                        return Some(pick.clone());
                     }
                 }
             }
@@ -892,6 +913,55 @@ pub fn tm_frame(len: usize, scid: u16, vcid: u8, mc: u8, vc: u8, data: &[u8]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_sent_without_the_randomiser_are_read_without_it() {
+        // Optus 10's beacon: RS(255,223) at interleave 4, no randomiser.
+        // The randomiser's sequence is a codeword, so Reed–Solomon passes
+        // either way; the version field decides.
+        for interleave in [1usize, 4, 5] {
+            for randomised in [false, true] {
+                let fmt = Format {
+                    block_bytes: 255 * interleave,
+                    rs: Some(RsLayout {
+                        e: 16,
+                        interleave,
+                        n: 255,
+                        dual: true,
+                    }),
+                    randomised,
+                };
+                let blocks: Vec<Vec<u8>> = (0..4u8)
+                    .map(|i| encode_block(&fmt, &tm_frame(223 * interleave, 0x260, 1, i, i, &[])))
+                    .collect();
+                let refs: Vec<&[u8]> = blocks.iter().map(|b| b.as_slice()).collect();
+                let found = find_format(&refs).expect("format");
+                assert_eq!(
+                    found, fmt,
+                    "interleave {interleave} randomised {randomised}"
+                );
+                let (fr, _) = found.decode(&blocks[2]).unwrap();
+                let h = Header::parse(&fr).expect("header");
+                assert_eq!((h.version, h.scid, h.vcid), (0, 0x260, 1));
+            }
+        }
+        // The sequence alone, on the all-zero codeword: still a codeword.
+        let zero_plain = Format {
+            block_bytes: 255,
+            rs: Some(RsLayout {
+                e: 16,
+                interleave: 1,
+                n: 255,
+                dual: true,
+            }),
+            randomised: false,
+        };
+        assert!(
+            zero_plain
+                .decode(&randomiser(255))
+                .is_ok_and(|(_, n)| n == 0)
+        );
+    }
 
     #[test]
     fn randomiser_starts_as_the_book_says() {
