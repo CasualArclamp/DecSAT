@@ -6479,3 +6479,24 @@ program was said to hang. No recording.
   the window: blocks are dropped, and deleting a VFO does not wait). The
   pool alone at this width and rate reads a 3.4 s, 20 MS/s recording in
   2.1 s.
+
+## DVB-RCS2 return-link tables (2026-11-15)
+
+`decsat_ts::rcs2` reads DVB-RCS2's own tables (EN 301 545-2 §6.4): FCT2
+(frame types as bandwidth-time-unit grids, Table 6-14), BCT (transmission
+types, Table 6-16; linear-modulation bursts spelled out, Table 6-18, or
+annex A reference waveforms by number) and TBTP2 (burst time plans, Table
+6-31, formats 0–3 and 10–12). With the SCT the plan's bursts are put on
+the air: uplink frequency, start in the superframe, length, who sends.
+
+- **Where:** transport-stream sections on the PIDs the PMT declares (the
+  existing `RcsRx` hands AB–ADh over), and GSE PDUs of protocol type 0082h
+  (tables, Table 6-4 header) and 0081h (NCR) on any GSE outbound. Shown
+  under the RCS card and the GSE card in the GUI, and by `decsat decode`.
+- **Not seen on the air:** tests are tables built by hand from the
+  standard. The random-access / dedicated split of assignment ids is the
+  network's own (Table 6-33); the top sixteenth of the id range is taken as
+  random access.
+- **Next:** demodulating RCS2 linear bursts (16-state turbo, §7.3.5) in a
+  Return pool VFO from the placed plan; legacy RCS (EN 301 790) bursts
+  only if a network using them is found.
