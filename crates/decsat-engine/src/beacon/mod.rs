@@ -1338,6 +1338,7 @@ impl BeaconRx {
                 out.clear();
             }
             c.framed |= c.locked().is_some();
+            let framed = c.framed;
             // Given up when nothing has ever framed: every reading at once,
             // or the one the parity checks named (wrongly, then: the bits as
             // they come go back to the plain framer). Not a reading that
@@ -1350,6 +1351,14 @@ impl BeaconRx {
                 self.coded = None;
                 self.conv_found = false;
                 self.bits_at_lock = self.bits;
+            } else if framed && !self.conv_found {
+                // The code is there: the bits as they come are its symbols,
+                // and the plain framer stops looking at them. Left running,
+                // it frames blind on the coded marker whenever the decoded
+                // frames drop out (Optus 10: 16384-bit "frames" of code
+                // symbols in each gap).
+                self.conv_found = true;
+                self.framer = pcm::Framer::new();
             }
         }
     }
@@ -1908,6 +1917,10 @@ mod tests {
         }
         let (_, stats, coded_lock) = rx.active_lock().expect("locked again after the slip");
         assert!(coded_lock);
+        // The plain framer was stood down once the code framed: nothing
+        // framed on the code symbols while the lock was away.
+        assert!(rx.conv_found && rx.framer.lock().is_none());
+        assert_eq!(rx.framer.stats.frames, 0);
         assert!(
             stats.frames >= 20,
             "{} frames after ({before} before)",
