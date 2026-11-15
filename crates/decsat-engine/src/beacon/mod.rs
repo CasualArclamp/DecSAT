@@ -81,6 +81,10 @@ const CCSDS_HEADER_BYTES: usize = 6;
 const CONV_PROBE_BITS: usize = 2048;
 const CONV_PROBE_MIN_CHECKS: usize = 300;
 const CONV_PROBE_MAX_FAILS: f64 = 0.35;
+/// Every other reading must fail at least this share for the best to stand
+/// clear (structured uncoded telemetry can pass one reading by chance, and
+/// then passes others nearly as well).
+const CONV_PROBE_CLEAR: f64 = 0.42;
 
 /// How the telemetry rides on the carrier.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -520,14 +524,17 @@ impl Coded {
     /// (fill alone).
     fn probe(soft: &[f32]) -> Option<(convblind::Code, bool)> {
         let hard: Vec<u8> = soft.iter().map(|&b| u8::from(b > 0.0)).collect();
-        let (fails, reading) = Self::readings()
+        let mut judged: Vec<(f64, (convblind::Code, bool))> = Self::readings()
             .into_iter()
             .filter_map(|(code, odd)| {
                 let (f, judged) = convblind::check_fails(&code, &hard, odd);
                 (judged >= CONV_PROBE_MIN_CHECKS).then_some((f, (code, odd)))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))?;
-        (fails < CONV_PROBE_MAX_FAILS).then_some(reading)
+            .collect();
+        judged.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let &(fails, reading) = judged.first()?;
+        let clear = judged.get(1).is_none_or(|r| r.0 >= CONV_PROBE_CLEAR);
+        (fails < CONV_PROBE_MAX_FAILS && clear).then_some(reading)
     }
 
     fn locked(&self) -> Option<&ViterbiTry> {
@@ -1178,7 +1185,12 @@ impl BeaconRx {
         // decoded from the block's start on.
         let mut coded_in = soft;
         let replay;
-        if !self.conv_tried {
+        // Not while the bits as they come hold a frame lock: they are then
+        // no code symbols, and a block of quiet telemetry passing the checks
+        // by chance would throw a good lock away.
+        if self.framer.lock().is_some() {
+            self.conv_probe.clear();
+        } else if !self.conv_tried {
             self.conv_probe.extend_from_slice(soft);
             if self.conv_probe.len() >= CONV_PROBE_BITS {
                 let probe = std::mem::take(&mut self.conv_probe);
@@ -1229,12 +1241,17 @@ impl BeaconRx {
             } else if c.tries.len() > 1 {
                 out.clear();
             }
-            let give_up = c.tries.len() > 1 && self.bits - c.since > CONV_GIVE_UP_BITS;
+            // Given up when nothing has framed: every reading at once, or
+            // the one the parity checks named (wrongly, then: the bits as
+            // they come go back to the plain framer).
+            let give_up = c.locked().is_none() && self.bits - c.since > CONV_GIVE_UP_BITS;
             for (_, f) in out {
                 self.frame(f, true);
             }
             if give_up {
                 self.coded = None;
+                self.conv_found = false;
+                self.bits_at_lock = self.bits;
             }
         }
     }
@@ -1673,6 +1690,51 @@ mod tests {
             rx.push(c, 0.0);
         }
         rx
+    }
+
+    #[test]
+    fn a_frame_lock_is_not_given_up_for_a_block_passing_the_code_checks() {
+        // Uncoded IRIG frames, locked; then frames whose words happen to be
+        // a K = 7 codeword (as a quiet stretch of telemetry can look to the
+        // parity checks). MEASAT-3b's beacon dropped its lock this way.
+        let framing = Framing::Irig {
+            frame_bytes: 256,
+            counter_mod: 32,
+        };
+        let mut bits = synth::bits(framing, 40 * 2048, 4096.0);
+        let book = ccsds::CONV_CODE;
+        let code = convblind::Code {
+            k: book.k,
+            g: book.g,
+            inv: book.inv,
+        };
+        let mut lcg = 0x1234_5678u32;
+        let data: Vec<u8> = (0..1024)
+            .map(|_| {
+                lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (lcg >> 24) as u8 & 1
+            })
+            .collect();
+        let word = code.encode(&data);
+        for f in 12..40 {
+            // Past the marker, the counter and the fixed words.
+            let at = f * 2048 + 96;
+            bits[at..at + 1920].copy_from_slice(&word[..1920]);
+        }
+        let soft: Vec<f32> = bits.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
+        assert!(
+            Coded::probe(&soft[20 * 2048 + 96..][..1920]).is_some(),
+            "the block passes the checks on its own"
+        );
+        let mut rx = BeaconRx::new(48_000.0, 48_000.0);
+        for c in soft.chunks(500) {
+            rx.take_bits(c);
+        }
+        assert!(!rx.conv_found);
+        let (lock, stats, coded) = rx.active_lock().expect("lock");
+        assert!(!coded);
+        assert_eq!(lock.frame_bits, 2048);
+        assert!(stats.frames >= 36, "{} frames", stats.frames);
     }
 
     #[test]
