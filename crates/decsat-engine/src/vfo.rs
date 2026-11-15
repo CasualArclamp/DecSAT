@@ -4090,7 +4090,10 @@ mod tests {
         // fixed time after handing it over: Identify's analysis holds the
         // worker for several block times when it runs (longer on a loaded
         // machine), and a status read on the clock then counted the blocks
-        // waiting behind it as never published.
+        // waiting behind it as never published. The 40 ms pace is kept from
+        // that reading, not from the offer: after a long block the next
+        // would otherwise follow at once, inside STATUS_EVERY, and rightly
+        // not publish.
         let rs = 62_500.0;
         let x = carrier(&Constellation::qpsk(), 100_000, 8, rs, 40_000.0, 0.0, 12);
         let settings = VfoSettings::new("ID", 38_000.0, 110_000.0, DecoderKind::Identify);

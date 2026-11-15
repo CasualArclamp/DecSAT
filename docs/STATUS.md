@@ -6479,3 +6479,53 @@ program was said to hang. No recording.
   the window: blocks are dropped, and deleting a VFO does not wait). The
   pool alone at this width and rate reads a 3.4 s, 20 MS/s recording in
   2.1 s.
+
+## DVB-RCS2 return-link tables (2026-11-15)
+
+`decsat_ts::rcs2` reads DVB-RCS2's own tables (EN 301 545-2 §6.4): FCT2
+(frame types as bandwidth-time-unit grids, Table 6-14), BCT (transmission
+types, Table 6-16; linear-modulation bursts spelled out, Table 6-18, or
+annex A reference waveforms by number) and TBTP2 (burst time plans, Table
+6-31, formats 0–3 and 10–12). With the SCT the plan's bursts are put on
+the air: uplink frequency, start in the superframe, length, who sends.
+
+- **Where:** transport-stream sections on the PIDs the PMT declares (the
+  existing `RcsRx` hands AB–ADh over), and GSE PDUs of protocol type 0082h
+  (tables, Table 6-4 header) and 0081h (NCR) on any GSE outbound. Shown
+  under the RCS card and the GSE card in the GUI, and by `decsat decode`.
+- **Not seen on the air:** tests are tables built by hand from the
+  standard. The random-access / dedicated split of assignment ids is the
+  network's own (Table 6-33); the top sixteenth of the id range is taken as
+  random access.
+- **Next:** demodulating RCS2 linear bursts (16-state turbo, §7.3.5) in a
+  Return pool VFO from the placed plan; legacy RCS (EN 301 790) bursts
+  only if a network using them is found.
+
+## DVB-RCS2 linear bursts: turbo code and burst receiver (2026-11-16)
+
+`decsat_fec::duobinary` is DVB-RCS2's turbo code (EN 301 545-2 §7.3.5.1):
+16-state double-binary circular RSC encoders, the couple permutation
+(equations 7-2 to 7-4), circulation states (Table 7-13), puncturing, and a
+max-log-MAP decoder (8 iterations, extrinsic × 0.75, circular edges carried
+between iterations). `tdma::rcs2_burst` builds and reads a burst (§7.3):
+the PRBS (§7.3.3), CRC16 / CRC32 (§7.3.4), the bit-to-symbol layouts
+(Tables 7-16 to 7-20) for π/2-BPSK, QPSK, 8PSK and 16QAM, preamble, pilot
+blocks and postamble (§7.3.6.1), and annex A's reference waveforms 1–7.
+
+- **Receiver:** takes a burst at one sample a symbol, timed. The carrier is
+  the peak of the known symbols' coherent sum over ±0.1 cycles a symbol;
+  where a preamble and postamble alone leave fringes of near one height,
+  the payload's 4th (8PSK: 8th) power chooses. Phase followed over ≥ 32
+  known symbols at a time. Waveform 3 (QPSK 1/3): 0 of 40 bursts lost at
+  Es/N0 1 dB, frequency within 1.4e-4 of a symbol rate.
+- **Checked against the standard:** burst and payload lengths of waveforms
+  1–7 as Table A-1 gives them; the encoder's feedback and state numbering
+  against Table 7-13.
+- **Not checked:** no RCS2 burst has been read off the air. Read from
+  figures, so open: where B joins the encoder's register and which cells
+  the parities tap (figure 7-11), the QPSK and 8PSK labels (figures 7-20,
+  7-21). Annex A's P/Q values were read from a badly extracted table.
+- **Next:** in a Return pool VFO, cut each burst the TBTP2 places
+  (`decsat_ts::rcs2::place`), matched filter (RRC 0.2) and timing, then
+  this receiver; that needs the NCR and superframe timing against the
+  pool's samples.

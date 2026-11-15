@@ -857,6 +857,9 @@ pub(crate) fn report(st: &VfoStatus) {
             if let Some(h) = &g.hub {
                 print_hub(h);
             }
+            if let Some(r) = &g.rcs2 {
+                print_rcs2(r);
+            }
         }
     }
     if let Some(t) = &f.tpc {
@@ -1455,6 +1458,73 @@ fn print_rcs(r: &decsat_ts::rcs::RcsView) {
     }
     if let Some(p) = &r.plan {
         print_plan(p);
+    }
+    if let Some(r2) = &r.rcs2 {
+        print_rcs2(r2);
+    }
+}
+
+/// DVB-RCS2's frame types, transmission types and burst time plans.
+fn print_rcs2(r: &decsat_ts::rcs2::Rcs2View) {
+    use decsat_ts::rcs2::{content_name, format_class_name};
+    println!(
+        "DVB-RCS2 return link{}: {} burst time plans, {} timeslots to {} terminals, {} random access{}",
+        r.network_id
+            .map_or(String::new(), |n| format!(" (network {n}, GSE)")),
+        r.plans,
+        r.assigned,
+        r.terminals,
+        r.random_access_slots,
+        if r.unplaced > 0 {
+            format!(", {} not placed", r.unplaced)
+        } else {
+            String::new()
+        }
+    );
+    if r.ncr_packets > 0 {
+        println!("  NCR in GSE: {} packets", r.ncr_packets);
+    }
+    for sf in &r.superframes {
+        println!(
+            "  superframe {}: {:.5} GHz, {:.2} ms, {} frames",
+            sf.id,
+            sf.centre_hz / 1e9,
+            sf.duration_s * 1e3,
+            sf.frames.len()
+        );
+    }
+    for f in &r.frame_types {
+        println!(
+            "  frame type {}: {:.2} ms, {}, {} BTUs of {:.3} ms on {} carriers of {:.1} kHz ({:.1} kBd), {} sections",
+            f.id,
+            f.duration_s * 1e3,
+            format_class_name(f.format_class),
+            f.time_units,
+            f.btu_s * 1e3,
+            f.grids_hz.len(),
+            f.btu_bandwidth_hz / 1e3,
+            f.btu_symbol_rate / 1e3,
+            f.sections.len()
+        );
+    }
+    for t in &r.tx_types {
+        println!(
+            "  tx type {}: {}, {}",
+            t.id,
+            content_name(t.content),
+            t.describe()
+        );
+    }
+    for (id, t) in &r.tables {
+        println!(
+            "  GSE table {id:02X}h {}: {} tables{}, version {}, {} B",
+            decsat_ts::rcs::table_name(*id),
+            t.tables,
+            t.interval_s()
+                .map_or(String::new(), |s| format!(" every {:.1} ms", s * 1e3)),
+            t.version,
+            t.last_len
+        );
     }
 }
 

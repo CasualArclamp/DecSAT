@@ -337,6 +337,9 @@ pub struct RcsView {
     pub tim_macs: usize,
     /// A Newtec hub's private burst plan (D1h), when one parses.
     pub plan: Option<crate::newtec::PlanView>,
+    /// DVB-RCS2's frame types, transmission types and burst time plans,
+    /// when any came.
+    pub rcs2: Option<crate::rcs2::Rcs2View>,
 }
 
 impl RcsView {
@@ -387,6 +390,7 @@ pub struct RcsRx {
     /// Plan frames read since [`RcsRx::take_plan_frames`] last took them
     /// (at most `FRESH_FRAMES`: nobody may be taking them).
     fresh: Vec<crate::newtec::PlanFrame>,
+    rcs2: crate::rcs2::Rcs2Rx,
     view: RcsView,
 }
 
@@ -548,6 +552,7 @@ impl RcsRx {
     /// Signal time passes.
     pub fn tick(&mut self, secs: f64) {
         self.clock += secs;
+        self.rcs2.tick(secs);
     }
 
     /// The packets coming next arrived at `t` on the receiver's own clock
@@ -584,6 +589,7 @@ impl RcsRx {
         v.cmt_logons = self.cmt_logons.len();
         v.tim_macs = self.tim_macs.len();
         v.plan = self.plan.as_ref().map(|p| p.view());
+        v.rcs2 = self.rcs2.active().then(|| self.rcs2.view());
         v
     }
 
@@ -680,6 +686,9 @@ impl RcsRx {
             0xA2 => self.tct(&body[5..]),
             0xA4 => self.cmt(&body[5..]),
             0xA5 => self.tbtp(&body[5..]),
+            // DVB-RCS2's own (EN 301 545-2 Table 6-5: the same section
+            // header, content after it).
+            0xAB..=0xAD => self.rcs2.table(id, &body[5..]),
             0xB0 => self.tim(s),
             crate::newtec::PLAN_TABLE => {
                 if let Some(f) = crate::newtec::parse_plan(s) {
@@ -780,38 +789,8 @@ impl RcsRx {
 
     /// Superframe composition (Table 33).
     fn sct(&mut self, b: &[u8]) {
-        let Some(&count) = b.first() else { return };
-        let mut at = 1;
-        let mut out = Vec::new();
-        for _ in 0..=count {
-            // Id, a byte of flags and polarization, 6 bytes of start time
-            // (33-bit base, 6 reserved, 9-bit extension), duration, centre,
-            // counter, frame count: 19 bytes.
-            if at + 19 > b.len() {
-                break;
-            }
-            let e = &b[at..];
-            let mut sf = Superframe {
-                id: e[0],
-                duration_s: pcr_s(u32b(&e[8..12])),
-                centre_hz: u32b(&e[12..16]) as f64 * 100.0,
-                counter: u16::from_be_bytes([e[16], e[17]]),
-                frames: Vec::new(),
-            };
-            let frames = (e[18] & 0x1F) as usize + 1;
-            at += 19;
-            for _ in 0..frames {
-                if at + 8 > b.len() {
-                    break;
-                }
-                let f = &b[at..];
-                sf.frames
-                    .push((f[0], pcr_s(u32b(&f[1..5])), offset_100hz(&f[5..8])));
-                at += 8;
-            }
-            out.push(sf);
-        }
-        merge(&mut self.view.superframes, out, |s| s.id);
+        merge(&mut self.view.superframes, parse_sct(b), |s| s.id);
+        self.rcs2.set_superframes(&self.view.superframes);
     }
 
     /// Frame composition (Table 35).
@@ -949,6 +928,45 @@ impl RcsRx {
             self.tim_macs.insert(mac);
         }
     }
+}
+
+/// The superframe composition table's content (EN 301 790 Table 33; the
+/// same layout in EN 301 545-2 Table 6-12).
+pub fn parse_sct(b: &[u8]) -> Vec<Superframe> {
+    let Some(&count) = b.first() else {
+        return Vec::new();
+    };
+    let mut at = 1;
+    let mut out = Vec::new();
+    for _ in 0..=count {
+        // Id, a byte of flags and polarization, 6 bytes of start time
+        // (33-bit base, 6 reserved, 9-bit extension), duration, centre,
+        // counter, frame count: 19 bytes.
+        if at + 19 > b.len() {
+            break;
+        }
+        let e = &b[at..];
+        let mut sf = Superframe {
+            id: e[0],
+            duration_s: pcr_s(u32b(&e[8..12])),
+            centre_hz: u32b(&e[12..16]) as f64 * 100.0,
+            counter: u16::from_be_bytes([e[16], e[17]]),
+            frames: Vec::new(),
+        };
+        let frames = (e[18] & 0x1F) as usize + 1;
+        at += 19;
+        for _ in 0..frames {
+            if at + 8 > b.len() {
+                break;
+            }
+            let f = &b[at..];
+            sf.frames
+                .push((f[0], pcr_s(u32b(&f[1..5])), offset_100hz(&f[5..8])));
+            at += 8;
+        }
+        out.push(sf);
+    }
+    out
 }
 
 /// Replace entries of `have` by id with those of `new` (a table's sections

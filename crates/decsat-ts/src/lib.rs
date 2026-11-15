@@ -25,6 +25,7 @@ pub mod mpe;
 pub mod newtec;
 pub mod psi;
 pub mod rcs;
+pub mod rcs2;
 pub mod section;
 pub mod sink;
 pub mod udp;
