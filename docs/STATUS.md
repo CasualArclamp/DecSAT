@@ -6376,3 +6376,30 @@ VVC and cannot play.
   each; 1, 2 or 4 screen pixels a symbol, never blended, scrolled sideways) shows the
   preamble, the unique words and the bit positions that never change.
   Not tried live.
+
+## A lone, weak inroute's frames not found (12358.8 MHz, 2026-11-15)
+
+Seen live (HackRF, 20 MS/s): a 1.666 MS/s S2 ACM outbound at 12357.3 MHz
+whose hub signalling lists one inroute, BF9h (uplink 14108.8 MHz,
+832.661 kBd, 215 slots of 474 symbols), and that carrier beside it at
+12358.8 MHz, on 98 % of the time with ~3 ms gaps 6 dB deep. A Return pool
+VFO on it stayed at "lining up: the hub's plans are heard; 1 frame starts
+found".
+
+- **Cause:** `inroute_bursts::silence_ends` looked for the frames' guard
+  silences block by block (20 µs) and wanted the carriers 6 dB over the
+  silence. This inroute stands 6 dB over its noise, and a 20 µs block of it
+  scatters by a third. On a synthetic copy (BPSK, same slots and guard):
+  12 of 12 frames at 10 dB, 4 of 12 at 6 dB (one 540 µs early), none at
+  4 dB. With under six starts there is no frame line, so no lead is tried
+  and nothing is followed. (172B's inroutes were 9–10 dB.)
+- **Fix:** the envelope averaged over 0.5 ms first; 3 dB is enough; the
+  threshold halfway in power; each end put at the block that best splits
+  the envelope round the crossing into low and high. All 12 frames at 10,
+  6 and 4 dB, each within 100 µs.
+- The comb with one carrier in a VFO it nearly fills lands within 5 kHz
+  (test); the satellite's translation is never needed.
+- **Not checked on the air, and no recording yet.** Once lined up, bursts
+  on an inroute whose modulation byte is not 04h (8PSK) are counted, not
+  demodulated: whether this one's bursts are read depends on what its
+  configuration says.
