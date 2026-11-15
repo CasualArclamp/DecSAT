@@ -302,7 +302,9 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
                          Sun's direction in the body frame, the velocity, the solar array's angle and two timers. \
                          Position: the point below the satellite, and its orbit's plane. \
                          Attitude: the body's turn from flying x along the velocity, y to \
-                         the Earth. The speed's unit is inferred.",
+                         the Earth. The speed's unit is inferred. On the second \
+                         subcarrier (the attitude computer's pages): the Sun and Moon too, \
+                         and the four memory bytes it dwells on.",
                     );
                     ui.end_row();
                 }

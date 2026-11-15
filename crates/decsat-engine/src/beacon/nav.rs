@@ -32,6 +32,36 @@
 //! analogue words, 13 bits left-justified in 16: they turn once a day and
 //! stayed 1.94° ahead of the Sun's azimuth (about the body's north axis,
 //! from the side away from the Earth) through 27 minutes of recordings.
+//!
+//! A second subcarrier (73.728 kHz beside the first's 49.152 kHz) carries
+//! the attitude computer's own stream in frames with the same marker and
+//! length, byte 4 now 20h + the minor frame number in odd frames and 60h +
+//! it in even ones. Odd frames are pages: the clock is in bytes 6–9 and the
+//! page is that clock modulo 28. Even frames dwell on four memory bytes:
+//! their addresses in bytes 6–13 (and again in 14–21), then 58 samples of
+//! the four bytes. Of the pages:
+//!
+//! | page   | bytes   | word                                              |
+//! |--------|---------|---------------------------------------------------|
+//! | 6, 7   | 26–33   | J2000 → body quaternion                           |
+//! | 11, 12 | 10–17   | J2000 → orbit frame quaternion                    |
+//! | 11, 12 | 52–57   | the Moon's direction in the body frame            |
+//! | 11, 12 | 74–79   | the Sun's direction in the body frame             |
+//! | 11, 12 | 96–101  | the Moon's direction from the satellite, in J2000 |
+//! | 11, 12 | 168–173 | the Sun's direction in J2000                      |
+//!
+//! Not read here: page 11's bytes 120–127 (the attitude aimed for: the
+//! orbit frame with its axes named as the body's), and page 13's bytes
+//! 56–63 and 106–113 (two quaternions fixed in the body to 8 counts: star
+//! trackers, most likely).
+//!
+//! Checked on 2026-11-15: the Sun in J2000 0.34° from an almanac's (the
+//! precession since 2000), the Moon 0.58° from the Moon's place seen from
+//! the satellite (2.8° from its geocentric one), each body-frame vector the
+//! J2000 one through the body quaternion to 0.01°. This stream has no Earth
+//! quaternion that was found, so the Earth's turn is taken from the clock
+//! (the Earth Rotation Angle, IERS Conventions 2010 eq. 5.15), which the
+//! first stream's quaternion agreed with to 0.01°.
 
 /// A frame of this format, bytes.
 const FRAME_BYTES: usize = 256;
@@ -74,6 +104,17 @@ pub struct Nav {
     /// The two timers: seconds (negative: past) as sent, and the clock in
     /// the frame that carried them.
     pub timers_s: [Option<(i16, u32)>; 2],
+    /// Read from the attitude computer's stream (the second subcarrier):
+    /// the Earth's turn is then worked out from the clock.
+    pub diagnostic: bool,
+    /// The Sun in J2000, and the Moon as the satellite sees it: right
+    /// ascension and declination, degrees.
+    pub sun_radec: Option<(f64, f64)>,
+    pub moon_radec: Option<(f64, f64)>,
+    /// The Moon's angle from the Earth as the satellite sees them, degrees.
+    pub moon_earth_deg: Option<f64>,
+    /// The dwell: four memory addresses and the bytes last read there.
+    pub dwell: Option<([u16; 4], [u8; 4])>,
 }
 
 /// The words gathered as frames come.
@@ -88,6 +129,12 @@ pub struct NavRx {
     array: Option<f64>,
     wings: [Option<f64>; 2],
     timers: [Option<(i16, u32)>; 2],
+    /// The frames are the attitude computer's stream.
+    diagnostic: bool,
+    moon_body: Option<[i16; 3]>,
+    moon_j2000: Option<[i16; 3]>,
+    sun_j2000: Option<[i16; 3]>,
+    dwell: Option<([u16; 4], [u8; 4])>,
     /// Frames carrying the format's marks, and frames that did not.
     matched: u32,
     missed: u32,
@@ -136,6 +183,37 @@ fn matrix(q: [i16; 4]) -> Option<Mat> {
     ])
 }
 
+/// A unit vector's three words, if they are one.
+fn unit(v: [i16; 3]) -> Option<[f64; 3]> {
+    let v = v.map(f64::from);
+    let n = dot(v, v).sqrt();
+    ((n - UNIT).abs() <= NORM_SLACK).then(|| v.map(|a| a / n))
+}
+
+/// Right ascension and declination of a unit vector, degrees.
+fn radec(v: [f64; 3]) -> (f64, f64) {
+    (
+        v[1].atan2(v[0]).to_degrees().rem_euclid(360.0),
+        v[2].clamp(-1.0, 1.0).asin().to_degrees(),
+    )
+}
+
+/// The Earth-fixed frame's axes in J2000 from the clock alone: a turn about
+/// the pole by the Earth Rotation Angle (IERS Conventions 2010, eq. 5.15;
+/// the clock keeps UTC, within a second of UT1, which is 0.004°).
+fn earth_from_clock(j2000_s: u32) -> Mat {
+    let days = f64::from(j2000_s) / 86_400.0;
+    let (s, c) = (280.460_618_375_04 + 360.985_612_288_808 * days)
+        .to_radians()
+        .sin_cos();
+    [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+}
+
+/// Pages in the attitude computer's cycle (the clock modulo this).
+const PAGES: u32 = 28;
+/// Samples of the four bytes in a dwell frame, from byte 22.
+const DWELL_SAMPLES: usize = 58;
+
 fn column(m: &Mat, c: usize) -> [f64; 3] {
     [m[0][c], m[1][c], m[2][c]]
 }
@@ -152,7 +230,29 @@ impl NavRx {
     /// A good minor frame in. Frames of another format are counted and
     /// left; a run of them forgets what was gathered.
     pub fn push(&mut self, f: &[u8]) {
-        if f.len() != FRAME_BYTES || f[4] & 0xE0 != 0xC0 || f[254] != 0x80 | (f[4] & 0x1F) {
+        let housekeeping =
+            f.len() == FRAME_BYTES && f[4] & 0xE0 == 0xC0 && f[254] == 0x80 | (f[4] & 0x1F);
+        // The attitude computer's stream: 20h + an odd minor frame number,
+        // or 60h + an even one, and a copy number after it.
+        let diagnostic = f.len() == FRAME_BYTES
+            && f[4] & 0xA0 == 0x20
+            && (f[4] & 0x40 == 0) == (f[4] & 1 == 1)
+            && (1..=2).contains(&f[5]);
+        if diagnostic {
+            if !self.diagnostic {
+                *self = NavRx {
+                    diagnostic: true,
+                    ..NavRx::default()
+                };
+            }
+            self.matched = self.matched.saturating_add(1);
+            self.push_diagnostic(f);
+            return;
+        }
+        if housekeeping && self.diagnostic {
+            *self = NavRx::default();
+        }
+        if !housekeeping {
             self.missed = self.missed.saturating_add(1);
             if self.missed > 64 && self.missed > 4 * self.matched {
                 *self = NavRx {
@@ -189,6 +289,32 @@ impl NavRx {
         }
     }
 
+    /// A frame of the attitude computer's stream: a page (odd) or the
+    /// dwell (even).
+    fn push_diagnostic(&mut self, f: &[u8]) {
+        if f[4] & 1 == 0 {
+            let addr = [6, 8, 10, 12].map(|b| u16::from_be_bytes([f[b], f[b + 1]]));
+            if f[6..14] == f[14..22] {
+                let last = 22 + 4 * (DWELL_SAMPLES - 1);
+                self.dwell = Some((addr, [f[last], f[last + 1], f[last + 2], f[last + 3]]));
+            }
+            return;
+        }
+        self.j2000_s = u32::from_be_bytes([f[6], f[7], f[8], f[9]]);
+        let three = |at: usize| [at, at + 2, at + 4].map(|b| word(f, b));
+        match self.j2000_s % PAGES {
+            6 | 7 => self.body = [26, 28, 30, 32].map(|b| Some(word(f, b))),
+            11 | 12 => {
+                self.orbit = [10, 12, 14, 16].map(|b| Some(word(f, b)));
+                self.moon_body = Some(three(52));
+                self.sun = Some(three(74));
+                self.moon_j2000 = Some(three(96));
+                self.sun_j2000 = Some(three(168));
+            }
+            _ => {}
+        }
+    }
+
     /// The reading, once the orbit and Earth quaternions have come whole
     /// and are unit ones (which is also what tells this format from another
     /// with the same frame marks).
@@ -196,7 +322,13 @@ impl NavRx {
         // `[Option<i16>; 4]` to `Option<[i16; 4]>`: all four parts or none.
         let whole = |q: &[Option<i16>; 4]| Some([q[0]?, q[1]?, q[2]?, q[3]?]);
         let orbit = matrix(whole(&self.orbit)?)?;
-        let earth = matrix(self.earth?)?;
+        let earth = if self.diagnostic {
+            // Not this format unless its Sun is a unit vector too.
+            self.sun_j2000.and_then(unit)?;
+            earth_from_clock(self.j2000_s)
+        } else {
+            matrix(self.earth?)?
+        };
         // The radial axis in the Earth-fixed frame.
         let r = column(&orbit, 0);
         let e = [0, 1, 2].map(|c| dot(column(&earth, c), r));
@@ -217,11 +349,7 @@ impl NavRx {
             ]
             .map(|a: f64| a.clamp(-1.0, 1.0).asin().to_degrees())
         });
-        let sun_body = self.sun.and_then(|s| {
-            let v = s.map(f64::from);
-            let n = dot(v, v).sqrt();
-            ((n - UNIT).abs() <= NORM_SLACK).then(|| v.map(|a| a / n))
-        });
+        let sun_body = self.sun.and_then(unit);
         // The Sun's azimuth about the body's north axis, from the side away
         // from the Earth (where it stands at the satellite's noon).
         let array_lead_deg = self.array.zip(sun_body).map(|(a, s)| {
@@ -249,6 +377,14 @@ impl NavRx {
             sun_body,
             sun_earth_deg: sun_body.map(|s| s[1].clamp(-1.0, 1.0).acos().to_degrees()),
             timers_s: self.timers,
+            diagnostic: self.diagnostic,
+            sun_radec: self.sun_j2000.and_then(unit).map(radec),
+            moon_radec: self.moon_j2000.and_then(unit).map(radec),
+            moon_earth_deg: self
+                .moon_body
+                .and_then(unit)
+                .map(|m| m[1].clamp(-1.0, 1.0).acos().to_degrees()),
+            dwell: self.dwell,
         })
     }
 }
@@ -299,10 +435,36 @@ impl Nav {
             }
             out.push(("Solar array", s));
         }
+        if let Some((ra, dec)) = self.sun_radec {
+            out.push(("Sun (J2000)", format!("RA {ra:.2}° dec {dec:+.2}°")));
+        }
+        if let Some((ra, dec)) = self.moon_radec {
+            let mut s = format!("RA {ra:.2}° dec {dec:+.2}° from the satellite");
+            if let Some(a) = self.moon_earth_deg {
+                s += &format!(" · {a:.1}° from the Earth");
+            }
+            out.push(("Moon", s));
+        }
         out.push((
             "Earth angle",
-            format!("{:.2}° from J2000's equinox", self.earth_angle_deg),
+            format!(
+                "{:.2}° from J2000's equinox{}",
+                self.earth_angle_deg,
+                if self.diagnostic {
+                    " (from the clock)"
+                } else {
+                    ""
+                }
+            ),
         ));
+        if let Some((addr, bytes)) = self.dwell {
+            let pairs: Vec<String> = addr
+                .iter()
+                .zip(bytes)
+                .map(|(a, b)| format!("{a:04X}h = {b}"))
+                .collect();
+            out.push(("Dwell", pairs.join(" · ")));
+        }
         let timers: Vec<String> = self
             .timers_s
             .iter()
@@ -440,6 +602,84 @@ mod tests {
             lines.last().unwrap().1
         );
         assert_eq!(n.j2000_s, 847_998_498);
+    }
+
+    /// Hex to bytes.
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn reads_the_attitude_computers_pages() {
+        // Pages 6 and 11 as JCSAT-17 sent them at 08:13 UTC on 2026-11-15.
+        let p6 = hex(concat!(
+            "faf3380c2d01328b7cbe194cfe54000000000000000000000000043b01db2ee4",
+            "77030000000000007ffffd1a033b5a875a6400000015000800721d311d311d31",
+            "29980001d0850001a0340001af6800025eb40007c93a000eb41e0013466f0010",
+            "ccf107e009f609f300101100f5bffb38fb37fcaf0000098e0467046700000000",
+            "09300a0f0a120020fff00000000000000000eee31ba5fdc50000000200031ae2",
+            "3af4c84239ad13f0270913f080002709270913f00000000000000000fca53298",
+            "0000fca9329803200062014000a0000000574a8f004755740080a3c9008a8840",
+            "00c1b0960078fcff0058e838004ee81f00e500120270011c0b297f83000083b6"
+        ));
+        let p11 = hex(concat!(
+            "faf3380c3701328b7cc3058e025bccd1752b1397000200a2f92ca9055d7f08c2",
+            "fd19033b5a875a64000000000000000000000000e6508aedd314000000000002",
+            "803c0000000000000000879cee01d86d000000000000000000000002000045d2",
+            "3a9a9b63cad50000d9c500000adffff8fff8fff0060b2bacafc8dd691f655821",
+            "f443000000002342207c031c575a1b1c000000367fffff8a56fba281f73ef023",
+            "9221853c1f66edeab23aa2bad78f000000000000ffff0001ffff000000000000",
+            "000004c7fff7fff7ffef060b27423288be0e04c7fff7fff7ffef060b27423288",
+            "be0e04c70399098d002800010fc230702998f7afff28ffaae17ffd59ff6286ed"
+        ));
+        let mut dwell = vec![0u8; FRAME_BYTES];
+        dwell[..6].copy_from_slice(&[0xFA, 0xF3, 0x38, 0x0C, 0x6E, 0x01]);
+        for at in [6, 14] {
+            dwell[at..at + 8].copy_from_slice(&[0x12, 0x53, 0x12, 0x5F, 0x12, 0x54, 0x12, 0x60]);
+        }
+        for k in 0..DWELL_SAMPLES {
+            dwell[22 + 4 * k..26 + 4 * k].copy_from_slice(&[0x5A, 0x01, 0x60, 0x08]);
+        }
+        let mut rx = NavRx::new();
+        rx.push(&p6);
+        rx.push(&dwell);
+        assert!(rx.view().is_none(), "not before the orbit quaternion");
+        rx.push(&p11);
+        let n = rx.view().expect("nav");
+        assert!(n.diagnostic);
+        assert!((n.lon_deg - 136.15).abs() < 0.1, "lon {}", n.lon_deg);
+        assert!((n.lat_deg + 3.5).abs() < 0.5, "lat {}", n.lat_deg);
+        assert!(
+            (n.inclination_deg - 5.405).abs() < 0.02,
+            "{}",
+            n.inclination_deg
+        );
+        let (ra, dec) = n.sun_radec.expect("sun");
+        assert!(
+            (ra - 230.2).abs() < 0.1 && (dec + 18.4).abs() < 0.1,
+            "{ra} {dec}"
+        );
+        let (ra, dec) = n.moon_radec.expect("moon");
+        assert!(
+            (ra - 300.2).abs() < 0.2 && (dec + 24.5).abs() < 0.2,
+            "{ra} {dec}"
+        );
+        let m = n.moon_earth_deg.expect("moon in the body");
+        assert!((m - 156.4).abs() < 0.5, "{m}");
+        let off = n.off_deg.expect("attitude");
+        assert!(off[0].abs() < 0.5 && off[2].abs() < 0.5, "{off:?}");
+        assert_eq!(
+            n.dwell,
+            Some(([0x1253, 0x125F, 0x1254, 0x1260], [0x5A, 0x01, 0x60, 0x08]))
+        );
+        assert!(n.speed_m_s.is_none() && n.array_deg.is_none());
+        // The first stream's frames after it start afresh.
+        for f in major() {
+            rx.push(&f);
+        }
+        assert!(!rx.view().expect("nav").diagnostic);
     }
 
     #[test]
