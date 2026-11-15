@@ -582,10 +582,44 @@ impl Coded {
     /// stream is busy to judge (fill).
     fn refuted(&self, k: usize) -> bool {
         let t = &self.tries[k];
+        self.fails(&t.code, t.odd)
+            .is_some_and(|f| f >= CONV_PROBE_MAX_FAILS)
+    }
+
+    /// The share of `code`'s parity checks the bits fed lately fail, its
+    /// pairs starting on the stream's odd bits or not; `None` when too
+    /// little of the stream is busy to judge.
+    fn fails(&self, code: &convblind::Code, odd: bool) -> Option<f64> {
         let start = self.fed - self.recent.len() as u64;
-        let odd = t.odd ^ (start % 2 == 1);
-        let (fails, judged) = convblind::check_fails(&t.code, &self.recent, odd);
-        judged >= CONV_PROBE_MIN_CHECKS && fails >= CONV_PROBE_MAX_FAILS
+        let (fails, judged) = convblind::check_fails(code, &self.recent, odd ^ (start % 2 == 1));
+        (judged >= CONV_PROBE_MIN_CHECKS).then_some(fails)
+    }
+
+    /// The reading kept has lost its frames because the pairs' phase moved
+    /// by a bit (the bit clock slipping in a fade, a bit dropped): its
+    /// checks fail now and the other phase's pass. The decoder starts
+    /// again on that phase. Without this the reading stays a bit out for
+    /// ever, decoding noise.
+    fn follow_a_slip(&mut self) -> bool {
+        let [t] = self.tries.as_slice() else {
+            return false;
+        };
+        if !self.framed || t.framer.lock().is_some() || !self.refuted(0) {
+            return false;
+        }
+        let (code, odd) = (t.code, !t.odd);
+        if !self
+            .fails(&code, odd)
+            .is_some_and(|f| f < CONV_PROBE_MAX_FAILS)
+        {
+            return false;
+        }
+        // The new decoder's first bit is the stream's bit `fed`: it skips
+        // one if that is not where its pairs start.
+        let mut next = ViterbiTry::new(code, (self.fed % 2 == 1) != odd);
+        next.odd = odd;
+        self.tries = vec![next];
+        true
     }
 }
 
@@ -1282,6 +1316,7 @@ impl BeaconRx {
                 out.extend(frames.into_iter().map(|f| (i, f)));
             }
             c.note(coded_in);
+            c.follow_a_slip();
             // A first lock on bits that are not the reading's code is a
             // false one: the framer starts again, its frames are dropped.
             // (A reading that has framed is past this: noise in a fade
@@ -1847,6 +1882,37 @@ mod tests {
         assert_eq!(passing.len(), 1, "one reading passes: {passing:?}");
         let t = &c.tries[passing[0]];
         assert!(t.code == code && !t.odd);
+    }
+
+    #[test]
+    fn a_coded_lock_follows_a_bit_slip() {
+        // CCSDS frames under the K = 7 code, and one channel bit dropped
+        // part way (the bit clock slipping in a fade): the pairs are a bit
+        // out from there on. The frames must come back.
+        let framing = Framing::Ccsds {
+            interleave: 1,
+            conv: true,
+            scid: 0x1A5,
+        };
+        let coded = synth::bits(framing, 300_000, 32_000.0);
+        let soft =
+            |b: &[u8]| -> Vec<f32> { b.iter().map(|&x| if x == 1 { 1.0 } else { -1.0 }).collect() };
+        let mut rx = BeaconRx::new(64_000.0, 64_000.0);
+        for c in soft(&coded[..150_001]).chunks(500) {
+            rx.take_bits(c);
+        }
+        let before = rx.active_lock().expect("locked").1.frames;
+        // Bit 150 001 never arrives.
+        for c in soft(&coded[150_002..]).chunks(500) {
+            rx.take_bits(c);
+        }
+        let (_, stats, coded_lock) = rx.active_lock().expect("locked again after the slip");
+        assert!(coded_lock);
+        assert!(
+            stats.frames >= 20,
+            "{} frames after ({before} before)",
+            stats.frames
+        );
     }
 
     #[test]
