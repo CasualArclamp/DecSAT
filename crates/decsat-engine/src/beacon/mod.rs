@@ -442,6 +442,8 @@ struct ViterbiTry {
     /// A soft bit held for the next pair; bits still to skip (the phase).
     carry: Option<f32>,
     skip: bool,
+    /// Its pairs start on the stream's odd bits.
+    odd: bool,
     out: Vec<u8>,
 }
 
@@ -453,6 +455,7 @@ impl ViterbiTry {
             framer: pcm::Framer::new().known_only(),
             carry: None,
             skip: odd,
+            odd,
             out: Vec::new(),
         }
     }
@@ -487,6 +490,10 @@ struct Coded {
     /// A reading has framed: the code is there, and a lock lost later (a
     /// fade, a slip) is waited out, not taken for no code.
     framed: bool,
+    /// The bits fed lately (hard), and how many were fed in all: a frame
+    /// lock is checked against the code's parity checks on them.
+    recent: Vec<u8>,
+    fed: u64,
 }
 
 impl Coded {
@@ -517,6 +524,8 @@ impl Coded {
             tries,
             since,
             framed: false,
+            recent: Vec::new(),
+            fed: 0,
         }
     }
 
@@ -526,6 +535,8 @@ impl Coded {
             tries: vec![ViterbiTry::new(code, odd)],
             since,
             framed: false,
+            recent: Vec::new(),
+            fed: 0,
         }
     }
 
@@ -551,6 +562,30 @@ impl Coded {
 
     fn locked(&self) -> Option<&ViterbiTry> {
         self.tries.iter().find(|t| t.framer.lock().is_some())
+    }
+
+    /// Bits fed to the readings, kept for [`Self::refuted`].
+    fn note(&mut self, soft: &[f32]) {
+        self.fed += soft.len() as u64;
+        self.recent.extend(soft.iter().map(|&b| u8::from(b > 0.0)));
+        let over = self.recent.len().saturating_sub(2 * CONV_PROBE_BITS);
+        // An even cut, so nothing else has to follow the pairs' phase.
+        self.recent.drain(..over & !1);
+    }
+
+    /// The bits fed lately are not reading `k`'s code: they fail its parity
+    /// checks as often as anything would. Uncoded telemetry through a
+    /// Viterbi decoder still gives the same bits out for the same bits in,
+    /// so the fixed start of each of its frames decodes to a fixed pattern
+    /// every frame, and one of the readings' patterns will look like a
+    /// known marker; only the checks tell. `false` when too little of the
+    /// stream is busy to judge (fill).
+    fn refuted(&self, k: usize) -> bool {
+        let t = &self.tries[k];
+        let start = self.fed - self.recent.len() as u64;
+        let odd = t.odd ^ (start % 2 == 1);
+        let (fails, judged) = convblind::check_fails(&t.code, &self.recent, odd);
+        judged >= CONV_PROBE_MIN_CHECKS && fails >= CONV_PROBE_MAX_FAILS
     }
 }
 
@@ -1246,6 +1281,17 @@ impl BeaconRx {
                 t.push(coded_in, &mut frames);
                 out.extend(frames.into_iter().map(|f| (i, f)));
             }
+            c.note(coded_in);
+            // A first lock on bits that are not the reading's code is a
+            // false one: the framer starts again, its frames are dropped.
+            // (A reading that has framed is past this: noise in a fade
+            // fails the checks too, and its lock is to come back.)
+            for k in 0..c.tries.len() {
+                if !c.framed && c.tries[k].framer.lock().is_some() && c.refuted(k) {
+                    c.tries[k].framer = pcm::Framer::new().known_only();
+                    out.retain(|(i, _)| *i != k);
+                }
+            }
             // The first reading to frame is kept, the rest dropped.
             if c.tries.len() > 1
                 && let Some(k) = c.tries.iter().position(|t| t.framer.lock().is_some())
@@ -1759,6 +1805,48 @@ mod tests {
         assert!(!coded);
         assert_eq!(lock.frame_bits, 2048);
         assert!(stats.frames >= 36, "{} frames", stats.frames);
+    }
+
+    #[test]
+    fn a_readings_frame_lock_is_checked_against_its_code() {
+        // Uncoded bits fail every reading's parity checks; coded ones pass
+        // their own reading's. (Optus D3's uncoded telemetry, through the
+        // Viterbi decoders, framed on EB91 every second: the same bits in
+        // give the same bits out.)
+        let mut lcg = 0x0BAD_5EEDu32;
+        let mut random = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (lcg >> 24) as u8 & 1
+                })
+                .collect()
+        };
+        let soft = |bits: &[u8]| -> Vec<f32> {
+            bits.iter()
+                .map(|&b| if b == 1 { 1.0 } else { -1.0 })
+                .collect()
+        };
+        let mut c = Coded::new(0);
+        c.note(&soft(&random(6000)));
+        assert!((0..c.tries.len()).all(|k| c.refuted(k)), "uncoded bits");
+
+        let book = ccsds::CONV_CODE;
+        let code = convblind::Code {
+            k: book.k,
+            g: book.g,
+            inv: book.inv,
+        };
+        let coded = code.encode(&random(3001));
+        let mut c = Coded::new(0);
+        // An odd number first, then the rest: the pairs' phase is kept
+        // through the cut of what is held.
+        c.note(&soft(&coded[..2501]));
+        c.note(&soft(&coded[2501..]));
+        let passing: Vec<usize> = (0..c.tries.len()).filter(|&k| !c.refuted(k)).collect();
+        assert_eq!(passing.len(), 1, "one reading passes: {passing:?}");
+        let t = &c.tries[passing[0]];
+        assert!(t.code == code && !t.odd);
     }
 
     #[test]

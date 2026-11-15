@@ -503,6 +503,18 @@ fn grid(bits: &[u8], word: &SyncWord) -> Option<(usize, usize, usize)> {
     if on < needed {
         return None;
     }
+    // Two hits alone must both be the word exactly. With its tolerance a
+    // 24-bit word turns up by chance every 55 000 bits, in each polarity
+    // and reading, so over a few frames of any telemetry two such hits a
+    // "frame" apart are near certain; two exact ones are not.
+    if on < 3
+        && hits
+            .iter()
+            .filter(|&&q| q.abs_diff(anchor).is_multiple_of(len))
+            .any(|&q| word_errors(bits, q, word).0 > 0)
+    {
+        return None;
+    }
     // The earliest hit on the grid, not the grid run back to the start of
     // the bits: before the first word there may be no frames at all (the
     // noise a lock was just lost in), and a lock begun there would ride
@@ -983,6 +995,36 @@ mod tests {
         );
         assert!(!c.check(&frames[0]) && c.check(&frames[1]));
         assert_eq!(c.describe(64), "sum of bytes 0–62 in byte 63");
+    }
+
+    #[test]
+    fn two_near_hits_of_a_word_are_not_a_lock() {
+        // Random bits with a known word twice, a "frame" apart, each two
+        // bits wrong (inside its tolerance): chance, not frames. The same
+        // with the word exact both times is a lock.
+        let stream = |word: u32| {
+            let mut lcg = 0xC0FF_EE11u32;
+            let mut bits: Vec<u8> = (0..9000)
+                .map(|_| {
+                    lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (lcg >> 24) as u8 & 1
+                })
+                .collect();
+            for at in [700usize, 700 + 3911] {
+                for k in 0..24 {
+                    bits[at + k] = ((word >> (23 - k)) & 1) as u8;
+                }
+            }
+            bits
+        };
+        let lock_on = |word: u32| {
+            let mut fr = Framer::new().known_only();
+            let mut out = Vec::new();
+            fr.push(&stream(word), &mut out);
+            fr.lock().map(|l| l.frame_bits)
+        };
+        assert_eq!(lock_on(0xFA_F320 ^ 0x00_0101), None);
+        assert_eq!(lock_on(0xFA_F320), Some(3911));
     }
 
     #[test]
