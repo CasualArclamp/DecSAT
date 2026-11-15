@@ -2250,6 +2250,11 @@ pub(crate) fn print_beacon(v: &decsat_engine::beacon::BeaconView) {
             );
         }
     }
+    if let Some(n) = &v.nav {
+        for (label, text) in n.lines() {
+            println!("  {}: {text}", label.to_lowercase());
+        }
+    }
     if let Some(c) = &v.counter {
         println!(
             "  minor-frame counter: byte {} (mask {:02X}h), {}{}",

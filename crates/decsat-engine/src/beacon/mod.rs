@@ -27,6 +27,7 @@
 
 pub mod bits;
 pub mod carrier;
+pub mod nav;
 pub use decsat_modem::barker;
 pub use decsat_modem::hsmodemrx as hs;
 pub use decsat_modem::p3rx as p3;
@@ -392,6 +393,9 @@ pub struct BeaconView {
     pub counter: Option<pcm::Counter>,
     /// A spacecraft clock found in the frames.
     pub clock: Option<pcm::ClockWord>,
+    /// Attitude and orbit words, where the frames are of the format that
+    /// carries them (JCSAT-17's).
+    pub nav: Option<nav::Nav>,
     /// A check byte at the frames' end, and the frames passing and failing
     /// it.
     pub checksum: Option<(pcm::Checksum, u64, u64)>,
@@ -597,6 +601,7 @@ pub struct BeaconRx {
     recent: VecDeque<Vec<u8>>,
     counter: Option<pcm::Counter>,
     clock: Option<pcm::ClockWord>,
+    nav: nav::NavRx,
     since_clock: usize,
     checksum: Option<pcm::Checksum>,
     /// Frames passing and failing it.
@@ -659,6 +664,7 @@ impl BeaconRx {
             recent: VecDeque::new(),
             counter: None,
             clock: None,
+            nav: nav::NavRx::new(),
             since_clock: 0,
             checksum: None,
             check_counts: (0, 0),
@@ -991,6 +997,7 @@ impl BeaconRx {
         self.recent.clear();
         self.counter = None;
         self.clock = None;
+        self.nav = nav::NavRx::new();
         self.checksum = None;
         self.check_counts = (0, 0);
         self.snr = SnrMeter::default();
@@ -1338,6 +1345,9 @@ impl BeaconRx {
             None => true,
         };
         let index = self.counter.and_then(|c| c.index(&f.bytes));
+        if checked && f.sync_errors.is_some() {
+            self.nav.push(&f.bytes);
+        }
         self.log_frame(LoggedFrame {
             t_s: t,
             index,
@@ -1522,6 +1532,7 @@ impl BeaconRx {
             framing,
             counter: self.counter,
             clock: self.clock,
+            nav: self.nav.view(),
             checksum: self
                 .checksum
                 .map(|c| (c, self.check_counts.0, self.check_counts.1)),
@@ -1721,7 +1732,10 @@ mod tests {
             let at = f * 2048 + 96;
             bits[at..at + 1920].copy_from_slice(&word[..1920]);
         }
-        let soft: Vec<f32> = bits.iter().map(|&b| if b == 1 { 1.0 } else { -1.0 }).collect();
+        let soft: Vec<f32> = bits
+            .iter()
+            .map(|&b| if b == 1 { 1.0 } else { -1.0 })
+            .collect();
         assert!(
             Coded::probe(&soft[20 * 2048 + 96..][..1920]).is_some(),
             "the block passes the checks on its own"
