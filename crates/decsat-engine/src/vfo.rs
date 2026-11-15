@@ -4092,8 +4092,18 @@ mod tests {
         let mut last = Vec::new();
         let (mut blocks, mut changes) = (0, 0);
         for (k, c) in x.chunks(20_000).enumerate() {
+            let t0 = std::time::Instant::now();
             h.offer(&Arc::new(c.to_vec()), k as f64 * 0.04);
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            // Wait for the worker to finish the block (its guard is let go
+            // after the publish), then keep the 40 ms pace: a slow runner
+            // taking longer than 40 ms over a block must not read as a
+            // block left unpublished.
+            while h.pending.get() > 0 && t0.elapsed() < std::time::Duration::from_secs(2) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if let Some(rest) = std::time::Duration::from_millis(40).checked_sub(t0.elapsed()) {
+                std::thread::sleep(rest);
+            }
             let now = h.status.lock().unwrap().scatter.clone();
             // Counted once the demodulator has symbols to show.
             if k >= 10 {
