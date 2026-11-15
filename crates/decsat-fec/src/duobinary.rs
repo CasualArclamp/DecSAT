@@ -129,7 +129,7 @@ impl DuoBinaryTurbo {
     /// `None` when N is not a multiple of 4, is a multiple of 15 (Table
     /// 7-13 has no row for it), or the permutation is not one.
     pub fn new(n: usize, p: u32, q: [u32; 4], keep_y: &[bool], keep_w: &[bool]) -> Option<Self> {
-        if n == 0 || n % 4 != 0 || n % 15 == 0 {
+        if n == 0 || !n.is_multiple_of(4) || n.is_multiple_of(15) {
             return None;
         }
         let pi = permutation(n, p, q);
@@ -343,10 +343,10 @@ fn siso(
     };
     let forward = |from: &[f32; 16], k: usize| -> [f32; 16] {
         let mut to = [f32::MIN; 16];
-        for s in 0..16 {
+        for (s, &a) in from.iter().enumerate() {
             for d in 0..4 {
                 let (nx, g) = gamma(k, s, d);
-                to[nx] = to[nx].max(from[s] + g);
+                to[nx] = to[nx].max(a + g);
             }
         }
         normalise(&mut to);
@@ -385,10 +385,10 @@ fn siso(
     let mut app = vec![[0f32; 4]; n];
     for k in (0..n).rev() {
         let mut m = [f32::MIN; 4];
-        for s in 0..16 {
+        for (s, &a) in alpha[k].iter().enumerate() {
             for (d, md) in m.iter_mut().enumerate() {
                 let (nx, g) = gamma(k, s, d);
-                *md = md.max(alpha[k][s] + g + b[nx]);
+                *md = md.max(a + g + b[nx]);
             }
         }
         app[k] = m;

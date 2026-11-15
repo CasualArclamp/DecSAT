@@ -378,7 +378,19 @@ impl BurstShape {
         if known.len() < 2 {
             return None;
         }
-        let (freq, phase, gain) = carrier(r, &known)?;
+        let payload: Vec<usize> = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| matches!(s, Symbol::Payload(_)))
+            .map(|(n, _)| n)
+            .collect();
+        let power = if self.modulation == Modulation::Psk8 {
+            8
+        } else {
+            4
+        };
+        let (freq, phase, gain) = carrier(r, &known, &payload, power)?;
         let turn = |n: usize| {
             Iq::from_polar(
                 1.0 / gain,
@@ -468,56 +480,120 @@ pub struct Received {
     pub mer_db: f32,
 }
 
-/// The carrier from the known symbols: frequency (cycles a symbol), phase
-/// and gain. Coarse from neighbouring known symbols (the preamble's), then
-/// the peak of their coherent sum over all of them.
-fn carrier(r: &[Iq], known: &[(usize, Iq)]) -> Option<(f64, f64, f32)> {
-    let z: Vec<(usize, num_complex::Complex64)> = known
+/// How far off the carrier is looked for, cycles a symbol (the caller has
+/// tuned to the plan's frequency; a terminal's error and the satellite's
+/// drift are a small part of a symbol rate).
+pub const MAX_FREQ: f64 = 0.1;
+
+/// The carrier from the burst: frequency (cycles a symbol), phase and
+/// gain.
+///
+/// The coherent sum of all the known symbols, searched over ±[`MAX_FREQ`]
+/// a quarter of its main lobe a step: the preamble and postamble keep the
+/// aliases pilots a period apart give well below the true peak. Where
+/// they cannot — a preamble and postamble alone, a burst apart, give
+/// fringes of almost one height — the fringes near the top (within one
+/// run's lobe, at least [`FRINGE`] of it) are told apart by the payload
+/// raised to the power that takes its modulation off (`power`: 4, or 8
+/// for 8PSK), summed over the burst.
+fn carrier(
+    r: &[Iq],
+    known: &[(usize, Iq)],
+    payload: &[usize],
+    power: i32,
+) -> Option<(f64, f64, f32)> {
+    use num_complex::Complex64 as C;
+    let z: Vec<(usize, C)> = known
         .iter()
         .map(|&(n, p)| {
             let v = r[n] * p.conj() / p.norm_sqr().max(1e-9);
-            (
-                n,
-                num_complex::Complex64::new(f64::from(v.re), f64::from(v.im)),
-            )
+            (n, C::new(f64::from(v.re), f64::from(v.im)))
         })
         .collect();
-    let diff: num_complex::Complex64 = z
-        .windows(2)
-        .filter(|w| w[1].0 == w[0].0 + 1)
-        .map(|w| w[1].1 * w[0].1.conj())
-        .sum();
-    let mut f = if diff.norm() > 0.0 {
-        diff.arg() / std::f64::consts::TAU
-    } else {
-        0.0
-    };
-    let sum = |f: f64| -> num_complex::Complex64 {
-        z.iter()
-            .map(|&(n, v)| {
-                v * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * f * n as f64)
-            })
+    let mut longest = 1;
+    let mut run = 1;
+    for w in z.windows(2) {
+        run = if w[1].0 == w[0].0 + 1 { run + 1 } else { 1 };
+        longest = longest.max(run);
+    }
+    let sum = |zs: &[(usize, C)], f: f64| -> C {
+        zs.iter()
+            .map(|&(n, v)| v * C::from_polar(1.0, -std::f64::consts::TAU * f * n as f64))
             .sum()
     };
-    // Refine: a grid round the coarse value, narrowing.
+    let coherent = |f: f64| sum(&z, f).norm_sqr();
     let span = (z.last()?.0 - z.first()?.0).max(1) as f64;
-    let mut step = 0.5 / span;
-    for _ in 0..4 {
-        let best = (-8..=8)
-            .map(|k| f + f64::from(k) * step / 4.0)
-            .max_by(|a, b| sum(*a).norm().total_cmp(&sum(*b).norm()))?;
-        f = best;
-        step /= 4.0;
+    let step = 0.25 / span;
+    let k = (MAX_FREQ / step).ceil() as i64;
+    let grid: Vec<(f64, f64)> = (-k..=k)
+        .map(|i| {
+            let f = i as f64 * step;
+            (f, coherent(f))
+        })
+        .collect();
+    let top = grid.iter().map(|g| g.1).fold(0.0, f64::max);
+    let best = grid.iter().find(|g| g.1 == top)?.0;
+    // Each candidate peak narrowed to a hundredth of a step.
+    let narrow = |mut f: f64| {
+        let mut s = step;
+        for _ in 0..3 {
+            f = (-4..=4)
+                .map(|i| f + f64::from(i) * s / 4.0)
+                .max_by(|a, b| coherent(*a).total_cmp(&coherent(*b)))
+                .unwrap_or(f);
+            s /= 4.0;
+        }
+        f
+    };
+    let reach = 0.5 / longest as f64;
+    let mut fringes: Vec<f64> = (1..grid.len() - 1)
+        .filter(|&i| grid[i].1 >= grid[i - 1].1 && grid[i].1 >= grid[i + 1].1)
+        .filter(|&i| grid[i].1 >= FRINGE * top && (grid[i].0 - best).abs() <= reach)
+        .map(|i| narrow(grid[i].0))
+        .collect();
+    if fringes.is_empty() {
+        fringes.push(narrow(best));
     }
-    let c = sum(f) / z.len() as f64;
+    let f = if fringes.len() == 1 || payload.len() < 16 {
+        fringes
+            .iter()
+            .copied()
+            .max_by(|a, b| coherent(*a).total_cmp(&coherent(*b)))?
+    } else {
+        let w: Vec<(usize, C)> = payload
+            .iter()
+            .map(|&n| {
+                let v = C::new(f64::from(r[n].re), f64::from(r[n].im));
+                (n, v.powi(power) / v.norm().max(1e-12).powi(power - 1))
+            })
+            .collect();
+        let p = f64::from(power);
+        fringes.iter().copied().max_by(|a, b| {
+            sum(&w, p * a)
+                .norm_sqr()
+                .total_cmp(&sum(&w, p * b).norm_sqr())
+        })?
+    };
+    let c = sum(&z, f) / z.len() as f64;
     Some((f, c.arg(), c.norm().max(1e-9) as f32))
 }
 
-/// The phase that remains, measured on each run of known symbols and
-/// drawn straight between them, taken off.
+/// A fringe of the known symbols' sum this high against the top is one
+/// the payload must choose between.
+const FRINGE: f64 = 0.7;
+
+/// Known symbols that one point of the followed phase is measured on, at
+/// least: single pilots at a low Es/N0 are a phase each of a few tenths
+/// of a radian, too rough alone.
+const PHASE_SPAN: usize = 32;
+
+/// The phase that remains, measured round each run of known symbols (that
+/// run and its neighbours, out to [`PHASE_SPAN`] known symbols) and drawn
+/// straight between them, taken off.
 fn follow_phase(y: &mut [Iq], known: &[(usize, Iq)]) {
-    // Runs of neighbouring known symbols: (centre, phase).
-    let mut runs: Vec<(f32, f32)> = Vec::new();
+    // Runs of neighbouring known symbols: (centre, their sum against the
+    // known points, how many).
+    let mut runs: Vec<(f32, Iq, usize)> = Vec::new();
     let mut i = 0;
     while i < known.len() {
         let mut j = i;
@@ -525,26 +601,44 @@ fn follow_phase(y: &mut [Iq], known: &[(usize, Iq)]) {
             j += 1;
         }
         let acc: Iq = known[i..=j].iter().map(|&(n, p)| y[n] * p.conj()).sum();
-        let centre = (known[i].0 + known[j].0) as f32 / 2.0;
-        // Unwrapped against the run before.
-        let mut a = acc.arg();
-        if let Some(&(_, prev)) = runs.last() {
-            a = prev + (a - prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-                - std::f32::consts::PI;
-        }
-        runs.push((centre, a));
+        runs.push(((known[i].0 + known[j].0) as f32 / 2.0, acc, j + 1 - i));
         i = j + 1;
     }
     if runs.len() < 2 {
         return;
     }
+    // Each run widened to its neighbours till it has enough symbols.
+    let mut points: Vec<(f32, f32)> = Vec::with_capacity(runs.len());
+    for k in 0..runs.len() {
+        let (mut lo, mut hi) = (k, k);
+        let (mut acc, mut count) = (runs[k].1, runs[k].2);
+        while count < PHASE_SPAN && (lo > 0 || hi + 1 < runs.len()) {
+            if lo > 0 {
+                lo -= 1;
+                acc += runs[lo].1;
+                count += runs[lo].2;
+            }
+            if hi + 1 < runs.len() && count < PHASE_SPAN {
+                hi += 1;
+                acc += runs[hi].1;
+                count += runs[hi].2;
+            }
+        }
+        // Unwrapped against the point before.
+        let mut a = acc.arg();
+        if let Some(&(_, prev)) = points.last() {
+            a = prev + (a - prev + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+        }
+        points.push((runs[k].0, a));
+    }
     let mut k = 0;
     for (n, v) in y.iter_mut().enumerate() {
         let t = n as f32;
-        while k + 2 < runs.len() && t > runs[k + 1].0 {
+        while k + 2 < points.len() && t > points[k + 1].0 {
             k += 1;
         }
-        let ((t0, a0), (t1, a1)) = (runs[k], runs[k + 1]);
+        let ((t0, a0), (t1, a1)) = (points[k], points[k + 1]);
         let a = if t <= t0 {
             a0
         } else if t >= t1 {
@@ -571,6 +665,8 @@ fn uw_symbols(hex: &str, m: usize, count: usize) -> Vec<u8> {
 
 /// Annex A's reference waveforms 1–7 (Table A-1, the QPSK ones) as
 /// [`LinearBurst`]s.
+// Rust note: the table is one tuple a row, its type spelt out once.
+#[allow(clippy::type_complexity)]
 pub fn reference(id: u8) -> Option<LinearBurst> {
     // (payload bytes, preamble, postamble, pilot period, pilot block,
     // pilot sum, P, Q0–Q3, Y pattern, W pattern, UW)
@@ -718,7 +814,8 @@ mod tests {
     /// The burst through a channel: frequency (cycles a symbol), phase,
     /// gain, and noise at Es/N0 `snr_db`.
     fn channel(x: &[Iq], freq: f64, phase: f64, snr_db: f32, seed: &mut u64) -> Vec<Iq> {
-        let sigma = (10f32.powf(-snr_db / 10.0) / 2.0).sqrt();
+        // Es/N0 against what arrives (the 0.7 gain below).
+        let sigma = 0.7 * (10f32.powf(-snr_db / 10.0) / 2.0).sqrt();
         x.iter()
             .enumerate()
             .map(|(n, &s)| {
