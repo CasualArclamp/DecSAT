@@ -1,7 +1,7 @@
 <!-- made by CasualArclamp -->
 # DecSAT
 
-[![release](https://img.shields.io/github/v/release/CasualArclamp/DecSAT?logo=github&label=release)](https://github.com/CasualArclamp/DecSAT/releases/latest)
+[![release](https://img.shields.io/github/v/release/CasualArclamp/DecSAT?logo=github&label=release)](https://github.com/CasualArclamp/DecSAT/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/DecSAT/total?logo=github&label=downloads)](https://github.com/CasualArclamp/DecSAT/releases)
 
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
