@@ -484,6 +484,9 @@ struct Coded {
     tries: Vec<ViterbiTry>,
     /// Bits when the search started.
     since: u64,
+    /// A reading has framed: the code is there, and a lock lost later (a
+    /// fade, a slip) is waited out, not taken for no code.
+    framed: bool,
 }
 
 impl Coded {
@@ -510,7 +513,11 @@ impl Coded {
             .into_iter()
             .map(|(code, odd)| ViterbiTry::new(code, odd))
             .collect();
-        Coded { tries, since }
+        Coded {
+            tries,
+            since,
+            framed: false,
+        }
     }
 
     /// The one reading the parity checks named.
@@ -518,6 +525,7 @@ impl Coded {
         Coded {
             tries: vec![ViterbiTry::new(code, odd)],
             since,
+            framed: false,
         }
     }
 
@@ -1248,10 +1256,12 @@ impl BeaconRx {
             } else if c.tries.len() > 1 {
                 out.clear();
             }
-            // Given up when nothing has framed: every reading at once, or
-            // the one the parity checks named (wrongly, then: the bits as
-            // they come go back to the plain framer).
-            let give_up = c.locked().is_none() && self.bits - c.since > CONV_GIVE_UP_BITS;
+            c.framed |= c.locked().is_some();
+            // Given up when nothing has ever framed: every reading at once,
+            // or the one the parity checks named (wrongly, then: the bits as
+            // they come go back to the plain framer). Not a reading that
+            // framed and lost its lock: that comes back.
+            let give_up = !c.framed && self.bits - c.since > CONV_GIVE_UP_BITS;
             for (_, f) in out {
                 self.frame(f, true);
             }
@@ -1749,6 +1759,54 @@ mod tests {
         assert!(!coded);
         assert_eq!(lock.frame_bits, 2048);
         assert!(stats.frames >= 36, "{} frames", stats.frames);
+    }
+
+    #[test]
+    fn a_coded_lock_lost_is_found_again() {
+        // CCSDS frames under the K = 7 code; then noise long enough to drop
+        // the frame lock, well after the search's give-up time; then the
+        // frames again. (Optus 10's beacon went to "looking for frames" for
+        // good at its first fade.)
+        let framing = Framing::Ccsds {
+            interleave: 1,
+            conv: true,
+            scid: 0x1A5,
+        };
+        let coded = synth::bits(framing, 240_000, 32_000.0);
+        let mut lcg = 0x2468_ACE1u32;
+        let mut noise = || {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (lcg >> 24) as u8 & 1
+        };
+        let soft = |b: u8| if b == 1 { 1.0f32 } else { -1.0 };
+        let mut rx = BeaconRx::new(64_000.0, 64_000.0);
+        let first: Vec<f32> = coded[..150_000].iter().map(|&b| soft(b)).collect();
+        for c in first.chunks(500) {
+            rx.take_bits(c);
+        }
+        let before = rx
+            .active_lock()
+            .expect("locked on the coded frames")
+            .1
+            .frames;
+        assert!(rx.active_lock().unwrap().2, "after the Viterbi decoder");
+        let gap: Vec<f32> = (0..40_000).map(|_| soft(noise())).collect();
+        for c in gap.chunks(500) {
+            rx.take_bits(c);
+        }
+        // An even number of bits were lost, so the pairs still line up.
+        let second: Vec<f32> = coded[150_000..].iter().map(|&b| soft(b)).collect();
+        for c in second.chunks(500) {
+            rx.take_bits(c);
+        }
+        let (_, stats, coded_lock) = rx.active_lock().expect("locked again");
+        assert!(coded_lock);
+        assert!(
+            stats.frames >= before + 10,
+            "{} then {}",
+            before,
+            stats.frames
+        );
     }
 
     #[test]

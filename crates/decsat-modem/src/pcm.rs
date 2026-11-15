@@ -274,8 +274,20 @@ impl Framer {
                 lock.misses += 1;
                 self.stats.flywheel += 1;
                 if lock.misses >= FLYWHEEL {
+                    // The next search starts where the frames stopped (the
+                    // first one missed): with the good frames before it
+                    // still held, it would lock on those again, run into
+                    // the same gap, and go round until they aged out,
+                    // giving the old frames out again each time.
+                    let lost_at = lock
+                        .next
+                        .saturating_sub(u64::from(FLYWHEEL - 1) * lock.frame_bits as u64);
+                    let cut = (lost_at.saturating_sub(self.base) as usize).min(self.direct.len());
                     self.stats.losses += 1;
                     self.lock = None;
+                    self.direct.drain(..cut);
+                    self.diff.drain(..cut);
+                    self.base += cut as u64;
                     self.since_search = usize::MAX / 2;
                     return;
                 }
@@ -491,7 +503,15 @@ fn grid(bits: &[u8], word: &SyncWord) -> Option<(usize, usize, usize)> {
     if on < needed {
         return None;
     }
-    let first = anchor % len;
+    // The earliest hit on the grid, not the grid run back to the start of
+    // the bits: before the first word there may be no frames at all (the
+    // noise a lock was just lost in), and a lock begun there would ride
+    // its flywheel out and be lost again, for ever.
+    let first = hits
+        .iter()
+        .copied()
+        .find(|&q| q.abs_diff(anchor).is_multiple_of(len))
+        .unwrap_or(anchor);
     Some((on, len, first))
 }
 
@@ -963,6 +983,55 @@ mod tests {
         );
         assert!(!c.check(&frames[0]) && c.check(&frames[1]));
         assert_eq!(c.describe(64), "sum of bytes 0–62 in byte 63");
+    }
+
+    #[test]
+    fn a_lock_lost_in_a_gap_is_found_again_past_it() {
+        // IRIG frames, a gap of noise longer than the flywheel rides, then
+        // the frames again: they must come out once each, the later ones
+        // too. (The search once locked back on the frames before the gap,
+        // again and again.)
+        let frame = |i: u32| {
+            let mut f: Vec<u8> = (0..64u32).map(|j| (j * 37 + i * 11) as u8).collect();
+            f[..3].copy_from_slice(&[0xFA, 0xF3, 0x20]);
+            f[4] = i as u8;
+            f
+        };
+        let bits_of = |f: &[u8]| -> Vec<u8> {
+            f.iter()
+                .flat_map(|b| (0..8).map(move |k| (b >> (7 - k)) & 1))
+                .collect()
+        };
+        let mut bits = Vec::new();
+        for i in 0..40 {
+            bits.extend(bits_of(&frame(i)));
+        }
+        let mut lcg = 0x1357_9BDFu32;
+        for _ in 0..(8 * 512 + 100) {
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bits.push((lcg >> 24) as u8 & 1);
+        }
+        for i in 40..70 {
+            bits.extend(bits_of(&frame(i)));
+        }
+        let mut fr = Framer::new().known_only();
+        let mut out = Vec::new();
+        for c in bits.chunks(200) {
+            fr.push(c, &mut out);
+        }
+        assert!(fr.lock().is_some(), "locked again after the gap");
+        let with_word: Vec<u8> = out
+            .iter()
+            .filter(|f| f.sync_errors.is_some())
+            .map(|f| f.bytes[4])
+            .collect();
+        let mut once = with_word.clone();
+        once.dedup();
+        assert_eq!(with_word, once, "no frame given out twice");
+        assert!(with_word.contains(&0) && with_word.contains(&39));
+        let after = with_word.iter().filter(|&&i| i >= 40).count();
+        assert!(after >= 25, "{after} frames after the gap");
+        assert_eq!(fr.stats.losses, 1);
     }
 
     #[test]
