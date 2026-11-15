@@ -931,6 +931,9 @@ impl VfoHandle {
 // Still bounded: sustained DSP overload will ultimately drop samples.
 // At 30.72 MS/s this may retain ~160 MiB of shared IQ data per queued VFO.
 const QUEUE_DEPTH: usize = 16;
+/// The least time between a worker's status publications (a 60 Hz screen's
+/// frame; blocks come every 40 ms, so each one publishes).
+const STATUS_EVERY: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// A VFO centred outside what a receiver at `in_rate` takes in (±half the
 /// rate about its centre).
@@ -1758,11 +1761,13 @@ impl Worker {
                     let real = block.len() as f64 / self.in_rate;
                     let used = t0.elapsed().as_secs_f64() / real.max(1e-9);
                     self.load = 0.9 * self.load + 0.1 * used as f32;
-                    // Publishing snapshots the demodulator, copies the constellation,
-                    // reads FEC statistics and sometimes calculates an FFT. None of
-                    // that needs to run for every incoming sample block. Preserve
-                    // uninterrupted DDC / decoder processing as the priority.
-                    if self.last_status_refresh.elapsed() >= std::time::Duration::from_millis(200) {
+                    // Publishing snapshots the demodulator, copies the constellation
+                    // and reads FEC statistics (the FFT inside has its own, slower
+                    // clock). Once a block at the usual 25 blocks a second, so the
+                    // constellation and the MODCOD panel move as the signal does;
+                    // the interval only keeps a source handing over many short
+                    // blocks from publishing more often than a screen redraws.
+                    if self.last_status_refresh.elapsed() >= STATUS_EVERY {
                         self.last_status_refresh = std::time::Instant::now();
                         self.publish(n);
                     }
@@ -4073,6 +4078,38 @@ mod tests {
         let len = std::fs::metadata(&path).unwrap().len();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(len, n);
+    }
+
+    #[test]
+    fn the_constellation_is_published_for_every_block() {
+        // Blocks as the front end hands them, 40 ms apart, to a real worker
+        // thread: nearly every one must reach the status. (Publishing was
+        // once held to five a second, and the panels crawled.)
+        let rs = 62_500.0;
+        let x = carrier(&Constellation::qpsk(), 100_000, 8, rs, 40_000.0, 0.0, 12);
+        let settings = VfoSettings::new("ID", 38_000.0, 110_000.0, DecoderKind::Identify);
+        let h = spawn(500_000.0, settings, true, None);
+        let mut last = Vec::new();
+        let (mut blocks, mut changes) = (0, 0);
+        for (k, c) in x.chunks(20_000).enumerate() {
+            h.offer(&Arc::new(c.to_vec()), k as f64 * 0.04);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let now = h.status.lock().unwrap().scatter.clone();
+            // Counted once the demodulator has symbols to show.
+            if k >= 10 {
+                blocks += 1;
+                if now != last {
+                    changes += 1;
+                }
+            }
+            last = now;
+        }
+        h.stop();
+        assert!(blocks >= 20, "{blocks} blocks");
+        assert!(
+            changes * 10 >= blocks * 8,
+            "{changes} of {blocks} blocks published"
+        );
     }
 
     #[test]
