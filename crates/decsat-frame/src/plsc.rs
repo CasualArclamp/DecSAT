@@ -61,7 +61,25 @@ pub struct PlsInfo {
     pub payload_len: u32,
     /// XFECFRAME length in symbols: data only, no pilots.
     pub xfecframe_len: u32,
+    /// A NovelSat NS4 frame ([`PlsInfo::parse_ns4`]): `modcod` names the
+    /// modulation and rate in S2's numbering, but the LDPC code is NS4's.
+    pub ns4: bool,
 }
+
+/// NovelSat NS4's PLS codes, as far as they have been seen on a modem:
+/// (the 7-bit code, the DVB-S2 MODCOD number of the same modulation and
+/// rate). All QPSK, normal FECFRAME, pilots on. NS4 keeps DVB-S2's SOF, PLS
+/// coding and frame layout but numbers its modes its own way, and nothing
+/// is published: each entry is a mode recorded and decoded. How it signals
+/// pilots off or a short frame is not known yet.
+pub const NS4_PLS_CODES: [(u8, u8); 6] = [
+    (8, 1),  // QPSK 1/4
+    (25, 4), // QPSK 1/2
+    (32, 5), // QPSK 3/5
+    (37, 6), // QPSK 2/3
+    (44, 7), // QPSK 3/4
+    (56, 9), // QPSK 5/6
+];
 
 impl PlsInfo {
     /// Derive the frame geometry from an 8-bit PLS code.
@@ -96,6 +114,23 @@ impl PlsInfo {
         };
         Self::geometry(plsc, modcod, frame, has_pilots, dummy_frame, n_mod, n_slots)
             .with(None, false)
+    }
+
+    /// The frame a NovelSat NS4 modem announces with a 7-bit PLS code
+    /// ([`NS4_PLS_CODES`]). Code 0 is DVB-S2's dummy frame, which NS4 sends
+    /// unchanged. A code not seen yet is taken as QPSK with pilots (what
+    /// every known one is) and marked reserved: its length is then right
+    /// for the QPSK modes, and nothing tries to decode it.
+    pub fn parse_ns4(plsc: u8) -> Self {
+        if plsc == 0 {
+            return Self::parse(0);
+        }
+        let known = NS4_PLS_CODES.iter().find(|&&(c, _)| c == plsc);
+        let mut p = Self::from_fields(known.map_or(1, |&(_, m)| m), false, true);
+        p.plsc = plsc;
+        p.ns4 = true;
+        p.reserved = known.is_none();
+        p
     }
 
     /// An S2X code (EN 302 307-2 §5.5.2.2): a Table 17a MODCOD, a VL-SNR
@@ -179,6 +214,7 @@ impl PlsInfo {
             plframe_len,
             payload_len: plframe_len - SLOT_LEN as u32,
             xfecframe_len,
+            ns4: false,
         }
     }
 
@@ -306,6 +342,8 @@ pub struct PlscDecoder {
     rm: ReedMuller,
     soft: Vec<f32>,
     rot: Vec<Iq>,
+    /// Read the codes as a NovelSat NS4 modem means them.
+    ns4: bool,
 }
 
 impl Default for PlscDecoder {
@@ -320,6 +358,19 @@ impl PlscDecoder {
             rm: ReedMuller::new(PLSC_SCRAMBLER),
             soft: vec![0.0; PLSC_LEN],
             rot: vec![Iq::new(0.0, 0.0); PLSC_LEN],
+            ns4: false,
+        }
+    }
+
+    /// For a NovelSat NS4 carrier: only the codes NS4 is known to send
+    /// (and the dummy frame), read with [`PlsInfo::parse_ns4`].
+    pub fn ns4() -> Self {
+        let codes = std::iter::once(0)
+            .chain(NS4_PLS_CODES.iter().map(|&(c, _)| c))
+            .collect();
+        PlscDecoder {
+            ns4: true,
+            ..Self::with_expected(codes)
         }
     }
 
@@ -332,6 +383,7 @@ impl PlscDecoder {
             rm: ReedMuller::with_enabled(PLSC_SCRAMBLER, expected),
             soft: vec![0.0; PLSC_LEN],
             rot: vec![Iq::new(0.0, 0.0); PLSC_LEN],
+            ns4: false,
         }
     }
 
@@ -392,7 +444,11 @@ impl PlscDecoder {
                 pick(a.map(|(d, m)| (d, m as f32)), b.map(|(d, m)| (d, m as f32)))
             }
         };
-        PlsInfo::parse(plsc)
+        if self.ns4 {
+            PlsInfo::parse_ns4(plsc)
+        } else {
+            PlsInfo::parse(plsc)
+        }
     }
 }
 

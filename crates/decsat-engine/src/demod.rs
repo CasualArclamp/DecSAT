@@ -399,6 +399,15 @@ impl Demod {
 
     /// The PL scrambling sequence (gold code) in use: the one given, or a
     /// preferred one found to fit the pilots.
+    /// Read the PLS codes as a NovelSat NS4 modem means them (DVB-S2's
+    /// framing, its own numbering of the modes).
+    pub fn with_ns4(mut self, ns4: bool) -> Self {
+        if ns4 {
+            self.dec = PlscDecoder::ns4();
+        }
+        self
+    }
+
     pub fn gold_code(&self) -> u32 {
         self.scrambler.gold_code()
     }

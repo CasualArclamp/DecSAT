@@ -36,6 +36,7 @@ pub fn vfo_text(s: &VfoSettings) -> String {
         format!("follow={}", u8::from(s.follow_carrier)),
         format!("voice={}", u8::from(s.voice_auto)),
         format!("gold={}", s.gold_code),
+        format!("ns4={}", u8::from(s.ns4)),
         format!("activity={}", u8::from(s.record_on_activity)),
         format!("lowsnr={}", u8::from(s.cid_low_snr)),
     ];
@@ -76,6 +77,7 @@ pub fn vfo_from_text(t: &str, record_dir: std::path::PathBuf) -> Option<VfoSetti
     s.record_on_activity = flag("activity", false);
     s.cid_low_snr = flag("lowsnr", false);
     s.gold_code = get("gold").and_then(|v| v.parse().ok()).unwrap_or(0);
+    s.ns4 = flag("ns4", false);
     s.symbol_rate = get("rs").and_then(|v| v.parse().ok());
     s.psk_modulation =
         get("mod").and_then(|v| MODULATIONS.into_iter().find(|m| format!("{m:?}") == v));

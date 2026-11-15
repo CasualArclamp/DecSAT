@@ -505,6 +505,9 @@ pub struct VfoSettings {
     pub symbol_rate: Option<f64>,
     /// PL scrambling gold-code index.
     pub gold_code: u32,
+    /// The carrier is NovelSat NS4: DVB-S2's framing with NovelSat's own
+    /// mode numbers and LDPC codes.
+    pub ns4: bool,
     /// Generic PSK: the constellation to decide on; `None` takes Identify's.
     pub psk_modulation: Option<decsat_core::Modulation>,
     /// Generic PSK: look for text in the decided bits, every way of reading
@@ -611,6 +614,7 @@ impl VfoSettings {
             enabled: true,
             symbol_rate: None,
             gold_code: 0,
+            ns4: false,
             psk_modulation: None,
             find_text: true,
             symbol_labels: crate::psk::SymbolLabels::Standard,
@@ -1548,6 +1552,7 @@ impl Worker {
         let new_decoder = new.decoder != self.settings.decoder
             || new.symbol_rate != self.settings.symbol_rate
             || new.gold_code != self.settings.gold_code
+            || new.ns4 != self.settings.ns4
             || new.psk_modulation != self.settings.psk_modulation;
         if rebuild_ddc {
             self.ddc = Ddc::new(
@@ -1924,7 +1929,8 @@ impl Worker {
                         let alpha = id.roll_off.map_or(0.35, |r| r.as_f64());
                         if let Some(rs) = rs.filter(|&r| out_rate / r >= 2.0) {
                             // Start demodulating, from the gathered signal on.
-                            let mut d = Demod::new(out_rate, rs, alpha, self.settings.gold_code);
+                            let mut d = Demod::new(out_rate, rs, alpha, self.settings.gold_code)
+                                .with_ns4(self.settings.ns4);
                             // Identify's offset is averaged over every header
                             // it saw: the best seed for the carrier loop.
                             if let Some(f) = id.carrier_offset_hz {

@@ -44,3 +44,8 @@ pub const NORMAL_1_4: Table = Table {
         38258, 39249, 41212, 37974, 40075, 43649, 24198, 25617, 31305, 5806, 46410, 46475,
     ],
 };
+
+/// Every table here: ((rate numerator, denominator), the table).
+pub const NORMAL: [((u16, u16), &Table); 1] = [
+    ((1, 4), &NORMAL_1_4),
+];

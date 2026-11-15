@@ -267,6 +267,10 @@ enum Command {
         /// Symbol rate, if known (found blind otherwise).
         #[arg(long)]
         symbol_rate: Option<f64>,
+        /// ip/ts: the carrier is NovelSat NS4 (DVB-S2 framing, NovelSat's
+        /// own mode numbers and LDPC codes).
+        #[arg(long)]
+        ns4: bool,
         /// Modulation for tpc/psk (bpsk, qpsk, 8psk, 16qam…).
         #[arg(long)]
         modulation: Option<String>,
@@ -465,6 +469,7 @@ fn main() -> Result<()> {
             offset,
             bandwidth,
             symbol_rate,
+            ns4,
             modulation,
             out,
             fast,
@@ -515,6 +520,7 @@ fn main() -> Result<()> {
                 offset,
                 bandwidth,
                 symbol_rate,
+                ns4,
                 modulation,
                 out,
                 fast,
