@@ -474,6 +474,11 @@ V.35-scrambled ahead of the encoder (HDLC idle flags on the carrier seen).
 from the data, so the data bits pass on with the channel's errors. A
 capture carrying traffic would let the code be found.
 
+![A Comtech 8QAM rate 0.8 carrier under a VFO: 8QAM locked, the unique word found every 2092 symbols, and the frame structure listed in the card](docs/images/releases/v1.1.0/comtech-8qam.jpg)
+
+*Comtech 8QAM, rate 0.8, on a simulated carrier: locked, with the unique
+word and the frame's structure in the card.*
+
 IP found in the HDLC frames (Cisco HDLC, PPP, Frame Relay as RFC 2427
 carries it, or anything with the packet after a short header) gets the same
 statistics, PCAP and multicast audio as GSE — a flow whose UDP checksums all
@@ -853,6 +858,11 @@ their elevation and azimuth, and **All beacons** marks only those, so a
 beacon on the same frequency on the far side of the world is never matched. The list is
 `apps/decsat-gui/src/ku_beacons.csv`.
 
+![The Ku-band beacons window twice, for two locations: each lists the satellites in view with elevation, azimuth and their beacon frequencies](docs/images/releases/v1.3.0/beacons-my-location.png)
+
+*The beacons window for two locations: only the satellites in view, with
+their elevation, azimuth and beacon frequencies.*
+
 **📡 All beacons** (beside the volume) marks every satellite's beacons at
 once, to find a satellite or check which one the dish is on: a mark with a
 narrow line within 100 kHz of it (and nearer it than any other listed
@@ -897,6 +907,11 @@ the card draws the frames as a bitmap, a row a frame and a column a symbol
 The format was measured from a recording — no specification is known, and
 neither is what the blocks carry (no text in them, in any reading tried).
 
+![The Barker-11 decoder on a carrier near 4004 MHz: the despread spectrum, the frame fields in hex, the frames drawn as a bitmap and the BPSK constellation](docs/images/releases/v1.8.0/barker-decoder.jpg)
+
+*The Barker-11 decoder: the frames in hex, and drawn as a bitmap, a row a
+frame.*
+
 ```bash
 decsat decode capture_8000000Sps.cs8 --decoder barker --offset -813000 --bandwidth 300000 --fast
 ```
@@ -917,6 +932,11 @@ Listen, and tune USB so the beacon is somewhere between 300 Hz and 3.7 kHz.
 It shows the waterfall, the constellation, the latest of each block, a log of
 every frame and the housekeeping values. A frame takes 10.4 s and they come
 every 25 s.
+
+![qo100-beacon tracking the beacon from a WebSDR recording: audio waterfall, BPSK constellation, the satellite's attitude, the latest text block and the frame log](docs/images/releases/v1.8.0/qo100-beacon.png)
+
+*`qo100-beacon.exe` on a WebSDR recording: the beacon's text blocks, with
+every frame's CRC good.*
 
 As received in November 2026 the beacon sends text only: the K block, which
 carried uptime, temperature and voltages in 2019, is blank. They will show
