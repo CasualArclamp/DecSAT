@@ -6431,3 +6431,51 @@ PSK decoder's symbol .bin, 33 kBd, 12481.99 MHz), pilots off at 1/4 and
   is NovelSat's own wrapping and is not unpacked; Identify still names an
   NS4 carrier by its S2 reading; 15 LDPC iterations a frame on that
   capture is more than 8 dB should need (not looked into).
+
+## A lone, weak inroute's frames not found (12358.8 MHz, 2026-11-15)
+
+Seen live (HackRF, 20 MS/s): a 1.666 MS/s S2 ACM outbound at 12357.3 MHz
+whose hub signalling lists one inroute, BF9h (uplink 14108.8 MHz,
+832.661 kBd, 215 slots of 474 symbols), and that carrier beside it at
+12358.8 MHz, on 98 % of the time with ~3 ms gaps 6 dB deep. A Return pool
+VFO on it stayed at "lining up: the hub's plans are heard; 1 frame starts
+found".
+
+- **Cause:** `inroute_bursts::silence_ends` looked for the frames' guard
+  silences block by block (20 µs) and wanted the carriers 6 dB over the
+  silence. This inroute stands 6 dB over its noise, and a 20 µs block of it
+  scatters by a third. On a synthetic copy (BPSK, same slots and guard):
+  12 of 12 frames at 10 dB, 4 of 12 at 6 dB (one 540 µs early), none at
+  4 dB. With under six starts there is no frame line, so no lead is tried
+  and nothing is followed. (172B's inroutes were 9–10 dB.)
+- **Fix:** the envelope averaged over 0.5 ms first; 3 dB is enough; the
+  threshold halfway in power; each end put at the block that best splits
+  the envelope round the crossing into low and high. All 12 frames at 10,
+  6 and 4 dB, each within 100 µs.
+- The comb with one carrier in a VFO it nearly fills lands within 5 kHz
+  (test); the satellite's translation is never needed.
+- **Not checked on the air, and no recording yet.** Once lined up, bursts
+  on an inroute whose modulation byte is not 04h (8PSK) are counted, not
+  demodulated: whether this one's bursts are read depends on what its
+  configuration says.
+
+## A Return pool beside a big hub never kept up (2026-11-15)
+
+Reported live: a Return pool VFO 3.8 MHz wide (10 MS/s) beside a wide ACM
+GSE outbound sat at "0 carriers · finding the grid…", 42 % CPU, and the
+program was said to hang. No recording.
+
+- **Found:** `inroute_bursts::map_inroutes` slid the hub's whole inroute
+  table along the pool's spectrum in 2 kHz steps, every carrier weighed at
+  every bin. For a hub listing 44 inroutes over 200 MHz (a test, 1571
+  bins) one look took 5.7 s, and a look is taken every 2 s of signal, on
+  the VFO's own thread: the pool's blocks are dropped and it never counts
+  carriers. With 172B's six inroutes the cost never showed.
+- **Fix:** only the carriers reaching into the band shape the comb; coarse
+  steps a sixth of the narrowest carrier's skirt, a finer pass after.
+  0.03 s for the same hub, the same placing.
+- **Not established:** that this is the hang he saw (whether the whole
+  window froze is not known; a VFO's thread running behind does not block
+  the window: blocks are dropped, and deleting a VFO does not wait). The
+  pool alone at this width and rate reads a 3.4 s, 20 MS/s recording in
+  2.1 s.

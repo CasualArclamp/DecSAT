@@ -76,6 +76,11 @@ use crate::vfo::VfoId;
 const BLOCK_S: f64 = 20e-6;
 /// A frame's guard silence is at least this long, s.
 const SILENCE_MIN_S: f64 = 1.5e-3;
+/// The envelope is averaged over this long before the silences are looked
+/// for, s: under a slot, well under a silence.
+const SMOOTH_S: f64 = 0.5e-3;
+/// The carriers stand at least this far over a silence (a power ratio).
+const SILENCE_MIN_DEPTH: f64 = 2.0;
 /// Frame starts kept for the line (30 s).
 const STARTS_KEEP: usize = 240;
 /// How often the plans are lined up with the pool again, s of signal.
@@ -394,30 +399,64 @@ impl Shared {
     }
 }
 
+/// Running sums of an envelope: `acc[k]` = the first `k` blocks' power.
+fn running(blocks: &[(f64, f32)]) -> Vec<f64> {
+    let mut acc = Vec::with_capacity(blocks.len() + 1);
+    acc.push(0.0f64);
+    for b in blocks {
+        acc.push(acc[acc.len() - 1] + f64::from(b.1));
+    }
+    acc
+}
+
 /// The ends of the guard silences in a power envelope (block start, power):
-/// runs of at least [`SILENCE_MIN_S`] under the level halfway (in dB)
-/// between its floor and its carriers, each end the first block back over.
+/// runs of at least [`SILENCE_MIN_S`] under the level halfway between its
+/// floor and its carriers, each end the block the power steps up at.
+///
+/// The envelope is averaged over [`SMOOTH_S`] first: a 20 µs block of an
+/// 830 kBd carrier is some ten independent samples, so its power scatters
+/// by a third, as much as a weak inroute stands over its silence. A silence
+/// 3 dB deep is then enough. (The lone 832.7 kBd inroute at 12358.8 MHz
+/// stood 6 dB over its noise, 2026-11-15; block by block, with 6 dB asked
+/// for, its frames were never found.)
 fn silence_ends(blocks: &[(f64, f32)], block_s: f64) -> Vec<f64> {
     if blocks.len() < 1000 {
         return Vec::new();
     }
-    let mut sorted: Vec<f32> = blocks.iter().map(|b| b.1).collect();
-    sorted.sort_by(f32::total_cmp);
-    let (floor, on) = (sorted[sorted.len() / 100], sorted[sorted.len() * 6 / 10]);
-    // Under 6 dB between them: no silences to speak of.
-    if on <= 4.0 * floor || floor <= 0.0 {
+    let n = blocks.len();
+    let acc = running(blocks);
+    let mean = |a: usize, b: usize| (acc[b] - acc[a]) / (b - a) as f64;
+    let half = ((SMOOTH_S / block_s / 2.0).round() as usize).max(1);
+    let smooth: Vec<f64> = (0..n)
+        .map(|k| mean(k.saturating_sub(half), (k + half).min(n)))
+        .collect();
+    let mut sorted = smooth.clone();
+    sorted.sort_by(f64::total_cmp);
+    let (floor, on) = (sorted[n / 200], sorted[n * 6 / 10]);
+    if on <= SILENCE_MIN_DEPTH * floor || floor <= 0.0 {
         return Vec::new();
     }
-    let thr = (floor * on).sqrt();
+    let thr = 0.5 * (floor + on);
     let min_run = (SILENCE_MIN_S / block_s).round() as usize;
     let mut ends = Vec::new();
     let mut run = 0usize;
-    for &(t, p) in blocks {
+    for (k, &p) in smooth.iter().enumerate() {
         if p < thr {
             run += 1;
         } else {
             if run >= min_run {
-                ends.push(t);
+                // The step itself, within the averaging's reach of where
+                // the average crossed: the block that best splits the
+                // envelope there into a low stretch and a high one.
+                let (a, b) = (k.saturating_sub(2 * half), (k + 2 * half).min(n));
+                let step = (a + 1..b)
+                    .map(|j| {
+                        let d = mean(j, b) - mean(a, j);
+                        (d * d.abs() * ((j - a) * (b - j)) as f64, j)
+                    })
+                    .max_by(|x, y| x.0.total_cmp(&y.0))
+                    .map_or(k, |x| x.1);
+                ends.push(blocks[step].0);
             }
             run = 0;
         }
@@ -508,14 +547,20 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         })
         .filter(|(f, _)| f.abs() <= half)
         .collect();
+    // The widest carrier's reach either side of its centre: one further
+    // from the band than this puts nothing in it.
+    let reach = rows.iter().map(|r| r.2.air_rate()).fold(0.0, f64::max);
     let score = |x: f64| -> Option<f64> {
+        if !rows.iter().any(|r| (x + r.1 - base).abs() < half) {
+            return None;
+        }
+        // Only the carriers that reach into the band shape the comb there
+        // (a big hub lists dozens, hundreds of MHz apart).
         let centres: Vec<(f64, f64)> = rows
             .iter()
             .map(|r| (x + r.1 - base, r.2.air_rate()))
+            .filter(|c| c.0.abs() < half + reach)
             .collect();
-        if !centres.iter().any(|c| c.0.abs() < half) {
-            return None;
-        }
         let (mut n, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         for &(f, v) in &bins {
             let t = centres
@@ -532,7 +577,15 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         let d = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
         (n > 8.0 && d > 0.0).then(|| (n * sxy - sx * sy) / d)
     };
-    let coarse = pool.spectrum_bin_hz.max(2e3);
+    // Coarse steps a sixth of the narrowest carrier's skirt (the fit's peak
+    // is as wide as a skirt), then a fine pass round the best. (At 2 kHz
+    // steps a 44-inroute hub over 200 MHz took 5.7 s a look, every 2 s of
+    // signal: the pool VFO never kept up.)
+    let narrowest = rows
+        .iter()
+        .map(|r| r.2.air_rate())
+        .fold(f64::INFINITY, f64::min);
+    let coarse = (narrowest * 0.2 / 6.0).max(pool.spectrum_bin_hz).max(2e3);
     let mut best: Option<(f64, f64)> = None;
     let mut x = -half - span;
     while x <= half {
@@ -544,8 +597,8 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         x += coarse;
     }
     let (mut corr, mut xb) = best?;
-    let fine = coarse / 8.0;
-    for k in -16..=16 {
+    let fine = coarse / 16.0;
+    for k in -24..=24 {
         let x = xb + f64::from(k) * fine;
         if let Some(c) = score(x)
             && c > corr
@@ -1518,5 +1571,154 @@ mod tests {
         assert!((fit.lead_s - (5.0 * period - 0.010)).abs() < 1e-6);
         // Terminal 39 sits 19.5 dB over terminal 0.
         assert!(levels[&39] > levels[&0] + 15.0, "{levels:?}");
+    }
+    /// A lone BPSK inroute as on the air at 12358.8 MHz (2026-11-15): 215
+    /// slots of 474 symbols at 832.661 kBd, every slot in use, 2.6 ms of
+    /// guard at each 125 ms frame's end, the carrier's plateau `depth_db`
+    /// over the noise. Returns the frame starts found over 2.5 s and where
+    /// the first frame starts.
+    fn lone_inroute_starts(depth_db: f64) -> (Vec<f64>, f64) {
+        let rate = 1.3e6;
+        let rs = 832_661.0;
+        let first = 0.040;
+        let on_s = 215.0 * 474.0 / rs;
+        // Plateau over noise = 1 + Es/N0; the signal's power for unit noise.
+        let amp = (((10f64.powf(depth_db / 10.0) - 1.0) * rs / rate).sqrt()) as f32;
+        let mut r = crate::tdma::demod::tests::Lcg(15);
+        let n = (2.5 * rate) as usize;
+        let (mut sym, mut bit) = (u64::MAX, 1.0f32);
+        let x: Vec<Iq> = (0..n)
+            .map(|k| {
+                let t = k as f64 / rate;
+                let ph = (t - first).rem_euclid(FRAME_S);
+                let k_sym = (t * rs) as u64;
+                if k_sym != sym {
+                    sym = k_sym;
+                    bit = if r.next() & 1 == 0 { 1.0 } else { -1.0 };
+                }
+                let s = if ph < on_s { amp * bit } else { 0.0 };
+                Iq::new(
+                    s + r.gauss() * std::f32::consts::FRAC_1_SQRT_2,
+                    r.gauss() * std::f32::consts::FRAC_1_SQRT_2,
+                )
+            })
+            .collect();
+        let mut ib = InrouteBursts::new(rate, 1);
+        ib.ring.push(&x, 0.0);
+        let c = Carrier {
+            inroute: 0xbf9,
+            centre_hz: 0.0,
+            config: BurstConfig {
+                index: 0,
+                symbol_rate: rs,
+                slot_ticks: (474.0 / rs * 27e6) as u32,
+                modulation: Modulation::Other(1),
+            },
+        };
+        let bp = ib.band_power(&[c]).unwrap();
+        (silence_ends(&bp.envelope(), bp.block_s), first)
+    }
+
+    #[test]
+    fn frames_from_shallow_guard_silences() {
+        // Before the envelope was smoothed: 12 of 12 frames at 10 dB, 4 at
+        // 6 dB (one of them 540 µs early), none at 4 dB.
+        for depth in [10.0, 6.0, 4.0] {
+            let (ends, first) = lone_inroute_starts(depth);
+            assert!(ends.len() >= 11, "{depth} dB: {}", ends.len());
+            for e in &ends {
+                let ph = (e - first).rem_euclid(FRAME_S);
+                let off = ph.min(FRAME_S - ph);
+                assert!(off < 100e-6, "{depth} dB: {e} is {off} s off");
+            }
+            let starts: VecDeque<f64> = ends.into_iter().collect();
+            let (s0, _) = fit_frames(&starts).unwrap();
+            let ph = (s0 - first).rem_euclid(FRAME_S);
+            assert!(ph.min(FRAME_S - ph) < 60e-6, "{depth} dB: {ph}");
+        }
+    }
+
+    #[test]
+    fn a_lone_inroute_put_on_the_spectrum() {
+        // The table's one inroute, 6 dB over the noise, 30 kHz off the
+        // middle of a 1.071 MHz VFO it nearly fills.
+        let c = BurstConfig {
+            index: 0,
+            symbol_rate: 832_661.0,
+            slot_ticks: (474.0 / 832_661.0 * 27e6) as u32,
+            modulation: Modulation::Other(1),
+        };
+        let v = hub(&[(0xbf9, 14_108.8e6, c)]);
+        let (bin, start, centre) = (2_000.0, -650_000.0, 30_000.0);
+        let spectrum: Vec<f32> = (0..650)
+            .map(|k| {
+                let f = start + k as f64 * bin;
+                (10.0 * (1.0 + 3.0 * raised_cosine(f - centre, 832_661.0)).log10()) as f32
+            })
+            .collect();
+        let pool = PoolView {
+            spectrum,
+            spectrum_start_hz: start,
+            spectrum_bin_hz: bin,
+            half_band_hz: 535_500.0,
+            ..Default::default()
+        };
+        let (corr, carriers) = map_inroutes(&pool, &v).unwrap();
+        assert!(corr > 0.8, "{corr}");
+        assert_eq!(carriers.len(), 1);
+        assert!(
+            (carriers[0].centre_hz - centre).abs() < 5e3,
+            "{}",
+            carriers[0].centre_hz
+        );
+    }
+    #[test]
+    fn a_big_hubs_inroutes_are_placed_quickly() {
+        // 40 inroutes over 200 MHz of uplink, four of them under a
+        // 3.8 MHz VFO at 10 MS/s (2.44 kHz bins).
+        let c = config(0, 29077);
+        let rows: Vec<(u16, f64, BurstConfig)> = (0..40u16)
+            .map(|k| {
+                (
+                    k,
+                    14_000e6 + f64::from(k) * 5e6 + f64::from(k % 4) * 0.8e6,
+                    c,
+                )
+            })
+            .chain((0..4u16).map(|k| (100 + k, 14_101.3e6 + f64::from(k) * 0.8e6, c)))
+            .collect();
+        let v = hub(&rows);
+        let centres = [-1_200_000.0, -400_000.0, 400_000.0, 1_200_000.0];
+        let (bin, start) = (2_441.4, -1_917_900.0);
+        let spectrum: Vec<f32> = (0..1571)
+            .map(|k| {
+                let f = start + k as f64 * bin;
+                centres
+                    .iter()
+                    .map(|c| 10.0 * raised_cosine(f - c, 665_780.0))
+                    .fold(0.3, f64::max) as f32
+            })
+            .collect();
+        let pool = PoolView {
+            spectrum,
+            spectrum_start_hz: start,
+            spectrum_bin_hz: bin,
+            half_band_hz: 1_917_900.0,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let (corr, carriers) = map_inroutes(&pool, &v).unwrap();
+        let took = t0.elapsed().as_secs_f64();
+        eprintln!("placed in {took:.3} s");
+        // 5.7 s before (release); generous for an unoptimised CI build.
+        assert!(took < 3.0, "{took} s");
+        assert!(corr > 0.9, "{corr}");
+        let ids: Vec<u16> = carriers.iter().map(|c| c.inroute).collect();
+        assert_eq!(ids, [100, 101, 102, 103]);
+        assert!(
+            (carriers[0].centre_hz - centres[0]).abs() < 2e3,
+            "{}",
+            carriers[0].centre_hz
+        );
     }
 }
