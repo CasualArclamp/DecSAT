@@ -4083,8 +4083,17 @@ mod tests {
     #[test]
     fn the_constellation_is_published_for_every_block() {
         // Blocks as the front end hands them, 40 ms apart, to a real worker
-        // thread: nearly every one must reach the status. (Publishing was
-        // once held to five a second, and the panels crawled.)
+        // thread: every one must reach the status. (Publishing was once held
+        // to five a second, and the panels crawled.)
+        //
+        // The status is read once the worker has finished the block, not a
+        // fixed time after handing it over: Identify's analysis holds the
+        // worker for several block times when it runs (longer on a loaded
+        // machine), and a status read on the clock then counted the blocks
+        // waiting behind it as never published. The 40 ms pace is kept from
+        // that reading, not from the offer: after a long block the next
+        // would otherwise follow at once, inside STATUS_EVERY, and rightly
+        // not publish.
         let rs = 62_500.0;
         let x = carrier(&Constellation::qpsk(), 100_000, 8, rs, 40_000.0, 0.0, 12);
         let settings = VfoSettings::new("ID", 38_000.0, 110_000.0, DecoderKind::Identify);
@@ -4092,34 +4101,28 @@ mod tests {
         let mut last = Vec::new();
         let (mut blocks, mut changes) = (0, 0);
         for (k, c) in x.chunks(20_000).enumerate() {
-            let t0 = std::time::Instant::now();
             h.offer(&Arc::new(c.to_vec()), k as f64 * 0.04);
-            // Wait for the worker to finish the block (its guard is let go
-            // after the publish), then keep the 40 ms pace: a slow runner
-            // taking longer than 40 ms over a block must not read as a
-            // block left unpublished.
-            while h.pending.get() > 0 && t0.elapsed() < std::time::Duration::from_secs(2) {
+            // `pending` counts the block from the offer until the worker has
+            // decoded it and published (its guard drops at the end of the
+            // block's arm in `run_loop`).
+            let waited = Instant::now();
+            while h.pending.get() > 0 {
+                assert!(waited.elapsed().as_secs() < 60, "block {k} never finished");
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            if let Some(rest) = std::time::Duration::from_millis(40).checked_sub(t0.elapsed()) {
-                std::thread::sleep(rest);
-            }
             let now = h.status.lock().unwrap().scatter.clone();
-            // Counted once the demodulator has symbols to show.
-            if k >= 10 {
-                blocks += 1;
-                if now != last {
-                    changes += 1;
-                }
+            blocks += 1;
+            if now != last {
+                changes += 1;
             }
             last = now;
+            // The front end's pace: the next block a block time later, so
+            // well past STATUS_EVERY since this one was published.
+            std::thread::sleep(std::time::Duration::from_millis(40));
         }
         h.stop();
-        assert!(blocks >= 20, "{blocks} blocks");
-        assert!(
-            changes * 10 >= blocks * 8,
-            "{changes} of {blocks} blocks published"
-        );
+        assert!(blocks >= 30, "{blocks} blocks");
+        assert_eq!(changes, blocks, "{changes} of {blocks} blocks published");
     }
 
     #[test]
