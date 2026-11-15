@@ -293,6 +293,20 @@ fn telemetry_rows(ui: &mut Ui, b: &BeaconView) {
                     ui.end_row();
                 }
             }
+            if let Some(n) = &b.nav {
+                for (label, text) in n.lines() {
+                    ui.label(label);
+                    ui.colored_label(GOOD, text).on_hover_text(
+                        "Attitude and orbit words in the telemetry, in the layout JCSAT-17 sends: \
+                         quaternions for the Earth's turn, the orbit frame and the body, the \
+                         Sun's direction in the body frame, the velocity, and two timers. \
+                         Position: the point below the satellite, and its orbit's plane. \
+                         Attitude: the body's turn from flying x along the velocity, y to \
+                         the Earth. The speed's unit is inferred.",
+                    );
+                    ui.end_row();
+                }
+            }
             if let Some(c) = &b.counter {
                 ui.label("Counter");
                 let major = match c.modulus {
