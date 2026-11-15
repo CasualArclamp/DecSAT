@@ -61,7 +61,39 @@ pub struct PlsInfo {
     pub payload_len: u32,
     /// XFECFRAME length in symbols: data only, no pilots.
     pub xfecframe_len: u32,
+    /// A NovelSat NS4 frame ([`PlsInfo::parse_ns4`]): `modcod` names the
+    /// modulation and rate in S2's numbering, but the LDPC code is NS4's.
+    pub ns4: bool,
 }
+
+/// NovelSat NS4's PLS codes, as far as they have been seen on a modem:
+/// (the 7-bit code of a normal FECFRAME with pilots off, the DVB-S2 MODCOD
+/// number of the same modulation and rate). All QPSK. A short frame is the
+/// code plus 2 ([`NS4_SHORT`]) and pilots on the code plus 4
+/// ([`NS4_PILOTS`]): pilots were recorded both ways at 1/4 (4, 8) and 1/2
+/// (21, 25), short frames at those two rates (10 and 27, with pilots), the
+/// other rates as normal frames with pilots on only, their other codes
+/// taken to follow. NS4 keeps DVB-S2's SOF, PLS coding and frame layout
+/// but numbers its modes its own way, and nothing is published: each entry
+/// is a mode recorded and decoded.
+///
+/// A short frame's rate goes by DVB-S2's name for a code of its sizes
+/// ("1/4" for what the modem calls 1/5, "1/2" for 4/9), as short frames do
+/// throughout.
+pub const NS4_PLS_CODES: [(u8, u8); 6] = [
+    (4, 1),  // QPSK 1/4
+    (21, 4), // QPSK 1/2
+    (28, 5), // QPSK 3/5
+    (33, 6), // QPSK 2/3
+    (40, 7), // QPSK 3/4
+    (52, 9), // QPSK 5/6
+];
+
+/// What pilots on adds to an NS4 PLS code.
+pub const NS4_PILOTS: u8 = 4;
+
+/// What a short FECFRAME adds to an NS4 PLS code.
+pub const NS4_SHORT: u8 = 2;
 
 impl PlsInfo {
     /// Derive the frame geometry from an 8-bit PLS code.
@@ -96,6 +128,31 @@ impl PlsInfo {
         };
         Self::geometry(plsc, modcod, frame, has_pilots, dummy_frame, n_mod, n_slots)
             .with(None, false)
+    }
+
+    /// The frame a NovelSat NS4 modem announces with a 7-bit PLS code
+    /// ([`NS4_PLS_CODES`]). Code 0 is DVB-S2's dummy frame, which NS4 sends
+    /// unchanged. A code not seen yet is taken as QPSK with pilots and
+    /// marked reserved: nothing tries to decode it.
+    pub fn parse_ns4(plsc: u8) -> Self {
+        if plsc == 0 {
+            return Self::parse(0);
+        }
+        // (DVB-S2 MODCOD, short, pilots) of a known code.
+        let known = NS4_PLS_CODES.iter().find_map(|&(c, m)| {
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .find(|&(short, pilots)| {
+                    c + NS4_SHORT * short as u8 + NS4_PILOTS * pilots as u8 == plsc
+                })
+                .map(|(short, pilots)| (m, short, pilots))
+        });
+        let (modcod, short, pilots) = known.unwrap_or((1, false, true));
+        let mut p = Self::from_fields(modcod, short, pilots);
+        p.plsc = plsc;
+        p.ns4 = true;
+        p.reserved = known.is_none();
+        p
     }
 
     /// An S2X code (EN 302 307-2 §5.5.2.2): a Table 17a MODCOD, a VL-SNR
@@ -179,6 +236,7 @@ impl PlsInfo {
             plframe_len,
             payload_len: plframe_len - SLOT_LEN as u32,
             xfecframe_len,
+            ns4: false,
         }
     }
 
@@ -306,6 +364,8 @@ pub struct PlscDecoder {
     rm: ReedMuller,
     soft: Vec<f32>,
     rot: Vec<Iq>,
+    /// Read the codes as a NovelSat NS4 modem means them.
+    ns4: bool,
 }
 
 impl Default for PlscDecoder {
@@ -320,6 +380,22 @@ impl PlscDecoder {
             rm: ReedMuller::new(PLSC_SCRAMBLER),
             soft: vec![0.0; PLSC_LEN],
             rot: vec![Iq::new(0.0, 0.0); PLSC_LEN],
+            ns4: false,
+        }
+    }
+
+    /// For a NovelSat NS4 carrier: only the codes NS4 is known to send
+    /// (and the dummy frame), read with [`PlsInfo::parse_ns4`].
+    pub fn ns4() -> Self {
+        let codes =
+            std::iter::once(0)
+                .chain(NS4_PLS_CODES.iter().flat_map(|&(c, _)| {
+                    [c, c + NS4_SHORT, c + NS4_PILOTS, c + NS4_SHORT + NS4_PILOTS]
+                }))
+                .collect();
+        PlscDecoder {
+            ns4: true,
+            ..Self::with_expected(codes)
         }
     }
 
@@ -332,6 +408,7 @@ impl PlscDecoder {
             rm: ReedMuller::with_enabled(PLSC_SCRAMBLER, expected),
             soft: vec![0.0; PLSC_LEN],
             rot: vec![Iq::new(0.0, 0.0); PLSC_LEN],
+            ns4: false,
         }
     }
 
@@ -392,7 +469,11 @@ impl PlscDecoder {
                 pick(a.map(|(d, m)| (d, m as f32)), b.map(|(d, m)| (d, m as f32)))
             }
         };
-        PlsInfo::parse(plsc)
+        if self.ns4 {
+            PlsInfo::parse_ns4(plsc)
+        } else {
+            PlsInfo::parse(plsc)
+        }
     }
 }
 
@@ -679,5 +760,38 @@ mod tests {
         let noise = vec![Iq::new(0.01, -0.02); PLSC_LEN + 1];
         let got = dec.decode(&noise, PlscDemap::CoherentSoft);
         assert!(got.plsc == a || got.plsc == b, "got {:#x}", got.plsc);
+    }
+}
+
+#[cfg(test)]
+mod ns4_tests {
+    use super::*;
+
+    #[test]
+    fn ns4_codes_as_recorded_from_a_modem() {
+        // (code, pilots, PLFRAME length): QPSK 1/4 and 1/2 both ways.
+        for (code, pilots, len) in [
+            (4, false, 32_490),
+            (8, true, 33_282),
+            (21, false, 32_490),
+            (25, true, 33_282),
+        ] {
+            let p = PlsInfo::parse_ns4(code);
+            assert!(p.ns4 && !p.reserved && !p.dummy_frame, "{code}");
+            assert_eq!((p.has_pilots, p.plframe_len), (pilots, len), "{code}");
+            // The code as sent stays in `plsc`: the header is rebuilt from it.
+            assert_eq!(p.plsc, code);
+        }
+        // Short frames, with pilots: the modem's 1/5 and 4/9.
+        for code in [10, 27] {
+            let p = PlsInfo::parse_ns4(code);
+            assert!(p.ns4 && !p.reserved && p.short_fecframe && p.has_pilots);
+            assert_eq!(p.plframe_len, 8_370, "{code}");
+        }
+        assert_eq!(PlsInfo::parse_ns4(25).modcod().unwrap().rate.num, 1);
+        assert!(PlsInfo::parse_ns4(0).dummy_frame);
+        assert!(PlsInfo::parse_ns4(99).reserved);
+        // Read as DVB-S2 the same codes mean something else.
+        assert!(!PlsInfo::parse(8).has_pilots);
     }
 }

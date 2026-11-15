@@ -310,10 +310,16 @@ impl FecDecoder {
 fn build_code(pls: PlsInfo) -> Option<Code> {
     let mc = pls.modcod()?;
     let params = FecParams::new(mc.frame, mc.rate)?;
+    // NS4 keeps S2's sizes, mapping and BCH; only the LDPC code is its own.
+    let ldpc = if pls.ns4 {
+        LdpcCode::ns4(params.ns4_ldpc_table()?)
+    } else {
+        LdpcCode::new(params.ldpc_table())
+    };
     Some(Code {
         params,
         mapper: Mapper::for_modcod(&mc)?,
-        ldpc: LdpcDecoder::new(LdpcCode::new(params.ldpc_table())),
+        ldpc: LdpcDecoder::new(ldpc),
         bch: Bch::new(mc.frame, params.t, params.n_bch),
     })
 }
