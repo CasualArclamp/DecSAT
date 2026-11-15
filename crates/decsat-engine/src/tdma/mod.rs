@@ -56,6 +56,7 @@ pub mod inroute_bursts;
 pub mod layout;
 pub mod pool;
 pub mod pool_bursts;
+pub mod rcs2_burst;
 pub mod slots;
 
 use std::collections::VecDeque;
