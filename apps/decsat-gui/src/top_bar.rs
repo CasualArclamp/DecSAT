@@ -1082,7 +1082,7 @@ impl App {
         // The FFT size applies at once, file or radio, with no restart.
         let fft_before = self.opts.fft_size;
         ui.menu_button(format!("FFT size  {}", self.opts.fft_size), |ui| {
-            for n in [1024usize, 2048, 4096, 8192, 16384] {
+            for n in [1024usize, 2048, 4096, 8192, 16384, 32768, 65536] {
                 ui.selectable_value(&mut self.opts.fft_size, n, format!("{n}"));
             }
         });
