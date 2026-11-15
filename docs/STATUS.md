@@ -6458,3 +6458,24 @@ found".
   on an inroute whose modulation byte is not 04h (8PSK) are counted, not
   demodulated: whether this one's bursts are read depends on what its
   configuration says.
+
+## A Return pool beside a big hub never kept up (2026-11-15)
+
+Reported live: a Return pool VFO 3.8 MHz wide (10 MS/s) beside a wide ACM
+GSE outbound sat at "0 carriers · finding the grid…", 42 % CPU, and the
+program was said to hang. No recording.
+
+- **Found:** `inroute_bursts::map_inroutes` slid the hub's whole inroute
+  table along the pool's spectrum in 2 kHz steps, every carrier weighed at
+  every bin. For a hub listing 44 inroutes over 200 MHz (a test, 1571
+  bins) one look took 5.7 s, and a look is taken every 2 s of signal, on
+  the VFO's own thread: the pool's blocks are dropped and it never counts
+  carriers. With 172B's six inroutes the cost never showed.
+- **Fix:** only the carriers reaching into the band shape the comb; coarse
+  steps a sixth of the narrowest carrier's skirt, a finer pass after.
+  0.03 s for the same hub, the same placing.
+- **Not established:** that this is the hang he saw (whether the whole
+  window froze is not known; a VFO's thread running behind does not block
+  the window: blocks are dropped, and deleting a VFO does not wait). The
+  pool alone at this width and rate reads a 3.4 s, 20 MS/s recording in
+  2.1 s.

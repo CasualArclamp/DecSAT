@@ -547,14 +547,20 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         })
         .filter(|(f, _)| f.abs() <= half)
         .collect();
+    // The widest carrier's reach either side of its centre: one further
+    // from the band than this puts nothing in it.
+    let reach = rows.iter().map(|r| r.2.air_rate()).fold(0.0, f64::max);
     let score = |x: f64| -> Option<f64> {
+        if !rows.iter().any(|r| (x + r.1 - base).abs() < half) {
+            return None;
+        }
+        // Only the carriers that reach into the band shape the comb there
+        // (a big hub lists dozens, hundreds of MHz apart).
         let centres: Vec<(f64, f64)> = rows
             .iter()
             .map(|r| (x + r.1 - base, r.2.air_rate()))
+            .filter(|c| c.0.abs() < half + reach)
             .collect();
-        if !centres.iter().any(|c| c.0.abs() < half) {
-            return None;
-        }
         let (mut n, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         for &(f, v) in &bins {
             let t = centres
@@ -571,7 +577,15 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         let d = ((n * sxx - sx * sx) * (n * syy - sy * sy)).sqrt();
         (n > 8.0 && d > 0.0).then(|| (n * sxy - sx * sy) / d)
     };
-    let coarse = pool.spectrum_bin_hz.max(2e3);
+    // Coarse steps a sixth of the narrowest carrier's skirt (the fit's peak
+    // is as wide as a skirt), then a fine pass round the best. (At 2 kHz
+    // steps a 44-inroute hub over 200 MHz took 5.7 s a look, every 2 s of
+    // signal: the pool VFO never kept up.)
+    let narrowest = rows
+        .iter()
+        .map(|r| r.2.air_rate())
+        .fold(f64::INFINITY, f64::min);
+    let coarse = (narrowest * 0.2 / 6.0).max(pool.spectrum_bin_hz).max(2e3);
     let mut best: Option<(f64, f64)> = None;
     let mut x = -half - span;
     while x <= half {
@@ -583,8 +597,8 @@ fn map_inroutes(pool: &PoolView, view: &HubView) -> Option<(f64, Vec<Carrier>)> 
         x += coarse;
     }
     let (mut corr, mut xb) = best?;
-    let fine = coarse / 8.0;
-    for k in -16..=16 {
+    let fine = coarse / 16.0;
+    for k in -24..=24 {
         let x = xb + f64::from(k) * fine;
         if let Some(c) = score(x)
             && c > corr
@@ -1654,6 +1668,55 @@ mod tests {
         assert_eq!(carriers.len(), 1);
         assert!(
             (carriers[0].centre_hz - centre).abs() < 5e3,
+            "{}",
+            carriers[0].centre_hz
+        );
+    }
+    #[test]
+    fn a_big_hubs_inroutes_are_placed_quickly() {
+        // 40 inroutes over 200 MHz of uplink, four of them under a
+        // 3.8 MHz VFO at 10 MS/s (2.44 kHz bins).
+        let c = config(0, 29077);
+        let rows: Vec<(u16, f64, BurstConfig)> = (0..40u16)
+            .map(|k| {
+                (
+                    k,
+                    14_000e6 + f64::from(k) * 5e6 + f64::from(k % 4) * 0.8e6,
+                    c,
+                )
+            })
+            .chain((0..4u16).map(|k| (100 + k, 14_101.3e6 + f64::from(k) * 0.8e6, c)))
+            .collect();
+        let v = hub(&rows);
+        let centres = [-1_200_000.0, -400_000.0, 400_000.0, 1_200_000.0];
+        let (bin, start) = (2_441.4, -1_917_900.0);
+        let spectrum: Vec<f32> = (0..1571)
+            .map(|k| {
+                let f = start + k as f64 * bin;
+                centres
+                    .iter()
+                    .map(|c| 10.0 * raised_cosine(f - c, 665_780.0))
+                    .fold(0.3, f64::max) as f32
+            })
+            .collect();
+        let pool = PoolView {
+            spectrum,
+            spectrum_start_hz: start,
+            spectrum_bin_hz: bin,
+            half_band_hz: 1_917_900.0,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let (corr, carriers) = map_inroutes(&pool, &v).unwrap();
+        let took = t0.elapsed().as_secs_f64();
+        eprintln!("placed in {took:.3} s");
+        // 5.7 s before (release); generous for an unoptimised CI build.
+        assert!(took < 3.0, "{took} s");
+        assert!(corr > 0.9, "{corr}");
+        let ids: Vec<u16> = carriers.iter().map(|c| c.inroute).collect();
+        assert_eq!(ids, [100, 101, 102, 103]);
+        assert!(
+            (carriers[0].centre_hz - centres[0]).abs() < 2e3,
             "{}",
             carriers[0].centre_hz
         );
