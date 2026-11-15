@@ -347,13 +347,27 @@ impl Framer {
             let known = (0..KNOWN_WORDS.len())
                 .filter_map(|i| lock(reading, SyncWord::known(i), false))
                 .max_by_key(|(s, _)| *s);
+            if self.known_only {
+                return known;
+            }
+            let blind = || {
+                let word = blind_word(self.reading(reading))?;
+                lock(reading, word, true)
+            };
+            // Frames found by each: the score is hits times the word's bits.
+            let frames = |(s, l): &(usize, Lock)| s / usize::from(l.word.len).max(1);
             match known {
-                Some(k) => Some(k),
-                None if !self.known_only => {
-                    let word = blind_word(self.reading(reading))?;
-                    lock(reading, word, true)
-                }
-                None => None,
+                None => blind(),
+                // A known word on a few frames, where a word found blind
+                // holds in clearly more of them, is a data word that looked
+                // like a marker for a while (a field of Optus D3's second
+                // stream reads FB90, a bit off IRIG's EB90, for a few frames
+                // at a time): the frames are the blind word's. A known word
+                // in as many frames as any stays the known word.
+                Some(k) => match blind() {
+                    Some(b) if frames(&b) >= 4 && frames(&b) * 3 > frames(&k) * 4 => Some(b),
+                    _ => Some(k),
+                },
             }
         };
         let known_first = |a: &Option<(usize, Lock)>| a.as_ref().is_some_and(|(_, l)| !l.blind);
@@ -603,16 +617,48 @@ fn blind_word(bits: &[u8]) -> Option<SyncWord> {
     {
         best_run = (s, (2 * len - s).min(len));
     }
-    let (s, run) = best_run;
+    let (run_at, run) = best_run;
     if run < 16 || run >= len {
         return None;
     }
     let take = run.min(32);
-    let mut w = 0u64;
-    for k in 0..take {
-        w = (w << 1) | u64::from(constant[(s + k) % len].unwrap_or(0));
+    let word_at = |s: usize| {
+        (0..take).fold(0u64, |w, k| {
+            (w << 1) | u64::from(constant[(s + k) % len].unwrap_or(0))
+        })
+    };
+    // The word is the start of the longest run, unless that is fill:
+    // telemetry with unused words sends runs of zeros longer than any
+    // marker, and a word of (nearly) one value is no sync word. Then, of
+    // every stretch of `take` positions that hold in every frame, the one
+    // whose bits change most often.
+    let changes = |w: u64| ((w ^ (w >> 1)) & ((1u64 << (take - 1)) - 1)).count_ones();
+    const BUSY: u32 = 6;
+    let mut s = run_at;
+    if changes(word_at(s)) < BUSY {
+        let mut held = 0usize;
+        let mut pick: Option<(u32, usize)> = None;
+        for i in 0..len + take {
+            held = if constant[i % len].is_some() {
+                held + 1
+            } else {
+                0
+            };
+            if held >= take && i + 1 - take < len {
+                let at = i + 1 - take;
+                let c = changes(word_at(at));
+                if pick.is_none_or(|(best, _)| c > best) {
+                    pick = Some((c, at));
+                }
+            }
+        }
+        if let Some((c, at)) = pick
+            && c >= BUSY
+        {
+            s = at;
+        }
     }
-    // A word of one value only (a long run of idle fill) is no sync word.
+    let w = word_at(s);
     if w == 0 || w == (1u64 << take) - 1 {
         return None;
     }
@@ -995,6 +1041,91 @@ mod tests {
         );
         assert!(!c.check(&frames[0]) && c.check(&frames[1]));
         assert_eq!(c.describe(64), "sum of bytes 0–62 in byte 63");
+    }
+
+    #[test]
+    fn a_data_word_like_a_marker_does_not_hide_the_frames() {
+        // 600-byte frames with a fixed start that is no known word, and a
+        // data word that reads FB90 (a bit off IRIG's EB90) in three frames
+        // running, then moves on: the frames are found blind, and kept.
+        let frame = |i: u32| {
+            // Telemetry: most words hold from frame to frame, one in five
+            // moves. Top bits clear: nothing fixed here is near a known
+            // word.
+            let mut f: Vec<u8> = (0..600u32)
+                .map(|j| {
+                    let fixed = (j.wrapping_mul(2_654_435_761) >> 13) as u8 & 0x3F;
+                    if j % 5 == 3 {
+                        fixed ^ (i * 29 + j) as u8
+                    } else {
+                        fixed
+                    }
+                })
+                .collect();
+            f[..6].copy_from_slice(&[0x34, 0xC5, 0x37, 0x60, 0x36, 0x78]);
+            let field: [u8; 2] = if (5..8).contains(&(i % 12)) {
+                [0xFB, 0x90]
+            } else {
+                [0x3A, (i * 37) as u8]
+            };
+            f[300..302].copy_from_slice(&field);
+            f
+        };
+        let mut fr = Framer::new();
+        let mut out = Vec::new();
+        for i in 0..40 {
+            let bits: Vec<u8> = frame(i)
+                .iter()
+                .flat_map(|b| (0..8).map(move |k| (b >> (7 - k)) & 1))
+                .collect();
+            for c in bits.chunks(480) {
+                fr.push(c, &mut out);
+            }
+        }
+        let l = fr.lock().expect("locked");
+        assert!(l.blind, "on the frames' own start, not on {:?}", l.word);
+        assert_eq!(l.frame_bits, 4800);
+        let good = out.iter().filter(|f| f.sync_errors.is_some()).count();
+        assert!(good >= 25, "{good} frames with their word");
+        assert!(fr.stats.losses <= 1, "{} losses", fr.stats.losses);
+    }
+
+    #[test]
+    fn the_blind_word_is_not_taken_from_a_run_of_fill() {
+        // Telemetry whose longest fixed stretch is 30 bytes of zeros
+        // (unused words): the word is taken from a fixed stretch that
+        // changes value, not from the zeros (which, all one value, gave no
+        // word at all: Optus D3's second stream never framed).
+        let frame = |i: u32| {
+            let mut f: Vec<u8> = (0..300u32)
+                .map(|j| {
+                    let fixed = (j.wrapping_mul(2_246_822_519) >> 11) as u8;
+                    if j % 5 == 3 {
+                        fixed ^ (i * 53 + j) as u8
+                    } else {
+                        fixed
+                    }
+                })
+                .collect();
+            f[100..130].fill(0);
+            f
+        };
+        let mut fr = Framer::new();
+        let mut out = Vec::new();
+        for i in 0..24 {
+            let bits: Vec<u8> = frame(i)
+                .iter()
+                .flat_map(|b| (0..8).map(move |k| (b >> (7 - k)) & 1))
+                .collect();
+            fr.push(&bits, &mut out);
+        }
+        let l = fr.lock().expect("locked");
+        assert_eq!(l.frame_bits, 2400);
+        if l.blind {
+            let ones = l.word.bits.count_ones();
+            assert!((8..=24).contains(&ones), "{:08X}", l.word.bits);
+        }
+        assert!(out.len() >= 15, "{} frames", out.len());
     }
 
     #[test]
