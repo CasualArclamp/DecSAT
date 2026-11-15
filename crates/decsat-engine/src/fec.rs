@@ -1247,6 +1247,8 @@ pub struct GseView {
     /// A hub's inroute signalling in the non-IP PDUs (its burst plans for a
     /// return pool), once any is read; refreshed twice a second of signal.
     pub hub: Option<Arc<decsat_gse::inroute::HubView>>,
+    /// DVB-RCS2 signalling in the non-IP PDUs, once any is read.
+    pub rcs2: Option<Arc<decsat_ts::rcs2::Rcs2View>>,
     pub packets: u64,
     pub bytes: u64,
     pub ipv4: u64,
@@ -1730,6 +1732,10 @@ struct IpStage {
     hub_view: Option<Arc<decsat_gse::inroute::HubView>>,
     hub_view_new: bool,
     hub_since: f64,
+    /// DVB-RCS2 signalling in GSE (protocol types 0081h, 0082h), and its
+    /// view as of the last half second.
+    rcs2: decsat_ts::rcs2::Rcs2Rx,
+    rcs2_view: Option<Arc<decsat_ts::rcs2::Rcs2View>>,
 }
 
 impl IpStage {
@@ -1770,6 +1776,8 @@ impl IpStage {
             hub_view: None,
             hub_view_new: false,
             hub_since: 0.0,
+            rcs2: decsat_ts::rcs2::Rcs2Rx::new(),
+            rcs2_view: None,
             gse: BTreeMap::new(),
             hem: BTreeMap::new(),
             hem_buf: Vec::new(),
@@ -1976,7 +1984,9 @@ impl IpStage {
             return;
         };
         for p in g.take_others() {
-            self.hub.pdu(p.protocol, &p.data);
+            if !self.rcs2.gse(p.protocol, &p.data) {
+                self.hub.pdu(p.protocol, &p.data);
+            }
         }
     }
 
@@ -2167,10 +2177,16 @@ impl IpStage {
         self.mcast.tick(secs);
         self.clock += secs;
         self.hub_since += secs;
-        if self.hub_since >= 0.5 && self.hub.active() {
+        self.rcs2.tick(secs);
+        if self.hub_since >= 0.5 {
             self.hub_since = 0.0;
-            self.hub_view = Some(Arc::new(self.hub.view()));
-            self.hub_view_new = true;
+            if self.hub.active() {
+                self.hub_view = Some(Arc::new(self.hub.view()));
+                self.hub_view_new = true;
+            }
+            if self.rcs2.active() {
+                self.rcs2_view = Some(Arc::new(self.rcs2.view()));
+            }
         }
         self.udp_ts.tick(secs);
         if let Some((_, stage)) = &mut self.watch {
@@ -2251,6 +2267,7 @@ impl IpStage {
             other_encrypted: main.is_some_and(GseIp::other_encrypted),
             trailers: self.gse.values().map(GseIp::trailers).sum(),
             hub: self.hub_view.clone(),
+            rcs2: self.rcs2_view.clone(),
             terminals: self.terminals.clone(),
             labels: self.labels,
             hem,

@@ -4358,6 +4358,142 @@ fn rcs_card(ui: &mut Ui, r: &decsat_ts::rcs::RcsView, id: VfoId) {
     if let Some(p) = &r.plan {
         plan_section(ui, p, id);
     }
+    if let Some(r2) = &r.rcs2 {
+        rcs2_section(ui, r2, id);
+    }
+}
+
+const RCS2_TIP: &str = "DVB-RCS2's own return-link tables (EN 301 545-2 §6.4), in the      transport stream's sections or in GSE (protocol type 0082h). A frame type (FCT2) is a      grid of bandwidth-time units on one or more unit carriers, cut into timeslots; a      transmission type (BCT) is one burst: modulation, turbo code, payload, its known      symbols; the burst time plan (TBTP2) walks a frame's timeslots naming who sends in      each. With the superframes (SCT) the plan's bursts are put on the air: uplink      frequency and time from the superframe's start.";
+
+/// DVB-RCS2's frame types, transmission types and burst time plans.
+fn rcs2_section(ui: &mut Ui, r: &decsat_ts::rcs2::Rcs2View, id: VfoId) {
+    use decsat_ts::rcs2::{content_name, context_name, format_class_name};
+    ui.add_space(6.0);
+    ui.label(RichText::new("DVB-RCS2 return link").strong())
+        .on_hover_text(RCS2_TIP);
+    let small = |ui: &mut Ui, t: String| {
+        ui.label(RichText::new(t).small());
+    };
+    if let Some(n) = r.network_id {
+        small(ui, format!("interactive network {n} (from the GSE tables)"));
+    }
+    if r.ncr_packets > 0 {
+        small(
+            ui,
+            format!(
+                "NCR in GSE: {} packets{}",
+                r.ncr_packets,
+                r.ncr_interval_s
+                    .map_or(String::new(), |s| format!(", every {:.1} ms", s * 1e3))
+            ),
+        );
+    }
+    for sf in &r.superframes {
+        small(
+            ui,
+            format!(
+                "superframe {} · {} (uplink) · {:.2} ms · {} frames",
+                sf.id,
+                rcs_freq(sf.centre_hz),
+                sf.duration_s * 1e3,
+                sf.frames.len()
+            ),
+        );
+    }
+    for f in &r.frame_types {
+        small(
+            ui,
+            format!(
+                "frame type {} · {:.2} ms · {} · {} BTUs of {:.3} ms on {} carrier{} of {:.1} kHz,                  {:.1} kBd · {} sections",
+                f.id,
+                f.duration_s * 1e3,
+                format_class_name(f.format_class),
+                f.time_units,
+                f.btu_s * 1e3,
+                f.grids_hz.len(),
+                if f.grids_hz.len() == 1 { "" } else { "s" },
+                f.btu_bandwidth_hz / 1e3,
+                f.btu_symbol_rate / 1e3,
+                f.sections.len()
+            ),
+        );
+    }
+    for t in &r.tx_types {
+        small(
+            ui,
+            format!(
+                "tx type {} · {} · {}{}",
+                t.id,
+                content_name(t.content),
+                t.describe(),
+                t.block_btus
+                    .map_or(String::new(), |b| format!(" · {b} BTUs"))
+            ),
+        );
+    }
+    if r.plans > 0 {
+        let contexts: Vec<String> = r
+            .contexts
+            .iter()
+            .map(|(c, n)| format!("{} {n}", context_name(*c)))
+            .collect();
+        ui.label(format!(
+            "{} burst time plans · {} timeslots to {} terminals, {} random access{}",
+            r.plans,
+            r.assigned,
+            r.terminals,
+            r.random_access_slots,
+            if r.unplaced > 0 {
+                format!(" · {} not placed (tables missing)", r.unplaced)
+            } else {
+                String::new()
+            }
+        ))
+        .on_hover_text(format!("By assignment context: {}", contexts.join(", ")));
+    }
+    if !r.bursts.is_empty() {
+        egui::CollapsingHeader::new(
+            RichText::new(format!("Latest plan's bursts ({})", r.bursts.len()))
+                .small()
+                .strong(),
+        )
+        .id_salt(("rcs2_bursts", id))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("rcs2_burst_rows", id))
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    egui::Grid::new(("rcs2_burst_grid", id))
+                        .num_columns(5)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for h in ["who", "tx type", "uplink", "start", "length"] {
+                                ui.label(RichText::new(h).small().weak());
+                            }
+                            ui.end_row();
+                            for b in &r.bursts {
+                                ui.label(
+                                    RichText::new(if b.random_access {
+                                        format!("RA {:X}h", b.id)
+                                    } else {
+                                        format!("{:X}h", b.id)
+                                    })
+                                    .small(),
+                                );
+                                ui.label(RichText::new(b.tx_type.to_string()).small());
+                                ui.label(RichText::new(rcs_freq(b.centre_hz)).small());
+                                ui.label(
+                                    RichText::new(format!("{:.3} ms", b.start_s * 1e3)).small(),
+                                );
+                                ui.label(
+                                    RichText::new(format!("{:.3} ms", b.duration_s * 1e3)).small(),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    }
 }
 
 const PLAN_TIP: &str = "A Newtec hub's own burst plan (private table D1h, read from a \
@@ -5214,6 +5350,9 @@ fn gse_card(ui: &mut Ui, g: &GseView, id: VfoId, actions: &mut Vec<Action>) {
     }
     if let Some(h) = &g.hub {
         hub_section(ui, h, id);
+    }
+    if let Some(r2) = &g.rcs2 {
+        rcs2_section(ui, r2, id);
     }
     if g.labels >= 2 {
         terminals_section(ui, g);

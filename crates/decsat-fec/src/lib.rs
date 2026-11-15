@@ -14,6 +14,7 @@ pub mod apsk_tables;
 pub mod bch;
 pub mod constellation;
 pub mod demap;
+pub mod duobinary;
 pub mod ldpc;
 pub mod params;
 pub mod vlsnr;
