@@ -89,7 +89,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 860.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_title("DecSAT")
+            .with_title(concat!("DecSAT v", env!("CARGO_PKG_VERSION")))
             .with_drag_and_drop(true),
         ..Default::default()
     };
