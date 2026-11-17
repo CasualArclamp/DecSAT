@@ -39,6 +39,23 @@ ForwardBearerCodeRateParam AVP from block 0's payload (byte 3, clause 5.7.16)
 when present, else the UW's level (the spec's default), then a learned trial
 order. A wrong-level trial runs 4 iterations, a near miss is finished.
 
+## Payload to packets
+
+The session writes the accepted blocks' bytes (`…_payload.bin`) and a raw-IP
+pcap (`…_ipv4.pcap`). Packets come from two places: `layers/pcap.rs` carves
+any IPv4 packet whose header lies contiguous (header checksum must pass), and
+`layers/segments.rs` rebuilds packets the link layer cut into segments, whose
+header is broken up by other traffic. The segment format there (connection id,
+length, sequence number, first/middle/last flags, CRC-16/X.25 per segment) was
+worked out from a real recording, not the spec text; a packet is kept only if
+every segment's CRC passes, the sequence numbers run without a gap, and the
+result has the declared length and a valid IP header. On a 23-minute recording
+it added 157 packets to the 395 carved. To redo an old recording:
+
+```bash
+cargo run --release -p decsat-bgan --example bgan_pcap -- X_payload.bin X_full.pcap
+```
+
 ## Real time
 
 Decoding is about 15–20 % of one core's worth of real time at 12 dB Es/N0

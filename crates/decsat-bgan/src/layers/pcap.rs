@@ -49,6 +49,11 @@ impl CarveOpts {
             protocols,
         }
     }
+
+    /// Is IP protocol number `proto` on the list?
+    pub fn accepts(&self, proto: u8) -> bool {
+        self.protocols[proto as usize]
+    }
 }
 
 impl Default for CarveOpts {

@@ -369,6 +369,15 @@ fn streaming_equals_one_shot() {
     assert_eq!(t.terminals(), terminals::terminals(&blob), "terminals");
     assert_eq!(t.nat_pairs(), terminals::nat_pairs(&blob), "nat");
 
+    let mut s = segments::SegmentReassembler::default();
+    let mut sg = Vec::new();
+    for c in blob.chunks(chunk) {
+        sg.extend(s.push(c));
+    }
+    sg.extend(s.finish());
+    assert_eq!(sg, segments::reassemble(&blob), "segments");
+    println!("{} packets rebuilt from segments", sg.len());
+
     let mut s = beams::BeamScanner::new();
     let mut r = Vec::new();
     for c in blob.chunks(chunk) {

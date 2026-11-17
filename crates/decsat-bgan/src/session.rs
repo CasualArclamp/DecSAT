@@ -5,7 +5,8 @@
 use crate::frame::C32;
 use crate::layers::files::FileScanner;
 use crate::layers::findings::{FindingsScanner, HostTally};
-use crate::layers::pcap::{DLT_RAW, Ipv4Carver, PcapWriter};
+use crate::layers::pcap::{CarvedPacket, DLT_RAW, Ipv4Carver, PcapWriter};
+use crate::layers::segments::SegmentReassembler;
 use crate::layers::sip::SipScanner;
 use crate::rx::{BganRx, RxStatus};
 use std::fs::File;
@@ -45,6 +46,8 @@ struct Layers {
     findings: Option<FindingsScanner>,
     files: Option<FileScanner>,
     carver: Option<Ipv4Carver>,
+    /// Packets split across segments, which the carver cannot see.
+    segments: Option<SegmentReassembler>,
     sip: Option<SipScanner>,
     tally: Option<HostTally>,
     n_findings: u64,
@@ -89,6 +92,7 @@ impl BganSession {
                 findings: Some(FindingsScanner::new()),
                 files: Some(FileScanner::new()),
                 carver: Some(Ipv4Carver::default()),
+                segments: Some(SegmentReassembler::default()),
                 sip: Some(SipScanner::new()),
                 tally: Some(HostTally::new()),
                 ..Default::default()
@@ -108,9 +112,9 @@ impl BganSession {
         }
     }
 
-    /// The IPv4 packets carved since the last call, oldest first. The
-    /// carve is checksum-gated and not a demux (see `layers::pcap`), so
-    /// packets split across FEC blocks or lost with a failed block are
+    /// The IPv4 packets found since the last call: carved ones (see
+    /// `layers::pcap`) and ones rebuilt from link-layer segments (see
+    /// `layers::segments`). Packets with a segment lost in a failed block are
     /// missing.
     pub fn take_live(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.live_out)
@@ -135,6 +139,11 @@ impl BganSession {
     pub fn set_recording(&mut self, on: bool, dir: &Path, tag: &str) {
         if on && !self.record {
             self.open_failed = false;
+        }
+        if !on && self.record {
+            // the last packets are still waiting for look-ahead that this
+            // recording will never get: decide them and write them first
+            self.flush_packets();
         }
         self.record = on;
         self.record_dir = dir.to_path_buf();
@@ -194,8 +203,38 @@ impl BganSession {
         let mut carved = Vec::new();
         if let Some(c) = l.carver.as_mut() {
             carved = c.push(bytes);
-            l.n_packets += carved.len() as u64;
         }
+        // never the same packet twice: the reassembler only reports packets
+        // of two or more segments, whose headers the carver cannot find
+        if let Some(s) = l.segments.as_mut() {
+            carved.extend(s.push(bytes));
+        }
+        self.emit_packets(carved);
+    }
+
+    /// Decide what the packet scanners are still holding back (positions
+    /// waiting for look-ahead, as if the stream ended here), hand it on, and
+    /// start fresh scanners: decoding goes on after a recording stops. A
+    /// packet that straddles this point is lost; it would be cut short in the
+    /// recording's payload file too.
+    fn flush_packets(&mut self) {
+        let l = &mut self.layers;
+        let mut carved = Vec::new();
+        // `take` swaps a fresh (default) scanner in and hands back the old
+        // one, which `finish` then empties
+        if let Some(c) = l.carver.as_mut() {
+            carved = std::mem::take(c).finish();
+        }
+        if let Some(s) = l.segments.as_mut() {
+            carved.extend(std::mem::take(s).finish());
+        }
+        self.emit_packets(carved);
+    }
+
+    /// Count packets, give them to a live Wireshark and write them to the
+    /// recording's pcap.
+    fn emit_packets(&mut self, carved: Vec<CarvedPacket>) {
+        self.layers.n_packets += carved.len() as u64;
         if self.live {
             self.live_out.extend(carved.iter().map(|p| p.data.clone()));
         }
@@ -288,6 +327,9 @@ impl BganSession {
 
 impl Drop for BganSession {
     fn drop(&mut self) {
+        if self.record {
+            self.flush_packets();
+        }
         if let Some((_, w, _)) = &mut self.payload {
             let _ = w.flush();
         }
@@ -342,5 +384,98 @@ mod tests {
         let mut off = BganSession::new(192_000.0);
         off.feed_layers(&stream);
         assert!(off.take_live().is_empty());
+    }
+
+    /// A packet the link layer split into segments comes out of the session
+    /// alongside a carved one, each once, in any chunking.
+    #[test]
+    fn split_packets_reach_the_live_feed() {
+        use crate::layers::segments::tests::{seg, split};
+        let plain = packet(50);
+        let cut = packet(120);
+        let parts = split([0x57, 0xc7], 3, 1, &cut, &[10, 80]);
+        let mut stream = vec![0u8; 11];
+        stream.extend(&parts[0]);
+        stream.extend(seg([0x55, 0xbc], 0, &[])); // an acknowledgement between
+        stream.extend(&plain);
+        stream.extend(&parts[1]);
+        stream.extend([0u8; 30]);
+        stream.extend(&parts[2]);
+        // like the carver, the reassembler decides a position only once the
+        // longest segment that could start there has arrived (260 octets), and
+        // the session never calls `finish`: in a live stream the next blocks
+        // supply that look-ahead
+        stream.extend([0u8; 260]);
+
+        for chunk in [1usize, 13, 64, stream.len()] {
+            let mut s = BganSession::new(192_000.0);
+            s.set_live(true);
+            let mut got = Vec::new();
+            for c in stream.chunks(chunk) {
+                s.feed_layers(c);
+                got.extend(s.take_live());
+            }
+            got.sort();
+            let mut want = vec![plain.clone(), cut.clone()];
+            want.sort();
+            assert_eq!(got, want, "chunk {chunk}");
+            assert_eq!(s.layers.n_packets, 2, "chunk {chunk}");
+        }
+    }
+
+    /// The records of a raw pcap file: 24-octet file header, then a 16-octet
+    /// header per record with its length at octets 8..12.
+    fn pcap_records(path: &std::path::Path) -> Vec<Vec<u8>> {
+        let b = std::fs::read(path).unwrap();
+        let mut out = Vec::new();
+        let mut i = 24;
+        while i + 16 <= b.len() {
+            let n = u32::from_le_bytes(b[i + 8..i + 12].try_into().unwrap()) as usize;
+            out.push(b[i + 16..i + 16 + n].to_vec());
+            i += 16 + n;
+        }
+        out
+    }
+
+    /// Stopping a recording writes the packets still waiting for look-ahead,
+    /// and the session keeps decoding afterwards.
+    #[test]
+    fn stopping_a_recording_flushes_held_packets() {
+        use crate::layers::segments::tests::split;
+        let plain = packet(50);
+        let cut = packet(120);
+        let parts = split([0x57, 0xc7], 3, 1, &cut, &[10, 80]);
+        let mut stream = vec![0u8; 11];
+        stream.extend(&plain);
+        stream.extend(parts.concat());
+        stream.extend([0u8; 9]); // too little look-ahead: `cut` is held back
+
+        let dir = std::env::temp_dir().join(format!("decsat-bgan-flush-{}", std::process::id()));
+        let mut s = BganSession::new(192_000.0);
+        s.set_live(true);
+        s.set_recording(true, &dir, "t");
+        s.feed_layers(&stream);
+        assert_eq!(
+            s.take_live(),
+            vec![plain.clone()],
+            "held back before the stop"
+        );
+        s.set_recording(false, &dir, "t");
+        assert_eq!(s.take_live(), vec![cut.clone()], "released by the stop");
+
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(pcap_records(&files[0]), vec![plain.clone(), cut]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // fresh scanners: later packets still come through
+        let mut more = vec![0u8; 5];
+        more.extend(packet(30));
+        more.extend([0u8; 9]);
+        s.feed_layers(&more);
+        assert_eq!(s.take_live(), vec![packet(30)]);
     }
 }

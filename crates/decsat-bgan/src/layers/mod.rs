@@ -10,6 +10,7 @@ pub mod pcap;
 #[cfg(test)]
 mod realdata;
 pub mod rtp;
+pub mod segments;
 pub mod sip;
 pub mod stream;
 pub mod terminals;
