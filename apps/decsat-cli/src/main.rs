@@ -236,6 +236,11 @@ enum Command {
         /// Always 16-bit IQ, even when the firmware (Tezuka) offers 8-bit.
         #[arg(long)]
         pluto_16bit: bool,
+        /// Divide a live radio's sample rate by 2, 4, 8, 16, 32 or 64 (a
+        /// half-band filter cascade) before anything else: for a carrier
+        /// much narrower than the radio's lowest rate. Any live source.
+        #[arg(long, default_value_t = 1, value_parser = decimation)]
+        decimate: u32,
         /// While a PCAP records (--out with an IP decoder), start a new
         /// file every this many minutes; each closed part is whole, for
         /// tools that read finished captures (BruteShark, NetworkMiner).
@@ -324,6 +329,14 @@ enum Command {
         #[arg(long, value_name = "OFFSET_HZ:BW_HZ[:ip]", allow_hyphen_values = true)]
         plan_from: Option<String>,
     },
+}
+
+/// `--decimate`: one of the factors `decsat_io::Decimate` offers.
+fn decimation(s: &str) -> std::result::Result<u32, String> {
+    s.parse()
+        .ok()
+        .filter(|d| decsat_io::DECIMATIONS.contains(d))
+        .ok_or_else(|| "1, 2, 4, 8, 16, 32 or 64".to_string())
 }
 
 fn parse_format(s: &str) -> std::result::Result<SampleFormat, String> {
@@ -456,6 +469,7 @@ fn main() -> Result<()> {
             pluto_uri,
             pluto_gain,
             pluto_16bit,
+            decimate,
             pcap_rotate,
             seconds,
             record_on_activity,
@@ -507,6 +521,7 @@ fn main() -> Result<()> {
                 pluto_uri,
                 pluto_gain,
                 pluto_16bit,
+                decimate,
                 seconds,
                 record_on_activity,
                 format,

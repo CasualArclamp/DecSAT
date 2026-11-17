@@ -7,6 +7,7 @@
 //! ([`net`]: SDR++'s IQ Exporter, GNU Radio, rtl_tcp). Recording goes out
 //! through [`IqFileWriter`].
 
+pub mod decimate;
 pub mod file;
 pub mod net;
 #[cfg(feature = "pluto")]
@@ -37,6 +38,7 @@ pub mod airspy;
 #[cfg(feature = "sdrplay")]
 pub mod sdrplay;
 
+pub use decimate::{DECIMATIONS, Decimate, snap_decimation};
 pub use file::{IqFileReader, IqFileWriter, format_from_path};
 pub use net::{NetIqControl, NetIqSettings, NetIqSource, NetMode, NetSample};
 pub use wav::{CaptureInfo, WavIq, probe_capture};

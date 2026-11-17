@@ -97,6 +97,8 @@ pub struct Options {
     pub radio_panel: bool,
     /// Tick the radio's bias tee (antenna-port power) for this run.
     pub bias_tee: bool,
+    /// Divide the live radio's rate by this for the run (2, 4 … 64).
+    pub decimate: Option<u32>,
     /// Open the survey and start it once the carriers are found.
     pub survey: bool,
     /// Open the Ku-band beacon list.
@@ -234,6 +236,14 @@ impl Options {
                 Some("--tx-panel") => o.tx_panel = true,
                 Some("--radio-panel") => o.radio_panel = true,
                 Some("--bias-tee") => o.bias_tee = true,
+                Some("--decimate") => {
+                    let v = args.next().ok_or("--decimate needs a factor")?;
+                    o.decimate = Some(
+                        v.to_str()
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("--decimate: 1, 2, 4 … 64")?,
+                    );
+                }
                 Some("--beacons") => o.beacons = true,
                 Some("--survey") => o.survey = true,
                 Some("--select") => {

@@ -63,6 +63,8 @@ pub struct DecodeArgs {
     pub pluto_gain: String,
     #[cfg_attr(not(feature = "pluto"), allow(dead_code))]
     pub pluto_16bit: bool,
+    /// Divide a live source's rate by this (1 = as it comes).
+    pub decimate: u32,
     /// Stop after this long.
     pub seconds: Option<f64>,
     /// fastlink: record while a TDM channel is active.
@@ -370,6 +372,15 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 "give a capture, --hackrf / --fobos / --airspy / --sdrplay / --pluto <MHz> or --net tcp://HOST:PORT"
             ),
         }
+    };
+    // Decimation, for any live source: everything after sees the lower rate.
+    let (source, rate) = if a.decimate > 1 && source.is_live() {
+        let src = decsat_io::Decimate::wrap(source, a.decimate);
+        let rate = src.sample_rate();
+        println!("decimated {}× to {:.4} MS/s", a.decimate, rate / 1e6);
+        (src, rate)
+    } else {
+        (source, rate)
     };
 
     // Real time by default: a VFO that falls behind drops blocks, and a
