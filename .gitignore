@@ -18,3 +18,5 @@
 *.cs16
 *.cf32
 /target_bgan*
+# Notes for Claude Code sessions: local only
+CLAUDE.md
