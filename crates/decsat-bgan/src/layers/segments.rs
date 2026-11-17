@@ -32,6 +32,8 @@
 //!
 //! Only SDUs of two or more segments are reported, so the output never repeats
 //! a packet the carver already found (a whole SDU's header is contiguous).
+//! When the cut falls after the IP header the header checksum holds, but the
+//! carver checks [`starts_split_packet`] and leaves such a packet alone.
 //! Connections that do not carry IP use the same segments with other body
 //! layouts; those fail the length or IPv4 checks and are dropped.
 
@@ -46,6 +48,32 @@ use super::stream::Rolling;
 pub const SEG_OVERHEAD: usize = 5;
 /// An acknowledgement: header and FCS only.
 const ACK_LEN: usize = 7;
+
+/// Octets before the packet in a first segment: the 5-octet header, the
+/// control octet and the 2-octet total length.
+pub const FIRST_PREFIX: usize = SEG_OVERHEAD + 3;
+
+/// Does the IPv4 packet of `total` octets that seems to start at `b[i]` in
+/// fact start a first segment that ends inside it? Then the bytes after that
+/// segment are link-layer framing and other segments, not the rest of the
+/// packet, and [`super::pcap`]'s carver must leave it to the reassembler.
+/// It happens when the cut falls after the IP header, so the header checksum
+/// holds (an SMTP reply cut after 56 octets, its next segment straight after,
+/// was carved with the segment's FCS and the next one's header in it).
+pub(crate) fn starts_split_packet(b: &[u8], i: usize, total: usize) -> bool {
+    let Some(s) = i.checked_sub(FIRST_PREFIX) else {
+        return false;
+    };
+    let seg_len = b[s + 2] as usize + SEG_OVERHEAD;
+    let ctr = b[s + SEG_OVERHEAD];
+    b[s] != 0
+        && ctr & 3 == 0b01
+        && u16::from_be_bytes([b[s + 6], b[s + 7]]) as usize == total
+        // the segment ends before the packet does (and so lies within `b`)
+        && s + seg_len < i + total
+        && i + total <= b.len()
+        && crc_ok(&b[s..s + seg_len])
+}
 
 /// One CRC-valid segment, by its parts.
 #[derive(Debug, Clone, Copy)]
@@ -400,8 +428,11 @@ pub(crate) mod tests {
     #[test]
     fn rebuilds_split_packets() {
         let (blob, a, b) = sample();
-        // the carver sees the whole SDU only
-        assert_eq!(carve_ipv4(&blob).len(), 1);
+        // the carver sees the whole SDU only (not `b`, whose header is whole
+        // in its first segment)
+        let carved = carve_ipv4(&blob);
+        assert_eq!(carved.len(), 1);
+        assert_eq!(carved[0].1, ipv4(6, &[1; 20]));
         let got = reassemble(&blob);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].data, a);
@@ -422,6 +453,34 @@ pub(crate) mod tests {
             got.extend(r.finish());
             assert_eq!(got, one, "chunk {chunk}");
         }
+    }
+
+    /// The real case: an SMTP reply cut after 56 octets (the whole IP and
+    /// TCP header in the first segment), the last segment straight after.
+    /// The header checksum holds, but the carver must not take the packet:
+    /// its bytes would include the FCS and the next segment's header.
+    #[test]
+    fn carver_skips_a_packet_cut_after_its_header() {
+        let p = ipv4(6, &[b'x'; 228]);
+        let parts = split([0x5b, 0xf4], 0xd9, 9, &p, &[56]);
+        let mut blob = vec![0u8; 20];
+        blob.extend(parts.concat());
+        blob.extend([0u8; 300]);
+        assert!(carve_ipv4(&blob).is_empty());
+        for chunk in [1usize, 7, 64, blob.len()] {
+            let mut cv = super::super::pcap::Ipv4Carver::default();
+            let mut got: Vec<_> = blob.chunks(chunk).flat_map(|c| cv.push(c)).collect();
+            got.extend(cv.finish());
+            assert!(got.is_empty(), "chunk {chunk}");
+        }
+        let got = reassemble(&blob);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].data, p);
+        // a whole SDU of the same packet is still the carver's
+        let mut body = vec![ctr(9, 0b11), 0];
+        body.extend_from_slice(&p);
+        let one = seg([0x5b, 0xf4], 1, &body[..]);
+        assert_eq!(carve_ipv4(&one).len(), 1);
     }
 
     #[test]

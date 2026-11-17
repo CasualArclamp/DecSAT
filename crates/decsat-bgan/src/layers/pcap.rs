@@ -8,12 +8,15 @@
 //! its **header checksum is valid** (RFC 791 one's-complement sum, a 16-bit
 //! constraint), together with version, IHL, length and protocol checks. It is a
 //! carve, not a demux: packets split across FEC blocks or landing in blocks
-//! that failed are lost.
+//! that failed are lost. A packet whose header opens a link-layer first
+//! segment that ends inside the packet is skipped, since the bytes after the
+//! segment are not its own; [`super::segments`] rebuilds those.
 //!
 //! [`Ipv4Carver`] does the same incrementally on a growing byte stream.
 
 use std::io::{self, Write};
 
+use super::segments::{FIRST_PREFIX, starts_split_packet};
 use super::stream::Rolling;
 
 pub const PCAP_MAGIC: u32 = 0xA1B2C3D4;
@@ -116,6 +119,11 @@ fn candidate(b: &[u8], i: usize, o: &CarveOpts, fin: bool) -> Cand {
         return Cand::No;
     }
     if !ipv4_checksum_ok(&b[i..i + ihl]) {
+        return Cand::No;
+    }
+    // A packet the link layer cut after its header: the bytes that follow
+    // are not all its own. `segments` rebuilds it.
+    if starts_split_packet(b, i, total) {
         return Cand::No;
     }
     Cand::Yes(total)
@@ -227,7 +235,9 @@ impl Ipv4Carver {
             })
             .collect();
         self.cur = base + i;
-        self.win.trim_before(self.cur);
+        // keep the octets a first segment's header puts before a packet:
+        // `starts_split_packet` looks back at them
+        self.win.trim_before(self.cur.saturating_sub(FIRST_PREFIX));
         out
     }
 }
@@ -248,10 +258,14 @@ impl<W: Write> PcapWriter<W> {
         Ok(PcapWriter { w, count: 0 })
     }
 
-    /// Append one record with timestamp `ts` seconds.
+    /// Append one record with timestamp `ts` seconds. Header and data go
+    /// out in one write, so a buffered writer never flushes between them: a
+    /// file cut off early ends on a record boundary.
     pub fn write_record(&mut self, ts: f64, data: &[u8]) -> io::Result<()> {
-        self.w.write_all(&record_header(ts, data.len()))?;
-        self.w.write_all(data)?;
+        let mut rec = Vec::with_capacity(16 + data.len());
+        rec.extend_from_slice(&record_header(ts, data.len()));
+        rec.extend_from_slice(data);
+        self.w.write_all(&rec)?;
         self.count += 1;
         Ok(())
     }

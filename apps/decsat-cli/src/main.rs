@@ -735,7 +735,8 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
         }
     }
     // Every decoder through all it was given, before the reports.
-    if !decode::wait_settled(&eng, decode::SETTLE_CAP) {
+    let settled = decode::wait_settled(&eng, decode::SETTLE_CAP);
+    if !settled {
         println!(
             "(stopped waiting after {} s: the decoders are still {} blocks or frames behind)",
             decode::SETTLE_CAP.as_secs(),
@@ -758,8 +759,7 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
             None => println!("no status from the VFO"),
         }
     }
-    // Whatever is still queued is not wanted now: leave at once.
-    eng.discard_vfos();
+    decode::close_or_discard(&eng, settled);
     Ok(())
 }
 
