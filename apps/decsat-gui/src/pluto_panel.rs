@@ -190,6 +190,12 @@ impl App {
                             }
                         });
                 });
+                crate::decimation::row(
+                    ui,
+                    &mut self.decimation,
+                    self.pluto_control.is_some(),
+                    self.pluto_settings.rate,
+                );
                 ui.horizontal(|ui| {
                     ui.label("RF bandwidth MHz");
                     let mut bw = self.pluto_settings.bandwidth / 1e6;

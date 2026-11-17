@@ -299,7 +299,12 @@ impl RadioPanel {
 
     /// Draw the panel. `live` is the running radio's control, if any; edits to
     /// frequency and gain go straight to it.
-    pub fn show(&mut self, ctx: &egui::Context, live: Option<&Live>) -> Option<RadioAction> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        live: Option<&Live>,
+        decimation: &mut u32,
+    ) -> Option<RadioAction> {
         let mut action = None;
         let mut open = self.open;
         egui::Window::new(format!("📡 {}", self.device.name()))
@@ -372,6 +377,16 @@ impl RadioPanel {
                         #[cfg(feature = "sdrplay")]
                         Device::Sdrplay => self.sdrplay_rows(ui, live),
                     }
+
+                    // After the radio, whichever it is (see `decimation`).
+                    ui.label("Decimation");
+                    crate::decimation::combo(
+                        ui,
+                        decimation,
+                        live.is_some(),
+                        self.sample_rate() as f64,
+                    );
+                    ui.end_row();
                 });
                 if self.settings.bias_tee && self.device.bias_tee().is_some() {
                     ui.colored_label(

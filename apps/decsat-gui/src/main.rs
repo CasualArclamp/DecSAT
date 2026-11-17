@@ -16,6 +16,7 @@ mod bgan_card;
 mod biss_memory;
 mod carrier_caps;
 mod constellation;
+mod decimation;
 mod decoder_filter;
 mod dns_viewer;
 mod filename;
@@ -80,7 +81,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--bias-tee] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--bias-tee] [--decimate N] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -135,6 +136,9 @@ fn main() -> eframe::Result {
                 app.radio.open |= opts.radio_panel;
                 // Before `--hackrf` and friends start the radio below.
                 app.radio.settings.bias_tee |= opts.bias_tee;
+            }
+            if let Some(d) = opts.decimate {
+                app.decimation = decsat_io::snap_decimation(d);
             }
             // PCAP parts and the session log, as last chosen.
             decsat_engine::fec::set_pcap_rotate_minutes(prefs::pcap_rotate_minutes());
@@ -377,6 +381,9 @@ struct App {
     net_open: bool,
     net_selected: bool,
     net_running: bool,
+    /// A live radio's rate is divided by this before the engine (1 = none):
+    /// one setting for every receiver, see `decimation`.
+    decimation: u32,
     net_control: Option<decsat_io::NetIqControl>,
     /// A DecSAT server as the source, and this app as one.
     remote: remote_panel::RemotePanel,
@@ -526,6 +533,7 @@ impl Default for App {
             net_open: false,
             net_selected: false,
             net_running: false,
+            decimation: 1,
             net_control: None,
             remote: Default::default(),
             #[cfg(feature = "hackrf")]
@@ -585,6 +593,7 @@ impl App {
                 u8::from(self.plan_keep).to_string(),
             ),
             ("source.rate".to_string(), self.sample_rate.to_string()),
+            ("radio.decimation".to_string(), self.decimation.to_string()),
             (
                 "source.format".to_string(),
                 session::format_name(self.format).to_string(),
@@ -972,6 +981,9 @@ impl App {
         if let Some(v) = get("source.rate").and_then(|v| v.parse().ok()) {
             self.sample_rate = v;
         }
+        if let Some(v) = get("radio.decimation").and_then(|v| v.parse().ok()) {
+            self.decimation = decsat_io::snap_decimation(v);
+        }
         if let Some(f) = get("source.format").and_then(session::format_by_name) {
             self.format = f;
         }
@@ -1354,6 +1366,13 @@ impl App {
 
     /// Run `source` through a fresh engine, keeping the VFOs.
     fn start_engine(&mut self, source: Box<dyn decsat_io::IqSource>) {
+        // A live radio's rate divided first, when the Decimation picker says
+        // so: the span, the VFOs and the waterfall all follow the new rate.
+        let source = if source.is_live() {
+            decsat_io::Decimate::wrap(source, self.decimation)
+        } else {
+            source
+        };
         let rate = source.sample_rate();
         // Every local source goes through the mirror: off, it costs a flag
         // read a block; on (a high-side LNB, or a file ticked Flip), the
@@ -1578,6 +1597,12 @@ impl App {
                         self.net_settings.sample_rate = f * 1e6;
                     }
                 });
+                decimation::row(
+                    ui,
+                    &mut self.decimation,
+                    self.net_running,
+                    self.net_settings.sample_rate,
+                );
                 ui.horizontal(|ui| {
                     ui.label("Sender's MHz");
                     let mut f = self.net_settings.center_hz / 1e6;
@@ -1678,6 +1703,7 @@ impl App {
                     }
                 });
             });
+            decimation::row(ui, &mut self.decimation, self.rtl_control.is_some(), self.rtl_settings.rate as f64);
             if ui.checkbox(&mut self.rtl_settings.manual_gain,"Manual tuner gain").changed()&& let Some(c)=&self.rtl_control{c.gain(self.rtl_settings.manual_gain,self.rtl_settings.gain_tenths);}
             if self.rtl_settings.manual_gain {
                 if let Some(info)=tuner.as_ref().filter(|t|!t.gains_tenths.is_empty()) {
@@ -1810,6 +1836,12 @@ impl App {
                             }
                         });
                 });
+                decimation::row(
+                    ui,
+                    &mut self.decimation,
+                    self.uhd_control.is_some(),
+                    self.uhd_settings.rate,
+                );
                 if ui
                     .add(
                         egui::Slider::new(&mut self.uhd_settings.gain, 0.0..=76.0)
@@ -3405,7 +3437,10 @@ impl eframe::App for App {
         #[cfg(feature = "hackrf")]
         {
             let live = self.live.clone();
-            match self.radio.show(ui.ctx(), live.as_ref()) {
+            match self
+                .radio
+                .show(ui.ctx(), live.as_ref(), &mut self.decimation)
+            {
                 Some(radio::RadioAction::Start) => self.start_radio(),
                 Some(radio::RadioAction::Stop) => {
                     self.stop_source();

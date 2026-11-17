@@ -1341,6 +1341,17 @@ None of these can power an LNB (13/18 V): feed that from an external
 inserter, and never put the bias tee into a DC short or an inserter's RF
 port. The Fobos and Pluto have none; the transmitter never powers its port.
 
+**Decimation.** Every live receiver's window (HackRF, Fobos, Airspy,
+SDRplay, RTL-SDR, UHD, Pluto and network IQ) has a *Decimation* picker: none,
+or the radio's sample rate divided by 2, 4, 8, 16, 32 or 64 before anything
+else, for carriers much narrower than the radio's lowest rate (an Airspy R2 at
+2.5 MS/s ÷ 16 is a 156 kS/s span). The span, the waterfall and the VFOs follow
+the new rate, and the CPU load drops with it. It is a cascade of half-band
+filters: the middle 80 % of the new span is flat and alias-free to better
+than 65 dB. One setting for all receivers, remembered, changed while the
+radio is stopped. On the command line: `decsat decode --airspy MHz --decimate 8`
+(any live source).
+
 **DC removal** (View menu, on by default) subtracts the IQ mean, tracked
 sample by sample with a 0.2 s time constant, before the waterfall and the
 VFOs, which removes the spike the HackRF leaves at the centre frequency.
