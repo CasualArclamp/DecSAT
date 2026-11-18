@@ -911,18 +911,35 @@ impl VfoHandle {
     /// Stop the VFO (a deletion) without waiting: its threads finish the
     /// block in hand, drop the rest, and are joined on a thread of their
     /// own, so a decoder deep in a search never holds up the caller.
-    pub fn discard(mut self) {
-        self.quit.store(true, Ordering::Relaxed);
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.tx.try_send(VfoMsg::Wake);
-        drop(self.tx);
-        if let Some(j) = self.join.take() {
+    pub fn discard(self) {
+        if let Some(j) = self.signal_quit() {
             let _ = std::thread::Builder::new()
                 .name("vfo-reaper".into())
                 .spawn(move || {
                     let _ = j.join();
                 });
         }
+    }
+
+    /// Stop the VFO after the block in hand, dropping whatever is still
+    /// queued, and wait for its threads: unlike [`discard`](Self::discard),
+    /// the decoder has been dropped (its files flushed and closed) when
+    /// this returns. For leaving the process right after.
+    pub fn close(self) {
+        if let Some(j) = self.signal_quit() {
+            let _ = j.join();
+        }
+    }
+
+    /// Tell the worker to leave without working through its queue; hands
+    /// back its thread to join.
+    fn signal_quit(mut self) -> Option<JoinHandle<()>> {
+        self.quit.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.tx.try_send(VfoMsg::Wake);
+        // Dropping the sender also wakes a worker blocked on an empty queue.
+        drop(self.tx);
+        self.join.take()
     }
 }
 

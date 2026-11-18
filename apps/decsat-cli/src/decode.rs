@@ -554,7 +554,8 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
         // FEC thread a moment.
         let file_ended = matches!(front.state, SourceState::Ended);
         if ended_at.is_some_and(|t| file_ended || t.elapsed() >= Duration::from_secs(3)) {
-            if file_ended && !wait_settled(&eng, SETTLE_CAP) {
+            let settled = !file_ended || wait_settled(&eng, SETTLE_CAP);
+            if !settled {
                 println!(
                     "(stopped waiting after {} s: the decoder is still {} blocks or frames behind)",
                     SETTLE_CAP.as_secs(),
@@ -585,10 +586,22 @@ pub fn decode(a: DecodeArgs) -> Result<()> {
                 Some(st) => report(&st),
                 None => println!("no status from the VFO"),
             }
-            // Whatever is still queued is not wanted now: leave at once.
-            eng.discard_vfos();
+            close_or_discard(&eng, settled);
             return Ok(());
         }
+    }
+}
+
+/// Stop the VFOs before leaving. Whatever is still queued is not wanted
+/// now. Normally wait for each decoder to be dropped: the process exits right
+/// after, and a decoder still closing its files then (a pcap or payload
+/// recording) loses the tail its buffers hold. A decoder still far behind
+/// (`settled` false) may be deep in a search: leave without it.
+pub(crate) fn close_or_discard(eng: &Engine, settled: bool) {
+    if settled {
+        eng.close_vfos();
+    } else {
+        eng.discard_vfos();
     }
 }
 

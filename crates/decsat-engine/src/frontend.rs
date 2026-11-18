@@ -300,6 +300,16 @@ impl Engine {
         }
     }
 
+    /// Stop every VFO after the block in hand, dropping what is still
+    /// queued, and wait until each decoder has been dropped, so its output
+    /// files are flushed and closed: for leaving the process right after.
+    pub fn close_vfos(&self) {
+        let vfos = std::mem::take(&mut *self.shared.vfos.lock().unwrap());
+        for (_, h) in vfos {
+            h.close();
+        }
+    }
+
     pub fn vfo_status(&self, id: VfoId) -> Option<VfoStatus> {
         let st = self
             .shared
