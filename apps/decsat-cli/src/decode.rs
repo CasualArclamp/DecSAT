@@ -121,6 +121,7 @@ fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "pool" | "return-pool" => DecoderKind::ReturnPool,
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
         "bgan" | "inmarsat" => DecoderKind::Bgan,
+        "aero" => DecoderKind::Aero,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => DecoderKind::P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => DecoderKind::HsBeacon,

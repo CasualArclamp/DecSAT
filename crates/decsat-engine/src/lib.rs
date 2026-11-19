@@ -5,6 +5,7 @@
 //! spectrum and constellation views. The demodulator, FEC and GSE stages slot
 //! in here from M1 onward — see `docs/DESIGN.md`.
 
+pub mod aero;
 pub mod beacon;
 pub mod bursty;
 pub mod carriers;

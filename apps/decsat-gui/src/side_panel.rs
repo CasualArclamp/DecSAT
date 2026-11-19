@@ -283,6 +283,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         DecoderKind::Dvbs2Ip | DecoderKind::Dvbs2Ts | DecoderKind::DvbsTs | DecoderKind::Ns4
     ) {
         ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
+    } else if v.settings.decoder == DecoderKind::Aero {
+        aero_card(ui, &st, vfo_rf, v.id);
     } else {
         // Every other mode: the same header, with what it has to show.
         mode_card(ui, v, &st, vfo_rf);
@@ -5956,6 +5958,7 @@ fn mode_title(decoder: DecoderKind) -> &'static str {
         DecoderKind::HsBeacon => "QO-100 multimedia",
         DecoderKind::BarkerTdm => "Barker-11 TDM",
         DecoderKind::Bgan => "Inmarsat BGAN",
+        DecoderKind::Aero => "Inmarsat Aero",
         DecoderKind::PskSymbols => "PSK",
         DecoderKind::Tdma => "TDMA",
         DecoderKind::ReturnPool => "Return pool",
@@ -6452,6 +6455,298 @@ fn nit_row_summary(t: &decsat_ts::psi::Transponder) -> String {
         parts.push(format!("{s:.3} M"));
     }
     parts.join(" · ")
+}
+
+/// Inmarsat Aero's colour (the title bar, the channel's name).
+const AERO: Color32 = Color32::from_rgb(255, 165, 80);
+
+/// An Inmarsat Aero VFO's card: the DVB card's layout with Aero's figures in
+/// its places. The title bar names the channel and gives the frequency and
+/// the symbol rate; under it the channel and bit rate, big, with the link
+/// margin beside it, and the Es/N0 bar ticked where the channel's code gives
+/// up (the DVB card's QEF tick); then the receive chain stage by stage, and
+/// what the channel carried, newest first.
+fn aero_card(ui: &mut Ui, st: &VfoStatus, vfo_rf: Option<f64>, id: VfoId) {
+    let grey = ui.visuals().weak_text_color();
+    let strong = ui.visuals().strong_text_color();
+    let Some(a) = &st.aero else {
+        title_bar(ui, "INMARSAT AERO", grey, None, None, vfo_rf, false);
+        ui.label(RichText::new("starting…").weak());
+        return;
+    };
+    let found = !a.searching;
+    let colour = match (found, a.locked) {
+        (true, true) => AERO,
+        (true, false) => AERO.gamma_multiply(0.55),
+        _ => grey,
+    };
+    // Frames have decoded: the Es/N0 is the firm one, from the bit errors
+    // the code corrected, and the margin means something.
+    let settled = a.locked && (a.crc_good > 0 || a.voice_frames.iter().sum::<u64>() > 0);
+    let margin = settled.then_some(a.margin_db);
+    let margin_colour = margin_colour(margin);
+    // Where the code gives up, on the Es/N0 scale.
+    let limit = settled.then_some(a.es_n0_db - a.margin_db);
+
+    let kind = match a.channel.split(' ').next() {
+        Some("P") => "P channel",
+        Some("R/T") => "R and T channels",
+        Some("C") => "C channel",
+        _ => "searching",
+    };
+    title_bar(
+        ui,
+        &format!("INMARSAT AERO · {kind}"),
+        colour,
+        st.symbol_rate,
+        None,
+        vfo_rf.map(|f| f + if a.locked { a.carrier_hz } else { 0.0 }),
+        a.locked,
+    );
+
+    // ---- the channel and its margin
+    let name = found.then(|| format!("{} bit/s", a.channel));
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(
+                RichText::new(name.as_deref().unwrap_or("–"))
+                    .monospace()
+                    .size(26.0)
+                    .color(if name.is_some() { colour } else { grey }),
+            );
+            if let Some(m) = margin {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(RIGHT_PAD);
+                    ui.label(
+                        RichText::new(format!("{m:+5.1} dB"))
+                            .monospace()
+                            .size(18.0)
+                            .color(margin_colour),
+                    );
+                });
+            }
+        })
+        .response;
+    resp.on_hover_text(
+        "Inmarsat Classic Aero: the P channel (ground to aircraft: signalling, ACARS), \
+         the R and T channels (aircraft to ground, in bursts) or a C channel (a \
+         telephone call), named from the signal.\n\nMargin: the measured Es/N0 less \
+         the Es/N0 at which this channel's code (rate ½, K = 7) stops correcting. \
+         Below 0 dB frames fail; within 1 dB a fade drops them.",
+    );
+
+    // ---- the Es/N0 bar, on the DVB card's fixed scale
+    let lo = if limit.is_some_and(|q| q < 0.0) {
+        -4.0
+    } else {
+        0.0
+    };
+    let hi = 20.0;
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, 10.0), Sense::hover());
+    let x_of = |db: f32| rect.left() + rect.width() * ((db - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    if a.locked && found {
+        let fill = egui::Rect::from_min_max(rect.min, pos2(x_of(a.es_n0_db), rect.max.y));
+        p.rect_filled(fill, CornerRadius::same(2), margin_colour);
+    }
+    if let Some(q) = limit {
+        let x = x_of(q);
+        p.rect_filled(
+            egui::Rect::from_min_max(
+                pos2(x - 1.0, rect.top() - 3.0),
+                pos2(x + 1.0, rect.bottom() + 3.0),
+            ),
+            CornerRadius::ZERO,
+            strong,
+        );
+    }
+    ui.horizontal(|ui| {
+        let left = match (found, a.locked) {
+            (true, true) => format!("Es/N0 {:.1} dB · Eb/N0 {:.1} dB", a.es_n0_db, a.eb_n0_db),
+            (true, false) => "no lock".into(),
+            _ => "searching…".into(),
+        };
+        ui.label(RichText::new(left).size(12.0).weak());
+        if let Some(q) = limit {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(format!("limit {q:.1} dB")).size(12.0).weak());
+            });
+        }
+    });
+
+    // ---- the receive chain
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.vertical(|ui| {
+            if a.too_narrow {
+                stage(ui, HEALTH_BAD, "VFO", a.message.clone());
+            }
+            if !found {
+                stage(
+                    ui,
+                    grey,
+                    "Demodulator",
+                    "looking for an Aero carrier".into(),
+                );
+                return;
+            }
+            let modulation = if a.bit_rate.is_some_and(|r| r <= 1200) {
+                "A-BPSK"
+            } else {
+                "A-QPSK"
+            };
+            if a.locked {
+                stage(
+                    ui,
+                    HEALTH_OK,
+                    "Demodulator",
+                    format!(
+                        "{modulation} locked · {:+.0} Hz · clock {:+.1} ppm",
+                        a.carrier_hz, a.clock_ppm
+                    ),
+                );
+            } else {
+                stage(
+                    ui,
+                    HEALTH_WARN,
+                    "Demodulator",
+                    format!("{modulation} not locked · {} losses", a.lock_losses),
+                );
+            }
+            let uw = if a.uw_bits > 0 {
+                format!(
+                    " · unique word {:.1} % wrong",
+                    100.0 * a.uw_wrong as f64 / a.uw_bits as f64
+                )
+            } else {
+                String::new()
+            };
+            stage(
+                ui,
+                if a.frames > 0 { HEALTH_OK } else { grey },
+                "Frames",
+                format!("{}{uw}", a.frames),
+            );
+            let load = match a.fec_load {
+                _ if a.frames == 0 => grey,
+                l if l < 0.5 => HEALTH_OK,
+                l if l < 0.85 => HEALTH_WARN,
+                _ => HEALTH_BAD,
+            };
+            stage(
+                ui,
+                load,
+                "Viterbi",
+                format!(
+                    "BER {:.1e} before · {} bits corrected · {:.0} % of its reach",
+                    a.pre_fec_ber,
+                    a.corrected_bits,
+                    100.0 * a.fec_load
+                ),
+            )
+            .on_hover_text(
+                "The raw bit error rate, counted from what the rate ½, K = 7 code \
+                 corrected, and how much of the code's correcting power that uses: \
+                 at 100 % frames start to fail.",
+            );
+            if a.voice {
+                let [voiced, repeated, silent, tone] = a.voice_frames;
+                stage(
+                    ui,
+                    if a.data {
+                        HEALTH_WARN
+                    } else if voiced > 0 {
+                        HEALTH_OK
+                    } else {
+                        grey
+                    },
+                    "Voice",
+                    if a.data {
+                        "not speech: a fax or data call (not decoded)".into()
+                    } else {
+                        format!(
+                            "{voiced} voiced · {repeated} repeated · {silent} silent · \
+                             {tone} tone · level {:.0} %",
+                            100.0 * a.audio_level
+                        )
+                    },
+                );
+                if let Some(e) = &a.audio_error {
+                    stage(ui, HEALTH_BAD, "Audio", e.clone());
+                }
+            } else {
+                let total = a.crc_good + a.crc_bad;
+                stage(
+                    ui,
+                    match total {
+                        0 => grey,
+                        _ if a.crc_bad * 10 > total => HEALTH_BAD,
+                        _ if a.crc_bad > 0 => HEALTH_WARN,
+                        _ => HEALTH_OK,
+                    },
+                    "Signal units",
+                    format!("{} good · {} failed the CRC", a.crc_good, a.crc_bad),
+                );
+                if a.bursts > 0 {
+                    stage(ui, HEALTH_OK, "Bursts", format!("{} decoded", a.bursts));
+                }
+            }
+            if let Some(aes) = a.aes {
+                stage(
+                    ui,
+                    AERO,
+                    "Aircraft",
+                    match a.ges {
+                        Some(g) => format!("{aes:06X} · ground station {g:02X}"),
+                        None => format!("{aes:06X}"),
+                    },
+                );
+            }
+        });
+    });
+
+    // ---- what it carried
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Log").strong());
+        ui.label(RichText::new(format!("{} lines · {} messages", a.line_count, a.messages)).weak());
+    });
+    egui::ScrollArea::vertical()
+        .id_salt(("aero_log", id))
+        .max_height(320.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for l in a.lines.iter().rev().take(120) {
+                let who = match (l.aes, l.ges) {
+                    (Some(x), Some(g)) => format!("{x:06X}·{g:02X}  "),
+                    (Some(x), None) => format!("{x:06X}  "),
+                    _ => String::new(),
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.label(
+                        RichText::new(format!("{:7.1}s", l.seconds))
+                            .monospace()
+                            .size(11.0)
+                            .weak(),
+                    );
+                    ui.label(RichText::new(who).monospace().size(11.0).weak());
+                    let title = RichText::new(&l.title).size(12.0);
+                    ui.label(if l.message {
+                        title.color(AERO).strong()
+                    } else {
+                        title
+                    });
+                });
+                if !l.text.trim().is_empty() {
+                    ui.label(RichText::new(l.text.trim_end()).monospace().size(11.0));
+                }
+            }
+        });
 }
 
 /// A link margin's colour: red below 0 dB, amber within 1 dB, else green.

@@ -110,6 +110,11 @@ pub enum DecoderKind {
     /// of ten coding levels, then the bearer-control, IP and payload layers.
     /// Needs the free ETSI Annex C tables (see [`decsat_bgan::tables`]).
     Bgan,
+    /// Inmarsat Classic Aero (DecAero's receiver, [`crate::aero`]): the
+    /// channel named by itself — P at 600, 1200 or 10500 bit/s, R and T
+    /// bursts, C voice at 8400 or 21000 bit/s — then its signalling, ACARS
+    /// and ADS-C read and its voice played.
+    Aero,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -142,7 +147,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 33] = [
+    pub const ALL: [DecoderKind; 34] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -162,6 +167,7 @@ impl DecoderKind {
         DecoderKind::HsBeacon,
         DecoderKind::BarkerTdm,
         DecoderKind::Bgan,
+        DecoderKind::Aero,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::ReturnPool,
@@ -203,6 +209,7 @@ impl DecoderKind {
             }
             DecoderKind::BarkerTdm => "Barker-11 spread BPSK (15.15 kBd TDM) → frames, data blocks",
             DecoderKind::Bgan => "Inmarsat BGAN forward (16-QAM turbo) → payload, IP, findings",
+            DecoderKind::Aero => "Inmarsat Aero (P, R/T, C) → ACARS, ADS-C, voice",
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
@@ -243,6 +250,7 @@ impl DecoderKind {
             DecoderKind::HsBeacon => "hs-beacon",
             DecoderKind::BarkerTdm => "barker",
             DecoderKind::Bgan => "bgan",
+            DecoderKind::Aero => "aero",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::ReturnPool => "return-pool",
@@ -367,6 +375,7 @@ impl DecoderKind {
                 | DecoderKind::HsBeacon
                 | DecoderKind::BarkerTdm
                 | DecoderKind::Bgan
+                | DecoderKind::Aero
         )
     }
 
@@ -391,6 +400,7 @@ impl DecoderKind {
             DecoderKind::HsBeacon => "HS",
             DecoderKind::BarkerTdm => "B11",
             DecoderKind::Bgan => "BGAN",
+            DecoderKind::Aero => "AERO",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::ReturnPool => "POOL",
@@ -740,6 +750,8 @@ pub struct VfoStatus {
     pub barker: Option<decsat_modem::barker::BarkerView>,
     /// Inmarsat BGAN forward link: lock, blocks, payload, findings.
     pub bgan: Option<decsat_bgan::session::BganView>,
+    /// Inmarsat Classic Aero: the channel, its figures and what it carried.
+    pub aero: Option<crate::aero::AeroView>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -1098,6 +1110,8 @@ enum Decoder {
     },
     /// An Inmarsat BGAN forward carrier: the whole receiver and its recording.
     Bgan(Box<decsat_bgan::session::BganSession>),
+    /// Inmarsat Classic Aero: DecAero's channel worker on the baseband.
+    Aero(Box<crate::aero::AeroSession>),
     /// A satellite beacon: the receiver, and its files while recording.
     Beacon {
         rx: Box<crate::beacon::BeaconRx>,
@@ -1503,6 +1517,10 @@ impl Worker {
             },
             DecoderKind::Bgan => Decoder::Bgan(Box::new(decsat_bgan::session::BganSession::new(
                 ddc.out_rate(),
+            ))),
+            DecoderKind::Aero => Decoder::Aero(Box::new(crate::aero::AeroSession::new(
+                ddc.out_rate(),
+                s.bandwidth_hz,
             ))),
             DecoderKind::Beacon => Decoder::Beacon {
                 rx: {
@@ -2286,6 +2304,15 @@ impl Worker {
                     }
                 }
             }
+            Decoder::Aero(a) => {
+                let tag = format!(
+                    "{}-{}",
+                    self.settings.name.replace(' ', "_"),
+                    crate::rf::freq_tag(self.settings.offset_hz)
+                );
+                a.set_recording(self.settings.record, &self.settings.record_dir, &tag);
+                a.push(&self.bb, self.lossless);
+            }
             Decoder::Beacon { rx, files } => {
                 rx.push(&self.bb, self.ddc.offset_hz());
                 let tag = format!(
@@ -2506,6 +2533,7 @@ impl Worker {
         st.is19 = None;
         st.beacon = None;
         st.bgan = None;
+        st.aero = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2748,6 +2776,31 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Aero(a) => {
+                let mut v = a.view();
+                // Measured on a recording: a 2 kHz VFO (5 kS/s of IQ) names
+                // a 600 or 1200 bit/s channel but never locks to it; from
+                // 4 kHz (10 kS/s) every rate decodes as in DecAero.
+                if self.ddc.out_rate() < crate::aero::LEAST_RATE {
+                    v.message = format!(
+                        "VFO too narrow ({:.1} kHz of IQ): widen it to 4 kHz or more",
+                        self.ddc.out_rate() / 1e3
+                    );
+                    v.too_narrow = true;
+                }
+                st.message = v.message.clone();
+                st.scatter = v.scatter.clone();
+                st.frames = v.frames;
+                // A-BPSK at the slow rates (a bit a symbol), A-QPSK above.
+                st.symbol_rate = v
+                    .bit_rate
+                    .map(|r| f64::from(r) / if r <= 1200 { 1.0 } else { 2.0 });
+                if let Some((p, n)) = &v.recording {
+                    st.recording = Some((p.clone(), *n));
+                    st.recording_active = true;
+                }
+                st.aero = Some(v);
+            }
             Decoder::Bgan(b) => {
                 let v = b.view();
                 st.message = if self.ddc.out_rate() < 190_000.0 {

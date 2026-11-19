@@ -84,6 +84,7 @@ for telling them apart from the outbound
 | **TDMA bursts**: one carrier or a whole MF-TDMA group in a VFO — bursts found and demodulated one by one, the bursts' layout (preamble, pilots, fixed fields, idle fill) read blind, the slot grid, the frame and the terminals, a rate-½ convolutional code looked for in the bursts' data; a burst map; each burst's data symbols to a `.bursts` file. **SCPC or TDMA** per VFO (and for new VFOs): bursty bands found on the waterfall apart from the continuous carriers | ✅ analyser and demodulator on a live 3-carrier group; the coding inside is next |
 | **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
 | **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on live beacons — Intelsat 19's: 4800 bit/s bi-phase on a 48 kHz subcarrier, IRIG frames; Eutelsat 172B's: 9600 symbol/s NRZ on a 76.8 kHz subcarrier, K = 7 coded CCSDS TM frames — every frame |
+| **Inmarsat Classic Aero → ACARS, ADS-C, voice**: the L-band aeronautical service on a VFO, the channel named from the signal: the P channel (ground to aircraft, 600, 1200 or 10500 bit/s), R and T channel bursts (aircraft to ground) and C channel telephone calls (8400 bit/s AMBE, 21000 bit/s 9.6 kbit/s MP-LPC). Signalling in words, ACARS messages with ADS-C positions read, voice played. [DecAero](https://github.com/CasualArclamp/DecAero)'s receiver, built in. | ✅ on recordings: P channels at 600, 1200 and 10500 bit/s with ACARS, and a 21000 bit/s call. Bursts and 8400 bit/s voice work in DecAero and are not yet tried here |
 | **QO-100's PSK beacon** (AO-40's uncoded format, 400 bit/s): frames with CRC, the blocks as text, housekeeping values when sent; also from a sound card in the small `qo100-beacon` app | ✅ on WebSDR recordings of 10489.750 MHz, every frame's CRC good, and the FEC block after each decoded |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
@@ -901,6 +902,40 @@ BPSK bi-phase chips, and Identify says so rather than calling them a code.
 
 ```bash
 decsat decode beacon_533333Sps.cf32 --decoder beacon   # carrier, telemetry, frames, the last few in hex
+```
+
+### Inmarsat Classic Aero (L band)
+
+Decoder **Inmarsat Aero** (`aero` on the command line): put a VFO on a
+carrier of the aeronautical service around 1545 MHz and it names the channel
+itself and decodes it. This is [DecAero](https://github.com/CasualArclamp/DecAero)'s
+receiver (same author) run on the VFO's baseband; DecAero remains the app
+for watching a whole band, following calls by itself and keeping an
+aircraft list.
+
+- **P channel** (ground to aircraft; 600 and 1200 bit/s A-BPSK, 10500 bit/s
+  A-QPSK): signalling units in words (log-on, channel and voice assignments,
+  call announcements with the kind of call), ACARS messages, other user data
+  in hex.
+- **R and T channels** (aircraft to ground, in bursts): the same, with ADS-C
+  position reports read from the aircraft's ACARS text.
+- **C channel** (a telephone call): 8400 bit/s (AMBE) and 21000 bit/s (the
+  9.6 kbit/s multipulse codec of ICAO Annex 10) speech, played through the
+  app's audio output; the call's progress in words. A 21000 bit/s fax or
+  data call is named as such, not decoded.
+
+The card is the DVB card's: the channel and bit rate, the link margin (the
+Es/N0 over the point where the channel's rate ½ code gives up, marked on the
+bar), then demodulator, frames, Viterbi, signal units or voice, and the log,
+newest first. **Record** writes the log to a text file.
+
+Make the VFO 4 kHz wide or more for the slow channels, about 12 kHz for
+10500 and 8400 bit/s, 25 kHz for 21000 bit/s: a narrower one leaves too few
+samples and the card says so. Voice assignments are logged, not followed:
+the VFO for the call is yours to place.
+
+```
+decsat decode aero_625000Sps.wav --decoder aero --offset -75600 --bandwidth 4000 --fast
 ```
 
 ### A Barker-11 spread carrier (C band, 4004 MHz)
