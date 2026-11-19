@@ -106,6 +106,9 @@ impl Hub {
             EngineOptions {
                 fft_size: p.fft_size as usize,
                 rows_per_sec: f64::from(p.rows_per_sec),
+                // A remote waterfall stays at the rate asked for: every row
+                // is sent over the link.
+                display_rows_per_sec: f64::from(p.rows_per_sec),
                 dc_removal: p.dc_removal,
                 ..Default::default()
             },

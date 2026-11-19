@@ -74,6 +74,8 @@ pub struct History {
     pub manual: (f32, f32),
     floor: Option<f32>,
     peak: Option<f32>,
+    /// How far the automatic levels move towards a new row's.
+    step: f32,
 }
 
 impl Default for History {
@@ -86,6 +88,7 @@ impl Default for History {
             epoch: 0,
             auto: true,
             manual: (-110.0, -40.0),
+            step: 0.05,
             floor: None,
             peak: None,
         }
@@ -109,6 +112,12 @@ impl History {
         self.push_with(row, None);
     }
 
+    /// The rows arriving a second: the automatic levels keep the pace they
+    /// have at 25 (5 % a row).
+    pub fn set_rows_per_sec(&mut self, rows: f32) {
+        self.step = 1.0 - 0.95f32.powf(25.0 / rows.max(1.0));
+    }
+
     /// A new row, and the finer spectrum of the view made with it.
     pub fn push_with(&mut self, row: Vec<f32>, fine: Option<ZoomRow>) {
         if row.is_empty() {
@@ -120,12 +129,22 @@ impl History {
         }
         // Track floor (20th percentile) and peak (99.5th) with some inertia,
         // so the colours do not pump with every row.
+        // Rust note: `select_nth_unstable_by` puts the value of that rank in
+        // its place without sorting the rest: far cheaper than a sort, 60
+        // times a second on a wide row.
         let mut sorted = row.clone();
-        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let q = |p: f32| sorted[((sorted.len() - 1) as f32 * p) as usize];
+        let mut q = |p: f32| {
+            let k = ((sorted.len() - 1) as f32 * p) as usize;
+            *sorted
+                .select_nth_unstable_by(k, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .1
+        };
         let (f, p) = (q(0.2), q(0.995));
-        self.floor = Some(self.floor.map_or(f, |x| x + 0.05 * (f - x)));
-        self.peak = Some(self.peak.map_or(p, |x| x + 0.05 * (p - x)));
+        let step = self.step;
+        self.floor = Some(self.floor.map_or(f, |x| x + step * (f - x)));
+        self.peak = Some(self.peak.map_or(p, |x| x + step * (p - x)));
 
         if self.rows.len() == ROWS {
             self.rows.pop_front();

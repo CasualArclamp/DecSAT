@@ -116,6 +116,21 @@ IqSource (HackRF 20 MS/s, or a wideband file)
   CPU that shows (11.0 s of CPU in 10 s at full span, 10.4 to 11.4 zoomed).
   A local engine only: a server's waterfall is drawn as sent. Unattended:
   `--view LO_HZ:HI_HZ`.
+- **60 rows a second** *(2026-11-19, asked for by Rory: "check the FFT is
+  working at 60 Hz"; it was 25)*: the spectrum thread makes a row every
+  1/60 s of signal, counted through the blocks, so the rows are evenly
+  spaced whatever the block length (`display_rows_per_sec`); the blocks the
+  VFOs get stay 25 a second, so no decoder sees a change. A row reaches back
+  over the block join (two FFTs of the past are kept), so a large FFT at a
+  low rate overlaps its rows instead of slowing them. The FFTs averaged a
+  second are held at 1200 (48 a row at 25, 20 a row at 60), so more rows
+  cost no more transforms. The rows of a block arrive together, so the GUI
+  draws a third of what waits each frame: a row a frame. The automatic
+  levels and the smoothed trace keep their pace in time. The waterfall's 512
+  rows are now 8.5 s (20 s before). Measured on a 5 MS/s recording, 12 s
+  runs: 12.9 → 12.7 s of CPU at full span, 13.0 → 12.8 at a 20 kHz view,
+  12.6 → 12.7 at 2 kHz. A server's waterfall stays at the rate its client
+  asks for (25): every row is sent over the link.
 
 ### Decoders a VFO can run
 

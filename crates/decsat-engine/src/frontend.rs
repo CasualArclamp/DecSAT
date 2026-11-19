@@ -28,8 +28,11 @@ use crate::zoom::{self, Zoom, ZoomRow};
 pub struct EngineOptions {
     /// Wideband FFT size: the waterfall's horizontal resolution.
     pub fft_size: usize,
-    /// Waterfall rows (and blocks) per second.
+    /// Blocks handed to the VFOs per second.
     pub rows_per_sec: f64,
+    /// Waterfall rows per second: made on an even step of their own, whatever
+    /// the block length.
+    pub display_rows_per_sec: f64,
     /// Play files at their real sample rate rather than as fast as possible.
     pub realtime: bool,
     /// Rewind a file at its end.
@@ -46,6 +49,7 @@ impl Default for EngineOptions {
         EngineOptions {
             fft_size: 4096,
             rows_per_sec: 25.0,
+            display_rows_per_sec: 60.0,
             realtime: true,
             loop_file: true,
             carrier_snr_db: 6.0,
@@ -109,11 +113,12 @@ const BURST_TAKES: usize = 4;
 /// clipped (0.0001 % of samples past 120 of 127).
 pub const STRONG_INPUT_DBFS: f32 = -25.0;
 
-/// Recent waterfall rows kept for the GUI to collect. At 25 rows/s this is a
+/// Recent waterfall rows kept for the GUI to collect. At 60 rows/s this is a
 /// few seconds' grace for a GUI that stalls.
-const ROW_BACKLOG: usize = 128;
-/// FFTs averaged per waterfall row, spread over the block.
-const SEGMENTS_PER_ROW: usize = 48;
+const ROW_BACKLOG: usize = 300;
+/// FFTs averaged per second of waterfall at most, shared among its rows (48
+/// a row at 25 rows a second, 20 a row at 60): more rows cost no more FFTs.
+const SEGMENTS_PER_SEC: f64 = 1200.0;
 
 struct Shared {
     front: Mutex<FrontStatus>,
@@ -370,8 +375,8 @@ impl Drop for Engine {
 
 fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, rx: Receiver<Cmd>) {
     let rate = source.sample_rate();
-    // A block is one waterfall row: 1/rows_per_sec of signal, but never less
-    // than two FFTs. Both change with the FFT size, so they are `mut`.
+    // A block is 1/rows_per_sec of signal, but never less than two FFTs.
+    // Both change with the FFT size, so they are `mut`.
     let block_for = |fft: usize| ((rate / opts.rows_per_sec).round() as usize).max(fft * 2);
     let mut block_len = block_for(opts.fft_size);
     // Spectrum is optional, unlike the sample stream consumed by the VFOs.
@@ -384,11 +389,12 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         let shared = Arc::clone(&shared);
         let fft_size = Arc::clone(&fft_size);
         let snr = opts.carrier_snr_db;
+        let rows_per_sec = opts.display_rows_per_sec;
         std::thread::Builder::new()
             .name("decsat-spectrum".into())
             .spawn(move || {
                 crate::thread_priority::set_display_priority();
-                run_spectrum(spectrum_rx, shared, rate, fft_size, snr)
+                run_spectrum(spectrum_rx, shared, rate, fft_size, snr, rows_per_sec)
             })
             .expect("spawning spectrum thread")
     };
@@ -540,7 +546,21 @@ fn run_spectrum(
     rate: f64,
     fft_size: Arc<AtomicUsize>,
     carrier_snr_db: f32,
+    rows_per_sec: f64,
 ) {
+    // A row every `hop` samples, counted through the blocks, so the rows are
+    // evenly spaced in time whatever the block length.
+    let hop = (rate / rows_per_sec.max(1.0)).max(1.0);
+    let row_s = hop / rate;
+    let most_segments = ((SEGMENTS_PER_SEC * row_s).round() as usize).max(1);
+    // The smoothed spectrum's pace: 15 % a row at 25 rows a second.
+    let smooth = 1.0 - 0.85f32.powf((row_s * 25.0) as f32);
+    // The newest samples before this block, then the block: a row reaches
+    // back over the join.
+    let mut work: Vec<Iq> = Vec::new();
+    // Samples from the start of the next block to the end of the next row.
+    let mut next_row = hop;
+    let mut avg_db: Vec<f32> = Vec::new();
     let mut spec = Spectrum::new(fft_size.load(Ordering::Relaxed));
     let mut fine: Option<Spectrum> = None;
     let mut avg_lin: Vec<f32> = Vec::new();
@@ -559,13 +579,9 @@ fn run_spectrum(
             spec = Spectrum::new(want);
             fine = None;
             avg_lin.clear();
+            avg_db.clear();
             takes.clear();
         }
-        let spacing = last_hop_secs;
-        let (row, hop) =
-            spec.compute_max_with(&block, SEGMENTS_PER_ROW, |p| bursts.push(p, rate, spacing));
-        last_hop_secs = hop as f64 / rate;
-        row_seq += 1;
         // Zoomed in past the waterfall's own bins: a finer spectrum of the
         // view. One that still serves the view is kept, so its samples are
         // not thrown away by every small move.
@@ -580,34 +596,81 @@ fn run_spectrum(
             }
             _ => zoom = None,
         }
-        let finer = zoom.as_mut().zip(fine_s).and_then(|(z, s)| {
-            if starts_at != joins_at {
+        if starts_at != joins_at {
+            work.clear();
+            next_row = hop;
+            if let Some(z) = &mut zoom {
                 z.gap();
             }
-            z.feed(&block);
-            z.row(s, block.len() as f64 / rate)
-        });
+        }
         joins_at = starts_at + block.len() as u64;
-        {
-            let mut rows = shared.zoom_rows.lock().unwrap();
-            if let Some(r) = finer {
-                rows.push_back((row_seq, r));
+        // Keep two FFTs of the past: a row is never shorter than that.
+        let past = work.len().min(2 * spec.size());
+        work.drain(..work.len() - past);
+        work.extend_from_slice(&block);
+        // How much of the block the zoom has been fed.
+        let mut fed = 0usize;
+        while next_row <= block.len() as f64 {
+            let at = (next_row.round() as usize).min(block.len());
+            next_row += hop;
+            let end = past + at;
+            let start = end.saturating_sub((hop.round() as usize).max(2 * spec.size()));
+            let finer = zoom.as_mut().zip(fine_s).and_then(|(z, s)| {
+                z.feed(&block[fed..at]);
+                z.row(s, row_s)
+            });
+            fed = at;
+            if end - start < spec.size() {
+                // Too little since the start or a gap for one transform.
+                continue;
             }
-            while rows.len() > ROW_BACKLOG {
+            let spacing = last_hop_secs;
+            let (row, step) = spec.compute_max_with(&work[start..end], most_segments, |p| {
+                bursts.push(p, rate, spacing)
+            });
+            last_hop_secs = step as f64 / rate;
+            row_seq += 1;
+            {
+                let mut rows = shared.zoom_rows.lock().unwrap();
+                if let Some(r) = finer {
+                    rows.push_back((row_seq, r));
+                }
+                while rows.len() > ROW_BACKLOG {
+                    rows.pop_front();
+                }
+            }
+            if avg_lin.len() != row.len() {
+                avg_lin = row.iter().map(|&d| 10f32.powf(d / 10.0)).collect();
+            } else {
+                for (a, &d) in avg_lin.iter_mut().zip(&row) {
+                    *a += smooth * (10f32.powf(d / 10.0) - *a);
+                }
+            }
+            let mut rows = shared.rows.lock().unwrap();
+            // This worker is the only producer: a row of another width than
+            // those kept (the FFT size changed while it computed) starts the
+            // backlog again, so the GUI never mixes widths.
+            if rows.back().is_some_and(|(_, r)| r.len() != row.len()) {
+                rows.clear();
+            }
+            if rows.len() == ROW_BACKLOG {
                 rows.pop_front();
             }
+            rows.push_back((row_seq, row));
         }
-        if avg_lin.len() != row.len() {
-            avg_lin = row.iter().map(|&d| 10f32.powf(d / 10.0)).collect();
-        } else {
-            for (a, &d) in avg_lin.iter_mut().zip(&row) {
-                *a += 0.15 * (10f32.powf(d / 10.0) - *a);
-            }
+        next_row -= block.len() as f64;
+        if let Some(z) = &mut zoom {
+            z.feed(&block[fed..]);
         }
-        let avg_db: Vec<f32> = avg_lin
-            .iter()
-            .map(|&p| 10.0 * p.max(1e-20).log10())
-            .collect();
+        if !avg_lin.is_empty() {
+            avg_db = avg_lin
+                .iter()
+                .map(|&p| 10.0 * p.max(1e-20).log10())
+                .collect();
+        }
+        if avg_db.is_empty() {
+            continue;
+        }
         let carriers = (last_carriers.elapsed() >= Duration::from_millis(500)).then(|| {
             last_carriers = Instant::now();
             let mut found = detect_carriers(&avg_db, rate, carrier_snr_db);
@@ -632,21 +695,8 @@ fn run_spectrum(
             }
             crate::bursty::union(takes.make_contiguous())
         });
-        {
-            let mut rows = shared.rows.lock().unwrap();
-            // This worker is the only producer: a row of another width than
-            // those kept (the FFT size changed while it computed) starts the
-            // backlog again, so the GUI never mixes widths.
-            if rows.back().is_some_and(|(_, r)| r.len() != row.len()) {
-                rows.clear();
-            }
-            if rows.len() == ROW_BACKLOG {
-                rows.pop_front();
-            }
-            rows.push_back((row_seq, row));
-        }
         let mut f = shared.front.lock().unwrap();
-        f.spectrum_db = avg_db;
+        f.spectrum_db.clone_from(&avg_db);
         f.zoom = zoom.as_ref().and_then(Zoom::average);
         if let Some(c) = carriers {
             f.carriers = c;
@@ -760,6 +810,47 @@ mod tests {
         let rs = ident.symbol_rate.unwrap();
         assert!((rs - 500e3).abs() / 500e3 < 0.01, "Rs {rs}");
 
+        drop(eng);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Rows come 60 to the second of signal, evenly, whatever the block
+    /// length: a 1 MS/s file of 2 s gives 120 (the first is skipped only if
+    /// too short), each with the tone in its place.
+    #[test]
+    fn sixty_rows_a_second() {
+        let path = std::env::temp_dir().join("decsat-engine-rows-60.cf32");
+        let x: Vec<Iq> = (0..2_000_000)
+            .map(|k| {
+                let p = std::f64::consts::TAU * 0.25 * k as f64;
+                Iq::new(p.cos() as f32, p.sin() as f32)
+            })
+            .collect();
+        let mut w = IqFileWriter::create(&path, SampleFormat::Cf32).unwrap();
+        w.write(&x).unwrap();
+        w.finish().unwrap();
+        let src = IqFileReader::open(&path, SampleFormat::Cf32, 1e6, 1 << 16).unwrap();
+        let eng = Engine::start(
+            Box::new(src),
+            EngineOptions {
+                loop_file: false,
+                ..Default::default()
+            },
+        );
+        // Played in real time, so the display worker skips nothing.
+        wait_for(10.0, || {
+            (eng.front().state == SourceState::Ended).then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let rows = eng.new_rows(0);
+        let n = rows.last().unwrap().0;
+        assert!((118..=120).contains(&n), "{n} rows from 2 s");
+        for (_, row) in &rows {
+            let peak = (0..row.len())
+                .max_by(|&a, &b| row[a].total_cmp(&row[b]))
+                .unwrap();
+            assert_eq!(peak, 3072);
+        }
         drop(eng);
         let _ = std::fs::remove_file(&path);
     }
