@@ -400,11 +400,14 @@ fn render_fine<'a>(
                 let b = (a + 1).min(n - 1);
                 z.db[a] + (z.db[b] - z.db[a]) * (at - a as f64) as f32
             } else {
-                // Several bins under a column: the strongest, so a narrow
-                // carrier is never lost between columns.
+                // Several bins under a column (a row from a deeper zoom
+                // than the view now): their mean power, which is what the
+                // waterfall's own wider bins read, so the row does not
+                // stand out from those about it.
                 let a = ((at - per_col / 2.0 + 0.5).max(0.0) as usize).min(n - 1);
                 let b = ((at + per_col / 2.0 + 0.5).ceil() as usize).clamp(a + 1, n);
-                z.db[a..b].iter().copied().fold(f32::MIN, f32::max)
+                let sum: f32 = z.db[a..b].iter().map(|d| 10f32.powf(d / 10.0)).sum();
+                10.0 * (sum / (b - a) as f32).max(1e-20).log10()
             };
             *px = lut[((db - floor) * scale).clamp(0.0, top) as usize];
         }
@@ -508,9 +511,11 @@ mod tests {
         assert_eq!(p[65], colour(2.05));
         assert_eq!(p[70], colour(2.55));
         assert!(p[100..].iter().all(|c| *c == Color32::TRANSPARENT));
-        // Two bins a column: the stronger of each pair.
+        // Two bins a column: the mean power of each pair.
         let p = render_fine(rows.iter(), (95.0, 195.0), 5, 1, (0.0, 10.0), &lut);
-        assert_eq!(p, [1.0, 3.0, 5.0, 7.0, 9.0].map(colour));
+        let pair =
+            |a: f32| 10.0 * ((10f32.powf(a / 10.0) + 10f32.powf((a + 1.0) / 10.0)) / 2.0).log10();
+        assert_eq!(p, [0.0, 2.0, 4.0, 6.0, 8.0].map(|a| colour(pair(a))));
     }
 
     #[test]

@@ -43,19 +43,18 @@ impl ZoomRow {
 /// The stretch to transform, seconds, for a view `lo_hz..hi_hz` drawn
 /// `pixels` wide, where the waterfall's own transform is `base_s` long;
 /// `None` while that one is fine enough (a pixel is wider than about a bin).
-/// From there the stretch grows as the square root of the zoom at first
-/// (finer bins come at the price of slower ones), then, from four times in,
-/// with the zoom itself: a bin every two pixels, which is as fine as the
-/// window's own width lets the screen show, up to [`LONGEST_S`].
+/// From there it is a bin a pixel, as fine as the screen can show, up to
+/// [`LONGEST_S`]: the resolution follows the zoom from the first step in.
 pub fn stretch(base_s: f64, lo_hz: f64, hi_hz: f64, pixels: u32) -> Option<f64> {
-    // How far past one bin a pixel the view is.
-    let zoom = f64::from(pixels) / ((hi_hz - lo_hz).max(1.0) * base_s);
-    let s = base_s * zoom.sqrt().max(zoom / 2.0);
+    let s = f64::from(pixels) / (hi_hz - lo_hz).max(1.0);
     (s > base_s * 1.25).then_some(s.min(LONGEST_S))
 }
 
 pub struct Zoom {
-    ddc: Ddc,
+    in_rate: f64,
+    /// Mixes the view to zero and decimates; `None` for a view too wide to
+    /// decimate (over a tenth of the input), which is transformed as it is.
+    ddc: Option<Ddc>,
     centre_hz: f64,
     /// Width of the band covered, around `centre_hz`.
     cover_hz: f64,
@@ -69,33 +68,38 @@ pub struct Zoom {
     buf: Vec<Iq>,
     power: Vec<f32>,
     /// The running average (linear power), with the transform size it was
-    /// taken at.
-    average: Option<(usize, Vec<f32>)>,
+    /// taken at and its first bin's frequency.
+    average: Option<(usize, f64, Vec<f32>)>,
+}
+
+/// Outputs to drop after a start: the filters' span.
+fn settle(ddc: &Option<Ddc>) -> usize {
+    ddc.as_ref().map_or(0, |d| d.taps() / d.decimation() + 1)
 }
 
 impl Zoom {
     /// A zoom on `lo_hz..hi_hz` (from the centre of the input), covering
     /// twice that so the view can be moved and widened a little without
-    /// starting again. `None` when the view is too wide to gain anything by
-    /// decimating.
+    /// starting again.
     pub fn new(in_rate: f64, lo_hz: f64, hi_hz: f64) -> Option<Self> {
         let cover_hz = 2.0 * (hi_hz - lo_hz);
-        if cover_hz <= 0.0 || cover_hz > in_rate / 5.0 {
+        if cover_hz <= 0.0 {
             return None;
         }
         let centre_hz = (lo_hz + hi_hz) / 2.0;
-        let ddc = Ddc::new(in_rate, centre_hz, cover_hz);
-        if ddc.decimation() < 2 {
-            return None;
-        }
-        let keep = (ddc.out_rate() * 0.2) as usize;
-        let settle = ddc.taps() / ddc.decimation() + 1;
+        // Rust note: `then` makes `Some(..)` only when the test holds, and
+        // `filter` drops it again if the filter would not decimate.
+        let ddc = (cover_hz <= in_rate / 5.0)
+            .then(|| Ddc::new(in_rate, centre_hz, cover_hz))
+            .filter(|d| d.decimation() >= 2);
+        let settle = settle(&ddc);
         Some(Self {
+            in_rate,
             ddc,
             centre_hz,
             cover_hz,
             samples: Vec::new(),
-            keep,
+            keep: (in_rate * 0.05) as usize,
             settle,
             planner: FftPlanner::new(),
             window: Vec::new(),
@@ -103,6 +107,10 @@ impl Zoom {
             power: Vec::new(),
             average: None,
         })
+    }
+
+    fn decimation(&self) -> usize {
+        self.ddc.as_ref().map_or(1, Ddc::decimation)
     }
 
     /// Does this zoom still serve the view `lo_hz..hi_hz`? It must cover it,
@@ -115,7 +123,10 @@ impl Zoom {
 
     /// A block of the input.
     pub fn feed(&mut self, block: &[Iq]) {
-        self.ddc.process(block, &mut self.samples);
+        match &mut self.ddc {
+            Some(d) => d.process(block, &mut self.samples),
+            None => self.samples.extend_from_slice(block),
+        }
         let drop = self.settle.min(self.samples.len());
         self.samples.drain(..drop);
         self.settle -= drop;
@@ -128,18 +139,21 @@ impl Zoom {
     /// The input skipped some samples: what was gathered does not join on.
     pub fn gap(&mut self) {
         self.samples.clear();
-        self.ddc.reset();
-        self.settle = self.ddc.taps() / self.ddc.decimation() + 1;
+        if let Some(d) = &mut self.ddc {
+            d.reset();
+        }
+        self.settle = settle(&self.ddc);
     }
 
     /// The spectrum of the newest `seconds`, or of what has been gathered
     /// since the zoom began once that is an eighth of it (the detail then
-    /// fills in as the rest arrives); `None` before. Where the stretch is shorter than a waterfall row lasts
-    /// (`row_s`), the half-overlapped stretches of the row are averaged, as
-    /// the waterfall's own rows are: the row turns from a smooth one into a
-    /// single transform as the zoom deepens.
+    /// fills in as the rest arrives); `None` before. Where the stretch is
+    /// shorter than a waterfall row lasts (`row_s`), the half-overlapped
+    /// stretches of the row are averaged, as the waterfall's own rows are:
+    /// the row turns from a smooth one into a single transform as the zoom
+    /// deepens.
     pub fn row(&mut self, seconds: f64, row_s: f64) -> Option<ZoomRow> {
-        let rate = self.ddc.out_rate();
+        let rate = self.in_rate / self.decimation() as f64;
         let full = ((seconds.min(LONGEST_S) * rate).round() as usize).max(64);
         let have = self.samples.len();
         let len = full.min(have);
@@ -181,36 +195,42 @@ impl Zoom {
         // length), with the decimation put back: noise and modulated
         // carriers keep their colours whatever the resolution, and only a
         // steady tone stands higher the finer it is resolved.
-        let scale = (self.ddc.decimation() as f64 / (len as f64 * segments as f64)) as f32;
+        let scale = (self.decimation() as f64 / (len as f64 * segments as f64)) as f32;
         let step_hz = rate / n as f64;
-        // The band covered is the middle of the transform.
-        let half = ((self.cover_hz / 2.0 / step_hz) as isize).min(n as isize / 2);
-        let lin: Vec<f32> = (-half..half)
+        // The band covered: the middle of the transform when it was mixed
+        // to zero, else the bins about the view's centre, as far as the
+        // input reaches.
+        let (mixed_hz, mid) = match self.ddc {
+            Some(_) => (self.centre_hz, 0),
+            None => (0.0, (self.centre_hz / step_hz).round() as isize),
+        };
+        let half = (self.cover_hz / 2.0 / step_hz) as isize;
+        let edge = n as isize / 2;
+        let (first, last) = ((mid - half).max(-edge), (mid + half).min(edge));
+        let lin: Vec<f32> = (first..last)
             .map(|k| self.power[k.rem_euclid(n as isize) as usize] * scale)
             .collect();
         let db = lin.iter().map(|p| 10.0 * p.max(1e-20).log10()).collect();
+        let lo_hz = mixed_hz + first as f64 * step_hz;
         match &mut self.average {
-            Some((size, average)) if *size == n => {
+            Some((size, at, average))
+                if *size == n && *at == lo_hz && average.len() == lin.len() =>
+            {
                 for (a, p) in average.iter_mut().zip(&lin) {
                     *a += 0.15 * (p - *a);
                 }
             }
-            _ => self.average = Some((n, lin)),
+            _ => self.average = Some((n, lo_hz, lin)),
         }
-        Some(ZoomRow {
-            lo_hz: self.centre_hz - half as f64 * step_hz,
-            step_hz,
-            db,
-        })
+        Some(ZoomRow { lo_hz, step_hz, db })
     }
 
     /// The running average of the rows, for the spectrum trace.
     pub fn average(&self) -> Option<ZoomRow> {
-        let (n, lin) = self.average.as_ref()?;
-        let step_hz = self.ddc.out_rate() / *n as f64;
+        let (n, lo_hz, lin) = self.average.as_ref()?;
         Some(ZoomRow {
-            lo_hz: self.centre_hz - (lin.len() / 2) as f64 * step_hz,
-            step_hz,
+            lo_hz: *lo_hz,
+            step_hz: self.in_rate / self.decimation() as f64 / *n as f64,
             db: lin.iter().map(|p| 10.0 * p.max(1e-20).log10()).collect(),
         })
     }
@@ -257,7 +277,7 @@ mod tests {
         // A 40 kHz view 1600 pixels wide: the waterfall's bins are 1953 Hz.
         let (lo, hi) = (-1_220_000.0, -1_180_000.0);
         let seconds = stretch(base_s, lo, hi, 1600).unwrap();
-        assert!(seconds > 30.0 * base_s && seconds < 0.03, "{seconds}");
+        assert!(seconds > 70.0 * base_s && seconds < 0.05, "{seconds}");
         let mut zoom = Zoom::new(RATE, lo, hi).unwrap();
         assert!(zoom.fits(lo, hi));
         assert!(zoom.fits(lo - 10_000.0, hi - 10_000.0));
@@ -269,8 +289,8 @@ mod tests {
             row = zoom.row(seconds, 0.04).or(row);
         }
         let row = row.unwrap();
-        // A bin every two pixels (25 Hz each), or finer.
-        assert!(row.step_hz < 51.0, "{}", row.step_hz);
+        // A bin a pixel (25 Hz), or finer.
+        assert!(row.step_hz < 25.1, "{}", row.step_hz);
         let (left, right) = row.edges();
         assert!(left <= lo && right >= hi, "{left} {right}");
         let at = |hz: f64| row.db[((hz - row.lo_hz) / row.step_hz).round() as usize];
@@ -300,11 +320,37 @@ mod tests {
     }
 
     #[test]
-    fn no_zoom_on_a_wide_view() {
-        assert!(Zoom::new(8e6, -1e6, 1e6).is_none());
-        assert!(Zoom::new(8e6, -2e5, 2e5).is_some());
-        // Nor while a pixel is wider than a bin.
-        assert!(stretch(4096.0 / 8e6, -2e6, 2e6, 1600).is_none());
-        assert!(stretch(4096.0 / 8e6, -2e5, 2e5, 1600).is_some());
+    fn a_wide_view_is_transformed_as_it_is() {
+        // No zoom while a pixel is wider than a bin.
+        let base_s = 4096.0 / RATE;
+        assert!(stretch(base_s, -2e6, 2e6, 1600).is_none());
+        // A 1.6 MHz view of 8 MS/s, too wide to decimate: 1 kHz a pixel
+        // against the waterfall's 1953 Hz bins.
+        let (lo, hi) = (-2_000_000.0, -400_000.0);
+        let seconds = stretch(base_s, lo, hi, 1600).unwrap();
+        let mut zoom = Zoom::new(RATE, lo, hi).unwrap();
+        let input = signal(0.1);
+        zoom.feed(&input);
+        let row = zoom.row(seconds, 0.04).unwrap();
+        assert!(row.step_hz < 1001.0, "{}", row.step_hz);
+        let (left, right) = row.edges();
+        assert!(left <= lo && right >= hi, "{left} {right}");
+        // The tones are the strongest thing in it, where they should be.
+        let peak = (0..row.db.len())
+            .max_by(|&a, &b| row.db[a].total_cmp(&row.db[b]))
+            .unwrap();
+        let peak_hz = row.lo_hz + peak as f64 * row.step_hz;
+        assert!((peak_hz + 1_200_000.0).abs() < 2000.0, "{peak_hz}");
+        // And the noise is where the waterfall has it.
+        let own = Spectrum::new(4096).compute(&input);
+        let mean = |v: &[f32]| {
+            10.0 * (v.iter().map(|p| 10f32.powf(p / 10.0)).sum::<f32>() / v.len() as f32).log10()
+        };
+        let noise = mean(&row.db[..row.db.len() / 4]);
+        assert!((noise - mean(&own[2048..])).abs() < 0.5, "{noise}");
+        // A view at the band's edge stops there.
+        let mut zoom = Zoom::new(RATE, 3e6, 4e6).unwrap();
+        zoom.feed(&input);
+        assert!(zoom.row(0.001, 0.04).unwrap().edges().1 <= 4e6 + 1.0);
     }
 }

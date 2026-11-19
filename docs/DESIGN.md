@@ -96,23 +96,26 @@ IqSource (HackRF 20 MS/s, or a wideband file)
   constellation and statistics below it.
 - **Finer when zoomed in** *(2026-11-19, asked for by Rory; from DecAero)*:
   once a pixel is narrower than one FFT bin, the window tells the engine the
-  view (`Engine::set_view`) and the spectrum thread mixes it to zero,
-  decimates (a `Ddc` over twice the view) and transforms a stretch of it
-  (`decsat-engine/src/zoom.rs`): `base x max(sqrt(z), z/2)` long, `base` the
-  FFT's own length and `z` how far past one bin a pixel the view is, up to
-  1 s. So from four times in there is a bin every two pixels, down to 1 Hz
-  bins (Rory: "needs more resolution fully zoomed in"; the square root alone
-  left 50 Hz bins on a 2 kHz view). The wheel now stops at a 500 Hz view,
-  not at 32 FFT bins. Levels are on the FFT's own scale, so noise and
-  carriers keep their colours. The finer rows are kept beside the waterfall's
-  rows and drawn into a second ring texture, one column a screen pixel, clear
-  where there is none: zooming or panning never blanks the waterfall, the
-  detail fills in over about an eighth of the stretch. Stretches shorter
-  than a row are averaged (up to 16), deeper ones are single transforms and
-  smear in time by their own length. Measured on a 5 MS/s recording: no
-  change in CPU that shows (11.0 s of CPU in 10 s at full span, 10.8 to 11.9
-  zoomed). A local engine only: a server's waterfall is drawn as sent.
-  Unattended: `--view LO_HZ:HI_HZ`.
+  view (`Engine::set_view`) and the spectrum thread transforms a stretch of
+  it `pixels / view width` seconds long, up to 1 s
+  (`decsat-engine/src/zoom.rs`): a bin a pixel from the first step in, down
+  to 1 Hz bins. (DecAero's square-root rule was tried first; Rory: "needs
+  more resolution fully zoomed in", then "make it change res faster so it's
+  higher res for the zoom level".) A view up to a tenth of the span is mixed
+  to zero and decimated first (a `Ddc` over twice the view); a wider one is
+  transformed at the full rate and the bins about the view kept. The wheel
+  now stops at a 500 Hz view, not at 32 FFT bins. Levels are on the FFT's
+  own scale, so noise and carriers keep their colours. The finer rows are
+  kept beside the waterfall's rows and drawn into a second ring texture, one
+  column a screen pixel, clear where there is none: zooming or panning never
+  blanks the waterfall, and the detail fills in from an eighth of the
+  stretch on. A row from a deeper zoom than the view now is drawn at its
+  mean power a column, so it does not stand out. Stretches shorter than a
+  row are averaged (up to 16); deeper ones are single transforms and smear
+  in time by their own length. Measured on a 5 MS/s recording: no change in
+  CPU that shows (11.0 s of CPU in 10 s at full span, 10.4 to 11.4 zoomed).
+  A local engine only: a server's waterfall is drawn as sent. Unattended:
+  `--view LO_HZ:HI_HZ`.
 
 ### Decoders a VFO can run
 
