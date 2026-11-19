@@ -36,6 +36,7 @@ mod radar_map;
 mod radar_scope;
 mod radio;
 mod remote_panel;
+mod row_pacer;
 mod session;
 mod session_log;
 mod side_panel;
@@ -50,7 +51,7 @@ mod tv;
 mod tv_info;
 mod waterfall;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -277,7 +278,7 @@ struct App {
     fine: crate::waterfall::FineImage,
     last_seq: u64,
     /// Rows collected from the engine and not yet drawn.
-    row_queue: VecDeque<(Vec<f32>, Option<decsat_engine::zoom::ZoomRow>)>,
+    row_pacer: row_pacer::Pacer<(Vec<f32>, Option<decsat_engine::zoom::ZoomRow>)>,
     front: FrontStatus,
     band: BandView,
     vfos: Vec<UiVfo>,
@@ -437,7 +438,7 @@ impl Default for App {
             ring: RingImage::default(),
             fine: Default::default(),
             last_seq: 0,
-            row_queue: VecDeque::new(),
+            row_pacer: Default::default(),
             front: FrontStatus::default(),
             band: BandView::default(),
             vfos: Vec::new(),
@@ -1405,7 +1406,7 @@ impl App {
         self.engine = Some(eng);
         self.history.reset();
         self.last_seq = 0;
-        self.row_queue.clear();
+        self.row_pacer.clear();
         self.front = FrontStatus::default();
         self.sample_rate = rate;
         self.band.set_span(rate);
@@ -1475,7 +1476,7 @@ impl App {
                 self.engine = Some(AnyEngine::Remote(eng));
                 self.history.reset();
                 self.last_seq = 0;
-                self.row_queue.clear();
+                self.row_pacer.clear();
                 self.front = FrontStatus::default();
                 self.sample_rate = rate;
                 self.band.set_span(rate);
@@ -3183,24 +3184,24 @@ impl eframe::App for App {
             // The rows first: a row's finer spectrum is put out before it.
             let rows = e.new_rows(self.last_seq);
             let mut finer: BTreeMap<_, _> = e.new_zoom_rows(self.last_seq).into_iter().collect();
+            let mut new = Vec::with_capacity(rows.len());
             for (seq, row) in rows {
-                self.row_queue.push_back((row, finer.remove(&seq)));
+                new.push((row, finer.remove(&seq)));
                 self.last_seq = seq;
             }
-            // The engine's rows come a block at a time (two or three every
-            // 40 ms): a third of what waits is drawn each frame, so the
-            // waterfall moves a row a frame at 60 frames a second, and a
-            // backlog (a file played fast, a stalled window) drains quickly.
+            // The rows come in bursts (a radio's buffer, a file's block):
+            // the pacer lets them out evenly, see `row_pacer`.
             let rows_per_sec = match e {
                 remote_panel::AnyEngine::Local(_) => self.opts.display_rows_per_sec,
                 remote_panel::AnyEngine::Remote(_) => self.opts.rows_per_sec,
             };
             self.history.set_rows_per_sec(rows_per_sec as f32);
-            for _ in 0..self.row_queue.len().div_ceil(3) {
-                if let Some((row, fine)) = self.row_queue.pop_front() {
-                    self.history.push_with(row, fine);
-                }
+            let now = ctx.input(|i| i.time);
+            let (due, slide) = self.row_pacer.frame(now, rows_per_sec, new);
+            for (row, fine) in due {
+                self.history.push_with(row, fine);
             }
+            self.history.slide = slide;
             for v in &self.vfos {
                 if let Some(s) = e.vfo_status(v.id) {
                     self.statuses.insert(v.id, s);
