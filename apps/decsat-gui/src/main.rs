@@ -50,7 +50,7 @@ mod tv;
 mod tv_info;
 mod waterfall;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -276,6 +276,8 @@ struct App {
     ring: RingImage,
     fine: crate::waterfall::FineImage,
     last_seq: u64,
+    /// Rows collected from the engine and not yet drawn.
+    row_queue: VecDeque<(Vec<f32>, Option<decsat_engine::zoom::ZoomRow>)>,
     front: FrontStatus,
     band: BandView,
     vfos: Vec<UiVfo>,
@@ -435,6 +437,7 @@ impl Default for App {
             ring: RingImage::default(),
             fine: Default::default(),
             last_seq: 0,
+            row_queue: VecDeque::new(),
             front: FrontStatus::default(),
             band: BandView::default(),
             vfos: Vec::new(),
@@ -1402,6 +1405,7 @@ impl App {
         self.engine = Some(eng);
         self.history.reset();
         self.last_seq = 0;
+        self.row_queue.clear();
         self.front = FrontStatus::default();
         self.sample_rate = rate;
         self.band.set_span(rate);
@@ -1471,6 +1475,7 @@ impl App {
                 self.engine = Some(AnyEngine::Remote(eng));
                 self.history.reset();
                 self.last_seq = 0;
+                self.row_queue.clear();
                 self.front = FrontStatus::default();
                 self.sample_rate = rate;
                 self.band.set_span(rate);
@@ -3179,8 +3184,22 @@ impl eframe::App for App {
             let rows = e.new_rows(self.last_seq);
             let mut finer: BTreeMap<_, _> = e.new_zoom_rows(self.last_seq).into_iter().collect();
             for (seq, row) in rows {
-                self.history.push_with(row, finer.remove(&seq));
+                self.row_queue.push_back((row, finer.remove(&seq)));
                 self.last_seq = seq;
+            }
+            // The engine's rows come a block at a time (two or three every
+            // 40 ms): a third of what waits is drawn each frame, so the
+            // waterfall moves a row a frame at 60 frames a second, and a
+            // backlog (a file played fast, a stalled window) drains quickly.
+            let rows_per_sec = match e {
+                remote_panel::AnyEngine::Local(_) => self.opts.display_rows_per_sec,
+                remote_panel::AnyEngine::Remote(_) => self.opts.rows_per_sec,
+            };
+            self.history.set_rows_per_sec(rows_per_sec as f32);
+            for _ in 0..self.row_queue.len().div_ceil(3) {
+                if let Some((row, fine)) = self.row_queue.pop_front() {
+                    self.history.push_with(row, fine);
+                }
             }
             for v in &self.vfos {
                 if let Some(s) = e.vfo_status(v.id) {
@@ -3248,7 +3267,7 @@ impl eframe::App for App {
             for (id, s) in follows {
                 self.apply(Action::Update(id, s));
             }
-            // Repaint at display rate while running; a row arrives every 40 ms.
+            // Repaint at display rate while running: a row a frame.
             ctx.request_repaint_after(Duration::from_millis(16));
         }
 
@@ -3256,7 +3275,14 @@ impl eframe::App for App {
         // eight strongest that are not rough lumps, in frequency order.
         // (`--vfo-at` drops one VFO where asked instead.)
         // Unattended: the survey, once the detector has settled.
-        if self.automation.survey && self.front.row_seq > 40 {
+        // (1.6 s of rows.)
+        let settled_rows = match &self.engine {
+            Some(remote_panel::AnyEngine::Local(_)) => {
+                (1.6 * self.opts.display_rows_per_sec) as u64
+            }
+            _ => 40,
+        };
+        if self.automation.survey && self.front.row_seq > settled_rows {
             self.automation.survey = false;
             self.survey.open = true;
             let reqs = self
@@ -3266,7 +3292,7 @@ impl eframe::App for App {
         }
         if (self.automation.claim_carriers || !self.automation.vfo_at.is_empty())
             && !self.automation.claimed
-            && self.front.row_seq > 40
+            && self.front.row_seq > settled_rows
         {
             self.automation.claimed = true;
             let mut picks: Vec<_> = self
