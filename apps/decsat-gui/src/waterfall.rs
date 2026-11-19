@@ -76,6 +76,9 @@ pub struct History {
     peak: Option<f32>,
     /// How far the automatic levels move towards a new row's.
     step: f32,
+    /// How far towards the next row the picture is (0 to 1): the newest row
+    /// slides in from the top by this much of its height.
+    pub slide: f32,
 }
 
 impl Default for History {
@@ -89,6 +92,7 @@ impl Default for History {
             auto: true,
             manual: (-110.0, -40.0),
             step: 0.05,
+            slide: 1.0,
             floor: None,
             peak: None,
         }
@@ -297,14 +301,22 @@ impl RingImage {
             self.head = head;
         }
         self.uploaded = h.pushed;
-        let v0 = self.head as f32 / ROWS as f32;
         Some(Shown {
             tiles: self.handles.iter().map(|t| t.id()).collect(),
             tile,
             width,
-            v: (v0, v0 + 1.0),
+            v: slid(self.head, h.slide),
         })
     }
+}
+
+/// The ring's texture coordinates top to bottom with the newest row (at
+/// `head`) slid in by `slide` of its height: one row less than the ring is
+/// drawn, so the picture moves evenly from row to row and its scale never
+/// changes.
+fn slid(head: usize, slide: f32) -> (f32, f32) {
+    let v0 = (head as f32 + 1.0 - slide.clamp(0.0, 1.0)) / ROWS as f32;
+    (v0, v0 + (ROWS - 1) as f32 / ROWS as f32)
 }
 
 /// The finer rows as a picture of the view: see the module's notes.
@@ -381,8 +393,7 @@ impl FineImage {
             }
         }
         self.uploaded = h.pushed;
-        let v0 = self.head as f32 / ROWS as f32;
-        Some((self.handle.as_ref()?.id(), (v0, v0 + 1.0)))
+        Some((self.handle.as_ref()?.id(), slid(self.head, h.slide)))
     }
 }
 

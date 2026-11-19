@@ -124,8 +124,19 @@ IqSource (HackRF 20 MS/s, or a wideband file)
   over the block join (two FFTs of the past are kept), so a large FFT at a
   low rate overlaps its rows instead of slowing them. The FFTs averaged a
   second are held at 1200 (48 a row at 25, 20 a row at 60), so more rows
-  cost no more transforms. The rows of a block arrive together, so the GUI
-  draws a third of what waits each frame: a row a frame. The automatic
+  cost no more transforms. The rows reach the window in bursts (a file's
+  block; a Pluto at 6 MS/s hands over about 13 rows every 200 ms), and
+  drawing a third of what waited each frame was jerky on the radio (Rory's
+  film: 0 to 5 px a frame, three or four frames in twelve still). The GUI
+  now paces them (`decsat-gui/src/row_pacer.rs`): rows leave a queue at the
+  rate they arrive at over the last 3 s, trimmed so the queue's low point
+  sits at 3 rows, and the waterfall is drawn the due fraction of a row on
+  (`History::slide`), so it moves the same distance every frame. Filmed on
+  a 5 MS/s recording at 60 frames a second: 1.05 px a frame, standard
+  deviation 0.12 (the release before, 25 rows a second: 0.99, deviation
+  0.95). The burst pattern of the film is a unit test; not filmed on the
+  radio by me. The waterfall lags the signal by what is queued (about a
+  burst). The automatic
   levels and the smoothed trace keep their pace in time. The waterfall's 512
   rows are now 8.5 s (20 s before). Measured on a 5 MS/s recording, 12 s
   runs: 12.9 → 12.7 s of CPU at full span, 13.0 → 12.8 at a 20 kHz view,
