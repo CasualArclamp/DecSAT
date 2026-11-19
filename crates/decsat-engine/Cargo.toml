@@ -25,8 +25,8 @@ decsat-bgan = { path = "../decsat-bgan" }
 # to a release: its channel worker runs on a VFO's baseband (`aero.rs`).
 # Cargo fetches the DecAero repository but builds only these crates and
 # what they need (its codec, framing and DSP crates).
-decaero-engine = { git = "https://github.com/CasualArclamp/DecAero", tag = "v0.3.1" }
-decaero-core = { git = "https://github.com/CasualArclamp/DecAero", tag = "v0.3.1" }
+decaero-engine = { git = "https://github.com/CasualArclamp/DecAero", rev = "966fe8b" }
+decaero-core = { git = "https://github.com/CasualArclamp/DecAero", rev = "966fe8b" }
 decsat-mod = { path = "../decsat-mod" }
 num-complex.workspace = true
 rustfft.workspace = true

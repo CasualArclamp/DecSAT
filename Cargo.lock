@@ -652,17 +652,17 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 [[package]]
 name = "decaero-ambe"
 version = "0.3.1"
-source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+source = "git+https://github.com/CasualArclamp/DecAero?rev=966fe8b#966fe8bbc7255c28ee1e20d7e394c08f73a7e0a0"
 
 [[package]]
 name = "decaero-core"
 version = "0.3.1"
-source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+source = "git+https://github.com/CasualArclamp/DecAero?rev=966fe8b#966fe8bbc7255c28ee1e20d7e394c08f73a7e0a0"
 
 [[package]]
 name = "decaero-dsp"
 version = "0.3.1"
-source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+source = "git+https://github.com/CasualArclamp/DecAero?rev=966fe8b#966fe8bbc7255c28ee1e20d7e394c08f73a7e0a0"
 dependencies = [
  "decaero-ambe",
  "decaero-core",
@@ -673,7 +673,7 @@ dependencies = [
 [[package]]
 name = "decaero-engine"
 version = "0.3.1"
-source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+source = "git+https://github.com/CasualArclamp/DecAero?rev=966fe8b#966fe8bbc7255c28ee1e20d7e394c08f73a7e0a0"
 dependencies = [
  "decaero-ambe",
  "decaero-core",

@@ -140,6 +140,24 @@ mod tests {
             .collect()
     }
 
+    /// Telephone speech at 8 kHz brought up to 48 kHz: the band is kept
+    /// and its images about 4 kHz are not let through.
+    #[test]
+    fn speech_at_8k_keeps_its_band_and_loses_its_images() {
+        for f in [300.0, 1000.0, 2500.0, 3000.0, 3400.0] {
+            let x = tone(f, 8000.0, 8000);
+            let mut r = Resampler::new(8000, 48_000);
+            let mut y = Vec::new();
+            r.process(&x, &mut y);
+            let kept = 20.0 * (tone_level(&y[4000..], f, 48_000.0) / 0.5).log10();
+            let image = 20.0 * (tone_level(&y[4000..], 8000.0 - f, 48_000.0) / 0.5).log10();
+            // Measured: 0.0 dB to 3 kHz, -0.5 dB at 3.4 kHz; images -71 dB
+            // or lower.
+            assert!(kept > -0.7, "{f} Hz comes out at {kept:.1} dB");
+            assert!(image < -60.0, "{f} Hz leaves an image at {image:.1} dB");
+        }
+    }
+
     #[test]
     fn tones_keep_their_pitch_and_level() {
         for (fin, fout, f) in [
