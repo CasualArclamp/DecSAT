@@ -650,6 +650,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "decaero-ambe"
+version = "0.3.1"
+source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+
+[[package]]
+name = "decaero-core"
+version = "0.3.1"
+source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+
+[[package]]
+name = "decaero-dsp"
+version = "0.3.1"
+source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+dependencies = [
+ "decaero-ambe",
+ "decaero-core",
+ "num-complex",
+ "rustfft",
+]
+
+[[package]]
+name = "decaero-engine"
+version = "0.3.1"
+source = "git+https://github.com/CasualArclamp/DecAero?tag=v0.3.1#3bc774fedf6d67fb72c59861d6dfd70fe6b7c31e"
+dependencies = [
+ "decaero-ambe",
+ "decaero-core",
+ "decaero-dsp",
+ "num-complex",
+ "rustfft",
+ "ruzstd",
+]
+
+[[package]]
 name = "decsat-audio"
 version = "1.12.0"
 dependencies = [
@@ -713,6 +747,8 @@ dependencies = [
 name = "decsat-engine"
 version = "1.12.0"
 dependencies = [
+ "decaero-core",
+ "decaero-engine",
  "decsat-audio",
  "decsat-bgan",
  "decsat-core",
@@ -2836,6 +2872,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3360,6 +3405,12 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "type-map"

@@ -434,6 +434,17 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             (_, Some(c)) => format!("I19 {} · sync?", if c.locked { "LOCK" } else { "no lock" }),
             _ => format!("acq {:.0} %", st.progress * 100.0),
         },
+        // "AERO P 600 · 9.1 dB": the channel and its Es/N0.
+        DecoderKind::Aero => match &st.aero {
+            Some(a) if !a.searching && a.locked => format!(
+                "AERO {} · {:.1} dB{}",
+                a.channel,
+                a.es_n0_db,
+                if st.recording_active { " ● REC" } else { "" }
+            ),
+            Some(a) if !a.searching => format!("AERO {} · no lock", a.channel),
+            _ => "AERO searching".into(),
+        },
         // "BGAN 12.4 dB · 87 %": Es/N0 and the share of blocks that decoded.
         DecoderKind::Bgan => match &st.bgan {
             Some(b) if b.rx.locked && b.rx.blocks_total > 0 => format!(

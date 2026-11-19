@@ -21,6 +21,12 @@ decsat-ip = { path = "../decsat-ip" }
 decsat-audio = { path = "../decsat-audio" }
 decsat-modem = { path = "../decsat-modem" }
 decsat-bgan = { path = "../decsat-bgan" }
+# DecAero's receiver for Inmarsat Classic Aero (same author, GPL-3), pinned
+# to a release: its channel worker runs on a VFO's baseband (`aero.rs`).
+# Cargo fetches the DecAero repository but builds only these crates and
+# what they need (its codec, framing and DSP crates).
+decaero-engine = { git = "https://github.com/CasualArclamp/DecAero", tag = "v0.3.1" }
+decaero-core = { git = "https://github.com/CasualArclamp/DecAero", tag = "v0.3.1" }
 decsat-mod = { path = "../decsat-mod" }
 num-complex.workspace = true
 rustfft.workspace = true
