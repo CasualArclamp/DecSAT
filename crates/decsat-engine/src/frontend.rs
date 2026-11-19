@@ -21,6 +21,7 @@ use decsat_io::IqSource;
 use crate::carriers::{Carrier, detect_carriers, resolve_narrow};
 use crate::spectrum::Spectrum;
 use crate::vfo::{self, VfoHandle, VfoId, VfoSettings, VfoStatus};
+use crate::zoom::{self, Zoom, ZoomRow};
 
 /// Front-end options.
 #[derive(Debug, Clone)]
@@ -73,6 +74,9 @@ pub struct FrontStatus {
     pub fft_size: usize,
     /// Smoothed wideband spectrum, dB, FFT-shifted.
     pub spectrum_db: Vec<f32>,
+    /// Zoomed in past one bin a pixel ([`Engine::set_view`]): the part on
+    /// screen again, smoothed, at a finer resolution.
+    pub zoom: Option<ZoomRow>,
     pub carriers: Vec<Carrier>,
     /// Bands whose power comes and goes — TDMA channels (or Bluetooth in a
     /// HackRF's IF: [`crate::bursty::bluetooth_offsets`]) — from the last
@@ -114,6 +118,10 @@ const SEGMENTS_PER_ROW: usize = 48;
 struct Shared {
     front: Mutex<FrontStatus>,
     rows: Mutex<VecDeque<(u64, Vec<f32>)>>,
+    /// The finer rows of the view, numbered as the rows they go with.
+    zoom_rows: Mutex<VecDeque<(u64, ZoomRow)>>,
+    /// What the window shows: Hz from the centre, and its width in pixels.
+    view: Mutex<Option<(f64, f64, u32)>>,
     vfos: Mutex<BTreeMap<VfoId, VfoHandle>>,
     /// Burst plans passed between the VFOs.
     plans: Arc<crate::plan_feed::PlanFeed>,
@@ -152,6 +160,8 @@ impl Engine {
                 ..Default::default()
             }),
             rows: Mutex::new(VecDeque::with_capacity(ROW_BACKLOG)),
+            zoom_rows: Mutex::new(VecDeque::new()),
+            view: Mutex::new(None),
             vfos: Mutex::new(BTreeMap::new()),
             plans: Default::default(),
         });
@@ -192,6 +202,28 @@ impl Engine {
             .filter(|(seq, _)| *seq > after)
             .cloned()
             .collect()
+    }
+
+    /// The finer rows of the view newer than `after` (see
+    /// [`set_view`](Self::set_view)), numbered as the waterfall rows they
+    /// were made with. Not every row has one.
+    pub fn new_zoom_rows(&self, after: u64) -> Vec<(u64, ZoomRow)> {
+        self.shared
+            .zoom_rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(seq, _)| *seq > after)
+            .cloned()
+            .collect()
+    }
+
+    /// Tell the engine what the window shows: `lo_hz..hi_hz` from the
+    /// centre, drawn `pixels` wide. Zoomed in past one FFT bin a pixel,
+    /// the engine makes a finer spectrum of that part ([`crate::zoom`]).
+    /// `None`: no window, nothing extra is computed.
+    pub fn set_view(&self, view: Option<(f64, f64, u32)>) {
+        *self.shared.view.lock().unwrap() = view;
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -345,7 +377,9 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
     // Spectrum is optional, unlike the sample stream consumed by the VFOs.
     // A bounded 1-slot queue ensures that a slow FFT never holds the receiver.
     let fft_size = Arc::new(AtomicUsize::new(opts.fft_size));
-    let (spectrum_tx, spectrum_rx) = mpsc::sync_channel::<Arc<Vec<Iq>>>(1);
+    // Each block goes with where it starts in the source (samples), so the
+    // worker knows when one was skipped.
+    let (spectrum_tx, spectrum_rx) = mpsc::sync_channel::<(u64, Arc<Vec<Iq>>)>(1);
     let spectrum_thread = {
         let shared = Arc::clone(&shared);
         let fft_size = Arc::clone(&fft_size);
@@ -480,7 +514,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
         for h in shared.vfos.lock().unwrap().values() {
             h.offer(&block, block_start_s);
         }
-        let _ = spectrum_tx.try_send(Arc::clone(&block));
+        let _ = spectrum_tx.try_send((source_samples - block_len as u64, Arc::clone(&block)));
 
         let used = t0.elapsed().as_secs_f64() / (block_len as f64 / rate);
         load = 0.9 * load + 0.1 * used as f32;
@@ -501,7 +535,7 @@ fn run(mut source: Box<dyn IqSource>, opts: EngineOptions, shared: Arc<Shared>, 
 /// Non-critical display worker. Slow rendering skips whole blocks, never
 /// creates a gap in the independent VFO IQ stream.
 fn run_spectrum(
-    rx: Receiver<Arc<Vec<Iq>>>,
+    rx: Receiver<(u64, Arc<Vec<Iq>>)>,
     shared: Arc<Shared>,
     rate: f64,
     fft_size: Arc<AtomicUsize>,
@@ -516,7 +550,10 @@ fn run_spectrum(
     let mut last_hop_secs = 0.0;
     let mut last_bursts = Instant::now();
     let mut takes: VecDeque<Vec<crate::bursty::BurstBand>> = VecDeque::new();
-    while let Ok(block) = rx.recv() {
+    let mut zoom: Option<Zoom> = None;
+    // Where the next block starts if none is skipped.
+    let mut joins_at = 0u64;
+    while let Ok((starts_at, block)) = rx.recv() {
         let want = fft_size.load(Ordering::Relaxed);
         if want != spec.size() {
             spec = Spectrum::new(want);
@@ -529,6 +566,37 @@ fn run_spectrum(
             spec.compute_max_with(&block, SEGMENTS_PER_ROW, |p| bursts.push(p, rate, spacing));
         last_hop_secs = hop as f64 / rate;
         row_seq += 1;
+        // Zoomed in past the waterfall's own bins: a finer spectrum of the
+        // view. One that still serves the view is kept, so its samples are
+        // not thrown away by every small move.
+        let view = *shared.view.lock().unwrap();
+        let fine_s = view
+            .and_then(|(lo, hi, pixels)| zoom::stretch(spec.size() as f64 / rate, lo, hi, pixels));
+        match (fine_s, view) {
+            (Some(_), Some((lo, hi, _))) => {
+                if !zoom.as_ref().is_some_and(|z| z.fits(lo, hi)) {
+                    zoom = Zoom::new(rate, lo, hi);
+                }
+            }
+            _ => zoom = None,
+        }
+        let finer = zoom.as_mut().zip(fine_s).and_then(|(z, s)| {
+            if starts_at != joins_at {
+                z.gap();
+            }
+            z.feed(&block);
+            z.row(s, block.len() as f64 / rate)
+        });
+        joins_at = starts_at + block.len() as u64;
+        {
+            let mut rows = shared.zoom_rows.lock().unwrap();
+            if let Some(r) = finer {
+                rows.push_back((row_seq, r));
+            }
+            while rows.len() > ROW_BACKLOG {
+                rows.pop_front();
+            }
+        }
         if avg_lin.len() != row.len() {
             avg_lin = row.iter().map(|&d| 10f32.powf(d / 10.0)).collect();
         } else {
@@ -579,6 +647,7 @@ fn run_spectrum(
         }
         let mut f = shared.front.lock().unwrap();
         f.spectrum_db = avg_db;
+        f.zoom = zoom.as_ref().and_then(Zoom::average);
         if let Some(c) = carriers {
             f.carriers = c;
         }

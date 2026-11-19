@@ -80,7 +80,7 @@ fn main() -> eframe::Result {
             eprintln!(
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
-                 [--select N] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
+                 [--select N] [--view LO_HZ:HI_HZ] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
                  [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--bias-tee] [--decimate N] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
@@ -274,6 +274,7 @@ struct App {
     applied: Option<(f64, SampleFormat, bool, bool)>,
     history: History,
     ring: RingImage,
+    fine: crate::waterfall::FineImage,
     last_seq: u64,
     front: FrontStatus,
     band: BandView,
@@ -432,6 +433,7 @@ impl Default for App {
             applied: None,
             history: History::default(),
             ring: RingImage::default(),
+            fine: Default::default(),
             last_seq: 0,
             front: FrontStatus::default(),
             band: BandView::default(),
@@ -3173,8 +3175,11 @@ impl eframe::App for App {
 
         if let Some(e) = &self.engine {
             self.front = e.front();
-            for (seq, row) in e.new_rows(self.last_seq) {
-                self.history.push(row);
+            // The rows first: a row's finer spectrum is put out before it.
+            let rows = e.new_rows(self.last_seq);
+            let mut finer: BTreeMap<_, _> = e.new_zoom_rows(self.last_seq).into_iter().collect();
+            for (seq, row) in rows {
+                self.history.push_with(row, finer.remove(&seq));
                 self.last_seq = seq;
             }
             for v in &self.vfos {
@@ -3489,6 +3494,15 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let tex = self.ring.update(ui.ctx(), &self.history);
+                if let Some((lo, hi)) = self.automation.view {
+                    (self.band.lo, self.band.hi) = (lo, hi);
+                }
+                let fine = self.fine.update(
+                    ui.ctx(),
+                    &self.history,
+                    (self.band.lo, self.band.hi),
+                    self.band.pixels as usize,
+                );
                 let inp = BandInput {
                     front: &self.front,
                     rf_center: self.rf_center(),
@@ -3496,6 +3510,8 @@ impl eframe::App for App {
                     statuses: &self.statuses,
                     selected: self.selected,
                     waterfall: tex,
+                    fine,
+                    fine_zoom: matches!(self.engine, Some(remote_panel::AnyEngine::Local(_))),
                     levels: self.history.levels(),
                     new_decoder: self.new_decoder,
                     next_name: self.next_name(),
@@ -3507,6 +3523,14 @@ impl eframe::App for App {
                 };
                 self.snapshot.band_rect = Some(ui.max_rect());
                 actions.extend(self.band.show(ui, &inp));
+                // What is on screen, for the engine's finer spectrum of it.
+                if let Some(e) = &self.engine {
+                    e.set_view((self.band.pixels > 0).then_some((
+                        self.band.lo,
+                        self.band.hi,
+                        self.band.pixels,
+                    )));
+                }
             });
         self.snapshot.overlay(ui.ctx());
 

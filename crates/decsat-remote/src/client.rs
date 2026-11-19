@@ -956,6 +956,7 @@ fn smart_reader(s: &mut TcpStream, link: &Link, state: &Mutex<Smart>) {
                         center_freq: w.center_freq,
                         fft_size: w.fft_size as usize,
                         spectrum_db: keep,
+                        zoom: None,
                         carriers: w.carriers,
                         burst_bands: w.burst_bands,
                         burst_takes: w.burst_takes,

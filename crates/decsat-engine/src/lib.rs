@@ -29,6 +29,7 @@ pub mod tdma;
 pub mod tx;
 pub mod vfo;
 pub mod wireshark;
+pub mod zoom;
 
 pub use carriers::{Carrier, detect_carriers};
 pub use cid::CidView;
