@@ -815,44 +815,50 @@ mod tests {
     }
 
     /// Rows come 60 to the second of signal, evenly, whatever the block
-    /// length: a 1 MS/s file of 2 s gives 120 (the first is skipped only if
-    /// too short), each with the tone in its place.
+    /// length: 2 s at 1 MS/s in blocks of a 25th of a second gives 120
+    /// (the first is skipped only if too short), each with the tone in its
+    /// place. The display worker is run by hand and every block is waited
+    /// for: in the engine it may skip blocks when the machine is busy, which
+    /// made a count taken there depend on the load.
     #[test]
     fn sixty_rows_a_second() {
-        let path = std::env::temp_dir().join("decsat-engine-rows-60.cf32");
-        let x: Vec<Iq> = (0..2_000_000)
-            .map(|k| {
-                let p = std::f64::consts::TAU * 0.25 * k as f64;
-                Iq::new(p.cos() as f32, p.sin() as f32)
-            })
-            .collect();
-        let mut w = IqFileWriter::create(&path, SampleFormat::Cf32).unwrap();
-        w.write(&x).unwrap();
-        w.finish().unwrap();
-        let src = IqFileReader::open(&path, SampleFormat::Cf32, 1e6, 1 << 16).unwrap();
-        let eng = Engine::start(
-            Box::new(src),
-            EngineOptions {
-                loop_file: false,
-                ..Default::default()
-            },
-        );
-        // Played in real time, so the display worker skips nothing.
-        wait_for(10.0, || {
-            (eng.front().state == SourceState::Ended).then_some(())
+        let shared = Arc::new(Shared {
+            front: Mutex::new(FrontStatus::default()),
+            rows: Mutex::new(VecDeque::new()),
+            zoom_rows: Mutex::new(VecDeque::new()),
+            view: Mutex::new(None),
+            vfos: Mutex::new(BTreeMap::new()),
+            plans: Default::default(),
         });
-        std::thread::sleep(Duration::from_millis(200));
-        let rows = eng.new_rows(0);
-        let n = rows.last().unwrap().0;
-        assert!((118..=120).contains(&n), "{n} rows from 2 s");
-        for (_, row) in &rows {
+        let (tx, rx) = mpsc::sync_channel::<(u64, Arc<Vec<Iq>>)>(1);
+        let worker = {
+            let shared = Arc::clone(&shared);
+            let fft = Arc::new(AtomicUsize::new(4096));
+            std::thread::spawn(move || run_spectrum(rx, shared, 1e6, fft, 6.0, 60.0))
+        };
+        // A tone at +250 kHz.
+        for block in 0..50u64 {
+            let x: Vec<Iq> = (0..40_000u64)
+                .map(|k| {
+                    let p = std::f64::consts::TAU * 0.25 * (block * 40_000 + k) as f64;
+                    Iq::new(p.cos() as f32, p.sin() as f32)
+                })
+                .collect();
+            // Rust note: `send` waits for room, where the engine's
+            // `try_send` gives the block up.
+            tx.send((block * 40_000, Arc::new(x))).unwrap();
+        }
+        drop(tx);
+        worker.join().unwrap();
+        let rows = shared.rows.lock().unwrap();
+        let n = rows.back().unwrap().0;
+        assert!((119..=120).contains(&n), "{n} rows from 2 s");
+        for (_, row) in rows.iter() {
             let peak = (0..row.len())
                 .max_by(|&a, &b| row[a].total_cmp(&row[b]))
                 .unwrap();
             assert_eq!(peak, 3072);
         }
-        drop(eng);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
