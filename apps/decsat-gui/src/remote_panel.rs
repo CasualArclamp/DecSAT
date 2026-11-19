@@ -41,6 +41,19 @@ impl AnyEngine {
     pub fn new_rows(&self, after: u64) -> Vec<(u64, Vec<f32>)> {
         both!(self, e => e.new_rows(after))
     }
+    /// The finer rows of the view (a local engine only: a server sends
+    /// its waterfall as it is).
+    pub fn new_zoom_rows(&self, after: u64) -> Vec<(u64, decsat_engine::zoom::ZoomRow)> {
+        match self {
+            AnyEngine::Local(e) => e.new_zoom_rows(after),
+            AnyEngine::Remote(_) => Vec::new(),
+        }
+    }
+    pub fn set_view(&self, view: Option<(f64, f64, u32)>) {
+        if let AnyEngine::Local(e) = self {
+            e.set_view(view);
+        }
+    }
     pub fn set_paused(&self, p: bool) {
         both!(self, e => e.set_paused(p))
     }

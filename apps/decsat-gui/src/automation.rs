@@ -59,6 +59,8 @@ pub struct Options {
     /// The spectrum's FFT size for this run (`--fft N`: a power of two,
     /// 1024 to 65536).
     pub fft: Option<usize>,
+    /// The part of the band shown (`--view LO_HZ:HI_HZ`, from the centre).
+    pub view: Option<(f64, f64)>,
     /// LNB LO for the axis, MHz.
     pub lo_mhz: Option<f64>,
     /// The LNB's LO is above the band (C band): RF = LO − tuned.
@@ -192,6 +194,16 @@ impl Options {
                 Some("--wireshark") => o.wireshark = true,
                 Some("--session-log") => o.session_log = true,
                 Some("--amp") => o.amp = true,
+                Some("--view") => {
+                    let v = args.next().ok_or("--view needs LO_HZ:HI_HZ")?;
+                    o.view = Some(
+                        v.to_str()
+                            .and_then(|s| s.split_once(':'))
+                            .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+                            .filter(|(a, b): &(f64, f64)| b > a)
+                            .ok_or("--view takes LO_HZ:HI_HZ from the centre, low first")?,
+                    );
+                }
                 Some("--fft") => {
                     let v = args.next().ok_or("--fft needs a size")?;
                     o.fft = Some(
@@ -355,6 +367,8 @@ pub struct Automation {
     pub radar_range: Option<f32>,
     pub radar_track: Option<u16>,
     pub panel_scroll: Option<f32>,
+    /// The part of the band shown, Hz from the centre (see `--view`).
+    pub view: Option<(f64, f64)>,
     pub vfo_at: Vec<(f64, f64)>,
     pub play_audio: bool,
     pub audio_started: bool,
@@ -384,6 +398,7 @@ impl Automation {
             radar_scope: o.radar_scope,
             radar_range: o.radar_range,
             panel_scroll: o.panel_scroll,
+            view: o.view,
             radar_track: o.radar_track,
             vfo_at: o.vfo_at.clone(),
             play_audio: o.play_audio,

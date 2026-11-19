@@ -76,6 +76,12 @@ pub struct BandInput<'a> {
     pub statuses: &'a BTreeMap<VfoId, VfoStatus>,
     pub selected: Option<VfoId>,
     pub waterfall: Option<crate::waterfall::Shown>,
+    /// The finer spectrum of the view, zoomed in, to lay over it: the
+    /// texture and its vertical coordinates (it spans the view exactly).
+    pub fine: Option<(egui::TextureId, (f32, f32))>,
+    /// The engine makes a finer spectrum of the view (a local one does):
+    /// the zoom may go past where the FFT's own bins turn to blocks.
+    pub fine_zoom: bool,
     /// Display levels, dB.
     pub levels: (f32, f32),
     /// Decoder for VFOs created from the view.
@@ -536,6 +542,8 @@ pub struct BandView {
     span: f64,
     drag: Drag,
     create_to: f64,
+    /// Width of the waterfall as last drawn, screen pixels.
+    pub pixels: u32,
 }
 
 impl Default for BandView {
@@ -546,6 +554,7 @@ impl Default for BandView {
             span: 1.0,
             drag: Drag::None,
             create_to: 0.0,
+            pixels: 0,
         }
     }
 }
@@ -587,6 +596,7 @@ impl BandView {
 
         let (lo, hi) = (self.lo, self.hi);
         let w = rect.width();
+        self.pixels = (w * ui.ctx().pixels_per_point()).round() as u32;
         let x_of = |hz: f64| rect.left() + ((hz - lo) / (hi - lo)) as f32 * w;
         let hz_of = |x: f32| lo + ((x - rect.left()) / w) as f64 * (hi - lo);
 
@@ -611,6 +621,11 @@ impl BandView {
                     );
                     let uv = Rect::from_min_max(pos2(t0, shown.v.0), pos2(t1, shown.v.1));
                     painter.image(tex, at, uv, Color32::WHITE);
+                }
+                // Zoomed in: the finer rows over it, where there are any.
+                if let Some((tex, v)) = inp.fine {
+                    let uv = Rect::from_min_max(pos2(0.0, v.0), pos2(1.0, v.1));
+                    painter.image(tex, wf, uv, Color32::WHITE);
                 }
             }
             _ => {
@@ -675,9 +690,18 @@ impl BandView {
 
         // ---- spectrum trace
         if have_signal {
-            let s = &inp.front.spectrum_db;
+            // Zoomed in, the finer spectrum where it covers the view; else
+            // the FFT's own. `left` and `across`: the band its bins span.
+            let fine = inp.front.zoom.as_ref().filter(|z| {
+                let (a, b) = z.edges();
+                z.db.len() > 1 && a <= lo && b >= hi
+            });
+            let (s, left, across) = match fine {
+                Some(z) => (&z.db, z.edges().0, z.edges().1 - z.edges().0),
+                None => (&inp.front.spectrum_db, -self.span / 2.0, self.span),
+            };
             let n = s.len();
-            let bin = |hz: f64| ((hz / self.span + 0.5) * n as f64).floor() as isize;
+            let bin = |hz: f64| ((hz - left) / across * n as f64).floor() as isize;
             let (b0, b1) = (
                 bin(lo).clamp(0, n as isize - 1) as usize,
                 bin(hi).clamp(0, n as isize - 1) as usize,
@@ -691,7 +715,7 @@ impl BandView {
                 let k0 = k as usize;
                 let k1 = ((k + per_col) as usize).min(b1 + 1).max(k0 + 1);
                 let m = s[k0..k1].iter().copied().fold(f32::MIN, f32::max);
-                let hz = ((k0 + k1) as f64 / 2.0 / n as f64 - 0.5) * self.span;
+                let hz = left + (k0 + k1) as f64 / 2.0 / n as f64 * across;
                 pts.push(pos2(x_of(hz), y_of(m)));
                 k += per_col;
             }
@@ -1497,7 +1521,12 @@ impl BandView {
         // all blocks. VFOs may be far narrower — two bins, and never under
         // 500 Hz — so a 10 kS/s carrier gets a VFO that fits it rather than
         // a forced 60 kHz (the old limit was 24 bins for both).
-        let min_view = (bin_hz * 32.0).max(1.0);
+        // With a finer spectrum of the view there is detail well past that.
+        let min_view = if inp.fine_zoom {
+            (bin_hz * 32.0).clamp(1.0, 500.0)
+        } else {
+            (bin_hz * 32.0).max(1.0)
+        };
         let min_vfo = (bin_hz * 2.0).max(500.0);
 
         // Zoom about the cursor.

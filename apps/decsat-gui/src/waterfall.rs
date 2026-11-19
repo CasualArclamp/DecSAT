@@ -12,10 +12,17 @@
 //! A row is as wide as the FFT, and a GPU texture is at most 8192 or 16384
 //! pixels a side: a wider row (32k and 64k FFTs) is cut into tiles side by
 //! side, each a ring of its own, drawn edge to edge.
+//!
+//! Zoomed in past one bin a pixel, the engine sends a finer spectrum of the
+//! view with each row (`decsat_engine::zoom`). Those are kept beside the rows
+//! and drawn into a second ring ([`FineImage`]), one column a screen pixel
+//! across the view, clear wherever there is none: laid over the first, the
+//! waterfall's own picture shows through there, so nothing ever blanks.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use decsat_engine::zoom::ZoomRow;
 use eframe::egui::{
     self, Color32, ColorImage, TextureHandle, TextureId, TextureOptions, TextureWrapMode,
 };
@@ -56,6 +63,8 @@ pub fn palette() -> Vec<Color32> {
 #[derive(Debug, Clone)]
 pub struct History {
     rows: VecDeque<Vec<f32>>,
+    /// Each row's finer spectrum of what was on screen, where one was made.
+    fine: VecDeque<Option<ZoomRow>>,
     width: usize,
     pushed: u64,
     epoch: u64,
@@ -71,6 +80,7 @@ impl Default for History {
     fn default() -> Self {
         History {
             rows: VecDeque::with_capacity(ROWS),
+            fine: VecDeque::with_capacity(ROWS),
             width: 0,
             pushed: 0,
             epoch: 0,
@@ -94,7 +104,13 @@ impl History {
         };
     }
 
+    #[cfg(test)]
     pub fn push(&mut self, row: Vec<f32>) {
+        self.push_with(row, None);
+    }
+
+    /// A new row, and the finer spectrum of the view made with it.
+    pub fn push_with(&mut self, row: Vec<f32>, fine: Option<ZoomRow>) {
         if row.is_empty() {
             return;
         }
@@ -113,8 +129,10 @@ impl History {
 
         if self.rows.len() == ROWS {
             self.rows.pop_front();
+            self.fine.pop_front();
         }
         self.rows.push_back(row);
+        self.fine.push_back(fine);
         self.pushed += 1;
     }
 
@@ -270,6 +288,130 @@ impl RingImage {
     }
 }
 
+/// The finer rows as a picture of the view: see the module's notes.
+#[derive(Default)]
+pub struct FineImage {
+    handle: Option<TextureHandle>,
+    cols: usize,
+    view: (f64, f64),
+    head: usize,
+    uploaded: u64,
+    epoch: u64,
+    lut: Vec<Color32>,
+}
+
+impl FineImage {
+    /// Bring the picture up to date for the view `lo..hi` (Hz from the
+    /// centre) drawn `cols` pixels wide, and return it with the texture
+    /// coordinates that put the newest row at the top; `None` while no row
+    /// on screen has a finer spectrum.
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        h: &History,
+        view: (f64, f64),
+        cols: usize,
+    ) -> Option<(TextureId, (f32, f32))> {
+        let side = ctx.input(|i| i.max_texture_side).max(1024);
+        let cols = cols.min(side);
+        if cols < 2 || h.fine.iter().all(Option::is_none) {
+            self.handle = None;
+            return None;
+        }
+        if self.lut.is_empty() {
+            self.lut = palette();
+        }
+        let levels = h.levels();
+        let new = h.pushed.saturating_sub(self.uploaded);
+        let newest = |k: usize| h.fine.iter().rev().take(k);
+        match &mut self.handle {
+            // The same view: only the new rows are drawn, onto the ring.
+            Some(t)
+                if self.cols == cols
+                    && self.view == view
+                    && self.epoch == h.epoch
+                    && new < ROWS as u64 =>
+            {
+                let k = (new as usize).min(h.fine.len());
+                if k > 0 {
+                    let block = render_fine(newest(k), view, cols, k, levels, &self.lut);
+                    let (head, parts) = plan(self.head, k, ROWS);
+                    for (row, range) in parts {
+                        let pixels = block[range.start * cols..range.end * cols].to_vec();
+                        t.set_partial(
+                            [0, row],
+                            ColorImage::new([cols, range.len()], pixels),
+                            OPTIONS,
+                        );
+                    }
+                    self.head = head;
+                }
+            }
+            // Zoomed or moved: every row is drawn again from what was kept
+            // of it, so the picture moves with the view.
+            _ => {
+                let pixels = render_fine(newest(ROWS), view, cols, ROWS, levels, &self.lut);
+                let image = ColorImage::new([cols, ROWS], pixels);
+                match &mut self.handle {
+                    Some(t) => t.set(image, OPTIONS),
+                    None => {
+                        self.handle = Some(ctx.load_texture("waterfall, finer", image, OPTIONS));
+                    }
+                }
+                (self.cols, self.view, self.epoch, self.head) = (cols, view, h.epoch, 0);
+            }
+        }
+        self.uploaded = h.pushed;
+        let v0 = self.head as f32 / ROWS as f32;
+        Some((self.handle.as_ref()?.id(), (v0, v0 + 1.0)))
+    }
+}
+
+/// Colour the finer `rows` (newest first) into `cols` × `height` pixels
+/// across the view `lo..hi`: clear where a row has none or does not reach.
+fn render_fine<'a>(
+    rows: impl Iterator<Item = &'a Option<ZoomRow>>,
+    (lo, hi): (f64, f64),
+    cols: usize,
+    height: usize,
+    (floor, top_db): (f32, f32),
+    lut: &[Color32],
+) -> Vec<Color32> {
+    let mut pixels = vec![Color32::TRANSPARENT; cols * height];
+    let top = (lut.len() - 1) as f32;
+    let scale = top / (top_db - floor).max(1e-3);
+    for (line, row) in pixels.chunks_exact_mut(cols).zip(rows) {
+        let Some(z) = row.as_ref().filter(|z| z.db.len() > 1) else {
+            continue;
+        };
+        let n = z.db.len();
+        // Bins a column, and each column's middle counted in bins.
+        let per_col = (hi - lo) / cols as f64 / z.step_hz;
+        let first = (lo - z.lo_hz) / z.step_hz;
+        for (c, px) in line.iter_mut().enumerate() {
+            let at = first + (c as f64 + 0.5) * per_col;
+            if at < -0.5 || at > n as f64 - 0.5 {
+                continue;
+            }
+            let db = if per_col <= 1.0 {
+                // Less than a bin a column: between the two nearest.
+                let at = at.clamp(0.0, (n - 1) as f64);
+                let a = at as usize;
+                let b = (a + 1).min(n - 1);
+                z.db[a] + (z.db[b] - z.db[a]) * (at - a as f64) as f32
+            } else {
+                // Several bins under a column: the strongest, so a narrow
+                // carrier is never lost between columns.
+                let a = ((at - per_col / 2.0 + 0.5).max(0.0) as usize).min(n - 1);
+                let b = ((at + per_col / 2.0 + 0.5).ceil() as usize).clamp(a + 1, n);
+                z.db[a..b].iter().copied().fold(f32::MIN, f32::max)
+            };
+            *px = lut[((db - floor) * scale).clamp(0.0, top) as usize];
+        }
+    }
+    pixels
+}
+
 /// Where `k` new rows go in a ring of `cap` rows whose newest row is at texture
 /// row `head`: the new head, and the uploads as (first texture row, range of
 /// the new rows counted newest first).
@@ -344,6 +486,31 @@ mod tests {
             one.pieces(0.25, 0.75),
             vec![(TextureId::User(9), (0.0, 1.0), (0.25, 0.75))]
         );
+    }
+
+    #[test]
+    fn finer_rows_are_drawn_where_they_reach() {
+        let lut = palette();
+        // Bins at 100, 110 … 190 Hz, rising 1 dB a bin from 0.
+        let z = ZoomRow {
+            lo_hz: 100.0,
+            step_hz: 10.0,
+            db: (0..10).map(|i| i as f32).collect(),
+        };
+        let rows = [Some(z), None];
+        let colour = |db: f32| lut[(db / 10.0 * 255.0).clamp(0.0, 255.0) as usize];
+        // The view runs past the row on the left: clear there, and the
+        // second row (no finer spectrum) clear all the way.
+        let p = render_fine(rows.iter(), (55.0, 155.0), 100, 2, (0.0, 10.0), &lut);
+        assert_eq!(p[10], Color32::TRANSPARENT);
+        assert_eq!(p[39], Color32::TRANSPARENT);
+        // Ten columns a bin: 120 Hz is column 65 (its middle 120.5 Hz).
+        assert_eq!(p[65], colour(2.05));
+        assert_eq!(p[70], colour(2.55));
+        assert!(p[100..].iter().all(|c| *c == Color32::TRANSPARENT));
+        // Two bins a column: the stronger of each pair.
+        let p = render_fine(rows.iter(), (95.0, 195.0), 5, 1, (0.0, 10.0), &lut);
+        assert_eq!(p, [1.0, 3.0, 5.0, 7.0, 9.0].map(colour));
     }
 
     #[test]

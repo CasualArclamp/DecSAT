@@ -156,7 +156,7 @@ On the waterfall:
 
 | | |
 |---|---|
-| **wheel** | zoom about the cursor |
+| **wheel** | zoom about the cursor; past one FFT bin a pixel the part on screen is transformed again at a finer resolution, down to 1 Hz bins on a 500 Hz view |
 | **right- or middle-drag** | pan; past the span's edge (or at full span) with the HackRF live, it tunes the radio — the spectrum follows the mouse, and the VFOs stay on their carriers, decoding on (one retuned out of the span idles until **Tune to it** in its settings brings it back) |
 | **drag on empty space** | draw a new VFO |
 | **double-click** | drop a VFO |
