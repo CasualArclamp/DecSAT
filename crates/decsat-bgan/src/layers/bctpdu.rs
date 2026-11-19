@@ -81,7 +81,7 @@ pub fn header_len(first_octet: u8) -> usize {
 /// Try a PDU starting at `blob[0]`. `Ok(Some(len))` on a CRC hit, `Ok(None)` if
 /// no length in `lo..=hi` matches, `Err(())` if the data ran out before `hi`
 /// and more bytes could still change the answer.
-fn try_pdu(blob: &[u8], lo: usize, hi: usize, fin: bool) -> Result<Option<usize>, ()> {
+pub(crate) fn try_pdu(blob: &[u8], lo: usize, hi: usize, fin: bool) -> Result<Option<usize>, ()> {
     let top = hi.min(blob.len());
     let mut crc = 0xFFFFu16;
     for (k, &b) in blob[..top].iter().enumerate() {

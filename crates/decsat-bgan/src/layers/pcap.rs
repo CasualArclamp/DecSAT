@@ -10,13 +10,16 @@
 //! carve, not a demux: packets split across FEC blocks or landing in blocks
 //! that failed are lost. A packet whose header opens a link-layer first
 //! segment that ends inside the packet is skipped, since the bytes after the
-//! segment are not its own; [`super::segments`] rebuilds those.
+//! segment are not its own; [`super::segments`] rebuilds those. By default a
+//! TCP, UDP or ICMP packet must also pass its own checksum
+//! ([`transport_checksum_ok`]): the IP header checksum covers only the
+//! header, and a header followed by someone else's bytes is no packet.
 //!
 //! [`Ipv4Carver`] does the same incrementally on a growing byte stream.
 
 use std::io::{self, Write};
 
-use super::segments::{FIRST_PREFIX, starts_split_packet};
+use super::segments::{MAX_FIRST_PREFIX, starts_split_packet};
 use super::stream::Rolling;
 
 pub const PCAP_MAGIC: u32 = 0xA1B2C3D4;
@@ -35,6 +38,9 @@ pub const DEFAULT_PROTOCOLS: [u8; 6] = [1, 6, 17, 47, 50, 58];
 pub struct CarveOpts {
     pub min_len: usize,
     pub max_len: usize,
+    /// Require a TCP, UDP or ICMP packet's own checksum to hold
+    /// ([`transport_checksum_ok`]).
+    pub check_transport: bool,
     /// Indexed by IP protocol number.
     protocols: [bool; 256],
 }
@@ -49,6 +55,7 @@ impl CarveOpts {
         CarveOpts {
             min_len: 20,
             max_len: 1500,
+            check_transport: true,
             protocols,
         }
     }
@@ -80,6 +87,58 @@ pub fn ipv4_checksum_ok(hdr: &[u8]) -> bool {
         s = (s & 0xFFFF) + (s >> 16);
     }
     s == 0xFFFF
+}
+
+/// The 16-bit one's-complement sum of `data` (odd length padded with zero),
+/// folded, starting from `acc`.
+fn ones_sum(data: &[u8], acc: u32) -> u32 {
+    let (pairs, rest) = data.as_chunks::<2>();
+    let mut s = pairs
+        .iter()
+        .fold(acc, |a, c| a + (((c[0] as u32) << 8) | c[1] as u32));
+    if let [last] = rest {
+        s += (*last as u32) << 8;
+    }
+    while s >> 16 != 0 {
+        s = (s & 0xFFFF) + (s >> 16);
+    }
+    s
+}
+
+/// Does the transport checksum of the IPv4 packet `p` (exactly its total
+/// length) hold? TCP (RFC 793) and UDP (RFC 768) over the pseudo-header,
+/// ICMP (RFC 792) over its message. A UDP checksum of zero means none was
+/// sent, and a fragment cannot be checked on its own: both pass, as does any
+/// other protocol.
+pub fn transport_checksum_ok(p: &[u8]) -> bool {
+    let ihl = (p[0] & 0x0F) as usize * 4;
+    // more-fragments flag or a fragment offset
+    if p[6] & 0x3F != 0 || p[7] != 0 {
+        return true;
+    }
+    let seg = &p[ihl..];
+    let pseudo = |len: usize| {
+        let mut h = [0u8; 12];
+        h[..8].copy_from_slice(&p[12..20]);
+        h[9] = p[9];
+        h[10..12].copy_from_slice(&(len as u16).to_be_bytes());
+        ones_sum(&h, 0)
+    };
+    match p[9] {
+        1 => seg.len() >= 8 && ones_sum(seg, 0) == 0xFFFF,
+        6 => seg.len() >= 20 && ones_sum(seg, pseudo(seg.len())) == 0xFFFF,
+        17 => {
+            if seg.len() < 8 {
+                return false;
+            }
+            let ulen = u16::from_be_bytes([seg[4], seg[5]]) as usize;
+            if !(8..=seg.len()).contains(&ulen) {
+                return false;
+            }
+            seg[6..8] == [0, 0] || ones_sum(&seg[..ulen], pseudo(ulen)) == 0xFFFF
+        }
+        _ => true,
+    }
 }
 
 /// Verdict for one candidate position.
@@ -124,6 +183,9 @@ fn candidate(b: &[u8], i: usize, o: &CarveOpts, fin: bool) -> Cand {
     // A packet the link layer cut after its header: the bytes that follow
     // are not all its own. `segments` rebuilds it.
     if starts_split_packet(b, i, total) {
+        return Cand::No;
+    }
+    if o.check_transport && !transport_checksum_ok(&b[i..i + total]) {
         return Cand::No;
     }
     Cand::Yes(total)
@@ -237,7 +299,8 @@ impl Ipv4Carver {
         self.cur = base + i;
         // keep the octets a first segment's header puts before a packet:
         // `starts_split_packet` looks back at them
-        self.win.trim_before(self.cur.saturating_sub(FIRST_PREFIX));
+        self.win
+            .trim_before(self.cur.saturating_sub(MAX_FIRST_PREFIX));
         out
     }
 }
@@ -338,11 +401,40 @@ pub fn write_ipv4<W: Write>(w: W, payload: &[u8], t0: f64, dt: f64) -> io::Resul
     Ok(pw.records())
 }
 
+/// Test helpers are `pub(crate)` so other layers' tests can build packets.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// Build a valid IPv4 header + payload.
+    /// Fill in the transport checksum of the IPv4 packet `p` (and a UDP
+    /// packet's length), so that [`transport_checksum_ok`] accepts it. A body
+    /// too short for its protocol's header is left as it is.
+    pub(crate) fn seal(p: &mut [u8]) {
+        let ihl = (p[0] & 0x0F) as usize * 4;
+        let (proto, n) = (p[9], p.len() - ihl);
+        let mut pseudo = [0u8; 12];
+        pseudo[..8].copy_from_slice(&p[12..20]);
+        pseudo[9] = proto;
+        pseudo[10..12].copy_from_slice(&(n as u16).to_be_bytes());
+        let (at, acc) = match proto {
+            1 if n >= 8 => (2, 0),
+            6 if n >= 20 => (16, ones_sum(&pseudo, 0)),
+            17 if n >= 8 => {
+                p[ihl + 4..ihl + 6].copy_from_slice(&(n as u16).to_be_bytes());
+                (6, ones_sum(&pseudo, 0))
+            }
+            _ => return,
+        };
+        let seg = &mut p[ihl..];
+        seg[at..at + 2].fill(0);
+        let mut ck = !(ones_sum(seg, acc) as u16);
+        if proto == 17 && ck == 0 {
+            ck = 0xFFFF; // zero would mean "no checksum"
+        }
+        seg[at..at + 2].copy_from_slice(&ck.to_be_bytes());
+    }
+
+    /// Build a valid IPv4 header + payload (transport checksum included).
     pub(crate) fn ipv4(proto: u8, src: [u8; 4], dst: [u8; 4], body: &[u8]) -> Vec<u8> {
         let total = 20 + body.len();
         let mut h = vec![
@@ -372,6 +464,7 @@ mod tests {
         h[10] = (ck >> 8) as u8;
         h[11] = ck as u8;
         h.extend_from_slice(body);
+        seal(&mut h);
         h
     }
 
@@ -391,7 +484,7 @@ mod tests {
     #[test]
     fn carve_and_stream_agree() {
         let a = ipv4(17, [10, 0, 0, 1], [10, 0, 0, 2], &[7; 40]);
-        let b = ipv4(6, [1, 2, 3, 4], [5, 6, 7, 8], &[9; 11]);
+        let b = ipv4(6, [1, 2, 3, 4], [5, 6, 7, 8], &[9; 20]);
         let c = ipv4(99, [1, 2, 3, 4], [5, 6, 7, 8], &[9; 11]); // protocol not accepted
         let mut blob = vec![0xffu8; 13];
         blob.extend_from_slice(&a);
@@ -420,8 +513,58 @@ mod tests {
     }
 
     #[test]
+    fn transport_checksums() {
+        let (s, d) = ([10, 0, 0, 1], [10, 0, 0, 2]);
+        for proto in [1u8, 6, 17] {
+            let p = ipv4(proto, s, d, &[0x5a; 40]);
+            assert!(transport_checksum_ok(&p), "proto {proto}");
+            let mut bad = p.clone();
+            bad[50] ^= 0x10;
+            assert!(!transport_checksum_ok(&bad), "proto {proto} damaged");
+            // a fragment cannot be checked: it passes
+            let mut frag = bad.clone();
+            frag[6] |= 0x20;
+            assert!(transport_checksum_ok(&frag), "proto {proto} fragment");
+        }
+        // a UDP checksum of zero means none was sent
+        let mut p = ipv4(17, s, d, &[0x5a; 40]);
+        p[26..28].fill(0);
+        p[50] ^= 0x10;
+        assert!(transport_checksum_ok(&p));
+        // a UDP length past the packet
+        let mut p = ipv4(17, s, d, &[0x5a; 40]);
+        p[24..26].copy_from_slice(&100u16.to_be_bytes());
+        assert!(!transport_checksum_ok(&p));
+        // too short for a TCP header
+        let mut p = ipv4(6, s, d, &[0x5a; 12]);
+        seal(&mut p);
+        assert!(!transport_checksum_ok(&p));
+        // other protocols are not checked
+        assert!(transport_checksum_ok(&ipv4(50, s, d, &[0x5a; 12])));
+    }
+
+    /// A valid IP header followed by bytes that are not its own (the cut-off
+    /// packets real recordings had in hundreds) is not carved by default.
+    #[test]
+    fn carver_checks_the_transport_checksum() {
+        let mut p = ipv4(6, [1, 2, 3, 4], [5, 6, 7, 8], &[9; 60]);
+        let mut blob = vec![0u8; 5];
+        blob.extend_from_slice(&p);
+        assert_eq!(carve_ipv4(&blob).len(), 1);
+        p[60] ^= 0xff;
+        blob.truncate(5);
+        blob.extend_from_slice(&p);
+        assert!(carve_ipv4(&blob).is_empty());
+        let off = CarveOpts {
+            check_transport: false,
+            ..CarveOpts::default()
+        };
+        assert_eq!(carve_ipv4_with(&blob, &off).len(), 1);
+    }
+
+    #[test]
     fn pcap_bytes() {
-        let a = ipv4(17, [10, 0, 0, 1], [10, 0, 0, 2], &[7; 4]);
+        let a = ipv4(17, [10, 0, 0, 1], [10, 0, 0, 2], &[7; 8]);
         let mut out = Vec::new();
         let n = write_ipv4(&mut out, &a, 1.5, 0.001).unwrap();
         assert_eq!(n, 1);
