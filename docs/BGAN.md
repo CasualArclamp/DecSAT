@@ -43,14 +43,25 @@ order. A wrong-level trial runs 4 iterations, a near miss is finished.
 
 The session writes the accepted blocks' bytes (`…_payload.bin`) and a raw-IP
 pcap (`…_ipv4.pcap`). Packets come from two places: `layers/pcap.rs` carves
-any IPv4 packet whose header lies contiguous (header checksum must pass), and
-`layers/segments.rs` rebuilds packets the link layer cut into segments, whose
-header is broken up by other traffic. The segment format there (connection id,
-length, sequence number, first/middle/last flags, CRC-16/X.25 per segment) was
-worked out from a real recording, not the spec text; a packet is kept only if
-every segment's CRC passes, the sequence numbers run without a gap, and the
-result has the declared length and a valid IP header. On a 23-minute recording
-it added 157 packets to the 395 carved. To redo an old recording:
+any IPv4 packet whose header lies contiguous (header checksum must pass, and
+by default its TCP, UDP or ICMP checksum too), and `layers/segments.rs`
+rebuilds packets the link layer cut into segments, whose header is broken up
+by other traffic. The segment format there (connection id, length, sequence
+number, first/middle/last flags, CRC-16/X.25 per segment) was worked out from
+real recordings, not the spec text; a packet is kept only if every segment's
+CRC passes, the sequence numbers run without a gap, and the result has the
+declared length and valid IP and transport checksums. On a 23-minute
+recording it added 157 packets to the 395 carved.
+
+Two variants of the segment layout are handled. A segment whose first octet
+has bit 0x40 (length present, as in the BCtPDU header) clear has no length
+octet, and ends where its CRC checks; and some connections put a zero octet
+before the IPv4 packet in the SDU (counted in a first segment's SDU length).
+Missing either, the carver took a packet cut after its header with the
+segment's FCS and other traffic in it: on a 3.5-minute recording 3666 packets
+(27 % of the pcap) were corrupt that way. With both, that recording gives no
+corrupt packets and 4686 rebuilt ones instead of 1635. To redo an old
+recording:
 
 ```bash
 cargo run --release -p decsat-bgan --example bgan_pcap -- X_payload.bin X_full.pcap
