@@ -77,3 +77,35 @@ BGAN recording in this repository (none is committed).
 cargo run --release -p decsat-bgan --example bgan_tx -- out/bgan.cf32 20 12 2500
 cargo run --release -p decsat-cli -- decode out/bgan.cf32 --rate 604800 --decoder bgan
 ```
+
+## Finding BGAN carriers
+
+Identify names a BGAN forward carrier when its symbol rate measures within
+2 % of 151.2 kBd and the bearer's unique word turns up every 12 096 symbols.
+That is the receiver's own acquisition test, so a carrier it names is one the
+decoder locks to: the folded, level-agnostic differential UW search
+(`decsat_bgan::detect_symbols`, which shares `fold_uw` with `BganRx`), with
+the same thresholds, over the 7 or so frames Identify listens to (4 at
+least). It needs no Annex tables. The hint reads *"16QAM, Inmarsat BGAN
+forward (F80T4.5X-8B: unique word every 12 096 symbols, level L3) — the BGAN
+decoder reads it"*. A click on the carrier, the Survey and
+`decsat scan --decode` then run the BGAN decoder on a VFO at least 240 kHz
+wide (`spec::BGAN_VFO_BW`).
+
+```bash
+decsat scan capture.wav --decode --only bgan --out dir
+```
+
+This decodes every BGAN carrier in the capture at once, each on a VFO thread
+of its own, and prints each one's progress every 5 s. Each carrier writes
+`bgan-#N-<offset>-…_ipv4.pcap` and `…_payload.bin` into `dir`. Without
+`--out`, what each carrier decoded is reported and nothing is kept. `--only`
+takes `decode --decoder`'s names, comma-separated.
+
+Two limits:
+
+- A carrier too weak for Identify's short look (Es/N0 about 2 dB) can go
+  unnamed, even though the decoder, put on it by hand, decodes a few
+  percent of its blocks.
+- A carrier that carrier detection splits into slivers is never given a VFO
+  to look at. This was seen on a 500 kS/s capture with BGAN at its centre.

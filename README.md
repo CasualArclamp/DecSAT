@@ -1045,8 +1045,12 @@ encrypted"*: nothing to decode, the outbounds name its calls), and a wide
 call channel — 25.6 or 51.2 kBd, in duplex pairs like the voice channels —
 by a pilot strictly every 16 symbols. Call channels
 sit 6.16 kHz apart, so carrier detection takes the band as one; put a VFO
-on one channel (about 6.5 kHz wide) to have it named. For the rest it
-looks for fingerprints of proprietary waveforms:
+on one channel (about 6.5 kHz wide) to have it named. An **Inmarsat BGAN
+forward** carrier (16QAM, 151.2 kBd) is named by its bearer's unique word
+every 12 096 symbols, the BGAN receiver's own acquisition test; claiming
+it, the survey or `scan --decode` run the BGAN decoder on it (see
+`docs/BGAN.md`). For the rest it looks for fingerprints of proprietary
+waveforms:
 
 - **DVB-S2-style headers off their own grid**: SOF and PLS headers that recur
   regularly but not where their PLS codes say the next frame starts — S2
@@ -1145,8 +1149,8 @@ demodulating with what it found, so the constellation and Es/N0 stay live.
 
 **Tools ▸ Survey…** tries every clean carrier the receiver sees, in
 frequency order, a few at a time (*At once*, 1–4): each gets a VFO of its
-own for Identify, then the decoder for what it is — DVB-S2 to GSE/IP, the
-modem carriers through the Comtech entry's *type found* (TPC 2964, the
+own for Identify, then the decoder for what it is — DVB-S2 to GSE/IP, a
+BGAN forward carrier to the BGAN decoder, the modem carriers through the Comtech entry's *type found* (TPC 2964, the
 K = 7 code, a FastLink); bursts, and anything Identify cannot name, have no decoder yet — and
 a time to lock (*give up after*, 40 s by default). One that locks is
 watched a few seconds more so what it carries shows, then its VFO goes and
@@ -1296,6 +1300,7 @@ cargo run --release -p decsat-modem --example aptx_wav -- rx.ts/….ts wavs   # 
 ```bash
 decsat scan capture_8Msps.cs8     # find every carrier and identify each
 decsat scan capture_8Msps.cs8 --decode   # …then run each one's decoder over the capture and report
+decsat scan capture.wav --decode --only bgan --out dir   # …only the Inmarsat BGAN carriers, all at once, each one's IP to a PCAP (no --out: nothing kept)
 decsat record --hackrf 1720:1780:14 --rate 20 --seconds 2 --out caps   # raw IQ from the HackRF: one slice or a sweep (receive only)
 decsat scene                      # write the 8 MS/s test scene above
 decsat cid                        # a DVB-S2 carrier with a DVB-CID under it

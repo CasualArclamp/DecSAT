@@ -139,10 +139,21 @@ enum Command {
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
         /// Then decode: run each identified carrier's decoder (TPC 2964,
-        /// FastLink, DVB-S2, DVB-S, Viterbi) over the whole capture and
-        /// report what each one found.
+        /// FastLink, DVB-S2, DVB-S, Viterbi, IS-19, beacon, TDMA, BGAN) over
+        /// the whole capture and report what each one found.
         #[arg(long)]
         decode: bool,
+        /// With --decode: run only these decoders (comma-separated or
+        /// repeated, named as for `decode --decoder`: bgan, ip, dvbs, tpc,
+        /// fastlink, viterbi, is19, beacon, tdma …). Every carrier is still
+        /// listed and identified.
+        #[arg(long, value_delimiter = ',', requires = "decode")]
+        only: Vec<String>,
+        /// With --decode: write the decoders' outputs (PCAP, payload, data)
+        /// here, each carrier's files named by its number and offset.
+        /// Without it the decoded data is reported, not kept.
+        #[arg(long, requires = "decode")]
+        out: Option<PathBuf>,
     },
     /// Run one decoder over a capture — or live from a radio — and report
     /// what it finds.
@@ -443,7 +454,16 @@ fn main() -> Result<()> {
             rate,
             timeout,
             decode,
-        } => scan(file, format, rate, timeout, decode),
+            only,
+            out,
+        } => {
+            // Checked before the scan starts, so a typo fails at once.
+            let only = only
+                .iter()
+                .map(|n| decode::decoder_by_name(n.trim()))
+                .collect::<Result<Vec<_>>>()?;
+            scan(file, format, rate, timeout, decode, &only, out.as_deref())
+        }
         Command::Remote(a) => remote::run(&a),
         Command::Decode {
             file,
@@ -569,6 +589,8 @@ fn scan(
     rate: Option<f64>,
     timeout: f64,
     decode: bool,
+    only: &[decsat_engine::DecoderKind],
+    out: Option<&std::path::Path>,
 ) -> Result<()> {
     use decsat_engine::{DecoderKind, Engine, EngineOptions, VfoSettings};
     use std::time::{Duration, Instant};
@@ -706,24 +728,36 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
             Some(b) => bw.max(2.3 * b.reach_hz),
             None => bw,
         };
-        for kind in decoders_for(ident) {
+        for kind in only_these(decoders_for(ident), only) {
             // Centred on the carrier as Identify measured it.
-            let mut s = VfoSettings::new(
+            let s = scan_vfo(
                 format!("#{i}"),
                 c.center_hz + ident.center_offset_hz,
                 bw,
                 kind,
+                ident.symbol_rate,
+                out,
             );
-            s.symbol_rate = ident.symbol_rate;
-            s.voice_auto = false;
             runs.push((i, kind, eng.add_vfo(s)));
         }
     }
     if runs.is_empty() {
-        println!("\nnothing to decode: no carrier has a decoder");
+        if only.is_empty() {
+            println!("\nnothing to decode: no carrier has a decoder");
+        } else {
+            let names: Vec<&str> = only.iter().map(|k| k.key()).collect();
+            println!(
+                "\nnothing to decode: no carrier was identified for {}",
+                names.join(", ")
+            );
+        }
         return Ok(());
     }
     println!("\ndecoding {} carriers over the whole capture…", runs.len());
+    // Every carrier's decoder runs at once, on its own thread; each says
+    // how it is doing every so often, as `decode` does for its one.
+    let t1 = Instant::now();
+    let mut last_line = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let front = eng.front();
@@ -732,6 +766,29 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
         }
         if matches!(front.state, decsat_engine::SourceState::Ended) {
             break;
+        }
+        if last_line.elapsed() >= SCAN_PROGRESS_EVERY {
+            last_line = Instant::now();
+            println!(
+                "\n[{:5.1} s] {:.1} s of the capture read",
+                t1.elapsed().as_secs_f64(),
+                front.samples as f64 / rate
+            );
+            for &(i, kind, id) in &runs {
+                if let Some(st) = eng.vfo_status(id) {
+                    println!(
+                        "{}",
+                        scan_progress(
+                            i,
+                            carriers[i].center_hz,
+                            kind,
+                            &st.message,
+                            st.load,
+                            st.dropped
+                        )
+                    );
+                }
+            }
         }
     }
     // Every decoder through all it was given, before the reports.
@@ -763,10 +820,6 @@ bands that come and go (TDMA, or Bluetooth in a HackRF):"
     Ok(())
 }
 
-/// The decoders to try on what Identify found: DVB-S2 and the modems it
-/// names by their framing; for a plain BPSK/QPSK carrier with no framing
-/// found, the K = 7 Viterbi decoder (it finds a convolutional code's rate
-/// blind, or says there is none); nothing for the rest.
 /// The tuning a raw capture's name gives: an unsigned `…MHz` figure, as
 /// `decsat record` names its files (a signed one is an offset, not a
 /// tuning).
@@ -779,11 +832,86 @@ fn tuning_in_name(file: &std::path::Path) -> Option<f64> {
         .map(|mhz| mhz * 1e6)
 }
 
+/// How often `scan --decode` reports each carrier's progress.
+const SCAN_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One carrier's progress line in `scan --decode`: its number, offset and
+/// decoder, the decoder's own status line, and its thread's load (over
+/// 100 % it is the one holding the file back).
+fn scan_progress(
+    i: usize,
+    center_hz: f64,
+    kind: decsat_engine::DecoderKind,
+    message: &str,
+    load: f32,
+    dropped: u64,
+) -> String {
+    format!(
+        "  #{i:<3} {:+9.1} kHz  {:<6} {message} · CPU {:.0} %{}",
+        center_hz / 1e3,
+        kind.short(),
+        100.0 * load,
+        if dropped > 0 {
+            format!(" · {dropped} blocks dropped")
+        } else {
+            String::new()
+        }
+    )
+}
+
+/// `kinds`, only those in `only` when it names any (`scan --only`).
+fn only_these(
+    kinds: Vec<decsat_engine::DecoderKind>,
+    only: &[decsat_engine::DecoderKind],
+) -> Vec<decsat_engine::DecoderKind> {
+    if only.is_empty() {
+        kinds
+    } else {
+        kinds.into_iter().filter(|k| only.contains(k)).collect()
+    }
+}
+
+/// A `scan --decode` VFO: `kind` on the carrier at `offset_hz`, `bw` wide
+/// (a BGAN one widened for its receiver). Recording into `out` when given;
+/// without it nothing is written — the decoded data is only reported.
+fn scan_vfo(
+    name: String,
+    offset_hz: f64,
+    bw: f64,
+    kind: decsat_engine::DecoderKind,
+    symbol_rate: Option<f64>,
+    out: Option<&std::path::Path>,
+) -> decsat_engine::VfoSettings {
+    use decsat_engine::DecoderKind;
+    let bw = match kind {
+        DecoderKind::Bgan => bw.max(decsat_engine::bgan::spec::BGAN_VFO_BW),
+        _ => bw,
+    };
+    let mut s = decsat_engine::VfoSettings::new(name, offset_hz, bw, kind);
+    s.symbol_rate = symbol_rate;
+    s.voice_auto = false;
+    if let Some(dir) = out {
+        // As `decode --out`: record throughout, IP as PCAP.
+        s.record = true;
+        s.pcap = true;
+        s.record_dir = dir.to_path_buf();
+    }
+    s
+}
+
+/// The decoders to try on what Identify found: DVB-S2 and the modems it
+/// names by their framing; for a plain BPSK/QPSK carrier with no framing
+/// found, the K = 7 Viterbi decoder (it finds a convolutional code's rate
+/// blind, or says there is none); nothing for the rest.
 fn decoders_for(ident: &decsat_engine::Identification) -> Vec<decsat_engine::DecoderKind> {
     use decsat_engine::identify::ConstellationGuess;
     use decsat_engine::{DecoderKind, Verdict};
     match &ident.verdict {
         Verdict::DvbS2(d) if d.unconfirmed_spacing.is_none() => vec![DecoderKind::Dvbs2Ip],
+        // An Inmarsat BGAN forward carrier (its bearer's unique word found).
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_bgan(hint) => {
+            vec![DecoderKind::Bgan]
+        }
         // An Intelsat 19 DAMA outbound: its own decoder; a call channel of
         // that network: none (its voice is encrypted).
         Verdict::NotDvbS2 { hint } if decsat_engine::names_is19(hint) => {
@@ -1080,4 +1208,119 @@ fn analyse(file: PathBuf, format: Option<SampleFormat>, rate: f64, blocks: usize
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use decsat_engine::bgan::spec::BGAN_VFO_BW;
+    use decsat_engine::{DecoderKind, Verdict, VfoSettings};
+
+    /// What Identify says of a BGAN forward carrier.
+    fn bgan_ident() -> decsat_engine::Identification {
+        let mut id = decsat_engine::identify(&vec![decsat_core::Iq::new(0.0, 0.0); 8192], 1.0);
+        id.verdict = Verdict::NotDvbS2 {
+            hint: "16QAM, Inmarsat BGAN forward (F80T4.5X-8B: unique word every 12 096 \
+                   symbols, level L3) — the BGAN decoder reads it"
+                .into(),
+        };
+        id.constellation = Some(decsat_engine::ConstellationGuess::Qam16);
+        id
+    }
+
+    #[test]
+    fn a_bgan_carrier_gets_the_bgan_decoder() {
+        assert_eq!(decoders_for(&bgan_ident()), vec![DecoderKind::Bgan]);
+    }
+
+    #[test]
+    fn only_keeps_the_decoders_asked_for() {
+        let both = vec![DecoderKind::DvbsTs, DecoderKind::Viterbi];
+        assert_eq!(only_these(both.clone(), &[]), both);
+        assert_eq!(
+            only_these(both.clone(), &[DecoderKind::Viterbi]),
+            vec![DecoderKind::Viterbi]
+        );
+        assert!(only_these(both, &[DecoderKind::Bgan]).is_empty());
+        assert_eq!(
+            only_these(decoders_for(&bgan_ident()), &[DecoderKind::Bgan]),
+            vec![DecoderKind::Bgan]
+        );
+    }
+
+    #[test]
+    fn without_out_nothing_is_recorded() {
+        // As `scan --decode` has always made its VFOs.
+        let s = scan_vfo(
+            "#3".into(),
+            1e3,
+            50e3,
+            DecoderKind::Viterbi,
+            Some(40e3),
+            None,
+        );
+        let plain = VfoSettings::new("#3", 1e3, 50e3, DecoderKind::Viterbi);
+        assert!(!s.record && !s.pcap);
+        assert_eq!(s.record_dir, plain.record_dir);
+        assert_eq!(s.bandwidth_hz, 50e3);
+        assert_eq!(s.symbol_rate, Some(40e3));
+        assert!(!s.voice_auto);
+    }
+
+    #[test]
+    fn with_out_everything_is_recorded_there() {
+        let dir = std::path::Path::new("/tmp/bgan-out");
+        let s = scan_vfo("#0".into(), 0.0, 192e3, DecoderKind::Bgan, None, Some(dir));
+        assert!(s.record && s.pcap);
+        assert_eq!(s.record_dir, dir);
+    }
+
+    #[test]
+    fn a_bgan_vfo_is_widened_for_its_receiver() {
+        let s = scan_vfo("#0".into(), 0.0, 192e3, DecoderKind::Bgan, None, None);
+        assert_eq!(s.bandwidth_hz, BGAN_VFO_BW);
+        let s = scan_vfo("#0".into(), 0.0, 300e3, DecoderKind::Bgan, None, None);
+        assert_eq!(s.bandwidth_hz, 300e3);
+    }
+
+    #[test]
+    fn a_progress_line_names_the_carrier_and_its_decoder() {
+        let line = scan_progress(
+            9,
+            -1000.3e3,
+            DecoderKind::Bgan,
+            "locked — Es/N0 8.5 dB, 94/192 blocks, UW L3",
+            0.54,
+            0,
+        );
+        assert_eq!(
+            line,
+            "  #9     -1000.3 kHz  BGAN   locked — Es/N0 8.5 dB, 94/192 blocks, UW L3 · CPU 54 %"
+        );
+        let line = scan_progress(2, 5e3, DecoderKind::Bgan, "searching", 1.2, 7);
+        assert!(line.ends_with("· CPU 120 % · 7 blocks dropped"), "{line}");
+    }
+
+    #[test]
+    fn only_and_out_need_decode() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["decsat", "scan", "x.wav", "--only", "bgan"]).is_err());
+        assert!(parse(&["decsat", "scan", "x.wav", "--out", "o"]).is_err());
+        assert!(
+            parse(&[
+                "decsat", "scan", "x.wav", "--decode", "--only", "bgan,ip", "--out", "o"
+            ])
+            .is_ok()
+        );
+        let Command::Scan { only, out, .. } = Cli::try_parse_from([
+            "decsat", "scan", "x.wav", "--decode", "--only", "bgan,ip", "--only", "tpc",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not scan");
+        };
+        assert_eq!(only, ["bgan", "ip", "tpc"]);
+        assert_eq!(out, None);
+    }
 }
