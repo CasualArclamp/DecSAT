@@ -10,7 +10,10 @@ use crate::turbo::{TurboDecoder, turbo_encode};
 /// Parity-agreement threshold. Correct decodes never fell below 0.7585, wrong
 /// ones never exceeded 0.6023 over 37281 impossible tries (DecBGAN
 /// `decode_wav.ACCEPT_AGREEMENT`, calibrated against a labelled negative
-/// set; do not move it without redoing that calibration).
+/// set; do not move it without redoing that calibration). The log-MAP
+/// decoder at 30 iterations fits noise a little better: over 200 000
+/// impossible tries (random 16-QAM at 2-11 dB and pure noise, every level)
+/// none passed: 8 exceeded 0.62 and the best reached 0.643.
 pub const ACCEPT_AGREEMENT: f32 = 0.70;
 /// Likelihood-ratio margin in nats (DecBGAN `verify_block`): 1200 kept every
 /// correct block and rejected every wrong one of 4960 labelled blocks.
@@ -100,12 +103,44 @@ pub struct BlockScratch {
     lq: Vec<f32>,
     bits: Vec<u8>,
     post: Vec<f32>,
+    /// `llr` at the block's own noise level, for the decoder.
+    dec_llr: Vec<f32>,
 }
 
 impl BlockScratch {
     pub fn new() -> Self {
-        Self::default()
+        let mut s = Self::default();
+        s.turbo.log_map = true;
+        s
     }
+}
+
+/// E|s|^4 of unit-power 16-QAM (Table 5.3's levels): 1.32.
+const QAM16_M4: f64 = 1.32;
+
+/// Signal power of `sym` (16-QAM in complex Gaussian noise) from its second
+/// and fourth moments: with signal power S and noise N, M2 = S + N and
+/// M4 = 1.32 S^2 + 4 S N + 2 N^2, so S^2 = (2 M2^2 - M4) / 0.68. Unlike the
+/// pilots' mean magnitude, which noise pushes up, it is unbiased.
+pub fn qam16_signal_power(sym: &[C32]) -> f64 {
+    let (mut m2, mut m4) = (0.0f64, 0.0f64);
+    for v in sym {
+        let p = v.norm_sqr() as f64;
+        m2 += p;
+        m4 += p * p;
+    }
+    let n = sym.len().max(1) as f64;
+    let (m2, m4) = (m2 / n, m4 / n);
+    ((2.0 * m2 * m2 - m4) / (2.0 - QAM16_M4)).max(1e-12).sqrt()
+}
+
+/// Noise over signal power of a block of 16-QAM symbols (N0/Es), kept
+/// within 2 and 0.02 (Es/N0 of -3 to 17 dB) so a block of noise or a very
+/// clean one still gives usable LLRs.
+fn noise_per_signal(sym: &[C32]) -> f32 {
+    let s = qam16_signal_power(sym);
+    let m2 = sym.iter().map(|v| v.norm_sqr() as f64).sum::<f64>() / sym.len().max(1) as f64;
+    ((m2 - s) / s).clamp(0.02, 2.0) as f32
 }
 
 /// Turbo-decode `sym` (one block's `teo` symbols, phase-corrected, unit power)
@@ -126,15 +161,21 @@ pub fn decode_block(
     t: &LevelTables,
     niter: usize,
 ) -> BlockDecode {
+    // The acceptance test below reads LLRs at the calibrated scale N0; the
+    // log-MAP decoder wants true ones, at the noise the block was received
+    // with.
     demap(sym, N0, &mut sc.llr);
-    deinterleave(&sc.llr, t, &mut sc.ls, &mut sc.lp, &mut sc.lq);
+    let k = N0 / noise_per_signal(sym);
+    sc.dec_llr.clear();
+    sc.dec_llr.extend(sc.llr.iter().map(|l| l * k));
+    deinterleave(&sc.dec_llr, t, &mut sc.ls, &mut sc.lp, &mut sc.lq);
     let iterations = sc.turbo.decode(
         &sc.ls,
         &sc.lp,
         &sc.lq,
         &t.perm,
         niter,
-        0.75,
+        1.0,
         &mut sc.bits,
         &mut sc.post,
     );
@@ -187,6 +228,34 @@ pub fn payload_bytes(bits: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_power_from_moments() {
+        // 16-QAM at power 0.49 in noise of power 0.2 (Es/N0 3.9 dB): the
+        // pilots' way (mean magnitude) would read it high
+        let pts = frame::qam16();
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut u = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let sym: Vec<C32> = (0..20_000)
+            .map(|_| {
+                let p = pts[(u() * 16.0) as usize % 16] * 0.7;
+                let (r, a) = (
+                    (-0.2 * u().max(1e-12).ln()).sqrt(),
+                    2.0 * std::f64::consts::PI * u(),
+                );
+                p + C32::new((r * a.cos()) as f32, (r * a.sin()) as f32)
+            })
+            .collect();
+        let s = qam16_signal_power(&sym);
+        assert!((s - 0.49).abs() < 0.02, "{s}");
+        let n = noise_per_signal(&sym);
+        assert!((n - 0.2 / 0.49).abs() < 0.03, "{n}");
+    }
 
     #[test]
     fn demap_signs() {

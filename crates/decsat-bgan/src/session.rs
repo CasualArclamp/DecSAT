@@ -133,6 +133,11 @@ impl BganSession {
         std::mem::take(&mut self.live_out)
     }
 
+    /// See [`BganRx::set_lossless`].
+    pub fn set_lossless(&mut self, on: bool) {
+        self.rx.set_lossless(on);
+    }
+
     pub fn set_pool(&mut self, pool: Option<Arc<rayon::ThreadPool>>) {
         self.rx.set_pool(pool);
     }

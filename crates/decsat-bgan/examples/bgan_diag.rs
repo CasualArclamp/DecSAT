@@ -35,6 +35,9 @@ fn main() {
         .collect();
     let mut rx = BganRx::new(sr);
     rx.set_diag(true);
+    // the diagnosis is slow: without this the real-time governor would drop
+    // most frames and cut the level search on the rest
+    rx.set_lossless(true);
     for ch in iq.chunks(8192) {
         rx.push(ch);
     }

@@ -27,8 +27,10 @@ VFO baseband (any rate >= ~215 kS/s)
   Locked:    per frame UW search in a +-320 symbol window (offsets step by
              tens of symbols on real recordings), pilot-slope carrier loop,
              per block pilot amplitude + linear phase fit (11 pilots),
-             level choice, max-log-MAP turbo decode (8 iterations, no
-             early stop, rayon across blocks), acceptance
+             then phase and level again from the block's data symbols,
+             level choice, log-MAP turbo decode (8 iterations; 30 at the
+             expected level in a file decode; no early stop, rayon across
+             blocks), acceptance
   Acceptance: parity agreement > 0.70 AND likelihood-ratio margin > 1200 nats
               (DecBGAN's calibrated pair: zero false accepts over 37281
               impossible tries)
@@ -37,8 +39,10 @@ VFO baseband (any rate >= ~215 kS/s)
 Levels: block 0 takes the UW's level; blocks 1-7 take the
 ForwardBearerCodeRateParam AVP from block 0's payload (byte 3, clause 5.7.16)
 when present, else the UW's level (the spec's default), then a learned trial
-order. Every trial runs the full 8 iterations; only when behind real time
-are levels screened at 3 iterations first, and a pass is confirmed at 8.
+order. A level the AVP names is the only one tried. Every trial runs the
+full 8 iterations, or 30 at the expected level in a lossless (file) decode;
+only when behind real time are levels screened at 3 iterations first, and a
+pass is confirmed at 8.
 
 Why no shortcuts: measured over 44000 accepted blocks on nine real
 recordings, stopping once an iteration changed no hard decision let 3
@@ -48,6 +52,63 @@ screening other levels at 6 iterations lost 20 blocks that only converge at
 the 7th or 8th. Requiring two unchanged iterations in a row gave no corrupt
 blocks on the same set and most of the speed back, but was not adopted:
 none in 44000 is not the same as none.
+
+### Weak signals
+
+The forward bearer changes code rate block by block, to suit the terminal
+each block is meant for. Blocks for a terminal with a better link than ours
+(H1 and up, coded for several dB more than a small dish gets) cannot be
+decoded at all. On a real 8 MS/s capture at Es/N0 about 5 dB, most of what
+failed was such blocks. The receiver now gets what it can from the rest:
+
+- Phase and level from the data. Each pilot is one symbol, so at 5 dB its
+  phase is only good to about 0.3 rad and its magnitude reads high. After
+  the pilot fit, the data symbols' fourth power gives the carrier phase of
+  each 136-symbol group (to the nearest quarter turn, which the pilots
+  settle), and a line is fitted through those. The level comes from the
+  block's second and fourth moments.
+- Log-MAP instead of max-log-MAP. The LLRs are scaled to each block's
+  measured noise. A file decode runs 30 iterations at the expected level;
+  a live one runs 8, because with no early stop 30 about doubles the
+  decode time.
+- File decodes never shed work. `BganRx::set_lossless` (set by the VFO
+  when it plays a file as fast as possible) turns off the real-time
+  governor, which otherwise drops frames and cuts the level search when
+  decoding lags.
+- When the AVP names a block's level, the other levels are not tried. On
+  real captures this was most of the CPU, and it rescued nothing.
+
+120 s of three carriers on that capture, blocks decoded by the level the
+AVP named (`decsat scan` on the whole 16 minutes, before and after, is
+below):
+
+| Carrier | Level | Before | After |
+|---|---|---|---|
+| #0 | L1 | 426 / 585 | 578 / 585 |
+| #0 | all | 85.7 % | 87.2 % |
+| #8 | R | 15 / 3374 | 215 / 3384 |
+| #8 | L1 | 68 / 96 | 90 / 96 |
+| #8 | all | 54.9 % | 56.9 % |
+| #10 | R | 35 / 284 | 172 / 284 |
+| #10 | all | 25.5 % | 26.7 % |
+| all | H1, H2, H3 | 0 | 0 |
+
+On the whole 16-minute capture (`decsat scan --decode`), the four carriers'
+payloads grew by 1 to 17 %. Their pcaps (full headers restored and
+compressed ones rebuilt, as below) grew from 257, 149, 61 and 0 packets to
+418, 311, 99 and 15. All but one of the old packets are among them, and one
+FEC block that decoded before now fails. The payload grows far less than
+the traffic because the newly decoded blocks are R and L1 ones, which carry
+the users' packets. The L3 blocks hold mostly signalling and padding.
+
+The decoder fits noise slightly better than before: in 200 000 impossible
+tries (random 16-QAM, pure noise, every level) the best parity agreement
+was 0.643, up from about 0.60. That is still under the 0.70 acceptance
+line, and none of the 200 000 tries was accepted.
+
+These figures are for a file decode. They were measured before the early
+stop was removed (see above), so with at most 30 iterations at the expected
+level; now each such decode runs all 30.
 
 ## Payload to packets
 
@@ -101,6 +162,19 @@ compressed non-TCP packets were rebuilt; of 123 compressed TCP packets 24
 were, 42 had no context and 57 followed a loss. With full headers restored and
 compressed packets rebuilt, the pcaps grew from 161, 37 and 141 packets to
 257, 61 and 149.
+
+### Segments that cannot be rebuilt
+
+Many middle and last segments arrive with no SDU open on their connection,
+or with a gap in the sequence numbers. On the three recordings above this
+was 753, 2620 and 451 segments. For 64 %, 82 % and 69 % of them, the
+segment before (sequence number one less) is nowhere in the payload: it was
+in an FEC block that failed, almost always one coded above what the dish
+received (see *Weak signals*). Most of the rest follow one that was itself
+cut off that way. The others belong to connections whose first segment
+has no SDU length and no IPv4 header, only data that looks random: not IP
+the reassembler could rebuild. None of these were parsing misses. What
+helps is decoding more blocks.
 
 To redo an old recording:
 
