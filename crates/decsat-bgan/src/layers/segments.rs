@@ -36,8 +36,11 @@
 //!
 //! A PID of 1 marks an RFC 2507 full header, whose Total Length field carries
 //! a compression context id: its header checksum fails as carried, so the
-//! carver never finds it, whole or split. The reassembler restores the length
-//! from the SDU's and reports it, whole SDUs included.
+//! carver never finds it, whole or split. PIDs 2 to 4 are compressed headers
+//! with no IPv4 header at all. The reassembler hands every SDU with a PID to
+//! a [`Decompressor`], which restores full headers, keeps their contexts and
+//! rebuilds compressed packets from them; it reports what that gives, whole
+//! SDUs included.
 //!
 //! The length-present bit is the one the BCtPDU header has (clause 5.1.4).
 //! Segments without a length were seen to fill the rest of their FEC block;
@@ -47,7 +50,7 @@
 //! A 7-octet segment (len = 2) has no body: an acknowledgement.
 //!
 //! Only SDUs of two or more segments are reported, and whole SDUs holding a
-//! full header, so the output never repeats a packet the carver already
+//! full or compressed header, so the output never repeats a packet the carver already
 //! found (any other whole SDU's header is contiguous and checks).
 //! When the cut falls after the IP header the header checksum holds, but the
 //! carver checks [`starts_split_packet`] and leaves such a packet alone.
@@ -57,7 +60,7 @@
 use std::collections::HashMap;
 
 use super::bctpdu::{crc_ok, try_pdu};
-use super::hc::{PID_FULL_HEADER, PID_NONE, restore_full_header, sdu_packet};
+use super::hc::{Decompressor, PID_FULL_HEADER, PID_NONE, is_pid};
 use super::pcap::{CarveOpts, CarvedPacket, ipv4_checksum_ok, transport_checksum_ok};
 use super::stream::Rolling;
 
@@ -87,6 +90,10 @@ pub const MAX_FIRST_PREFIX: usize = LEN_HEADER + 3 + 1;
 fn conn_key(b0: u8, b1: u8) -> [u8; 2] {
     [b0 | LENGTH_PRESENT, b1]
 }
+
+/// The fewest octets an SDU with a compressed header has: PID, CID, the
+/// flags or generation octet, and one more.
+const MIN_SDU: usize = 4;
 
 /// Header octets of a segment starting with `b0`.
 fn header_len(b0: u8) -> usize {
@@ -223,7 +230,8 @@ fn candidate(
 /// place the FCS checks, so a CRC is run only where the header fits an SDU
 /// this scan can use: a first segment of a plausible IPv4 SDU, or the next
 /// segment of an SDU open on its connection. Whole SDUs are the carver's,
-/// except a full header (see [`super::hc`]), which it cannot find.
+/// except full and compressed headers (see [`super::hc`]), which it cannot
+/// find.
 fn candidate_no_len(
     b: &[u8],
     i: usize,
@@ -241,14 +249,17 @@ fn candidate_no_len(
     // the fewest and most body octets the segment can have
     let (lo, hi) = match flags {
         0b01 => {
-            // ctr | SDU length(2) | SDU, which opens with IPv4 or 0x00 IPv4
+            // ctr | SDU length(2) | SDU, which opens with IPv4, or a PID and
+            // IPv4 or a compressed header
             let Some(f) = b.get(i + NO_LEN_HEADER + 1..i + NO_LEN_HEADER + 5) else {
                 return short;
             };
             let want = u16::from_be_bytes([f[0], f[1]]) as usize;
             let ipv4 =
                 f[2] >> 4 == 4 || ((f[2] == PID_NONE || f[2] == PID_FULL_HEADER) && f[3] >> 4 == 4);
-            if !ipv4 || want < 20 || want > opts.max_len + 1 {
+            let compressed = f[2] > PID_FULL_HEADER && is_pid(f[2]);
+            let least = if compressed { MIN_SDU } else { 20 };
+            if !(ipv4 || compressed) || want < least || want > opts.max_len + 1 {
                 return Cand::No;
             }
             // some of the SDU, never all of it
@@ -273,15 +284,22 @@ fn candidate_no_len(
             }
         }
         0b11 => {
-            // only a full header: any other whole SDU is the carver's
+            // a full or compressed header: any other whole SDU is the carver's
             let Some(f) = b.get(i + NO_LEN_HEADER + 1..i + NO_LEN_HEADER + 4) else {
                 return short;
             };
-            if f[0] != 0 || f[1] != PID_FULL_HEADER || f[2] >> 4 != 4 {
+            if f[0] != 0 || f[1] == PID_NONE || !is_pid(f[1]) {
                 return Cand::No;
             }
-            // ctr | 0x00 | PID | packet
-            (3 + 20, 3 + opts.max_len)
+            // ctr | 0x00 | then the SDU: PID | packet or compressed header
+            if f[1] == PID_FULL_HEADER {
+                if f[2] >> 4 != 4 {
+                    return Cand::No;
+                }
+                (2 + 1 + 20, 2 + 1 + opts.max_len)
+            } else {
+                (2 + MIN_SDU, 2 + 1 + opts.max_len)
+            }
         }
         _ => unreachable!("two bits"),
     };
@@ -305,6 +323,8 @@ pub struct SegmentReassembler {
     cur: usize,
     fin: bool,
     open: HashMap<[u8; 2], Partial>,
+    /// Header-compression contexts, from the SDUs taken so far.
+    hc: Decompressor,
 }
 
 impl Default for SegmentReassembler {
@@ -323,6 +343,7 @@ impl SegmentReassembler {
             cur: 0,
             fin: false,
             open: HashMap::new(),
+            hc: Decompressor::new(),
         }
     }
 
@@ -357,7 +378,7 @@ impl SegmentReassembler {
                 Cand::Wait => break,
                 Cand::Yes(n) => {
                     let s = Segment::parse(base + i, &b[i..i + n]);
-                    if let Some(p) = take_segment(&mut open, s, &self.opts) {
+                    if let Some(p) = take_segment(&mut open, &mut self.hc, s, &self.opts) {
                         out.push(p);
                     }
                     i += n;
@@ -376,6 +397,7 @@ impl SegmentReassembler {
 /// Apply one segment to the open SDUs; returns a packet when it completes one.
 fn take_segment(
     open: &mut HashMap<[u8; 2], Partial>,
+    hc: &mut Decompressor,
     s: Segment,
     opts: &CarveOpts,
 ) -> Option<CarvedPacket> {
@@ -388,10 +410,10 @@ fn take_segment(
         // connection lost its tail.
         0b11 => {
             open.remove(&s.cid);
-            // rest = [0x00, PID, packet]
+            // rest = [0x00, PID, packet or compressed header]
             match rest {
-                [0, PID_FULL_HEADER, ip @ ..] => restore_full_header(ip)
-                    .map(|f| f.packet)
+                [0, pid, ..] if *pid != PID_NONE && is_pid(*pid) => hc
+                    .packet(s.cid, &rest[1..])
                     .filter(|p| ipv4_ok(p, opts))
                     .map(|data| CarvedPacket {
                         offset: s.offset,
@@ -408,7 +430,7 @@ fn take_segment(
             }
             let want = u16::from_be_bytes([rest[0], rest[1]]) as usize;
             // the SDU may hold a zero octet before the packet
-            if want < 20 || want > opts.max_len + 1 || rest.len() - 2 > want {
+            if want < MIN_SDU || want > opts.max_len + 1 || rest.len() - 2 > want {
                 open.remove(&s.cid);
                 return None;
             }
@@ -446,7 +468,7 @@ fn take_segment(
                 return None;
             }
             // the PID octet some connections put first is not the packet's
-            let data = sdu_packet(&p.buf)?;
+            let data = hc.packet(s.cid, &p.buf)?;
             ipv4_ok(&data, opts).then_some(CarvedPacket {
                 offset: p.start,
                 data,
@@ -811,6 +833,61 @@ pub(crate) mod tests {
             let got = reassemble(&blob);
             assert_eq!(got.len(), 1, "{no_len:?}");
             assert_eq!(got[0].data, p, "{no_len:?}");
+        }
+    }
+
+    /// A UDP packet whose UDP length is right (checksums valid).
+    fn udp_packet(payload: &[u8]) -> Vec<u8> {
+        let mut body = vec![0x0f, 0xa0, 0xa9, 0xad, 0, 0, 0, 0];
+        body[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        body.extend_from_slice(payload);
+        ipv4(17, &body)
+    }
+
+    /// A full header sets a context; compressed non-TCP headers after it, a
+    /// whole SDU without a length octet and an SDU in two segments, are
+    /// rebuilt from it. The same compressed SDU on another connection is not.
+    #[test]
+    fn compressed_sdus_are_rebuilt() {
+        const C: [u8; 2] = [0x5d, 0xbb];
+        let a = udp_packet(b"sets the context");
+        let b = udp_packet(b"rebuilt from a compressed header");
+        let c = udp_packet(&[b'c'; 120]);
+        let compressed = |p: &[u8]| {
+            // PID 4 | CID 1 | 0 D generation 1 | IPv4 id | UDP checksum | data
+            let mut s = vec![4, 1, 1, p[4], p[5], p[26], p[27]];
+            s.extend_from_slice(&p[28..]);
+            s
+        };
+        let mut body = vec![ctr(3, 0b11), 0, PID_FULL_HEADER];
+        body.extend_from_slice(&full_header(&a));
+        body[3 + 2..3 + 4].copy_from_slice(&[0x01, 0x01]); // generation 1, CID 1
+        let mut blob = vec![0u8; 5];
+        blob.extend(seg_no_len(C, 1, &body));
+        blob.extend([0u8; 7]);
+        let mut whole = vec![ctr(4, 0b11), 0];
+        whole.extend(compressed(&b));
+        blob.extend(seg_no_len(C, 2, &whole));
+        blob.extend([0u8; 7]);
+        let sdu = compressed(&c);
+        let mut first = vec![ctr(5, 0b01)];
+        first.extend_from_slice(&(sdu.len() as u16).to_be_bytes());
+        first.extend_from_slice(&sdu[..50]);
+        blob.extend(seg(C, 3, &first));
+        let mut last = vec![ctr(5, 0b10)];
+        last.extend_from_slice(&sdu[50..]);
+        blob.extend(seg(C, 4, &last));
+        // the same compressed SDU, whole, on a connection with no context
+        blob.extend(seg_no_len([0x5e, 0xc7], 9, &whole));
+        blob.extend([0u8; 300]);
+        assert!(carve_ipv4(&blob).is_empty());
+        let got: Vec<_> = reassemble(&blob).into_iter().map(|p| p.data).collect();
+        assert_eq!(got, vec![a, b, c]);
+        for chunk in [1usize, 13, blob.len()] {
+            let mut r = SegmentReassembler::default();
+            let mut got: Vec<_> = blob.chunks(chunk).flat_map(|x| r.push(x)).collect();
+            got.extend(r.finish());
+            assert_eq!(got.len(), 3, "chunk {chunk}");
         }
     }
 

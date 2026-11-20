@@ -70,8 +70,39 @@ before the IPv4 packet in the SDU (counted in a first segment's SDU length).
 Missing either, the carver took a packet cut after its header with the
 segment's FCS and other traffic in it: on a 3.5-minute recording 3666 packets
 (27 % of the pcap) were corrupt that way. With both, that recording gives no
-corrupt packets and 4686 rebuilt ones instead of 1635. To redo an old
-recording:
+corrupt packets and 4686 rebuilt ones instead of 1635.
+
+### Header compression
+
+The octet some connections put before the packet is a PDCP packet
+identifier (3GPP TS 25.323) for RFC 2507 IP header compression — inferred
+from real payloads, not from the BGAN spec. `layers/hc.rs` handles it:
+
+| PID | Packet | Handling |
+|---|---|---|
+| 0 | no compression | the IPv4 packet as sent |
+| 1 | FULL_HEADER | Total Length carries the context id (CID) instead of the length, so the header checksum fails as carried: the length is restored from the SDU's, the sender's checksum must then hold, and the headers become the context |
+| 2 | COMPRESSED_TCP | rebuilt from the context with RFC 1144 deltas (special cases included) |
+| 3 | COMPRESSED_TCP_NODELTA | rebuilt from the context with the TCP header it carries |
+| 4 | COMPRESSED_NON_TCP | rebuilt from the context (UDP or bare IPv4) with the IPv4 id and UDP checksum it carries |
+
+Contexts are kept per link connection and CID, TCP and non-TCP apart. Every
+rebuilt packet must pass its transport checksum before it is kept or moves a
+context on; a TCP packet that fails is tried with its deltas applied twice
+and three times (RFC 2507's "twice" repair for lost packets). Not decoded:
+the D bit (compressed RTP or similar on top of UDP), and chains through
+tunnel or IPsec headers.
+
+What limits it is loss. A compressed packet whose context was set before the
+recording began has nothing to be rebuilt from, and one lost packet with
+deltas unlike the next puts a TCP context out of step until the next full
+header. On three real recordings (25, 25 and 8 minutes): 36 of 38
+compressed non-TCP packets were rebuilt; of 123 compressed TCP packets 24
+were, 42 had no context and 57 followed a loss. With full headers restored and
+compressed packets rebuilt, the pcaps grew from 161, 37 and 141 packets to
+257, 61 and 149.
+
+To redo an old recording:
 
 ```bash
 cargo run --release -p decsat-bgan --example bgan_pcap -- X_payload.bin X_full.pcap
