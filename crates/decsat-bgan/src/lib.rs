@@ -11,3 +11,5 @@ pub mod spec;
 pub mod tables;
 pub mod turbo;
 pub mod tx;
+
+pub use rx::{MIN_DETECT_FRAMES, Sighting, detect_symbols};

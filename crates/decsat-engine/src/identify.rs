@@ -49,6 +49,9 @@ const GRID_TOLERANCE: usize = 2;
 /// group seen live) put header-like peaks only 59–72 symbols apart — closer
 /// than a 90-symbol header could ever repeat.
 const MIN_FRAME_SPACING: usize = 1000;
+/// How far the measured symbol rate may sit from BGAN's 151.2 kBd for its
+/// unique word to be looked for (the search is not cheap, so it is gated).
+const BGAN_RATE_TOLERANCE: f64 = 0.02;
 
 /// Where a symbol-rate figure came from, best last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -236,6 +239,12 @@ pub fn names_is19_call(hint: &str) -> bool {
 /// (the beacon decoder reads it).
 pub fn names_beacon(hint: &str) -> bool {
     hint.starts_with("Satellite beacon")
+}
+
+/// A [`Verdict::NotDvbS2`] hint names an Inmarsat BGAN forward carrier (its
+/// bearer's unique word found: the BGAN decoder reads it).
+pub fn names_bgan(hint: &str) -> bool {
+    hint.contains("Inmarsat BGAN")
 }
 
 /// A [`Verdict::NotDvbS2`] hint names a TPC unique word found: tpc_2964's
@@ -1245,10 +1254,27 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         id.carrier_offset_hz = id.carrier_offset_hz.map(|f| -f);
     }
 
+    // 7b. An Inmarsat BGAN forward carrier: 16QAM at 151.2 kBd with its
+    //     bearer's 40-symbol unique word every 12 096 symbols — the BGAN
+    //     receiver's own acquisition test, so what it finds the decoder
+    //     locks to. Found, it is locked again as 16QAM (for the display).
+    let bgan = (!is_s2 && (rs / decsat_bgan::spec::F80T45X8B.rs - 1.0).abs() < BGAN_RATE_TOLERANCE)
+        .then(|| decsat_bgan::detect_symbols(&sym))
+        .flatten();
+    if bgan.is_some() {
+        cst = ConstellationGuess::Qam16;
+        id.constellation = Some(cst);
+        lock = lock_carrier(&sym, cst, cfo.map(|hz| hz / rs), None);
+        id.set_lock(&lock, rs);
+    }
+    // Named by its framing (DVB-S2 or BGAN): the checks below are for
+    // other carriers.
+    let framed = is_s2 || bgan.is_some();
+
     // 8. Not DVB-S2: the unique word of an Intelsat TPC 2964 carrier, every
     //    2964 bits, or a Comtech TPC 7/8 one, every 16 320, is quick to look
     //    for on BPSK, QPSK and 8PSK.
-    let tpc_code = (!is_s2
+    let tpc_code = (!framed
         && matches!(
             cst,
             ConstellationGuess::Bpsk | ConstellationGuess::Qpsk | ConstellationGuess::Psk8
@@ -1259,8 +1285,8 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // looked for differentially in the timed symbols. Its 8QAM has a
     // squared line (the points' squares do not cancel), so it reads BPSK;
     // found, the carrier is locked again as 8QAM.
-    let qam16_uw = !is_s2 && tpc_code.is_none() && decsat_modem::cdm8qam::detect_16(&sym);
-    let cdm8 = qam16_uw || (!is_s2 && tpc_code.is_none() && decsat_modem::cdm8qam::detect(&sym));
+    let qam16_uw = !framed && tpc_code.is_none() && decsat_modem::cdm8qam::detect_16(&sym);
+    let cdm8 = qam16_uw || (!framed && tpc_code.is_none() && decsat_modem::cdm8qam::detect(&sym));
     if cdm8 {
         // The frame also comes on 16QAM, with a UW of its own. Comtech's 8QAM
         // has a squared line of 0.2 of its power (its points' squares do not
@@ -1276,7 +1302,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     }
     let tpc = tpc_code.is_some() || cdm8;
     // Paradise Q-Flex FastLink: its sync word every 11 538 symbols.
-    let fastlink = !is_s2
+    let fastlink = !framed
         && !tpc
         && cst == ConstellationGuess::Qpsk
         && decsat_modem::fastlink::detect(&lock.symbols);
@@ -1284,7 +1310,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // looked for differentially (no lock needed — its pilots' squared lines
     // make it read BPSK, and the lock goes with that). Found, it is QPSK:
     // the lock is done again so.
-    let is19 = !is_s2
+    let is19 = !framed
         && !tpc
         && !fastlink
         && (rs / decsat_modem::is19::SYMBOL_RATE - 1.0).abs() < 0.02
@@ -1299,14 +1325,14 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // One of its call channels: QPSK at 5133⅓ Bd, a pilot every 16 symbols
     // in 154-symbol frames. Identify's rate for so narrow a carrier can be
     // well off: near it, the symbols are timed again at the call rate.
-    let mut is19_call = !is_s2
+    let mut is19_call = !framed
         && !tpc
         && !fastlink
         && !is19
         && cst == ConstellationGuess::Qpsk
         && decsat_modem::is19::detect_call_channel(&lock.symbols);
     let call_rs = decsat_modem::is19::CALL_SYMBOL_RATE;
-    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && (0.8..1.3).contains(&(rs / call_rs)) {
+    if !framed && !tpc && !fastlink && !is19 && !is19_call && (0.8..1.3).contains(&(rs / call_rs)) {
         let s = symbols_at(&bb, rate, call_rs, 0.2);
         let seed = weak_s4_offset(&s, call_rs).map(|hz| hz / call_rs);
         let l = lock_carrier(&s, ConstellationGuess::Qpsk, seed, None);
@@ -1329,7 +1355,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         .find(|w| (rs / w - 1.0).abs() < 0.05);
     let near_wide = wide_rs.is_some();
     let wide_rs = wide_rs.unwrap_or(rs);
-    let mut is19_wide = !is_s2
+    let mut is19_wide = !framed
         && !tpc
         && !fastlink
         && !is19
@@ -1337,7 +1363,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
         && near_wide
         && cst == ConstellationGuess::Qpsk
         && decsat_modem::is19::detect_wide_channel(&lock.symbols);
-    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && !is19_wide && near_wide {
+    if !framed && !tpc && !fastlink && !is19 && !is19_call && !is19_wide && near_wide {
         let s = symbols_at(&bb, rate, wide_rs, decsat_modem::is19::ROLL_OFF);
         let seed = weak_s4_offset(&s, wide_rs).map(|hz| hz / wide_rs);
         let l = lock_carrier(&s, ConstellationGuess::Qpsk, seed, None);
@@ -1355,7 +1381,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // Bi-phase: BPSK whose symbols pair up opposite (one of a bit's two
     // chips the other's negative) — Manchester data at half the rate. Its
     // pairs also satisfy a trivial "code" (K = 2), which is not one.
-    id.biphase = !is_s2
+    id.biphase = !framed
         && id.carrier_locked
         && cst == ConstellationGuess::Bpsk
         && lock.symbols.len() >= 1000
@@ -1367,7 +1393,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // A convolutional code on BPSK or QPSK: its parity checks show in the
     // hard decisions (quick: small GF(2) matrices), the K = 7 code of DVB-S
     // and IESS-308/309 or any other rate-½ one.
-    id.conv_code = (!is_s2
+    id.conv_code = (!framed
         && !id.biphase
         && !tpc
         && !fastlink
@@ -1380,7 +1406,7 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     // 9. Not DVB-S2 nor a TPC: does anything repeat frame by frame? A
     //    header or pilots every frame fingerprint a framing — proprietary
     //    ones included — even with no decoder for it.
-    if !is_s2 && !tpc && !fastlink && !is19 && !is19_call && id.carrier_locked {
+    if !framed && !tpc && !fastlink && !is19 && !is19_call && id.carrier_locked {
         id.frame_structure = crate::period::find_period(&lock.symbols, 16, 200_000);
     }
     let burst_text = id.bursts.map_or_else(String::new, |b| {
@@ -1398,6 +1424,11 @@ pub fn identify_in(x: &[Iq], rate: f64, bandwidth: Option<f64>) -> Identificatio
     } else {
         Verdict::NotDvbS2 {
             hint: match cst {
+                _ if bgan.is_some() => format!(
+                    "16QAM, Inmarsat BGAN forward (F80T4.5X-8B: unique word every 12 096 \
+                     symbols, level {}) — the BGAN decoder reads it",
+                    bgan.map_or("?", |b| b.uw_level)
+                ),
                 // A found UW beats PLHEADER-like chance hits in its data.
                 ConstellationGuess::Qam16 if cdm8 => "16QAM, Comtech 16QAM frame (52-symbol unique word every 2092 symbols) — framed and counted; its bit labels and code are not known, so no data comes out"
                     .into(),
@@ -2197,6 +2228,72 @@ mod tests {
             v => panic!("expected not-DVB-S2, got {v:?}"),
         }
         assert_eq!(id.constellation, Some(ConstellationGuess::Qam16));
+    }
+
+    /// `n` frames of a BGAN forward carrier (or, `uw` false, the same 16QAM
+    /// at 151.2 kBd with no frame structure), RRC-shaped at 4 samples a
+    /// symbol, 700 Hz off, at an Es/N0 of `esn0_db`. Returns (IQ, rate).
+    fn bgan_signal(n: usize, uw: bool, esn0_db: f64, seed: u64) -> (Vec<Iq>, f64) {
+        use decsat_bgan::{frame, spec};
+        let b = spec::F80T45X8B;
+        let mut nz = Noise(seed);
+        let mut syms = Vec::new();
+        for f in 0..n {
+            if uw {
+                let data: Vec<Iq> = (0..b.encoded_syms())
+                    .map(|_| frame::qam16()[(nz.uniform() * 16.0) as usize])
+                    .collect();
+                let lv = spec::LEVELS[f % 3];
+                syms.extend(frame::assemble_frame(&data, lv, &b));
+            } else {
+                syms.extend((0..b.mos).map(|_| frame::qam16()[(nz.uniform() * 16.0) as usize]));
+            }
+        }
+        let syms = &syms[2500..];
+        let sps = 4;
+        let mut sh = Shaper::new(sps, spec::ROLLOFF, 16);
+        let mut x = Vec::new();
+        sh.process(syms, &mut x);
+        let rate = sps as f64 * b.rs;
+        let w = std::f64::consts::TAU * 700.0 / rate;
+        // Es is spread over `sps` samples; the noise is over the whole rate.
+        let p: f32 = x.iter().map(|s| s.norm_sqr()).sum::<f32>() / x.len() as f32;
+        let sigma = (p * sps as f32 * 10f32.powf(-esn0_db as f32 / 10.0)).sqrt();
+        let x = x
+            .iter()
+            .enumerate()
+            .map(|(k, &s)| s * Iq::from_polar(1.0, (w * k as f64) as f32) + nz.gauss() * sigma)
+            .collect();
+        (x, rate)
+    }
+
+    /// An Inmarsat BGAN forward carrier is named by its unique word, as 16QAM,
+    /// with the levels changing frame to frame, at the Es/N0 seen live.
+    #[test]
+    fn names_a_bgan_forward_carrier() {
+        let (x, rate) = bgan_signal(10, true, 9.0, 21);
+        let id = identify(&x, rate);
+        match &id.verdict {
+            Verdict::NotDvbS2 { hint } => {
+                assert!(names_bgan(hint), "{}", id.summary());
+                assert!(!names_tpc(hint) && !names_is19(hint), "{hint}");
+            }
+            v => panic!("expected not-DVB-S2, got {v:?}"),
+        }
+        assert_eq!(id.constellation, Some(ConstellationGuess::Qam16));
+        let rs = id.symbol_rate.expect("symbol rate");
+        assert!((rs / 151_200.0 - 1.0).abs() < 0.005, "{rs}");
+        assert!(id.conv_code.is_none() && id.frame_structure.is_none());
+    }
+
+    /// 16QAM at BGAN's rate without its frames is not called BGAN.
+    #[test]
+    fn bgan_rate_alone_is_not_bgan() {
+        let (x, rate) = bgan_signal(10, false, 15.0, 22);
+        let id = identify(&x, rate);
+        if let Verdict::NotDvbS2 { hint } = &id.verdict {
+            assert!(!names_bgan(hint), "{hint}");
+        }
     }
 
     /// The Intelsat 19 DAMA network: an outbound named by its sync word

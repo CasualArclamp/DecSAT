@@ -293,6 +293,163 @@ fn diffs(s: &[C32]) -> Vec<C32> {
     s.windows(2).map(|w| w[1] * w[0].conj()).collect()
 }
 
+/// The UW correlation folded over the whole frames of a symbol stream.
+struct Fold {
+    /// Position of the peak in the frame (the UW's start), symbols.
+    pos: usize,
+    /// The folded sum at the peak.
+    peak: f64,
+    /// Mean of the folded sum away from the peak.
+    mean: f64,
+    /// Whole frames folded.
+    frames: usize,
+    /// Frames whose own correlation at the peak stands well above one
+    /// frame's noise.
+    frames_hit: usize,
+}
+
+impl Fold {
+    /// Peak to sidelobe ratio, or 0 when the peak does not come from most
+    /// frames: a start-up transient or a burst of interference in a single
+    /// frame can dominate a folded sum on its own (pure noise once scored a
+    /// PSR of 42 that way), while a real carrier puts its UW in every frame,
+    /// far above one frame's noise mean.
+    fn psr(&self) -> f64 {
+        if self.frames_hit * 10 >= self.frames * 6 {
+            self.peak / self.mean
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Fold `|corr|²` of the UW over the whole frames of `s` (one sample per
+/// symbol; a constant carrier offset does not matter). Level-agnostic: per
+/// frame and position the best of the ten UWs is taken (the level may change
+/// from frame to frame), then summed over frames. `None` when `s` does not
+/// hold a whole frame.
+fn fold_uw(tpl: &Templates, s: &[C32]) -> Option<Fold> {
+    let nfr = s.len() / MOS;
+    if nfr == 0 {
+        return None;
+    }
+    let d = diffs(s);
+    let per_frame: Vec<Vec<f32>> = (0..nfr)
+        .into_par_iter()
+        .map(|fr| {
+            (0..MOS)
+                .map(|p| {
+                    let pos = fr * MOS + p;
+                    if pos + UWLEN >= d.len() {
+                        return 0.0;
+                    }
+                    (0..LEVELS.len())
+                        .map(|l| {
+                            let c = tpl.corr_d(l, &d, pos);
+                            c * c
+                        })
+                        .fold(0.0f32, f32::max)
+                })
+                .collect()
+        })
+        .collect();
+    let mut folded = vec![0.0f64; MOS];
+    for pf in &per_frame {
+        for (f, v) in folded.iter_mut().zip(pf) {
+            *f += *v as f64;
+        }
+    }
+    let (j, &pk) = folded
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap();
+    let (mut sum, mut cnt) = (0.0, 0usize);
+    for (p, v) in folded.iter().enumerate() {
+        let dd = (p + MOS - j) % MOS;
+        if dd > 3 && dd < MOS - 3 {
+            sum += v;
+            cnt += 1;
+        }
+    }
+    let mean = (sum / cnt as f64).max(1e-30);
+    let per_frame_mean = mean / nfr as f64;
+    let frames_hit = per_frame
+        .iter()
+        .filter(|pf| pf[j] as f64 > 4.0 * per_frame_mean)
+        .count();
+    Some(Fold {
+        pos: j,
+        peak: pk,
+        mean,
+        frames: nfr,
+        frames_hit,
+    })
+}
+
+/// Fewest whole frames [`detect_symbols`] judges on (80 ms each).
+pub const MIN_DETECT_FRAMES: usize = 4;
+
+/// A BGAN forward carrier found by its unique word.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sighting {
+    /// Peak-to-sidelobe ratio of the folded UW correlation.
+    pub psr: f64,
+    /// Where the UW starts, symbols from the start of the input, modulo a
+    /// frame.
+    pub frame_offset: usize,
+    /// The coding level whose UW matched in most frames.
+    pub uw_level: &'static str,
+    /// Whole frames folded.
+    pub frames: usize,
+    /// Frames whose own UW correlation stood out.
+    pub frames_hit: usize,
+}
+
+/// Look for the F80T4.5X-8B frame structure — the forward bearer's unique
+/// word every 12 096 symbols — in `symbols`, given at one sample per symbol
+/// at about 151.2 kBd. Any constant carrier offset or phase is fine (the
+/// search is differential). The same test as the receiver's acquisition
+/// ([`BganRx`]), so a carrier this finds is one the receiver locks to. Needs
+/// [`MIN_DETECT_FRAMES`] whole frames; does not need the Annex C tables.
+pub fn detect_symbols(symbols: &[C32]) -> Option<Sighting> {
+    static TPL: std::sync::OnceLock<Templates> = std::sync::OnceLock::new();
+    if symbols.len() / MOS < MIN_DETECT_FRAMES {
+        return None;
+    }
+    let tpl = TPL.get_or_init(Templates::new);
+    let fold = fold_uw(tpl, symbols)?;
+    let psr = fold.psr();
+    if psr < ACQ_PSR {
+        return None;
+    }
+    // The level: the UW that matches best at the peak, by vote over frames.
+    let mut votes = [0usize; LEVELS.len()];
+    for fr in 0..fold.frames {
+        let p = fr * MOS + fold.pos;
+        if p + UWLEN >= symbols.len() {
+            continue;
+        }
+        let best = (0..LEVELS.len())
+            .map(|l| (l, tpl.corr(l, symbols, p)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(l, _)| l)
+            .unwrap_or(0);
+        votes[best] += 1;
+    }
+    // On a tie, the level that comes first in search order.
+    let level = (0..LEVELS.len())
+        .max_by(|&a, &b| votes[a].cmp(&votes[b]).then(b.cmp(&a)))
+        .unwrap_or(0);
+    Some(Sighting {
+        psr,
+        frame_offset: fold.pos,
+        uw_level: LEVELS[level],
+        frames: fold.frames,
+        frames_hit: fold.frames_hit,
+    })
+}
+
 enum State {
     Searching,
     Locked {
@@ -493,67 +650,10 @@ impl BganRx {
             *v *= C32::new(cs as f32, sn as f32);
         }
         // Fold |corr|^2 over whole frames (valid while the offset is fixed,
-        // true for a few seconds), per level.
-        let nfr = n / MOS;
-        let d = diffs(&s);
-        let tpl = &self.tpl;
-        // Level-agnostic fold: per frame and position take the best of the ten
-        // UWs (the level may change from frame to frame), then sum over frames.
-        let per_frame: Vec<Vec<f32>> = (0..nfr)
-            .into_par_iter()
-            .map(|fr| {
-                (0..MOS)
-                    .map(|p| {
-                        let pos = fr * MOS + p;
-                        if pos + UWLEN >= d.len() {
-                            return 0.0;
-                        }
-                        (0..LEVELS.len())
-                            .map(|l| {
-                                let c = tpl.corr_d(l, &d, pos);
-                                c * c
-                            })
-                            .fold(0.0f32, f32::max)
-                    })
-                    .collect()
-            })
-            .collect();
-        let mut folded = vec![0.0f64; MOS];
-        for pf in &per_frame {
-            for (f, v) in folded.iter_mut().zip(pf) {
-                *f += *v as f64;
-            }
-        }
-        let (j, &pk) = folded
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap();
-        let (mut sum, mut cnt) = (0.0, 0usize);
-        for (p, v) in folded.iter().enumerate() {
-            let dd = (p + MOS - j) % MOS;
-            if dd > 3 && dd < MOS - 3 {
-                sum += v;
-                cnt += 1;
-            }
-        }
-        let mean = (sum / cnt as f64).max(1e-30);
-        // The peak must come from most frames, not one: a start-up transient
-        // or a burst of interference in a single frame can dominate a folded
-        // sum on its own (pure noise once scored a PSR of 42 that way). A
-        // real carrier puts its UW in every frame, far above one frame's
-        // noise mean (mean / nfr).
-        let per_frame_mean = mean / nfr as f64;
-        let frames_hit = per_frame
-            .iter()
-            .filter(|pf| pf[j] as f64 > 4.0 * per_frame_mean)
-            .count();
-        let psr = if frames_hit * 10 >= nfr * 6 {
-            pk / mean
-        } else {
-            0.0
-        };
-        let pos = j;
+        // true for a few seconds).
+        let fold = fold_uw(&self.tpl, &s);
+        let psr = fold.as_ref().map_or(0.0, Fold::psr);
+        let pos = fold.map_or(0, |f| f.pos);
         if psr < ACQ_PSR {
             // nothing here: slide half a buffer and look again
             let drop = n / 2;
@@ -1014,6 +1114,121 @@ mod tests {
         assert_eq!(name(l[7]), Some("L2"));
         // a BulletinBoard header byte is not a code-rate tag
         assert!(levels_from_block0(&[0xc9, 0, 0, 0x10], 0).is_none());
+    }
+
+    use crate::tx::Rng;
+
+    /// Symbols of `nframes` frames built without the Annex C tables (UW,
+    /// pilots, random 16-QAM data), the level cycling through `levels`, the
+    /// first `skip` symbols dropped, turned by `cfo` cycles a symbol and with
+    /// complex noise at `esn0_db`.
+    fn frames(nframes: usize, levels: &[&str], skip: usize, cfo: f64, esn0_db: f64) -> Vec<C32> {
+        let b = spec::F80T45X8B;
+        let mut rng = Rng(0x0B6A_D7EC);
+        let mut s = Vec::with_capacity(nframes * MOS);
+        for f in 0..nframes {
+            let data: Vec<C32> = (0..b.encoded_syms())
+                .map(|_| frame::qam16()[(rng.next_u32() % 16) as usize])
+                .collect();
+            s.extend(frame::assemble_frame(&data, levels[f % levels.len()], &b));
+        }
+        let s = s.split_off(skip);
+        impair(s, cfo, esn0_db, &mut rng)
+    }
+
+    fn impair(s: Vec<C32>, cfo: f64, esn0_db: f64, rng: &mut Rng) -> Vec<C32> {
+        let sd = (10f64.powf(-esn0_db / 10.0) / 2.0).sqrt();
+        s.into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let (sn, cs) = (2.0 * PI * cfo * i as f64 + 0.7).sin_cos();
+                v * C32::new(cs as f32, sn as f32)
+                    + C32::new((sd * rng.gauss()) as f32, (sd * rng.gauss()) as f32)
+            })
+            .collect()
+    }
+
+    /// `n` symbols of random points from `points`, plus noise.
+    fn random(points: &[C32], n: usize, seed: u64, esn0_db: f64) -> Vec<C32> {
+        let mut rng = Rng(seed);
+        let s = (0..n)
+            .map(|_| points[(rng.next_u32() as usize) % points.len()])
+            .collect();
+        impair(s, 0.0, esn0_db, &mut rng)
+    }
+
+    #[test]
+    fn detects_a_carrier_off_frame_and_off_frequency() {
+        // 7 frames: what Identify's 0.6 s look holds. Started 3000 symbols
+        // into a frame, 1.5 kHz off (0.01 cycles a symbol), Es/N0 6 dB.
+        let s = frames(8, &["L1"], 3000, 0.01, 6.0);
+        let hit = detect_symbols(&s).expect("BGAN carrier not detected");
+        assert_eq!(hit.frame_offset, MOS - 3000, "{hit:?}");
+        assert_eq!(hit.uw_level, "L1", "{hit:?}");
+        assert_eq!(hit.frames, 7, "{hit:?}");
+        assert!(hit.psr >= ACQ_PSR, "{hit:?}");
+    }
+
+    #[test]
+    fn names_every_level() {
+        for lv in LEVELS {
+            let s = frames(MIN_DETECT_FRAMES, &[lv], 0, 0.0, 12.0);
+            let hit = detect_symbols(&s).unwrap_or_else(|| panic!("{lv} not detected"));
+            assert_eq!(hit.uw_level, lv);
+            assert_eq!(hit.frame_offset, 0);
+        }
+    }
+
+    #[test]
+    fn level_changing_frame_to_frame_is_still_found() {
+        let s = frames(7, &["L3", "H2", "R"], 500, -0.003, 8.0);
+        let hit = detect_symbols(&s).expect("not detected");
+        assert_eq!(hit.frame_offset, MOS - 500);
+        assert!(["L3", "H2", "R"].contains(&hit.uw_level), "{hit:?}");
+    }
+
+    #[test]
+    fn nothing_without_the_unique_word() {
+        let n = 7 * MOS;
+        let qpsk = [
+            C32::new(1.0, 1.0) / 2f32.sqrt(),
+            C32::new(-1.0, 1.0) / 2f32.sqrt(),
+            C32::new(-1.0, -1.0) / 2f32.sqrt(),
+            C32::new(1.0, -1.0) / 2f32.sqrt(),
+        ];
+        for seed in 1..=4u64 {
+            let noise = random(&[C32::new(0.0, 0.0)], n, seed, 0.0);
+            assert_eq!(detect_symbols(&noise), None, "noise, seed {seed}");
+            let q16 = random(frame::qam16(), n, seed, 10.0);
+            assert_eq!(detect_symbols(&q16), None, "16-QAM, seed {seed}");
+            let q4 = random(&qpsk, n, seed, 10.0);
+            assert_eq!(detect_symbols(&q4), None, "QPSK, seed {seed}");
+        }
+    }
+
+    #[test]
+    fn too_few_frames_say_nothing() {
+        let s = frames(MIN_DETECT_FRAMES, &["L3"], 1, 0.0, 20.0);
+        assert_eq!(s.len() / MOS, MIN_DETECT_FRAMES - 1);
+        assert_eq!(detect_symbols(&s), None);
+    }
+
+    #[test]
+    fn receiver_still_acquires() {
+        // The receiver's acquisition shares the fold: it must still lock on
+        // the same table-free frames, pulse-shaped at 2 samples a symbol.
+        let s = frames(12, &["L3"], 4000, 0.0, 10.0);
+        let mut rng = Rng(7);
+        let imp = crate::tx::Impair {
+            cfo_hz: 900.0,
+            ..Default::default()
+        };
+        let iq = crate::tx::to_iq(&s, 2, &imp, &mut rng);
+        let mut rx = BganRx::new(2.0 * RS);
+        for ch in iq.chunks(8192) {
+            rx.push(ch);
+        }
+        assert!(rx.status().locked);
     }
 
     #[test]

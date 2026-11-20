@@ -42,6 +42,7 @@ pub fn model_tag(k: DecoderKind) -> Option<&'static str> {
         DecoderKind::DvbsTs => "DVB-S",
         DecoderKind::Is19Outbound => "IS-19 outbound",
         DecoderKind::Beacon => "BEACON",
+        DecoderKind::Bgan => "BGAN",
         _ => return None,
     })
 }

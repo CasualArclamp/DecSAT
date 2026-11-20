@@ -183,6 +183,8 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
         }
         // A satellite beacon with telemetry on it.
         Verdict::NotDvbS2 { hint } if decsat_engine::names_beacon(hint) => Ok(DecoderKind::Beacon),
+        // An Inmarsat BGAN forward carrier (its bearer's unique word found).
+        Verdict::NotDvbS2 { hint } if decsat_engine::names_bgan(hint) => Ok(DecoderKind::Bgan),
         // A TDMA carrier's bursts: the burst analyser reads them.
         _ if ident.bursts.is_some() => Ok(DecoderKind::Tdma),
         // Bi-phase chips on their own: most likely one sideband of a
@@ -204,11 +206,21 @@ pub fn pick(ident: &Identification) -> Result<DecoderKind, Outcome> {
     }
 }
 
-/// The decoder has locked: DVB-S2 frames decoded; a modem's code locked and
-/// (TPC 2964) its payload's format known.
+/// The width of a VFO running `kind` on a carrier whose VFO is `bw` wide: a
+/// BGAN carrier's receiver wants more room than the carrier's own width.
+pub fn vfo_width(kind: DecoderKind, bw: f64) -> f64 {
+    match kind {
+        DecoderKind::Bgan => bw.max(decsat_engine::bgan::spec::BGAN_VFO_BW),
+        _ => bw,
+    }
+}
+
+/// The decoder has locked: DVB-S2 frames decoded; BGAN blocks decoded; a
+/// modem's code locked and (TPC 2964) its payload's format known.
 fn decoded(kind: DecoderKind, s: &VfoSettings, st: &VfoStatus) -> bool {
     match kind {
         DecoderKind::Dvbs2Ip | DecoderKind::Ns4 => st.fec.as_ref().is_some_and(|f| f.ok > 0),
+        DecoderKind::Bgan => st.bgan.as_ref().is_some_and(|b| b.rx.blocks_ok > 0),
         _ => Caps::of(s, st).model.is_some(),
     }
 }
@@ -370,6 +382,7 @@ impl Survey {
                                 s.decoder = kind;
                                 s.offset_hz = p.target.offset_hz + id_.center_offset_hz;
                                 s.symbol_rate = id_.symbol_rate;
+                                s.bandwidth_hz = vfo_width(kind, s.bandwidth_hz);
                                 reqs.push(Request::Update(id, s));
                                 p.phase = Phase::Decode {
                                     kind,
@@ -664,8 +677,12 @@ fn result(
             .or(p.ident.as_ref().and_then(|i| i.symbol_rate)),
         what: p.ident.as_ref().map_or(String::new(), |i| i.summary()),
         decoder: run.map(|r| r.0),
+        // (DVB-S2 and BGAN have no modem model: the decoder names them.)
         model: caps.model.or(run
-            .filter(|r| r.0 == DecoderKind::Dvbs2Ip && outcome == Outcome::Decoded)
+            .filter(|r| {
+                matches!(r.0, DecoderKind::Dvbs2Ip | DecoderKind::Bgan)
+                    && outcome == Outcome::Decoded
+            })
             .map(|r| r.0)),
         outcome,
         caps,
@@ -738,4 +755,58 @@ fn found_row(ui: &mut egui::Ui, f: &Found) -> Option<VfoSettings> {
         s.record_dir = crate::prefs::output_dir();
         s
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use decsat_core::Iq;
+    use decsat_engine::bgan::session::BganView;
+    use decsat_engine::bgan::spec::BGAN_VFO_BW;
+    use decsat_engine::{ConstellationGuess, identify};
+
+    /// What Identify says of a BGAN forward carrier (the hint as
+    /// `identify_in` words it).
+    fn bgan_ident() -> Identification {
+        let mut id = identify(&vec![Iq::new(0.0, 0.0); 8192], 1.0);
+        id.verdict = Verdict::NotDvbS2 {
+            hint: "16QAM, Inmarsat BGAN forward (F80T4.5X-8B: unique word every 12 096 \
+                   symbols, level L3) — the BGAN decoder reads it"
+                .into(),
+        };
+        id.constellation = Some(ConstellationGuess::Qam16);
+        id.symbol_rate = Some(151_200.0);
+        id
+    }
+
+    #[test]
+    fn a_bgan_carrier_gets_the_bgan_decoder() {
+        assert_eq!(pick(&bgan_ident()), Ok(DecoderKind::Bgan));
+    }
+
+    #[test]
+    fn a_bgan_vfo_is_wide_enough_for_its_receiver() {
+        // The carrier's own suggested width (~1.12 × 171 kHz) is widened…
+        assert_eq!(vfo_width(DecoderKind::Bgan, 192e3), BGAN_VFO_BW);
+        // …a wider one kept, and other decoders' left alone.
+        assert_eq!(vfo_width(DecoderKind::Bgan, 300e3), 300e3);
+        assert_eq!(vfo_width(DecoderKind::CdmAuto, 192e3), 192e3);
+    }
+
+    #[test]
+    fn bgan_is_decoded_once_blocks_decode() {
+        let s = VfoSettings::new("t", 0.0, BGAN_VFO_BW, DecoderKind::Bgan);
+        let mut st = VfoStatus::default();
+        assert!(!decoded(DecoderKind::Bgan, &s, &st), "no BGAN status yet");
+        let mut view = BganView::default();
+        view.rx.locked = true;
+        st.bgan = Some(view.clone());
+        assert!(
+            !decoded(DecoderKind::Bgan, &s, &st),
+            "locked, nothing decoded"
+        );
+        view.rx.blocks_ok = 3;
+        st.bgan = Some(view);
+        assert!(decoded(DecoderKind::Bgan, &s, &st));
+    }
 }

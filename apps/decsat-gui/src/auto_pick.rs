@@ -128,6 +128,7 @@ impl AutoPick {
                             // (The burst analyser finds its carriers' rates
                             // itself.)
                             s.symbol_rate = id.symbol_rate.filter(|_| kind != DecoderKind::Tdma);
+                            s.bandwidth_hz = survey::vfo_width(kind, s.bandwidth_hz);
                             if kind == DecoderKind::Beacon {
                                 s.bandwidth_hz = beacon_width(id, s.bandwidth_hz);
                                 s.symbol_rate = None;
