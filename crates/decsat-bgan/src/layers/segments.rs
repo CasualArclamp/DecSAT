@@ -26,12 +26,18 @@
 //! body[0] = sdu(6) | flags(2)
 //!   flags  11 whole SDU, 01 first segment, 00 middle, 10 last
 //!   sdu    the same in every segment of one SDU
-//! whole:  body = ctr | 0x00 | SDU                    (left to the carver)
+//! whole:  body = ctr | 0x00 | SDU                    (left to the carver,
+//!                                                     except full headers)
 //! first:  body = ctr | SDU length(2, big endian) | SDU bytes
 //! middle, last: body = ctr | SDU bytes
-//! SDU = [0x00] | IPv4 packet: some connections put one zero octet first
-//!       (counted in the SDU length)
+//! SDU = [PID] | IPv4 packet: some connections put a PDCP packet identifier
+//!       first (counted in the SDU length); see [`super::hc`]
 //! ```
+//!
+//! A PID of 1 marks an RFC 2507 full header, whose Total Length field carries
+//! a compression context id: its header checksum fails as carried, so the
+//! carver never finds it, whole or split. The reassembler restores the length
+//! from the SDU's and reports it, whole SDUs included.
 //!
 //! The length-present bit is the one the BCtPDU header has (clause 5.1.4).
 //! Segments without a length were seen to fill the rest of their FEC block;
@@ -40,8 +46,9 @@
 //!
 //! A 7-octet segment (len = 2) has no body: an acknowledgement.
 //!
-//! Only SDUs of two or more segments are reported, so the output never repeats
-//! a packet the carver already found (a whole SDU's header is contiguous).
+//! Only SDUs of two or more segments are reported, and whole SDUs holding a
+//! full header, so the output never repeats a packet the carver already
+//! found (any other whole SDU's header is contiguous and checks).
 //! When the cut falls after the IP header the header checksum holds, but the
 //! carver checks [`starts_split_packet`] and leaves such a packet alone.
 //! Connections that do not carry IP use the same segments with other body
@@ -50,6 +57,7 @@
 use std::collections::HashMap;
 
 use super::bctpdu::{crc_ok, try_pdu};
+use super::hc::{PID_FULL_HEADER, PID_NONE, restore_full_header, sdu_packet};
 use super::pcap::{CarveOpts, CarvedPacket, ipv4_checksum_ok, transport_checksum_ok};
 use super::stream::Rolling;
 
@@ -214,7 +222,8 @@ fn candidate(
 /// [`candidate`] for a segment without a length octet. Its end is the first
 /// place the FCS checks, so a CRC is run only where the header fits an SDU
 /// this scan can use: a first segment of a plausible IPv4 SDU, or the next
-/// segment of an SDU open on its connection. Whole SDUs are the carver's.
+/// segment of an SDU open on its connection. Whole SDUs are the carver's,
+/// except a full header (see [`super::hc`]), which it cannot find.
 fn candidate_no_len(
     b: &[u8],
     i: usize,
@@ -237,7 +246,8 @@ fn candidate_no_len(
                 return short;
             };
             let want = u16::from_be_bytes([f[0], f[1]]) as usize;
-            let ipv4 = f[2] >> 4 == 4 || (f[2] == 0 && f[3] >> 4 == 4);
+            let ipv4 =
+                f[2] >> 4 == 4 || ((f[2] == PID_NONE || f[2] == PID_FULL_HEADER) && f[3] >> 4 == 4);
             if !ipv4 || want < 20 || want > opts.max_len + 1 {
                 return Cand::No;
             }
@@ -262,7 +272,18 @@ fn candidate_no_len(
                 return Cand::No;
             }
         }
-        _ => return Cand::No,
+        0b11 => {
+            // only a full header: any other whole SDU is the carver's
+            let Some(f) = b.get(i + NO_LEN_HEADER + 1..i + NO_LEN_HEADER + 4) else {
+                return short;
+            };
+            if f[0] != 0 || f[1] != PID_FULL_HEADER || f[2] >> 4 != 4 {
+                return Cand::No;
+            }
+            // ctr | 0x00 | PID | packet
+            (3 + 20, 3 + opts.max_len)
+        }
+        _ => unreachable!("two bits"),
     };
     let o = NO_LEN_HEADER + FCS;
     match try_pdu(&b[i..], o + lo, o + hi, fin) {
@@ -367,7 +388,17 @@ fn take_segment(
         // connection lost its tail.
         0b11 => {
             open.remove(&s.cid);
-            None
+            // rest = [0x00, PID, packet]
+            match rest {
+                [0, PID_FULL_HEADER, ip @ ..] => restore_full_header(ip)
+                    .map(|f| f.packet)
+                    .filter(|p| ipv4_ok(p, opts))
+                    .map(|data| CarvedPacket {
+                        offset: s.offset,
+                        data,
+                    }),
+                _ => None,
+            }
         }
         0b01 => {
             // `rest` is [SDU length hi, lo, SDU bytes...]
@@ -414,13 +445,11 @@ fn take_segment(
             if p.buf.len() != p.want {
                 return None;
             }
-            // the zero octet some connections put first is not the packet's
-            if p.buf[0] == 0 {
-                p.buf.remove(0);
-            }
-            ipv4_ok(&p.buf, opts).then_some(CarvedPacket {
+            // the PID octet some connections put first is not the packet's
+            let data = sdu_packet(&p.buf)?;
+            ipv4_ok(&data, opts).then_some(CarvedPacket {
                 offset: p.start,
-                data: p.buf,
+                data,
             })
         }
     }
@@ -747,6 +776,66 @@ pub(crate) mod tests {
                 assert!(carved.is_empty(), "{name}: chunk {chunk} carved");
             }
         }
+    }
+
+    /// `p` as an RFC 2507 full header: Total Length replaced by a CID.
+    fn full_header(p: &[u8]) -> Vec<u8> {
+        let mut f = p.to_vec();
+        f[2..4].copy_from_slice(&[0x3a, 0x01]);
+        f
+    }
+
+    /// A full header split into segments (PID 1 before it, counted in the
+    /// SDU length), as the SIP on a real recording came: the carver cannot
+    /// see it and the reassembler restores its length.
+    #[test]
+    fn split_full_header_is_restored() {
+        let p = ipv4(17, &[b's'; 300]);
+        let f = full_header(&p);
+        for no_len in [[false; 3], [true, false, false], [true; 3]] {
+            let mut parts = split_as([0x5e, 0xc7], 14, &f, &[56, 200], true, &no_len);
+            // split_as pads with 0x00: make it PID 1 and redo the FCS
+            let k = if no_len[0] { NO_LEN_HEADER } else { LEN_HEADER } + 3;
+            let first = &mut parts[0];
+            first[k] = PID_FULL_HEADER;
+            let n = first.len();
+            let c = crc_append(&first[..n - FCS]);
+            first[n - FCS..].copy_from_slice(&c);
+            let mut blob = vec![0u8; 20];
+            for q in &parts {
+                blob.extend(q);
+                blob.extend([0u8; 9]);
+            }
+            blob.extend([0u8; 300]);
+            assert!(carve_ipv4(&blob).is_empty(), "{no_len:?}: carved");
+            let got = reassemble(&blob);
+            assert_eq!(got.len(), 1, "{no_len:?}");
+            assert_eq!(got[0].data, p, "{no_len:?}");
+        }
+    }
+
+    /// A whole SDU holding a full header, with and without a length octet.
+    #[test]
+    fn whole_full_header_is_restored() {
+        let p = ipv4(6, &[b't'; 40]);
+        let mut body = vec![ctr(14, 0b11), 0, PID_FULL_HEADER];
+        body.extend_from_slice(&full_header(&p));
+        for blob in [
+            seg([0x5e, 0xc7], 11, &body),
+            seg_no_len([0x5e, 0xc7], 11, &body),
+        ] {
+            let mut blob = [vec![0u8; 5], blob, vec![0u8; 300]].concat();
+            blob[0] = 0;
+            assert!(carve_ipv4(&blob).is_empty());
+            let got = reassemble(&blob);
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].data, p);
+            assert_eq!(got[0].offset, 5);
+        }
+        // a byte off in the packet: the checksums catch it
+        let mut bad = body.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(reassemble(&seg([0x5e, 0xc7], 11, &bad)).is_empty());
     }
 
     /// A whole SDU with the zero octet before its packet is still the
