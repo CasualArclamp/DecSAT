@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 /// Sent first by the client: the protocol's name and generation.
 pub const MAGIC: [u8; 4] = *b"DSR1";
 /// Bumped whenever a message or a status structure changes shape.
-pub const PROTO: u16 = 1;
+pub const PROTO: u16 = 2;
 /// The largest frame either end accepts.
 pub const MAX_FRAME: usize = 8 << 20;
 /// Flag bit: the payload is one zstd frame.
@@ -32,6 +32,14 @@ pub enum Kind {
     Vfo = 5,
     /// Transport stream ([`crate::ts`]).
     Ts = 6,
+    /// Postcard-encoded `ViewsWire`: a decoder's card.
+    Views = 7,
+    /// Postcard-encoded `AudioWire`: a decoder's sound, as Opus.
+    Audio = 8,
+    /// Postcard-encoded `FileWire`: part of a file a decoder wrote.
+    File = 9,
+    /// Postcard-encoded `PacketsWire`: packets for Wireshark.
+    Packets = 10,
 }
 
 impl Kind {
@@ -44,6 +52,10 @@ impl Kind {
             4 => Kind::Front,
             5 => Kind::Vfo,
             6 => Kind::Ts,
+            7 => Kind::Views,
+            8 => Kind::Audio,
+            9 => Kind::File,
+            10 => Kind::Packets,
             _ => return None,
         })
     }

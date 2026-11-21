@@ -132,7 +132,7 @@ impl Carrier {
 }
 
 /// How the plans line up with the pool's frames.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LeadFit {
     /// Frames from the one a plan arrives in to the one it applies to.
     pub lead: i32,
@@ -146,7 +146,7 @@ pub struct LeadFit {
 }
 
 /// An inroute as the pool sees it, for display.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CarrierView {
     pub inroute: u16,
     pub centre_hz: f64,
@@ -161,7 +161,7 @@ pub struct CarrierView {
 }
 
 /// One terminal's bursts.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InrouteTerminal {
     pub id: u16,
     /// Slots a frame in the recent plans, and the inroutes they were on.
@@ -194,7 +194,7 @@ pub struct InrouteTerminal {
 ///
 /// Placeholder: the GUI's plot reads this, and hides itself while `samples` is
 /// empty. Nothing in the engine fills it in yet.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurstWave {
     /// The burst's samples with its own carrier taken out.
     pub samples: Vec<Iq>,
@@ -208,7 +208,7 @@ pub struct BurstWave {
 }
 
 /// What the inroute demodulator is doing, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InrouteBurstsView {
     /// The outbound VFO whose plans are followed.
     pub from: Option<VfoId>,

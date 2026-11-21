@@ -92,7 +92,7 @@ fn score<'a>(frames: impl Iterator<Item = [u8; TIMESLOTS]> + 'a) -> f64 {
 }
 
 /// What the descrambler has decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Scrambling {
     /// Gathering frames to decide.
     #[default]
@@ -103,7 +103,7 @@ pub enum Scrambling {
     Scrambled,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyncStats {
     pub scrambling: Scrambling,
     /// Frames descrambled, multiframes found (the first and again after a

@@ -69,7 +69,7 @@ pub struct RawBurst {
 }
 
 /// Envelope levels, as the histogram stands.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Levels {
     pub floor_db: f32,
     pub on_db: f32,

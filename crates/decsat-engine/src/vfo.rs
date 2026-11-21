@@ -29,7 +29,7 @@ use crate::spectrum::Spectrum;
 pub type VfoId = u32;
 
 /// What a VFO does with its signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DecoderKind {
     /// "What is this?" — blind symbol rate, roll-off, constellation, standard.
     Identify,
@@ -424,7 +424,7 @@ impl DecoderKind {
 /// interference, coasted through) or a channel terminals take turns on
 /// (TDMA: the burst analyser). Which decoders a VFO offers follows it; the
 /// waterfall's brackets say which a band looks like.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SignalMode {
     #[default]
     Scpc,
@@ -510,8 +510,26 @@ impl DecoderKind {
     }
 }
 
-/// A VFO's user-facing settings.
-#[derive(Debug, Clone, PartialEq)]
+/// [`crate::wireshark::PacketRoute`] with what `VfoSettings` derives:
+/// the same route is equal to itself.
+#[derive(Clone)]
+pub struct PacketRouteHandle(pub crate::wireshark::PacketRoute);
+
+impl std::fmt::Debug for PacketRouteHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PacketRoute")
+    }
+}
+
+impl PartialEq for PacketRouteHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// A VFO's user-facing settings. Serialisable for smart mode, which sends
+/// them to the server (all but the local handles, which are skipped).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VfoSettings {
     pub name: String,
     /// Centre relative to the wideband centre, Hz.
@@ -575,7 +593,17 @@ pub struct VfoSettings {
     pub biss_key: String,
     /// DVB-S2 → MPEG-TS: a copy of the (descrambled) stream for the in-app
     /// player.
+    #[serde(skip)]
     pub ts_tap: Option<decsat_ts::TsTap>,
+    /// Where the VFO's sound goes instead of this machine's sound card: its
+    /// client's, when it runs on a server (see [`decsat_audio::route`]).
+    /// Taken when the VFO starts.
+    #[serde(skip)]
+    pub audio_route: Option<decsat_audio::AudioRoute>,
+    /// Where the VFO's Wireshark feeds go instead of a Wireshark here (see
+    /// [`crate::wireshark::set_route`]). Taken when the VFO starts.
+    #[serde(skip)]
+    pub packet_route: Option<PacketRouteHandle>,
     /// A multistream carrier: the input stream (ISI) whose transport stream
     /// is shown and output; `None` for the first that carries one.
     pub ts_isi: Option<u8>,
@@ -651,6 +679,8 @@ impl VfoSettings {
             ts_tcp: "127.0.0.1:8001".into(),
             biss_key: String::new(),
             ts_tap: None,
+            audio_route: None,
+            packet_route: None,
             ts_isi: None,
             udp_ts: None,
             audio_play: None,
@@ -1002,6 +1032,11 @@ pub(crate) fn spawn(
                 // Prioritise real-time channel processing over display work.
                 // Windows remains free to schedule the thread across cores.
                 crate::thread_priority::set_dsp_priority();
+                // On a server, the VFO's sound goes to its client: players
+                // started on this thread (and threads it spawns, which pass
+                // the route on) take this up.
+                decsat_audio::route::set_current(settings.audio_route.clone());
+                crate::wireshark::set_route(settings.packet_route.clone().map(|r| r.0));
                 let mut w = Worker::new(in_rate, settings, status, dropped);
                 w.lossless = lossless;
                 w.plans = plans;

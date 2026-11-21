@@ -41,7 +41,7 @@ const MAX_TEXT: usize = 4096;
 pub const FOUND: u64 = 3;
 
 /// Which check a block's BCC passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Bcc {
     /// CCITT x¹⁶+x¹²+x⁵+1, preset 0, over the span with `DLE STX`'s `DLE`.
     #[default]
@@ -78,7 +78,7 @@ pub struct Block {
     pub bcc: Bcc,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BscStats {
     /// Blocks whose BCC checked, and blocks that ended but did not check
     /// (or broke off: a stray `DLE`, too long).

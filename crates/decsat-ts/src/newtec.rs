@@ -162,7 +162,7 @@ pub const SLOT_S: f64 = 5e-3;
 pub const BURST_SHORTFALL: u32 = 45;
 
 /// A return burst's waveform, as the 172B capture showed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Waveform {
     /// 16APSK 8+8 after a 76-symbol preamble, with a 66-symbol known block
     /// 203 symbols on.

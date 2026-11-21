@@ -63,7 +63,7 @@ const KEEP_SCANS: f64 = 4.0;
 const TRAIL: usize = 12;
 
 /// One track report.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     /// The BSC report's status word; for ASTERIX, I048/020's first octet
     /// (high) and I048/170's (low).
@@ -114,7 +114,7 @@ pub struct Report {
 }
 
 /// What an ADS-B report says beyond what a radar's does.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Adsb {
     /// WGS-84, degrees (I021/130).
     pub lat: f64,
@@ -235,7 +235,7 @@ pub fn bsc_status_text(status: u16) -> String {
 }
 
 /// Where the radar is (WGS-84; ASTERIX I034/120).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Site {
     pub lat: f64,
     pub lon: f64,
@@ -353,7 +353,7 @@ impl Message {
 }
 
 /// A track as last reported, with its trail.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub last: Report,
     /// Time of day of the last report, and of the first.
@@ -383,7 +383,7 @@ impl Track {
 }
 
 /// What the feed has said, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RadarView {
     pub messages: u64,
     pub reports: u64,

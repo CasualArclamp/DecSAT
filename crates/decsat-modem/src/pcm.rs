@@ -34,7 +34,7 @@ pub const MAX_FRAME_BITS: usize = 16_384;
 pub const MIN_FRAME_BITS: usize = 64;
 
 /// How the bits are read before the sync word is looked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Reading {
     /// As decided (NRZ-L, bi-phase-L), either polarity.
     Direct,
@@ -108,7 +108,7 @@ pub struct Lock {
 }
 
 /// A minor frame.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     /// The frame's bits from its sync word on, packed MSB first (the last
     /// byte padded with zeros when the length is not whole bytes), the
@@ -125,7 +125,7 @@ pub struct Frame {
 }
 
 /// What the framer has done.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FramerStats {
     pub frames: u64,
     /// Frames kept with their word missing (the flywheel).
@@ -685,7 +685,7 @@ pub fn pack(bits: &[u8], invert: bool) -> Vec<u8> {
 
 /// A minor-frame counter: the word (byte) numbering frames within a major
 /// frame (IRIG 106 Chapter 4 §4.3.2's subframe ID).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Counter {
     /// Byte position in the frame.
     pub byte: usize,
@@ -780,7 +780,7 @@ pub fn find_counter(frames: &[&[u8]], skip: usize) -> Option<Counter> {
 /// A spacecraft clock in the frames: a big-endian word counting up at a
 /// steady rate (the IS-19 beacon's bytes 12–15: seconds, since
 /// 2012-05-31 17:30:48 UTC by the wall clock — 13 h before launch).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClockWord {
     pub byte: usize,
     /// Bytes in the word (2–4).
@@ -838,10 +838,11 @@ pub const CLOCK_EPOCHS: &[(&str, i64)] = &[
 ];
 
 /// A clock word read as a time of day ([`ClockWord::time_of_day`]).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClockTime {
     /// The epoch it counts from, as named in [`CLOCK_EPOCHS`].
-    pub epoch: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub epoch: decsat_core::static_str::Str,
     /// Its reading, Unix seconds.
     pub unix: f64,
     /// How far that is ahead of the computer's clock, s.
@@ -880,14 +881,14 @@ pub fn utc_text(unix: i64) -> String {
 }
 
 /// A check byte at a frame's end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Checksum {
     pub kind: CheckKind,
     /// The bytes it covers start here and run up to it (the last byte).
     pub from: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CheckKind {
     /// Sum mod 256 (the IS-19 beacon's: bytes 0–254 into byte 255).
     Sum,

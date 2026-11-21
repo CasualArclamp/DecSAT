@@ -49,7 +49,7 @@ const FIND_ERRORS: u32 = 1;
 const KEEP_ERRORS: u32 = 4;
 const LOSE: u32 = 3;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdmacStats {
     pub locked: bool,
     /// The frames come upside down (every bit inverted; handed on put

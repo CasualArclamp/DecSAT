@@ -60,7 +60,9 @@ const STATS_FRAMES: u32 = 64;
 const LINE_FRAMES: usize = 64;
 
 /// A slot's owner word: a 12-bit terminal id over a 4-bit kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Owner(pub u16);
 
 impl Owner {
@@ -77,7 +79,7 @@ impl Owner {
 }
 
 /// One inroute's plan for one frame.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InroutePlan {
     /// The frame's number (24 bits, one a 125 ms frame).
     pub frame: u32,
@@ -92,7 +94,7 @@ pub struct InroutePlan {
 }
 
 /// A row of the inroute table.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Inroute {
     pub id: u16,
     /// Its uplink frequency, Hz (the table's 100 Hz units).
@@ -106,7 +108,7 @@ pub struct Inroute {
 
 /// A burst's modulation, as the configuration's modulation byte gives it
 /// (04h on the 8PSK carriers, measured; 02h taken to be QPSK).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Modulation {
     Qpsk,
     Psk8,
@@ -131,7 +133,7 @@ impl Modulation {
 }
 
 /// A burst configuration.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurstConfig {
     pub index: u8,
     /// Symbols a second, as configured.
@@ -291,7 +293,7 @@ fn parse_plan(d: &[u8]) -> Option<InroutePlan> {
 
 /// When plan frames arrive: frame `frame` at `at_s` on the source clock,
 /// the rest [`FRAME_S`] apart (the jitter is the forward link's queueing).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArrivalLine {
     pub frame: u32,
     pub at_s: f64,
@@ -324,7 +326,7 @@ fn median(v: &mut [f64]) -> f64 {
 }
 
 /// A terminal's slots in the recent plans.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSlots {
     pub id: u16,
     /// Slots a frame, over the frames looked at.
@@ -336,7 +338,7 @@ pub struct TerminalSlots {
 }
 
 /// An inroute as the tables and plans describe it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InrouteView {
     pub id: u16,
     pub table: Option<Inroute>,
@@ -353,7 +355,7 @@ pub struct InrouteView {
 }
 
 /// What the hub's signalling says, for display and for a pool.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HubView {
     /// Hub clock PDUs, the latest count, and the clock's rate against the
     /// receiver's (ppm), once fitted.

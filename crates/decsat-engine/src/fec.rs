@@ -325,7 +325,7 @@ fn build_code(pls: PlsInfo) -> Option<Code> {
 }
 
 /// What a VFO's FEC has done, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FecStats {
     /// Data frames decoded (dummy frames excluded).
     pub frames: u64,
@@ -367,6 +367,8 @@ pub struct FecStats {
     /// What GSE and IP have made of the GS-mode frames.
     pub gse: Option<GseView>,
     /// The MPEG-TS from the TS-mode frames (MPEG-TS decoders).
+    /// Filled in at the receiving end in smart mode (what it counted itself).
+    #[serde(skip)]
     pub ts: Option<TsView>,
     /// DVB-S: the code rate found, Viterbi and Reed–Solomon.
     pub dvbs: Option<decsat_modem::dvbs::DvbsStats>,
@@ -407,13 +409,14 @@ pub struct FecStats {
 }
 
 /// A call's voice out of the TDM multiplex, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CallVoiceView {
     pub playing: bool,
     /// Playing by itself (speech was found, `voice_auto`), not by ▶.
     pub auto: bool,
     /// Playing by itself and holding the voice floor: heard now.
     pub on_air: bool,
+    #[serde(skip)]
     pub audio: Option<AudioHandle>,
     pub recording: bool,
     /// The recording (current or last) and its bytes.
@@ -596,7 +599,7 @@ impl CallVoice {
 }
 
 /// An E1's state, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct E1View {
     /// How the channels are carried: "E1 (G.704)", "D&I++" or HDLC
     /// packets.
@@ -624,6 +627,7 @@ pub struct E1View {
     /// The timeslot playing ([`MIX`]: every G.728 channel, by itself),
     /// and its player.
     pub playing: Option<u8>,
+    #[serde(skip)]
     pub audio: Option<AudioHandle>,
     /// The channel of this carrier holding the voice floor (heard now,
     /// others waiting; see [`crate::floor`]).
@@ -1230,7 +1234,7 @@ pub struct TsView {
 }
 
 /// IP out of GSE, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GseView {
     /// Where packets come from: the GSE variant in use, or the blind search.
     pub source: Option<Source>,
@@ -1290,6 +1294,7 @@ pub struct GseView {
     pub audio_target: Option<PlayTarget>,
     pub audio_error: Option<String>,
     /// The in-app player, while one is playing: status, level, pause.
+    #[serde(skip)]
     pub audio_app: Option<AudioHandle>,
     /// The stream being recorded, and the file (current or last) with
     /// its bytes so far.
@@ -1329,7 +1334,7 @@ const TERMINALS_SHOWN: usize = 64;
 
 /// One GSE label's traffic: on a VSAT hub's ACM outbound, one terminal's,
 /// and the MODCODs the hub chose for it — its downlink as the hub sees it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalView {
     pub label: Label,
     /// The input stream it was seen on.
@@ -1516,9 +1521,18 @@ impl FecWorker {
             queued: queued.clone(),
             lossless: lossless_shared.clone(),
         };
+        // The VFO's sound route (a server's client) goes with it: the FEC
+        // thread is where the voice and programme players start.
+        // So does its Wireshark route: the IP feeds start there too.
+        let route = decsat_audio::route::current();
+        let packets = crate::wireshark::route();
         let join = std::thread::Builder::new()
             .name("decsat-fec".into())
-            .spawn(move || run(rx, s, o, g, q, p, backlog, symbol_rate))
+            .spawn(move || {
+                decsat_audio::route::set_current(route);
+                crate::wireshark::set_route(packets);
+                run(rx, s, o, g, q, p, backlog, symbol_rate)
+            })
             .expect("spawn FEC thread");
         FecWorker {
             tx: Some(tx),

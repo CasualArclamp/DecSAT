@@ -26,7 +26,7 @@ const NAME_ANSWERS: usize = 8;
 const MAX_RECORDS: usize = 64;
 
 /// Which naming service a message belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Service {
     Dns,
     Mdns,
@@ -302,7 +302,7 @@ impl Entry {
 }
 
 /// One name of the view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DnsName {
     pub name: String,
     pub qtype: u16,
@@ -320,7 +320,7 @@ pub struct DnsName {
 }
 
 /// All of it, for a display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct DnsView {
     pub queries: u64,
     pub responses: u64,

@@ -36,7 +36,7 @@ const BITRATES: [[[u32; 15]; 3]; 2] = [
 const SAMPLE_RATES: [[u32; 3]; 2] = [[44_100, 48_000, 32_000], [22_050, 24_000, 16_000]];
 
 /// A frame header, as far as it matters here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Header {
     /// 1 for MPEG-1, 2 for MPEG-2 (lower sample rates).
     pub version: u8,
@@ -112,7 +112,7 @@ impl Header {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MpaStats {
     pub locked: bool,
     pub frames: u64,

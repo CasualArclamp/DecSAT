@@ -178,13 +178,15 @@ impl Cal {
 }
 
 /// One analogue channel's reading.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Channel {
     /// Its telemetry address, #100 to #17F.
     pub address: u16,
-    pub name: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub name: decsat_core::static_str::Str,
     /// The unit; empty for a channel with no equation (the raw byte).
-    pub unit: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub unit: decsat_core::static_str::Str,
     pub raw: u8,
     pub value: f32,
     /// The spec lists the sensor as not working since 2000-12-26.
@@ -192,7 +194,7 @@ pub struct Channel {
 }
 
 /// An A or E block's housekeeping.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Housekeeping {
     /// `A` (now) or `E` (a past event).
     pub block: char,
@@ -250,7 +252,7 @@ pub fn housekeeping(block: &[u8]) -> Option<Housekeeping> {
 }
 
 /// When and where in the orbit a whole-orbit capture's sample was taken.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OrbitPoint {
     /// UTC, `hh:mm:ss`.
     pub time: String,
@@ -263,14 +265,16 @@ pub struct OrbitPoint {
 }
 
 /// One channel sampled round the orbit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WholeOrbit {
     /// The channel's telemetry address, and its name when it is an
     /// analogue one this module knows.
     pub address: u16,
-    pub name: Option<&'static str>,
+    #[serde(with = "decsat_core::static_str::option")]
+    pub name: Option<decsat_core::static_str::Str>,
     /// The unit; empty when the values are the raw bytes.
-    pub unit: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub unit: decsat_core::static_str::Str,
     /// Mean anomaly between samples, in 256ths of an orbit.
     pub interval_ma: u32,
     /// The samples taken so far, oldest first.

@@ -190,7 +190,7 @@ struct Job {
 }
 
 /// One terminal's bursts as demodulated.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalBursts {
     pub id: u16,
     /// Its bursts cut out and handed to the demodulator, those it took
@@ -216,7 +216,7 @@ pub struct TerminalBursts {
 /// When the followed plan's frames start on the receiver's source clock:
 /// frame `counter` at `start_s`, the rest `frame_s` apart, their slots
 /// `slot_s` apart — the start trimmed by the bursts themselves.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameClock {
     pub counter: u32,
     pub start_s: f64,
@@ -232,7 +232,7 @@ impl FrameClock {
 }
 
 /// What the live burst demodulator is doing, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurstsView {
     /// The outbound VFO whose plan is followed, the plan's zero on this
     /// VFO (Hz from its centre) and its timing.

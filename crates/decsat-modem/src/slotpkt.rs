@@ -146,7 +146,7 @@ pub fn channel_byte(ts: u8) -> u8 {
     ts << 3
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SlotStats {
     /// Packets whose FCS checked, and those of them carrying a timeslot.
     pub packets: u64,

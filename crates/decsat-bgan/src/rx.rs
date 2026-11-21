@@ -44,11 +44,12 @@ const ACQ_PSR: f64 = 7.0;
 const LOSS_FRAMES: u32 = 25;
 
 /// One accepted FEC block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockOut {
     /// Block index in the frame, 0..8.
     pub block: u8,
-    pub level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub level: decsat_core::static_str::Str,
     /// Parity agreement of the re-encode check (0.70 is the acceptance line).
     pub agreement: f32,
     /// Descrambled information bytes (D/8).
@@ -56,12 +57,13 @@ pub struct BlockOut {
 }
 
 /// One 80 ms frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrameOut {
     /// Frames since lock.
     pub index: u64,
+    #[serde(with = "decsat_core::static_str")]
     /// UW level (the level of block 0).
-    pub uw_level: &'static str,
+    pub uw_level: decsat_core::static_str::Str,
     /// UW correlation against the noise floor measured half a frame away.
     pub uw_ratio: f32,
     pub esn0_db: f32,
@@ -71,13 +73,15 @@ pub struct FrameOut {
 
 /// A block that failed, with the best any level could do (see
 /// [`BganRx::set_diag`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiagBlock {
     pub frame: u64,
     pub block: u8,
-    pub uw_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub uw_level: decsat_core::static_str::Str,
     pub esn0_db: f32,
-    pub best_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub best_level: decsat_core::static_str::Str,
     pub best_agreement: f32,
     pub lr_ok: bool,
     /// Agreement at the best level after 1, 2, 3, 4, 6 iterations.
@@ -87,7 +91,7 @@ pub struct DiagBlock {
 }
 
 /// Receiver state for the UI.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RxStatus {
     pub locked: bool,
     pub frames: u64,
@@ -95,7 +99,8 @@ pub struct RxStatus {
     pub blocks_total: u64,
     pub payload_bytes: u64,
     pub esn0_db: f32,
-    pub uw_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub uw_level: decsat_core::static_str::Str,
     pub uw_ratio: f32,
     pub carrier_hz: f64,
     pub clock_ppm: f64,

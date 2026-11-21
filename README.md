@@ -126,9 +126,11 @@ cargo run --release -p decsat-gui -- capture_8Msps.cs8
 
 `decsat-server` runs next to the radio; DecSAT connects from anywhere (Source
 ▸ Remote server settings…). **Smart** mode decodes on the server and sends
-only the waterfall, constellations, decoder status and the TS; **dumb** mode
-sends the IQ, 4 to 16 bits with block scaling and optional zstd, whole band or
-a slice. Smart mode currently offers Identify, DVB-S2/S2X → TS and DVB-S → TS.
+only the waterfall, constellations, decoder cards and the TS, with each
+decoder's sound (Opus), the files it writes and its Wireshark feeds coming
+back to your machine; **dumb** mode sends the IQ, 4 to 16 bits with block
+scaling and optional zstd, whole band or a slice. Smart mode runs every
+decoder.
 `--shared` runs one radio for everyone, QO-100 style: each user adds decoders
 and can camp on anyone else's. Details: [docs/REMOTE.md](docs/REMOTE.md).
 

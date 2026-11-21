@@ -29,7 +29,7 @@ pub struct BurstTime {
 }
 
 /// The frame the slots repeat in.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     /// Length, symbols.
     pub period: f64,
@@ -53,7 +53,7 @@ impl Frame {
 }
 
 /// The slots.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SlotGrid {
     /// Slot length, symbols.
     pub period: f64,
@@ -311,7 +311,7 @@ fn find_frame(b: &[BurstTime], used: &[bool], slot: f64) -> Option<Frame> {
 }
 
 /// A terminal, as its bursts reveal it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Terminal {
     /// The value of the field inside its bursts' preamble (its points'
     /// numbers), when the layout has one: live, one value a terminal.

@@ -508,7 +508,7 @@ impl DvbsRx {
 }
 
 /// What a [`ViterbiRx`] has found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ViterbiStats {
     /// The code rate and orientation found, once locked.
     pub rate: Option<Rate>,

@@ -19,7 +19,7 @@
 const NO_SYNC: u16 = 0xFFFF;
 
 /// What a [`HemDeframer`] has done.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HemStats {
     pub fields: u64,
     /// Whole GSE packets handed on.

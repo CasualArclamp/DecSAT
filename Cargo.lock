@@ -691,6 +691,7 @@ dependencies = [
  "decsat-ip",
  "decsat-opus-sys",
  "decsat-xaac-sys",
+ "serde",
  "symphonia-bundle-mp3",
  "symphonia-core",
 ]
@@ -704,6 +705,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "rustfft",
+ "serde",
 ]
 
 [[package]]
@@ -740,6 +742,7 @@ version = "1.13.1"
 dependencies = [
  "decsat-core",
  "num-complex",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -775,6 +778,7 @@ version = "1.13.1"
 dependencies = [
  "decsat-core",
  "num-complex",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -795,6 +799,7 @@ version = "1.13.1"
 dependencies = [
  "decsat-core",
  "decsat-ip",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -842,6 +847,7 @@ name = "decsat-ip"
 version = "1.13.1"
 dependencies = [
  "decsat-core",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -882,6 +888,8 @@ dependencies = [
 name = "decsat-remote"
 version = "1.13.1"
 dependencies = [
+ "decsat-audio",
+ "decsat-bgan",
  "decsat-core",
  "decsat-dsp",
  "decsat-engine",
@@ -931,6 +939,7 @@ dependencies = [
  "decsat-core",
  "decsat-frame",
  "decsat-ip",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -1998,6 +2007,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]

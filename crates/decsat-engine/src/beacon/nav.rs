@@ -73,7 +73,7 @@ const NORM_SLACK: f64 = 48.0;
 const VELOCITY_LSB: f64 = 0.25;
 
 /// What the words say, from the latest major frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Nav {
     /// The on-board clock, seconds since J2000.
     pub j2000_s: u32,

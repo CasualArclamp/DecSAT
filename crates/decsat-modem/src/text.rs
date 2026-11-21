@@ -99,7 +99,7 @@ impl Stream {
 }
 
 /// What the search has found, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TextView {
     /// The reading that carries text, if one stands out.
     pub best: Option<String>,
@@ -250,7 +250,7 @@ const MAX_DISTINCT: usize = 65_536;
 const SHOW: usize = 16;
 
 /// What [`ByteText`] has found, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ByteTextView {
     /// Strings seen more than once, most frequent first, with their counts.
     pub repeated: Vec<(String, u64)>,

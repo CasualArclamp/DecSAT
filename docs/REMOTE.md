@@ -7,12 +7,25 @@ port 5262). The server is receive only: nothing in it opens a transmit path.
 | | runs on the server | crosses the link | client |
 |---|---|---|---|
 | **Dumb** | the radio | packed IQ | a normal engine on `RemoteIqSource` |
-| **Smart** | the radio, the engine, the decoders | waterfall, spectrum, carriers, decoder status, constellations, TS | `RemoteEngine`, which has `Engine`'s methods |
+| **Smart** | the radio, the engine, the decoders | waterfall, spectrum, carriers, decoder status and cards, constellations, TS, sound, files, Wireshark packets | `RemoteEngine`, which has `Engine`'s methods |
 | **Shared** | as smart, the radio fixed | as smart, per user | `RemoteEngine` |
 
-Smart mode currently runs Identify, DVB-S2/S2X → TS and DVB-S → TS. Other
-decoders are refused with a message; they still work in dumb mode, where
-the decoding is local.
+Smart mode runs every decoder (since protocol 2). What a decoder makes
+comes back to the client:
+
+- its **card**: everything the local card shows (BGAN, Aero, the beacons,
+  TDMA, CID, IS-19, FEC's IP, E1 and voice figures, …);
+- its **sound**: a decoder on the server plays as it would locally, but its
+  player sends the decoded audio to the client instead of a sound card
+  (`decsat_audio::route`), as Opus, 48 kHz stereo, about 48 kbit/s a player;
+- its **files**: each VFO writes into a folder of its own on the server
+  (under the temp folder, `decsat-server/`), which is tailed and sent to
+  the VFO's owner, who writes the same files under the VFO's own folder;
+  the card names the files there. The folder goes when the VFO closes;
+- its **Wireshark** feeds: started on the client, fed the packets.
+
+A shared server records nothing (its disk is not its users'): recording,
+PCAPs and BBFRAME dumps are turned off there.
 
 ## Running it
 
@@ -71,7 +84,8 @@ All integers little-endian.
 
 ```text
 u32 length      counts kind + flags + payload; at most 8 MiB
-u8  kind        0 control, 1 IQ, 2 row, 3 spectrum, 4 front, 5 VFO, 6 TS
+u8  kind        0 control, 1 IQ, 2 row, 3 spectrum, 4 front, 5 VFO, 6 TS,
+                7 views, 8 audio, 9 file, 10 packets
 u8  flags       bit 0: payload is one zstd frame
 payload
 ```
@@ -147,10 +161,28 @@ whole stream.
 
 TS recording, UDP/TCP re-serving and the in-app player are all on the client.
 
+## Cards, sound, files, packets (smart)
+
+Postcard-encoded `ViewsWire`, `AudioWire`, `FileWire` and `PacketsWire`.
+
+- **Views**: a decoder's card beyond `VfoWire` (the engine's view types, and
+  FEC's figures less the TS), with the VFO's folder on the server so the
+  client can turn paths in it into its own. Sent when it changes, latest
+  wins.
+- **Audio**: Opus packets of one player on the server (`stream`), its
+  label, and an end marker when it stops. The client plays each stream on a
+  player of its own; their handles are what the card's pause and level use.
+- **File**: `name` under the VFO's folder (`/`-separated, no `..`), the
+  offset, the bytes. At most 1 MiB a file a pass, four times a second, and
+  the forwarder waits while 4 MiB is queued: a file must arrive whole, so it
+  is held back, never dropped. Files go to the VFO's owner only.
+- **Packets**: one Wireshark feed's packets (µs timestamps), owner only.
+
 ## Congestion
 
 One TCP stream, so the order of frames is the only lever:
-control, then TS or IQ, then front, VFO status, spectrum, rows. Every 16th
+control, sound, then TS, Wireshark packets, file data or IQ, then front,
+VFO status, cards, spectrum, rows. Every 16th
 frame the display goes first, so a TS filling the link cannot freeze the
 waterfall. Front, status and spectrum are latest-wins. Rows queue up to 16;
 when 6 are waiting, the rate halves (down to 1 in 16), and it recovers after

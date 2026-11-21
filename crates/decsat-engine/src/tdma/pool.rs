@@ -129,7 +129,7 @@ const GAP_S: f64 = 5e-4;
 
 /// A carrier in the pool now, for display: its edges, Hz from the VFO's
 /// centre.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PoolCarrier {
     pub lo_hz: f64,
     pub hi_hz: f64,
@@ -149,7 +149,7 @@ impl PoolCarrier {
 /// share): a row each `dur_s` from `t_s[i]` (s), `bins` levels a row, dB
 /// over the noise floor, the first bin centred `start_hz` from the VFO's
 /// centre and each `bin_hz` wide.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpectrumRows {
     pub t_s: Vec<f64>,
     pub dur_s: f64,
@@ -384,7 +384,7 @@ impl SpectrumRows {
 
 /// A band of the pool whose bins burst together ([`SpectrumRows::lanes`]):
 /// its edges, Hz from the VFO's centre, and its bursts, oldest first.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FineLane {
     pub lo_hz: f64,
     pub hi_hz: f64,
@@ -393,7 +393,7 @@ pub struct FineLane {
 
 /// A burst in a lane: its start and end on the receiver's source clock, s,
 /// and its level, dB over the floor.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FineBurst {
     pub t0_s: f64,
     pub t1_s: f64,
@@ -403,7 +403,7 @@ pub struct FineBurst {
 /// A pool's slots on the receiver's source clock: frames `frame_s` long,
 /// each `slots` slots `pitch_s` apart from its start — the frame's leftover
 /// (`frame_s` − `slots` × `pitch_s`; 0.2 ms on 172B) after the last.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SlotGrid {
     pub frame_s: f64,
     pub pitch_s: f64,
@@ -441,7 +441,7 @@ impl SlotGrid {
 }
 
 /// What the pool tracker sees, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PoolView {
     /// The carriers now, lowest first.
     pub carriers: Vec<PoolCarrier>,
@@ -1395,7 +1395,7 @@ const LEAD_MIN_FRAMES: f64 = -2.0;
 const LEAD_MAX_FRAMES: f64 = 24.0;
 
 /// When a burst plan's frames land in the pool.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlanTiming {
     /// From a frame's arrival (on the plan's arrival line, [`PlanClock`])
     /// to its first slot in the pool, s: how far ahead the hub sends it.

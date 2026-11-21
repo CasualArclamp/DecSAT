@@ -161,12 +161,6 @@ pub fn run(a: &RemoteArgs) -> Result<()> {
     }
     let kind =
         DecoderKind::from_key(&a.decoder).with_context(|| format!("--decoder {}", a.decoder))?;
-    if !decsat_remote::served(kind) {
-        bail!(
-            "{} does not run on the server yet: use decode --remote",
-            a.decoder
-        );
-    }
     let gains = a
         .gains
         .iter()

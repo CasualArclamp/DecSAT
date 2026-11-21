@@ -8,6 +8,7 @@
 
 pub mod crc;
 pub mod modcod;
+pub mod static_str;
 
 pub use modcod::{
     CodeRate, FecFrame, Modcod, Modulation, modcod, modcod_name, qef_es_n0_db, s2_modcod,
