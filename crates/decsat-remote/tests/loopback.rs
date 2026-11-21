@@ -349,14 +349,13 @@ fn smart_mode_sends_the_display_and_the_ts() {
                     .any(|p| p.name.as_deref() == Some("DecSAT test signal"))
             })
     });
-    // A decoder the server does not run is refused, and said to be.
-    let refused = e.add_vfo(VfoSettings::new("BGAN", 0.0, 50_000.0, DecoderKind::Bgan));
-    wait_for("the refusal", 5, || e.vfo_status(refused).is_none());
-    assert!(
-        e.take_gone()
-            .iter()
-            .any(|(i, why)| *i == refused && why.contains("does not run"))
-    );
+    // Every decoder runs on the server now: BGAN is taken, not refused.
+    let bgan = e.add_vfo(VfoSettings::new("BGAN", 0.0, 50_000.0, DecoderKind::Bgan));
+    // Its card (not part of the fast status) comes across too.
+    wait_for("the BGAN card", 15, || {
+        e.vfo_status(bgan).is_some_and(|s| s.bgan.is_some())
+    });
+    assert!(e.take_gone().is_empty());
 
     e.control().tune(1.5e9);
     wait_for("the retune", 5, || {
@@ -373,6 +372,49 @@ fn smart_mode_sends_the_display_and_the_ts() {
         again.is_some()
     });
     assert_eq!(log.opens.load(Ordering::Relaxed), opens + 1);
+}
+
+#[test]
+fn smart_mode_forwards_files_and_sound() {
+    let (_s, _log, addr) = server(ServerConfig::default());
+    let p = SmartParams {
+        fft_size: 1024,
+        ..Default::default()
+    };
+    let mut e = RemoteEngine::connect(&opts(&addr, "t"), Some(request()), p).unwrap();
+    let here = std::env::temp_dir().join(format!("decsat-remote-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&here);
+
+    // The IQ recorder writes on the server; its file arrives here, under
+    // this VFO's folder, and the card names the file here.
+    let mut rec = VfoSettings::new("REC", 40_000.0, 50_000.0, DecoderKind::IqRecord);
+    rec.record_dir = here.clone();
+    let rec = e.add_vfo(rec);
+    let size = || {
+        std::fs::read_dir(&here)
+            .map(|d| {
+                d.flatten()
+                    .filter(|f| f.path().extension().is_some_and(|x| x == "cf32"))
+                    // The file's own size: a listing's is stale while it is open.
+                    .map(|f| std::fs::metadata(f.path()).map_or(0, |m| m.len()))
+                    .sum::<u64>()
+            })
+            .unwrap_or(0)
+    };
+    wait_for("the recording, forwarded", 30, || size() > 200_000);
+    let (path, _) = e
+        .vfo_status(rec)
+        .and_then(|s| s.recording)
+        .expect("the card names the recording");
+    assert!(path.starts_with(&here), "{}", path.display());
+
+    // An FM receiver plays on the server's side of the link: its sound
+    // comes here as Opus.
+    let fm = e.add_vfo(VfoSettings::new("FM", 40_000.0, 12_500.0, DecoderKind::Nfm));
+    wait_for("the receiver's sound", 30, || e.sound_packets(fm) > 50);
+
+    drop(e);
+    let _ = std::fs::remove_dir_all(&here);
 }
 
 #[test]

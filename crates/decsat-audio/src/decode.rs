@@ -222,14 +222,14 @@ const OPUS_MAX_FRAME: usize = 5760;
 
 /// A libopus decoder, always 48 kHz stereo out: libopus duplicates a mono
 /// stream to both sides itself.
-struct OpusDecoder(NonNull<opus::OpusDecoder>);
+pub(crate) struct OpusDecoder(NonNull<opus::OpusDecoder>);
 
 // SAFETY: the decoder state belongs to this value alone, and libopus keeps
 // no per-thread or shared state for it, so it may move between threads.
 unsafe impl Send for OpusDecoder {}
 
 impl OpusDecoder {
-    fn new() -> Result<OpusDecoder, String> {
+    pub(crate) fn new() -> Result<OpusDecoder, String> {
         let mut err = 0;
         // SAFETY: a valid rate and channel count; `err` outlives the call.
         let p = unsafe { opus::opus_decoder_create(48_000, 2, &mut err) };
@@ -239,7 +239,7 @@ impl OpusDecoder {
     }
 
     /// One packet into interleaved stereo `out` (replacing what it held).
-    fn decode(&mut self, packet: &[u8], out: &mut Vec<f32>) -> Result<(), String> {
+    pub(crate) fn decode(&mut self, packet: &[u8], out: &mut Vec<f32>) -> Result<(), String> {
         out.clear();
         out.resize(2 * OPUS_MAX_FRAME, 0.0);
         // SAFETY: the state is live; `packet` is valid for its length and
@@ -271,7 +271,7 @@ impl Drop for OpusDecoder {
 }
 
 /// libopus's text for an error code.
-fn opus_error(code: c_int) -> String {
+pub(crate) fn opus_error(code: c_int) -> String {
     // SAFETY: `opus_strerror` returns a static NUL-terminated string for
     // any code.
     let s = unsafe { CStr::from_ptr(opus::opus_strerror(code)) };

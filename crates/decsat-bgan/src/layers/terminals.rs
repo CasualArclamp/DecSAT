@@ -73,7 +73,7 @@ fn addr(b: &[u8], o: usize) -> String {
     format!("{}.{}.{}.{}", b[o], b[o + 1], b[o + 2], b[o + 3])
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AddrKind {
     Public,
     Private,
@@ -249,7 +249,7 @@ impl Confidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Terminal {
     pub addr: String,
     pub kind: AddrKind,

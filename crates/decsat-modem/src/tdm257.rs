@@ -72,7 +72,7 @@ const CALL_HANG: u64 = 1000;
 const CALLS_KEPT: usize = 32;
 
 /// What a channel is doing over the last half second.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ChannelState {
     #[default]
     Unknown,
@@ -104,7 +104,7 @@ impl ChannelState {
 
 /// One channel's meter: the share of bits differing from 20 ms and 4 ms
 /// before, and of ones, over the window.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelView {
     pub state: ChannelState,
     pub change_20ms: f32,
@@ -113,7 +113,7 @@ pub struct ChannelView {
 }
 
 /// A call: proven codec channels leaving their silence frames together.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Call {
     /// The frame (2 ms) it began at, and its length in frames so far.
     pub start: u64,
@@ -139,7 +139,7 @@ impl Call {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TdmStats {
     pub locked: bool,
     pub frames: u64,
@@ -157,7 +157,7 @@ pub struct TdmStats {
 }
 
 /// The voice stream being followed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceView {
     /// Its channels, one bit each.
     pub channels: u16,

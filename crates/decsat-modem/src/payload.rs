@@ -522,7 +522,7 @@ impl PayloadOut {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PayloadStats {
     /// Found, and how: e.g. "HDLC (FCS-16), not scrambled".
     pub found: Option<String>,

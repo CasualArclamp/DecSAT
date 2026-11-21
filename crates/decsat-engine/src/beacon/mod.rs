@@ -88,7 +88,7 @@ const CONV_PROBE_MAX_FAILS: f64 = 0.35;
 const CONV_PROBE_CLEAR: f64 = 0.42;
 
 /// How the telemetry rides on the carrier.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Riding {
     /// PCM/PSK/PM: BPSK on a sine subcarrier phase-modulating the carrier.
     Subcarrier { freq_hz: f64 },
@@ -205,7 +205,7 @@ fn look_bits(phi: &[f32], mut demod: SubDemod, hi: f64) -> Option<(f64, Coding)>
 }
 
 /// The carrier as measured.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CarrierView {
     /// A residual carrier is tracked (false: suppressed, measured by the
     /// PSK demodulator).
@@ -231,7 +231,7 @@ pub struct CarrierView {
 }
 
 /// The telemetry's physical layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TelemetryView {
     pub riding: Riding,
     pub coding: Coding,
@@ -252,7 +252,7 @@ pub struct TelemetryView {
 
 /// Where to look for the telemetry, set by hand (each `None`: found
 /// blind).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tune {
     /// The subcarrier's offset from the carrier, Hz; 0 for data on the
     /// carrier's phase. Snapped to the subcarrier's own line nearby.
@@ -263,7 +263,7 @@ pub struct Tune {
 }
 
 /// The frame synchroniser.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FramingView {
     pub word_hex: String,
     pub word_name: String,
@@ -279,7 +279,7 @@ pub struct FramingView {
 }
 
 /// CCSDS transfer frames.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CcsdsView {
     pub format: Option<String>,
     pub stats: ccsds::Stats,
@@ -287,7 +287,7 @@ pub struct CcsdsView {
 }
 
 /// A point of the carrier's log (charts, the level file).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LogPoint {
     pub t_s: f64,
     pub cn0_dbhz: f32,
@@ -300,7 +300,7 @@ pub struct LogPoint {
 }
 
 /// A minor frame (or CCSDS transfer frame) in the log.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LoggedFrame {
     pub t_s: f64,
     /// Where it sits in its major frame (the counter's reading).
@@ -313,7 +313,7 @@ pub struct LoggedFrame {
 /// What the decoder keeps for the charts, the frame map and the word plot:
 /// shared with the GUI behind a lock, as it grows too large to copy into
 /// every status.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BeaconLog {
     pub points: Vec<LogPoint>,
     pub frames: VecDeque<LoggedFrame>,
@@ -329,7 +329,7 @@ pub struct BeaconLog {
 }
 
 /// What one word of the major frame has done.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellStats {
     pub lo: u8,
     pub hi: u8,
@@ -385,7 +385,7 @@ impl WordKind {
 }
 
 /// What the beacon decoder shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BeaconView {
     pub carrier: Option<CarrierView>,
     pub telemetry: Option<TelemetryView>,

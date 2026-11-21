@@ -185,7 +185,7 @@ const SCATTER: usize = 3000;
 const TERMINAL_MIN: u64 = 20;
 
 /// One burst for the burst map.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BurstMark {
     /// Start, seconds since the VFO began.
     pub t_s: f64,
@@ -196,7 +196,7 @@ pub struct BurstMark {
 }
 
 /// What a TDMA VFO shows of one carrier.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChannelView {
     /// Centre relative to the VFO's, Hz.
     pub center_hz: f64,
@@ -228,7 +228,7 @@ pub struct ChannelView {
 /// has read, burst by burst. Values are the symbols as numbered points
 /// (QPSK 0–3 counter-clockwise from the first quadrant, in the layout's
 /// orientation): what they mean, and how the bits map, is the system's own.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HeaderFieldView {
     /// The symbols, `from..=to` in the burst.
     pub from: usize,
@@ -307,7 +307,7 @@ impl FieldTrack {
 }
 
 /// What the look for a convolutional code in a channel's bursts has found.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CodeView {
     /// The code, and the share of windows its parity check holds in.
     pub code: Option<decsat_modem::convblind::Code>,
@@ -372,7 +372,7 @@ impl CodeSearch {
 }
 
 /// What a TDMA VFO shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TdmaView {
     pub channels: Vec<ChannelView>,
     /// Bursts in the last half second, for the burst map.

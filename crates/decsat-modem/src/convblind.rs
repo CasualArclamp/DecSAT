@@ -31,7 +31,7 @@ use decsat_core::Iq;
 pub const MAX_K: usize = 10;
 
 /// A rate-½ convolutional code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Code {
     /// Constraint length: the input bit and K − 1 before it.
     pub k: usize,
@@ -523,7 +523,7 @@ pub fn hard_bits(symbols: &[Iq], bpsk: bool) -> Vec<u8> {
 }
 
 /// What the receiver has made of the carrier.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConvStats {
     /// The code found, its name, and how it is read.
     pub code: Option<Code>,

@@ -34,7 +34,7 @@ const IDLE_MATCH: f32 = 0.5;
 pub type Run = std::ops::Range<usize>;
 
 /// What the bursts of one length have in common.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     /// The bursts' length, symbols.
     pub len: usize,
@@ -63,7 +63,7 @@ pub struct Layout {
     pub modulation: Modulation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pilots {
     pub period: usize,
     pub first: usize,

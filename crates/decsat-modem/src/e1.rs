@@ -34,7 +34,7 @@ fn byte_at(bits: &[u8], at: usize) -> u8 {
 }
 
 /// What the E1 framer has found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct E1Stats {
     pub locked: bool,
     pub frames: u64,
@@ -187,7 +187,7 @@ pub fn alaw_encode(x: f32) -> u8 {
 /// What a 64 kbit/s timeslot carries, judged from which of its bits change.
 /// Bits are numbered as G.704 and I.460 do: bit 1 is the first sent (the
 /// MSB, A-law's sign).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Coding {
     /// Not measured yet.
     #[default]

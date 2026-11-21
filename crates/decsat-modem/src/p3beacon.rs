@@ -56,7 +56,7 @@ pub fn crc16(data: &[u8]) -> u16 {
 }
 
 /// One frame off the air, whole or cut short.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct P3Frame {
     /// The block and CRC (fewer than [`FRAME_BYTES`] when cut short).
     pub bytes: Vec<u8>,
@@ -284,7 +284,7 @@ impl Deframer {
 /// `UPT: 3d 0h 29m CMD: 91 LEI_REQ: 0 LEI_ACT: 0`,
 /// `TEMP: 56 C VOLTAGES: 1.0 1.8 ... Volts`, `TFL: 0 TFE: 0 ...`. Which rail
 /// each voltage is, and what the counters mean, AMSAT has not published.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Telemetry {
     /// `UPT`, in seconds.
     pub uptime_s: Option<u64>,

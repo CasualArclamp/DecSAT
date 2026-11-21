@@ -17,7 +17,6 @@ mod biss_memory;
 mod carrier_caps;
 mod constellation;
 mod decimation;
-mod decoder_filter;
 mod dns_viewer;
 mod filename;
 mod format;
@@ -1537,7 +1536,6 @@ impl App {
                 }
             }
         }
-        decoder_filter::set(self.engine.as_ref().is_some_and(|e| e.remote().is_some()));
     }
 
     /// Open the network stream with the panel's settings.

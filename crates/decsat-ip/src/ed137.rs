@@ -82,7 +82,7 @@ const VOICE_HELD: usize = 500;
 pub const SIP_PORT: u16 = 5060;
 
 /// The push-to-talk state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Ptt {
     #[default]
     Off,
@@ -126,7 +126,7 @@ impl Ptt {
 }
 
 /// An additional feature of the header extension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Feature {
     /// Signal quality: an index and how it was measured (0 RSSI, 1 AGC
     /// level, 2 C/N, 3 standardised PSD, 4–7 the vendor's).
@@ -220,7 +220,7 @@ impl Feature {
 }
 
 /// The radio signalling of one RTP packet.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Signalling {
     /// ED-137A's layout (profile 0167h), else the first edition's.
     pub edition_a: bool,
@@ -508,7 +508,7 @@ fn title(n: &str) -> String {
 }
 
 /// An RTP stream with ED-137 signalling: one way, one SSRC.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StreamKey {
     pub src: IpAddr,
     pub sport: u16,
@@ -518,7 +518,7 @@ pub struct StreamKey {
 }
 
 /// What a stream has said so far.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamView {
     pub key: StreamKey,
     pub packets: u64,
@@ -579,7 +579,7 @@ impl StreamView {
 }
 
 /// How an INVITE was answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
     Refused,
     Accepted,
@@ -595,7 +595,7 @@ impl Outcome {
 }
 
 /// A change of state, for the log.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub time: f64,
     /// The stream's label.
@@ -604,7 +604,7 @@ pub struct Event {
 }
 
 /// A SIP dialog (one Call-ID).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionView {
     pub call_id: String,
     pub from: String,
@@ -631,7 +631,7 @@ pub struct SessionView {
 /// what its last packet said (squelch open, perhaps) for ever.
 pub const STREAM_GONE: f64 = 10.0;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RadioView {
     /// Streams of `MIN_PACKETS` packets or more; packets in the rest (an
     /// SSRC or address hit by errors makes a stream of its own).

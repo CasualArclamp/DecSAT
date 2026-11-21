@@ -51,7 +51,7 @@ fn offset_100hz(b: &[u8]) -> f64 {
 
 /// One section of a frame type (Table 6-14's inner loop): `count`
 /// timeslots in a row, all of one kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameSection {
     /// The BCT transmission type of each timeslot, or 0: single BTUs, for
     /// the burst time plan to make timeslots of.
@@ -63,7 +63,7 @@ pub struct FrameSection {
 }
 
 /// One frame type (FCT2, Table 6-14).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameType2 {
     pub id: u8,
     pub duration_s: f64,
@@ -204,7 +204,7 @@ pub fn parse_fct2(b: &[u8]) -> Vec<FrameType2> {
 /// A linear-modulation burst the hub defines itself (Table 6-18, tx_type
 /// above 127): 16-state turbo code, its permutation and puncturing, and
 /// the burst's known symbols.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinearBurst {
     /// The channel coder's input block, bytes.
     pub payload_bytes: u16,
@@ -293,7 +293,7 @@ impl LinearBurst {
 }
 
 /// What a transmission type's format block says.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TxFormat {
     /// A burst the hub spells out.
     Linear(LinearBurst),
@@ -305,7 +305,7 @@ pub enum TxFormat {
 }
 
 /// One transmission type (BCT, Table 6-16).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TxType {
     pub id: u8,
     /// Table 6-17.
@@ -649,7 +649,7 @@ pub fn parse_tbtp2(b: &[u8]) -> Option<Tbtp2> {
 }
 
 /// One burst a plan assigns, on the air.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Burst2 {
     /// Who sends it (0: nobody named).
     pub id: u64,
@@ -664,7 +664,7 @@ pub struct Burst2 {
 }
 
 /// A table's GSE or section tally.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tally2 {
     pub tables: u64,
     pub version: u8,
@@ -680,7 +680,7 @@ impl Tally2 {
 }
 
 /// What the RCS2 tables say, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rcs2View {
     /// The interactive network the GSE tables name.
     pub network_id: Option<u16>,

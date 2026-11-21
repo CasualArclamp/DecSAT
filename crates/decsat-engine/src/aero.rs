@@ -31,7 +31,7 @@ pub const LEAST_RATE: f64 = 9000.0;
 const VOICE_RATE: u32 = 8000;
 
 /// One line of what the channel carried.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AeroLine {
     /// Seconds of signal since the VFO started.
     pub seconds: f64,
@@ -44,7 +44,7 @@ pub struct AeroLine {
 }
 
 /// What the UI shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct AeroView {
     /// "P 600", "R/T 1200", "C 8400", "C 21000"; empty while searching.
     pub channel: String,

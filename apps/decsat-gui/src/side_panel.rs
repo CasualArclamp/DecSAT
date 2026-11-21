@@ -4816,10 +4816,7 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind, mode: SignalMo
     egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .show_ui(ui, |ui| {
-            for k in DecoderKind::ALL
-                .into_iter()
-                .filter(|k| k.fits(mode) && crate::decoder_filter::allowed(*k))
-            {
+            for k in DecoderKind::ALL.into_iter().filter(|k| k.fits(mode)) {
                 if !k.is_cdm() {
                     ui.selectable_value(decoder, k, k.label());
                 } else if k == DecoderKind::CDM[0] {

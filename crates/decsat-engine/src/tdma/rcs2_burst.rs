@@ -28,7 +28,7 @@ use decsat_fec::duobinary::DuoBinaryTurbo;
 use decsat_ts::rcs2::LinearBurst;
 
 /// The payload modulations (Table 6-19).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Modulation {
     /// 0x00: plain BPSK (Table 6-19's reserved code; annex A's waveforms
     /// 40–43 name it).

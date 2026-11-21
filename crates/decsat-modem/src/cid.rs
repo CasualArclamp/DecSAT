@@ -305,7 +305,7 @@ fn bch_correct(word: &mut [u8]) -> Option<usize> {
 /// left to right as 001000001 (the one used to transmit), or right to
 /// left. The specification's text does not settle it and no CID carrier
 /// was at hand; the receiver accepts whichever passes the CRC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScramblerOrder {
     Stated,
     Reversed,
@@ -451,7 +451,7 @@ pub fn spread(frames: &[[u8; FRAME_BITS]], diff: &mut u8, out: &mut Vec<u8>) {
 }
 
 /// What the identifier fields told so far (§4.2, table 1), by content ID.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CidReport {
     pub guid: Option<u64>,
     /// Content IDs 0–12: format, latitude, longitude, 3 × telephone,
@@ -608,7 +608,7 @@ impl CidReport {
 }
 
 /// Receiver state, for display.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CidStats {
     /// The spreading code has been found.
     pub acquired: bool,
@@ -641,7 +641,7 @@ pub struct CidStats {
 pub const LIVE_BITS: usize = 256;
 
 /// What the tracking did lately, for live display (oldest first).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CidLive {
     /// Despread bits (the prompt correlations), turned so the data lie on
     /// the real axis and scaled to unit power — a BPSK constellation.
@@ -677,7 +677,7 @@ impl CidLive {
 
 /// One code search, for display: correlation power over code phase and
 /// frequency, in dB over the mean of every cell searched.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CidSearch {
     /// The strongest cell, and the level the search must reach to lock
     /// (lower the more bits were summed).

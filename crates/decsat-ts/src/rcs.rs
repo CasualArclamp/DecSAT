@@ -177,7 +177,7 @@ pub struct Linkage {
 }
 
 /// One return superframe (SCT, EN 301 790 Table 33).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Superframe {
     pub id: u8,
     pub centre_hz: f64,

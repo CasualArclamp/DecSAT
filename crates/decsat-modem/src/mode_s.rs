@@ -21,7 +21,7 @@
 
 /// Fields of the registers a report brought; `None` where it did not
 /// bring them (or their status bit was clear).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModeS {
     /// BDS 4,0: what the crew has set.
     pub intent: Option<Intent>,
@@ -37,7 +37,7 @@ pub struct ModeS {
 }
 
 /// BDS 4,0, selected vertical intention.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Intent {
     /// The altitude set on the autopilot's panel (MCP/FCU), and the FMS's,
     /// ft (16 ft steps: 37 000 ft reads 37 008).
@@ -52,7 +52,7 @@ pub struct Intent {
     pub target_source: Option<u8>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Modes {
     pub vnav: bool,
     pub alt_hold: bool,
@@ -60,7 +60,7 @@ pub struct Modes {
 }
 
 /// BDS 5,0, track and turn report.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackTurn {
     /// Roll, degrees, right wing down positive.
     pub roll_deg: Option<f32>,
@@ -73,7 +73,7 @@ pub struct TrackTurn {
 }
 
 /// BDS 6,0, heading and speed report.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HeadingSpeed {
     /// Magnetic heading, degrees 0–360.
     pub heading_deg: Option<f32>,

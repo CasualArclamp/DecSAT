@@ -24,7 +24,7 @@ use crate::section::SectionAssembler;
 const TABLE_MPE: u8 = 0x3E;
 
 /// What the extractor has seen.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MpeStats {
     /// PIDs found carrying MPE, and their datagrams.
     pub pids: BTreeMap<u16, u64>,

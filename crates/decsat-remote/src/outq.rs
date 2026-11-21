@@ -14,6 +14,14 @@ use crate::wire::Kind;
 const TS_MAX_BYTES: usize = 16 << 20;
 /// Rows waiting beyond this push out the oldest.
 const ROWS_MAX: usize = 16;
+/// Sound waiting beyond this many frames pushes out the oldest (each is a
+/// few 20 ms packets, so this is seconds).
+const AUDIO_MAX: usize = 256;
+/// Wireshark packets waiting beyond this many frames are dropped.
+const PACKETS_MAX: usize = 4096;
+/// File data waiting beyond this holds the forwarder back (it waits rather
+/// than dropping: a file must arrive whole).
+pub const FILE_MAX_BYTES: usize = 4 << 20;
 /// Every so many frames the display goes first, so a TS that fills the link
 /// cannot freeze the waterfall altogether.
 const FAIR_EVERY: u32 = 16;
@@ -35,6 +43,13 @@ struct State {
     iq_bytes: usize,
     front: Option<Vec<u8>>,
     vfos: BTreeMap<u32, Vec<u8>>,
+    views: BTreeMap<u32, Vec<u8>>,
+    audio: VecDeque<Vec<u8>>,
+    packets: VecDeque<Vec<u8>>,
+    files: VecDeque<Vec<u8>>,
+    file_bytes: usize,
+    audio_dropped: u64,
+    packets_dropped: u64,
     spectrum: Option<(u64, Vec<f32>)>,
     rows: VecDeque<(u64, Vec<f32>)>,
     pops: u32,
@@ -53,6 +68,10 @@ impl State {
             let id = *id;
             return self.vfos.remove(&id).map(|v| Out::Frame(Kind::Vfo, v));
         }
+        if let Some((id, _)) = self.views.first_key_value() {
+            let id = *id;
+            return self.views.remove(&id).map(|v| Out::Frame(Kind::Views, v));
+        }
         if let Some((s, t)) = self.spectrum.take() {
             return Some(Out::Spectrum(s, t));
         }
@@ -62,6 +81,10 @@ impl State {
     fn take(&mut self) -> Option<Out> {
         if let Some(c) = self.control.pop_front() {
             return Some(Out::Frame(Kind::Control, c));
+        }
+        // Sound next: it is small, and late is as bad as lost.
+        if let Some(a) = self.audio.pop_front() {
+            return Some(Out::Frame(Kind::Audio, a));
         }
         self.pops = self.pops.wrapping_add(1);
         if self.pops.is_multiple_of(FAIR_EVERY)
@@ -75,6 +98,13 @@ impl State {
             let lost = std::mem::take(&mut self.ts_lost);
             t[4..8].copy_from_slice(&lost.to_le_bytes());
             return Some(Out::Frame(Kind::Ts, t));
+        }
+        if let Some(p) = self.packets.pop_front() {
+            return Some(Out::Frame(Kind::Packets, p));
+        }
+        if let Some(f) = self.files.pop_front() {
+            self.file_bytes -= f.len();
+            return Some(Out::Frame(Kind::File, f));
         }
         if let Some(i) = self.iq.pop_front() {
             self.iq_bytes -= i.len();
@@ -149,7 +179,49 @@ impl OutQueue {
     pub fn forget_vfo(&self, id: u32) {
         self.push(|s| {
             s.vfos.remove(&id);
+            s.views.remove(&id);
         });
+    }
+
+    /// A decoder's card; a newer one replaces one not yet sent.
+    pub fn views(&self, id: u32, m: Vec<u8>) {
+        self.push(|s| {
+            s.views.insert(id, m);
+        });
+    }
+
+    pub fn audio(&self, m: Vec<u8>) {
+        self.push(|s| {
+            if s.audio.len() >= AUDIO_MAX {
+                s.audio.pop_front();
+                s.audio_dropped += 1;
+            }
+            s.audio.push_back(m);
+        });
+    }
+
+    pub fn packets(&self, m: Vec<u8>) {
+        self.push(|s| {
+            if s.packets.len() >= PACKETS_MAX {
+                s.packets_dropped += 1;
+            } else {
+                s.packets.push_back(m);
+            }
+        });
+    }
+
+    /// Part of a file; the caller keeps under [`FILE_MAX_BYTES`] waiting
+    /// (see [`file_bytes`](Self::file_bytes)).
+    pub fn file(&self, m: Vec<u8>) {
+        self.push(|s| {
+            s.file_bytes += m.len();
+            s.files.push_back(m);
+        });
+    }
+
+    /// File data waiting to go.
+    pub fn file_bytes(&self) -> usize {
+        self.state.lock().unwrap().file_bytes
     }
 
     pub fn spectrum(&self, seq: u64, t: Vec<f32>) {

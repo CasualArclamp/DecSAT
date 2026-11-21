@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde.workspace = true
 decsat-core = { path = "../decsat-core" }
 num-complex.workspace = true
 rustfft.workspace = true

@@ -34,6 +34,7 @@ use decsat_ip::AudioStream;
 use crate::decode::{Block, Decoder};
 use crate::depay::{Depacketizer, Unit};
 use crate::resample::Resampler;
+use crate::route::{AudioRoute, next_stream};
 
 /// Buffered before play starts (and after running dry), milliseconds.
 pub const START_MS: u32 = 400;
@@ -328,6 +329,9 @@ impl AudioPlayer {
         start_ms: u32,
         max_ms: u32,
     ) -> Result<AudioPlayer, String> {
+        // A player started on a thread with a route (a decoder's, on a
+        // server) sends its sound along it; see [`crate::route`].
+        let route = crate::route::current();
         let shared = Arc::new(Shared {
             ring: Mutex::new(Ring {
                 buf: VecDeque::new(),
@@ -351,7 +355,10 @@ impl AudioPlayer {
         let sh = shared.clone();
         let join = std::thread::Builder::new()
             .name("decsat-audio".into())
-            .spawn(move || run(rx, depay, sh, output))
+            .spawn(move || match route {
+                Some(r) => run_routed(rx, depay, sh, r),
+                None => run(rx, depay, sh, output),
+            })
             .map_err(|e| e.to_string())?;
         Ok(AudioPlayer {
             tx: Some(tx),
@@ -683,6 +690,73 @@ fn run(
             s.error = None;
         }
     }
+}
+
+/// A routed player's thread: decode, and hand each block to the route at
+/// its own rate (the far end resamples for its own sound card).
+fn run_routed(
+    rx: mpsc::Receiver<Input>,
+    mut depay: Option<Depacketizer>,
+    sh: Arc<Shared>,
+    route: AudioRoute,
+) {
+    let stream = next_stream();
+    let label = sh.status.lock().unwrap().carriage.clone();
+    sh.status.lock().unwrap().device = Some("sent to the client".into());
+    let mut dec = Decoder::new();
+    let mut units = Vec::new();
+    let mut block = Block::default();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Input::Payload(p)) => {
+                if let Some(d) = &mut depay {
+                    d.packet(&p, &mut units);
+                }
+            }
+            Ok(Input::Pcm { rate, samples, .. }) => units.push(Unit::Pcm {
+                rate,
+                channels: 2,
+                samples,
+            }),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        let paused = sh.paused.load(Ordering::Relaxed);
+        for u in units.drain(..) {
+            if !dec.decode(&u, &mut block) || paused {
+                continue;
+            }
+            for side in 0..2 {
+                let peak = block.samples[side..]
+                    .iter()
+                    .step_by(2)
+                    .fold(0f32, |m, v| m.max(v.abs()));
+                let old = f32::from_bits(sh.level[side].load(Ordering::Relaxed));
+                sh.level[side].store(peak.max(old * 0.93).to_bits(), Ordering::Relaxed);
+            }
+            sh.played
+                .fetch_add(block.samples.len() as u64 / 2, Ordering::Relaxed);
+            route.0.pcm(stream, &label, block.rate, &block.samples);
+        }
+        let mut s = sh.status.lock().unwrap();
+        s.state = if paused {
+            PlayState::Paused
+        } else if dec.decoded > 0 {
+            PlayState::Playing
+        } else {
+            PlayState::Starting
+        };
+        s.codec = dec.description.clone();
+        s.decoded = dec.decoded;
+        s.decode_errors = dec.errors;
+        s.lost_packets = depay.as_ref().map_or(0, |d| d.lost);
+        if dec.decoded == 0 && dec.errors > 0 {
+            s.error = dec.last_error.clone();
+        } else if dec.decoded > 0 {
+            s.error = None;
+        }
+    }
+    route.0.end(stream);
 }
 
 #[cfg(test)]

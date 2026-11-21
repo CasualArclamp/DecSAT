@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde.workspace = true
 decsat-ip = { path = "../decsat-ip" }
 # Pure-Rust decoders (MPL-2.0, GPL-compatible): MPEG-1/2 layers I-III.
 symphonia-core = "0.6.1"

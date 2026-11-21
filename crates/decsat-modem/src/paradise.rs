@@ -66,7 +66,7 @@ fn group_errors(bits: &[u8], at: usize, block: usize) -> u32 {
 }
 
 /// What the deframer has found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EscStats {
     /// Data octets to an overhead octet: 20 × the data rate in 128.5
     /// kbit/s.

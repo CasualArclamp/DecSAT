@@ -19,7 +19,7 @@ pub use decsat_modem::cid::{
 };
 
 /// A CID VFO's state, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CidView {
     /// The host carrier's symbol rate (as Identify measured it) and the
     /// chip rate it implies.

@@ -536,7 +536,7 @@ pub fn find_format(blocks: &[&[u8]]) -> Option<Format> {
 
 /// A transfer frame's primary header: TM (version 1, field value 00b) or
 /// AOS (version 2, 01b).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Header {
     /// Transfer frame version number field: 0 TM, 1 AOS.
     pub version: u8,
@@ -674,7 +674,7 @@ impl Clcw {
 }
 
 /// What a stream of transfer frames has shown.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     /// Codeblocks seen, decoded (every codeword), failed.
     pub blocks: u64,
@@ -704,7 +704,7 @@ impl Stats {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VcStats {
     pub frames: u64,
     pub idle: u64,
@@ -726,7 +726,7 @@ pub struct TmRx {
 }
 
 /// A decoded transfer frame.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     pub bytes: Vec<u8>,
     pub header: Option<Header>,

@@ -238,7 +238,7 @@ const DC_POLE: f32 = 0.995;
 /// Samples (8 kHz) between idle decisions: 100 ms.
 const IDLE_BLOCK: usize = 800;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct G726Stats {
     pub locked: bool,
     /// Windows that passed and failed the zero-code test; samples decoded.

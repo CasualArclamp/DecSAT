@@ -228,7 +228,7 @@ pub struct Framer {
     pub stats: FramerStats,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FramerStats {
     pub locked: bool,
     pub frames: u64,
@@ -562,7 +562,9 @@ fn fill_mask(bits: &[u8]) -> Vec<bool> {
 }
 
 /// What a packet is, as far as its type and timing tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum PacketKind {
     /// Type 0x1E, 275 bytes, about 35 a second: the bulk of the outbound.
     Traffic,
@@ -630,7 +632,7 @@ impl PacketKind {
 }
 
 /// A packet: the bits between two runs of fill.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Packet {
     /// When its first bit was sent, s (on the time base given the receiver).
     pub t_s: f64,
@@ -651,7 +653,7 @@ pub struct Packet {
 }
 
 /// Which end of a call an assignment goes to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CallEnd {
     /// The terminal that asked for the call (its request acked just before):
     /// type 0x0B.
@@ -670,7 +672,7 @@ impl CallEnd {
 }
 
 /// A channel assignment's fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Assignment {
     pub end: CallEnd,
     /// The call's reference (7 bits), in both ends' assignments.
@@ -914,7 +916,7 @@ impl PacketParser {
 }
 
 /// A call-signalling packet, with what was made of it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallEvent {
     pub t_s: f64,
     pub kind: PacketKind,
@@ -974,7 +976,7 @@ impl CallEvent {
 }
 
 /// A call as its assignments on this outbound tell it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Call {
     pub call_ref: u8,
     /// When the first of its assignments went out, s.
@@ -1038,7 +1040,7 @@ const KEEP_EVENTS: usize = 64;
 const KEEP_RECENT: usize = 32;
 
 /// Counts of what has come through.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutboundStats {
     pub framer: FramerStats,
     /// Packets of each kind ([`PacketKind::ALL`] order).
@@ -1064,7 +1066,7 @@ impl OutboundStats {
 }
 
 /// What the receiver has to show.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutboundView {
     pub stats: OutboundStats,
     /// Call signalling, oldest first.

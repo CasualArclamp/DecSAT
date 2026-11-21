@@ -174,7 +174,7 @@ pub fn parse(p: &[u8]) -> Option<Message<'_>> {
 }
 
 /// A point's value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Int(u32),
     Float(f32),
@@ -314,7 +314,9 @@ pub fn unit_list(b: &[u8]) -> Option<Vec<(u16, u16)>> {
 }
 
 /// Where a station's messages come from and go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Flow {
     pub src: IpAddr,
     pub group: IpAddr,
@@ -331,7 +333,7 @@ impl std::fmt::Display for Flow {
 /// Identification Codes (I034/010, I048/010), so its feed can be found.
 /// The monitoring traffic does not say (no SAC/SIC, no place): this comes
 /// from outside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KnownRadar {
     pub sac: u8,
     pub sic: u8,
@@ -368,7 +370,7 @@ impl KnownRadar {
 }
 
 /// One point as last heard.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PointView {
     /// The section type it came in, and its number.
     pub section: u16,
@@ -385,7 +387,7 @@ pub struct PointView {
 }
 
 /// One unit as heard.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UnitView {
     pub unit: u16,
     /// From the unit table, once it has come.
@@ -408,7 +410,7 @@ impl UnitView {
 }
 
 /// One station: its flow, counts and units.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StationView {
     pub flow: Flow,
     /// Which radar it is, when known ([`known_radar`]).

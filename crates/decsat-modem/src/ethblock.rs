@@ -73,7 +73,7 @@ const FRAGMENT: u8 = 0x20;
 const DF: u16 = 0x4000;
 const MF: u16 = 0x2000;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EthBlockStats {
     pub locked: bool,
     /// The bytes come inverted (handed on put right).

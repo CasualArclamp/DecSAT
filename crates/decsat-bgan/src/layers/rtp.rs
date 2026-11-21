@@ -124,7 +124,7 @@ pub fn wav_bytes(pcm: &[i16]) -> Vec<u8> {
 
 // --- RTP --------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Packet {
     pub offset: usize,
     pub src: Ipv4Addr,
