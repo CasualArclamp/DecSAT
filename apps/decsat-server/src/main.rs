@@ -72,6 +72,14 @@ struct Args {
     /// Shared mode: a gain, NAME=VALUE (repeatable).
     #[arg(long = "gain", value_name = "NAME=VALUE")]
     gains: Vec<String>,
+    /// Shared mode: power the radio's antenna port through its bias tee
+    /// (HackRF 3.3 V, Airspy 4.5 V, SDRplay 4.7 V).
+    #[arg(long)]
+    bias_tee: bool,
+    /// Never let a client switch a radio's bias tee on (in exclusive mode a
+    /// client may, by default, power the antenna port).
+    #[arg(long, conflicts_with = "bias_tee")]
+    no_bias_tee: bool,
     /// Shared mode: waterfall FFT size.
     #[arg(long, default_value_t = 4096)]
     fft: u32,
@@ -148,6 +156,7 @@ fn main() -> Result<()> {
         file,
         net,
         only: a.only.clone(),
+        no_bias_tee: a.no_bias_tee,
     };
     let radios = devices.list();
     if radios.is_empty() {
@@ -160,6 +169,7 @@ fn main() -> Result<()> {
                 center_hz: a.center,
                 sample_rate: a.rate,
                 gains: gains(&a.gains)?,
+                bias_tee: a.bias_tee,
             },
             params: SmartParams {
                 fft_size: a.fft,

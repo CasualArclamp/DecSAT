@@ -36,6 +36,10 @@ pub struct RemoteIqArgs {
     /// zstd level on the link; 0 is off.
     #[arg(long, default_value_t = 0)]
     pub remote_zstd: i32,
+    /// Power the remote radio's antenna port through its bias tee (HackRF,
+    /// Airspy, SDRplay). Off unless given.
+    #[arg(long)]
+    pub remote_bias_tee: bool,
 }
 
 fn password(given: Option<String>) -> Option<String> {
@@ -60,6 +64,7 @@ pub fn open_iq(a: &RemoteIqArgs, addr: &str, rate: f64) -> Result<RemoteIqSource
         center_hz: mhz * 1e6,
         sample_rate: rate,
         gains: Vec::new(),
+        bias_tee: a.remote_bias_tee,
     };
     let params = IqParams {
         bits: a.remote_bits,
@@ -101,6 +106,10 @@ pub struct RemoteArgs {
     /// A radio gain, NAME=VALUE (repeatable).
     #[arg(long = "gain", value_name = "NAME=VALUE")]
     gains: Vec<String>,
+    /// Power the radio's antenna port through its bias tee (HackRF, Airspy,
+    /// SDRplay; ignored by a shared server). Off unless given.
+    #[arg(long)]
+    bias_tee: bool,
     /// identify, dvbs2-ts or dvbs-ts.
     #[arg(long, default_value = "dvbs2-ts")]
     decoder: String,
@@ -150,11 +159,13 @@ pub fn run(a: &RemoteArgs) -> Result<()> {
                 .map(|g| format!("{}={}", g.name, g.value))
                 .collect();
             println!(
-                "  {:8} {}  rates {} MS/s  gains {}",
+                "  {:8} {}  rates {} MS/s  gains {}{}",
                 r.key,
                 r.name,
                 rates.join(" "),
-                gains.join(" ")
+                gains.join(" "),
+                r.bias_tee
+                    .map_or(String::new(), |v| format!("  bias tee {v}"))
             );
         }
         return Ok(());
@@ -177,6 +188,7 @@ pub fn run(a: &RemoteArgs) -> Result<()> {
         center_hz: a.mhz * 1e6,
         sample_rate: a.rate,
         gains,
+        bias_tee: a.bias_tee,
     };
     let mut engine = RemoteEngine::connect(&opts, Some(radio), SmartParams::default())?;
     println!(

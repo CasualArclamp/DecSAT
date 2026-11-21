@@ -46,6 +46,20 @@ decsat remote SERVER:5262 --radio net --mhz 1100 --rate 8e6 --decoder dvbs2-ts -
 
 `--net` takes `tcp://` (connect), `listen://` or `udp://`; `--net-format` is int8, uint8, int16, int32 or float32. Not yet in `decsat-server-app`.
 
+### Bias tee
+
+A client can power the remote radio's antenna port (HackRF 3.3 V, Airspy
+4.5 V, SDRplay 4.7 V): the **Bias tee** tick under the remote radio in the
+GUI, `--bias-tee` on `decsat remote`, `--remote-bias-tee` on `decsat decode
+--remote`. It is set as the radio opens, so change it while stopped; it is off
+unless asked for and not saved. `RadioInfo::bias_tee` says which radios have
+one (`decsat remote SERVER --list` prints it), and a request for a radio
+without one is refused. In shared mode no client holds the radio, so the
+operator decides: `decsat-server --shared hackrf --bias-tee`, or the tick in
+the server app. `decsat-server --no-bias-tee` (or untick "A client may power
+the antenna port" in the server app) never lets a client switch it on, for a
+coax where DC would harm what is connected.
+
 The default bind is 127.0.0.1. A password can also come from
 `DECSAT_PASSWORD`. No password is the default, and the server says so if it
 is also listening beyond the machine.
