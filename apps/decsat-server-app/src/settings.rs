@@ -22,6 +22,10 @@ pub struct Settings {
     pub rate_msps: f64,
     /// (radio, gain, value).
     pub gains: Vec<(String, String, f64)>,
+    /// Shared mode: the fixed radio's bias tee.
+    pub shared_bias_tee: bool,
+    /// Exclusive mode: clients may switch the radio's bias tee on.
+    pub client_bias_tee: bool,
     pub max_each: usize,
     pub max_total: usize,
     pub auto_start: bool,
@@ -44,6 +48,8 @@ impl Default for Settings {
             center_mhz: 739.5,
             rate_msps: 8.0,
             gains: Vec::new(),
+            shared_bias_tee: false,
+            client_bias_tee: true,
             max_each: 2,
             max_total: 8,
             auto_start: false,
@@ -90,6 +96,8 @@ pub fn load() -> Settings {
             "max_each" => s.max_each = v.parse().unwrap_or(s.max_each),
             "max_total" => s.max_total = v.parse().unwrap_or(s.max_total),
             "auto_start" => s.auto_start = on,
+            "shared_bias_tee" => s.shared_bias_tee = on,
+            "client_bias_tee" => s.client_bias_tee = on,
             "gain" => {
                 let mut f = v.splitn(3, ',');
                 if let (Some(r), Some(n), Some(x)) = (f.next(), f.next(), f.next())
@@ -128,6 +136,13 @@ pub fn save(s: &Settings) -> std::io::Result<()> {
         s.max_total,
         b(s.auto_start),
     );
+    t.push_str(&format!(
+        "shared_bias_tee={}
+client_bias_tee={}
+",
+        b(s.shared_bias_tee),
+        b(s.client_bias_tee)
+    ));
     // Only when asked: the file is plain text.
     if s.remember_password {
         t.push_str(&format!("password={}\n", s.password));

@@ -91,6 +91,7 @@ impl RadioProvider for Fake {
             max_hz: 6e9,
             rates: vec![RATE],
             gains: vec![],
+            bias_tee: None,
         }]
     }
     fn open(&self, _req: &RadioRequest) -> Result<OpenRadio> {
@@ -134,6 +135,7 @@ fn request() -> RadioRequest {
         center_hz: CENTER,
         sample_rate: RATE,
         gains: vec![],
+        bias_tee: false,
     }
 }
 

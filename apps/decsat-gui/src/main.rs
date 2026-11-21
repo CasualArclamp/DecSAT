@@ -81,7 +81,7 @@ fn main() -> eframe::Result {
                 "usage: decsat-gui [capture] [--hackrf MHZ | --fobos MHZ | --airspy MHZ | --sdrplay MHZ | --remote HOST[:PORT] [--remote-radio KEY] [--remote-dumb]] [--rate MSPS] [--lo MHZ] [--plan FILE.json] [--claim-carriers] \
                  [--claim-auto] [--vfo-at OFFSET_HZ[:BW_HZ]] [--decoder id|ip|ts|dvbs|tpc|cdm600|cdm570|trunk|auto|fastlink|viterbi|cid|is19|bgan|aero|beacon|p3|psk|tdma|pool|rec|spec[,…]] [--beacons] \
                  [--select N] [--view LO_HZ:HI_HZ] [--after SECS] [--screenshot OUT.png] [--ts-viewer] [--radar-scope] [--radar-range NM] \
-                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--bias-tee] [--decimate N] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
+                 [--radar-track HEX] [--play-audio] [--survey] [--tx-panel] [--radio-panel] [--remote-panel] [--bias-tee] [--decimate N] [--panel-scroll PX] [--lo-high] [--flip] [--amp] [--lna DB] [--vga DB] [--wireshark] [--session-log] [--biss-key KEY] [--watch] [--watch-after S]"
             );
             std::process::exit(2);
         }
@@ -131,6 +131,7 @@ fn main() -> eframe::Result {
                 app.opts.fft_size = n;
             }
             app.tx.open |= opts.tx_panel;
+            app.remote.open |= opts.remote_panel;
             #[cfg(feature = "hackrf")]
             {
                 app.radio.open |= opts.radio_panel;
@@ -232,6 +233,7 @@ fn main() -> eframe::Result {
                 if let Some(k) = opts.remote_radio.clone() {
                     app.remote.radio_key = k;
                 }
+                app.remote.bias_tee |= opts.bias_tee;
                 if let Some(r) = opts.rate_msps {
                     app.remote.rate = r * 1e6;
                 }

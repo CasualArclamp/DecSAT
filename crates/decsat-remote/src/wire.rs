@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 /// Sent first by the client: the protocol's name and generation.
 pub const MAGIC: [u8; 4] = *b"DSR1";
 /// Bumped whenever a message or a status structure changes shape.
-pub const PROTO: u16 = 2;
+pub const PROTO: u16 = 3;
 /// The largest frame either end accepts.
 pub const MAX_FRAME: usize = 8 << 20;
 /// Flag bit: the payload is one zstd frame.
