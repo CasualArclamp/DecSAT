@@ -3319,6 +3319,39 @@ fn code_row(ui: &mut Ui, f: Option<&FecStats>, good: Color32, wait: Color32) {
             }
         ));
         ui.end_row();
+        // The superframe's repeated frame, a known sequence: the raw
+        // channel measured on it.
+        if let Some(r) = &u.reference {
+            ui.label("Reference");
+            let colour = match r.ber() {
+                Some(b) if b < 1e-2 => good,
+                Some(_) => wait,
+                None => Color32::from_gray(170),
+            };
+            ui.colored_label(colour, r.describe())
+                .on_hover_text(format!(
+                    "The frame that repeats exactly once a superframe (frame {} of {}), \
+                 kept once two copies matched bit for bit. Each later copy is \
+                 compared with it: the bits that differ are raw channel errors, \
+                 before any FEC (Gray labels, so a neighbouring point is one bit).\
+                 \n\n{} bits a copy · {} copies compared · {} too unlike to count \
+                 (superframe phase lost) · last copy {} errors.{}",
+                    r.phase,
+                    u.superframe.unwrap_or(0),
+                    r.bits_per_copy,
+                    r.copies,
+                    r.unlike,
+                    r.last_errors,
+                    if r.lfsr.is_some() {
+                        "\n\nIts bits are a shift-register sequence (found with \
+                     Berlekamp–Massey): the connection polynomial and the register \
+                     before the frame's first bit, oldest bit first."
+                    } else {
+                        ""
+                    }
+                ));
+            ui.end_row();
+        }
     }
     ui.label("Code");
     let r = if let Some((v, r)) = k7.and_then(|v| v.rate.map(|r| (v, r))) {
