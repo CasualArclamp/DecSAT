@@ -285,6 +285,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
     } else if v.settings.decoder == DecoderKind::Aero {
         aero_card(ui, &st, vfo_rf, v.id);
+    } else if v.settings.decoder == DecoderKind::Gmr2 {
+        gmr2_card(ui, &st, vfo_rf);
     } else {
         // Every other mode: the same header, with what it has to show.
         mode_card(ui, v, &st, vfo_rf);
@@ -6055,6 +6057,7 @@ fn mode_title(decoder: DecoderKind) -> &'static str {
         DecoderKind::BarkerTdm => "Barker-11 TDM",
         DecoderKind::Bgan => "Inmarsat BGAN",
         DecoderKind::Aero => "Inmarsat Aero",
+        DecoderKind::Gmr2 => "Inmarsat GMR-2+",
         DecoderKind::PskSymbols => "PSK",
         DecoderKind::Tdma => "TDMA",
         DecoderKind::ReturnPool => "Return pool",
@@ -6577,6 +6580,153 @@ fn nit_row_summary(t: &decsat_ts::psi::Transponder) -> String {
         parts.push(format!("{s:.3} M"));
     }
     parts.join(" · ")
+}
+
+/// Inmarsat GMR-2+'s colour (the title bar, the network's name).
+const GMR2: Color32 = Color32::from_rgb(127, 211, 192);
+
+/// An Inmarsat GMR-2+ VFO's card, compact in the Aero card's layout: the
+/// title bar, the network and location area big with the Eb/N0 beside it
+/// and its bar, then the beam's colour codes, the frame number, the blocks
+/// decoded and the System Information seen.
+fn gmr2_card(ui: &mut Ui, st: &VfoStatus, vfo_rf: Option<f64>) {
+    let grey = ui.visuals().weak_text_color();
+    let strong = ui.visuals().strong_text_color();
+    let Some(g) = &st.gmr2 else {
+        title_bar(ui, "INMARSAT GMR-2+", grey, None, None, vfo_rf, false);
+        ui.label(RichText::new("starting…").weak());
+        return;
+    };
+    let colour = match (g.searching, g.locked) {
+        (false, true) => GMR2,
+        (false, false) => GMR2.gamma_multiply(0.55),
+        _ => grey,
+    };
+    title_bar(
+        ui,
+        "INMARSAT GMR-2+ · 50 kHz",
+        colour,
+        st.symbol_rate,
+        None,
+        vfo_rf.map(|f| f + if g.searching { 0.0 } else { g.carrier_hz }),
+        !g.searching,
+    );
+
+    // ---- the network and the Eb/N0
+    let name = g
+        .si3
+        .as_ref()
+        .map(|s| format!("{}-{} · LAC {:04X}", s.mcc, s.mnc, s.lac));
+    let db = (!g.searching && g.locked).then_some(g.eb_n0_db);
+    let db_colour = margin_colour(db.map(|d| d - 6.0));
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(name.as_deref().unwrap_or("–"))
+                .monospace()
+                .size(22.0)
+                .color(if name.is_some() { colour } else { grey }),
+        );
+        if let Some(d) = db {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(format!("{d:+5.1} dB")).monospace().size(16.0).color(db_colour));
+            });
+        }
+    })
+    .response
+    .on_hover_text(
+        "The network (MCC-MNC) and location area from System Information 3, and the          Eb/N0 measured on the soft bits. GMR-2+ is Inmarsat's IsatPhone system:          this decodes its 50 kHz forward control carriers (sync and broadcast).",
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, 8.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    if let Some(d) = db {
+        let x = rect.left() + rect.width() * (d / 20.0).clamp(0.0, 1.0);
+        p.rect_filled(
+            egui::Rect::from_min_max(rect.min, pos2(x, rect.max.y)),
+            CornerRadius::same(2),
+            db_colour,
+        );
+    }
+
+    // ---- beam, frame, blocks
+    let row = |ui: &mut Ui, key: &str, value: String| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(key).monospace().size(12.0).color(grey));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(value).monospace().size(12.0).color(strong));
+            });
+        });
+    };
+    ui.add_space(4.0);
+    if g.too_narrow || g.searching {
+        ui.label(RichText::new(&g.message).size(12.0).weak());
+        return;
+    }
+    row(
+        ui,
+        "beam",
+        g.sch
+            .map(|s| format!("NCC {} · BCCC {}", s.ncc, s.bccc))
+            .unwrap_or_else(|| "–".into()),
+    );
+    row(
+        ui,
+        "frame",
+        match (g.frame_number, g.sch) {
+            (Some(f), Some(s)) => format!("{f} · T1 {} T2 {}", s.t1, s.t2),
+            _ => "–".into(),
+        },
+    );
+    row(
+        ui,
+        "sync / BCCH",
+        format!(
+            "{}/{} ok · {}/{} ok",
+            g.sch_good,
+            g.sch_good + g.sch_bad,
+            g.bcch_good,
+            g.bcch_good + g.bcch_bad
+        ),
+    );
+    let seen: Vec<String> = g
+        .seen
+        .iter()
+        .map(|k| {
+            if k == "0x06" {
+                format!("beam map {}/22", g.beam_map_segments)
+            } else {
+                k.clone()
+            }
+        })
+        .collect();
+    ui.add_space(2.0);
+    ui.separator();
+    ui.label(
+        RichText::new(if seen.is_empty() {
+            "no System Information yet".into()
+        } else {
+            seen.join(" · ")
+        })
+        .monospace()
+        .size(12.0)
+        .color(if seen.is_empty() { grey } else { strong }),
+    )
+    .on_hover_text(
+        g.lines
+            .iter()
+            .rev()
+            .filter(|l| l.title != "SYNC")
+            .take(12)
+            .map(|l| format!("{} {}", l.title, l.text))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            ),
+    );
 }
 
 /// Inmarsat Aero's colour (the title bar, the channel's name).

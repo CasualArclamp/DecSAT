@@ -343,6 +343,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "is19" | "is19-outbound" | "i19" => Is19Outbound,
         "bgan" | "inmarsat" => Bgan,
         "aero" => Aero,
+        "gmr2" | "gmr2+" | "isatphone" => Gmr2,
         "beacon" | "tlm" | "telemetry" => Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => HsBeacon,

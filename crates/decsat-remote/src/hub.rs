@@ -778,6 +778,7 @@ fn views_of(s: &VfoStatus) -> Views {
         barker: s.barker.clone(),
         bgan: s.bgan.clone(),
         aero: s.aero.clone(),
+        gmr2: s.gmr2.clone(),
     }
 }
 
