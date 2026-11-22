@@ -723,7 +723,10 @@ impl App {
                 ("rate", u.sample_rate.to_string()),
                 ("center", u.center_hz.to_string()),
                 ("lo", self.net_lo_hz.to_string()),
-                ("auto_rate", if self.net_auto_rate { "1" } else { "0" }.into()),
+                (
+                    "auto_rate",
+                    if self.net_auto_rate { "1" } else { "0" }.into(),
+                ),
             ] {
                 p.push((format!("device.net.{k}"), v));
             }
