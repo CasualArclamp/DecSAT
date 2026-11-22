@@ -915,6 +915,14 @@ pub(crate) fn report(st: &VfoStatus) {
             u.slips,
             u.losses
         );
+        if let Some(r) = &u.reference {
+            println!(
+                "reference: frame {} of the superframe · {} · {} unlike copies left out",
+                r.phase,
+                r.describe(),
+                r.unlike
+            );
+        }
     }
     if let Some(v) = &f.viterbi {
         println!(

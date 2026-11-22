@@ -3229,7 +3229,17 @@ fn offer_code_search(w: &FecWorker, modulation: decsat_core::Modulation, syms: &
 /// A Viterbi VFO's status line.
 fn viterbi_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
     match f.and_then(|f| f.uw.as_ref()) {
-        Some(u) => format!("{lock} · {} · {}", u.describe(), code_text(f)),
+        Some(u) => {
+            // The raw channel off the reference frame, when there is one.
+            let channel = u
+                .reference
+                .as_ref()
+                .and_then(|r| r.ber())
+                .map_or(String::new(), |b| {
+                    format!(" · channel BER {b:.1e} (reference frame)")
+                });
+            format!("{lock} · {}{channel} · {}", u.describe(), code_text(f))
+        }
         None => format!("{lock} · {}", code_text(f)),
     }
 }

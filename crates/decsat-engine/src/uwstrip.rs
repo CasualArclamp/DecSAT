@@ -21,6 +21,14 @@
 //! It also notes when a whole frame's data repeats exactly: a frame that is
 //! the same every N frames gives the superframe length (that carrier: one
 //! frame in every 78, so a 26 676-symbol, 160.7 ms superframe).
+//!
+//! That repeated frame is known once heard twice alike, so each later copy
+//! measures the raw channel: its bit errors against the copy kept, whatever
+//! FEC the data frames use. When it is a shift-register sequence (that
+//! carrier's is the LFSR 1 + x + x^5 + x^14 + x^16 restarted from 0…01 at
+//! the frame's first bit, Gray-labelled, measured 2026-11-22), the
+//! polynomial and the register before the frame are read off it with
+//! Berlekamp–Massey.
 
 use std::collections::HashMap;
 
@@ -51,6 +59,12 @@ const MISSES: u32 = 8;
 const HASHES: usize = 8192;
 /// Repeats at one lag that make it the superframe.
 const SUPERFRAME_REPEATS: u32 = 3;
+/// A reference copy differing in more than this share of its bits is not
+/// it (random data differ in half).
+const UNLIKE: f64 = 0.2;
+/// The longest shift register named (and its sequence must be under a
+/// quarter of the frame: a random frame of n bits has complexity n/2).
+const MAX_LFSR: usize = 32;
 
 /// What the stripper has found, for display.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +87,55 @@ pub struct UwStats {
     pub superframe: Option<usize>,
     /// Symbols a second, for the times shown.
     pub symbol_rate: f64,
+    /// The frame that repeats each superframe, used as a known reference.
+    pub reference: Option<RefStats>,
+}
+
+/// The superframe's repeated frame, as a reference for the raw channel.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RefStats {
+    /// Which frame of the superframe it is (counted from an arbitrary
+    /// start), and its data bits.
+    pub phase: usize,
+    pub bits_per_copy: usize,
+    /// Copies compared since it was kept, the bits in them and the bits
+    /// that differed (Gray labels: a neighbouring point is one bit).
+    pub copies: u64,
+    pub bits: u64,
+    pub bit_errors: u64,
+    /// Copies too unlike it to be it (the superframe phase lost), left out.
+    pub unlike: u64,
+    /// The latest copy's bit errors.
+    pub last_errors: u32,
+    /// When its bits are a shift-register sequence: the connection
+    /// polynomial ("1 + x + x^5 + x^14 + x^16"), and the register before
+    /// its first bit, oldest bit first.
+    pub lfsr: Option<String>,
+    pub seed: Option<String>,
+}
+
+impl RefStats {
+    /// Raw bit errors per bit over the copies compared.
+    pub fn ber(&self) -> Option<f64> {
+        (self.bits > 0).then(|| self.bit_errors as f64 / self.bits as f64)
+    }
+
+    pub fn describe(&self) -> String {
+        let mut s = match self.ber() {
+            Some(b) => format!(
+                "channel BER {b:.1e} ({} errors in {} copies)",
+                self.bit_errors, self.copies
+            ),
+            None => "kept; waiting for the next copy".to_string(),
+        };
+        if let Some(l) = &self.lfsr {
+            s += &format!(" · LFSR {l}");
+            if let Some(seed) = &self.seed {
+                s += &format!(", register {seed} before it");
+            }
+        }
+        s
+    }
 }
 
 impl UwStats {
@@ -136,6 +199,10 @@ pub struct UwStripper {
     /// lag.
     seen: HashMap<u64, u64>,
     lags: HashMap<usize, u32>,
+    /// The current frame's data quadrants, and the reference frame kept:
+    /// (superframe length, its phase in it, its quadrants).
+    quads: Vec<u8>,
+    reference: Option<(usize, usize, Vec<u8>)>,
     pub stats: Option<UwStats>,
     symbol_rate: f64,
 }
@@ -151,6 +218,8 @@ impl UwStripper {
             missed_run: 0,
             seen: HashMap::new(),
             lags: HashMap::new(),
+            quads: Vec::new(),
+            reference: None,
             stats: None,
             symbol_rate,
         }
@@ -262,12 +331,14 @@ impl UwStripper {
             // so they fall mid-quadrant.
             let to_mid = rot * f.uw[0].conj() * MID;
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            self.quads.clear();
             for (k, &s) in frame.iter().enumerate() {
                 if !f.known[k] {
                     out.push(s);
                     // FNV-1a over the data's hard quadrants, turned by the
                     // UW's rotation so a turned constellation hashes alike.
                     let q = quadrant(s * to_mid, self.bpsk);
+                    self.quads.push(q);
                     hash = (hash ^ q as u64).wrapping_mul(0x0100_0000_01b3);
                 }
             }
@@ -288,14 +359,44 @@ impl UwStripper {
                 self.stage = Stage::Look { looks: 0 };
                 self.seen.clear();
                 self.lags.clear();
+                self.reference = None;
                 return;
             }
         }
     }
 
     /// A frame's data hash: a repeat of one seen before gives a lag, and a
-    /// lag seen [`SUPERFRAME_REPEATS`] times is the superframe.
+    /// lag seen [`SUPERFRAME_REPEATS`] times is the superframe. The frame
+    /// that repeated is kept as the reference; later copies are measured
+    /// against it.
     fn note_frame(&mut self, hash: u64, n: u64) {
+        let n_us = n as usize;
+        // A copy of the reference: count its differences.
+        if let Some((lag, phase, r)) = &self.reference
+            && n_us % lag == *phase
+            && let Some(rs) = self.stats.as_mut().and_then(|s| s.reference.as_mut())
+        {
+            let bpsk = self.bpsk;
+            let errors: u32 = r
+                .iter()
+                .zip(&self.quads)
+                .map(|(&a, &b)| {
+                    if bpsk {
+                        (a != b) as u32
+                    } else {
+                        (GRAY[a as usize] ^ GRAY[b as usize]).count_ones()
+                    }
+                })
+                .sum();
+            if errors as f64 <= UNLIKE * rs.bits_per_copy as f64 {
+                rs.copies += 1;
+                rs.bits += rs.bits_per_copy as u64;
+                rs.bit_errors += errors as u64;
+                rs.last_errors = errors;
+            } else {
+                rs.unlike += 1;
+            }
+        }
         if let Some(prev) = self.seen.insert(hash, n) {
             let lag = (n - prev) as usize;
             let c = self.lags.entry(lag).or_insert(0);
@@ -305,6 +406,19 @@ impl UwStripper {
                 && s.superframe.is_none_or(|old| lag < old)
             {
                 s.superframe = Some(lag);
+                // This frame matched an earlier copy bit for bit: keep it.
+                let phase = n_us % lag;
+                let per = if self.bpsk { 1 } else { 2 };
+                let (lfsr, seed) = name_lfsr(&self.quads, self.bpsk)
+                    .map_or((None, None), |(l, sd)| (Some(l), Some(sd)));
+                s.reference = Some(RefStats {
+                    phase,
+                    bits_per_copy: per * self.quads.len(),
+                    lfsr,
+                    seed,
+                    ..RefStats::default()
+                });
+                self.reference = Some((lag, phase, self.quads.clone()));
             }
         }
         if self.seen.len() > HASHES {
@@ -392,6 +506,93 @@ fn unit(s: Iq) -> Iq {
     if m > 1e-12 { s / m } else { Iq::new(0.0, 0.0) }
 }
 
+/// Gray labels of the quadrants 0–3 (neighbours differ in one bit).
+const GRAY: [u8; 4] = [0b00, 0b01, 0b11, 0b10];
+
+/// The shortest LFSR that generates `bits` (Berlekamp–Massey over GF(2)):
+/// its length L and connection polynomial c (c[0] = 1, s[n] = Σ c[j]·s[n−j]).
+fn berlekamp_massey(bits: &[u8]) -> (usize, Vec<u8>) {
+    let n = bits.len();
+    let (mut c, mut b) = (vec![0u8; n + 1], vec![0u8; n + 1]);
+    c[0] = 1;
+    b[0] = 1;
+    let (mut l, mut m) = (0usize, 1usize);
+    for i in 0..n {
+        let mut d = bits[i];
+        for j in 1..=l {
+            d ^= c[j] & bits[i - j];
+        }
+        if d == 0 {
+            m += 1;
+            continue;
+        }
+        let t = c.clone();
+        for j in 0..=n - m {
+            c[j + m] ^= b[j];
+        }
+        if 2 * l <= i {
+            l = i + 1 - l;
+            b = t;
+            m = 1;
+        } else {
+            m += 1;
+        }
+    }
+    c.truncate(l + 1);
+    (l, c)
+}
+
+/// The reference frame as a shift-register sequence, if it is one: its
+/// bits (Gray labels, either bit first, each quarter turn of the labels,
+/// since the UW fixes the phase only up to how the transmitter numbers its
+/// points) with the shortest LFSR, named, and the register before the
+/// frame (run back from its first L bits).
+fn name_lfsr(quads: &[u8], bpsk: bool) -> Option<(String, String)> {
+    let mut best: Option<(usize, Vec<u8>, Vec<u8>)> = None;
+    let turns: &[u8] = if bpsk { &[0, 2] } else { &[0, 1, 2, 3] };
+    for &t in turns {
+        for low_first in [true, false] {
+            let mut bits = Vec::with_capacity(2 * quads.len());
+            for &q in quads {
+                let g = GRAY[((q + t) % 4) as usize];
+                let (lo, hi) = (g & 1, g >> 1);
+                match (bpsk, low_first) {
+                    (true, _) => bits.push(hi),
+                    (false, true) => bits.extend([lo, hi]),
+                    (false, false) => bits.extend([hi, lo]),
+                }
+            }
+            let (l, c) = berlekamp_massey(&bits);
+            if best.as_ref().is_none_or(|b| l < b.0) {
+                best = Some((l, c, bits));
+            }
+        }
+    }
+    let (l, c, bits) = best?;
+    if l == 0 || l > MAX_LFSR || 4 * l > bits.len() || c[l] != 1 {
+        return None;
+    }
+    let poly = std::iter::once("1".to_string())
+        .chain((1..=l).filter(|&j| c[j] == 1).map(|j| match j {
+            1 => "x".to_string(),
+            _ => format!("x^{j}"),
+        }))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    // Run back: s[n-L] = s[n] + sum over 0<j<L of c[j] s[n-j] (c[L] = 1).
+    let mut reg: Vec<u8> = bits[..l].to_vec();
+    for _ in 0..l {
+        let mut v = reg[l - 1];
+        for j in 1..l {
+            v ^= c[j] & reg[l - 1 - j];
+        }
+        reg.insert(0, v);
+        reg.truncate(l);
+    }
+    let seed: String = reg.iter().map(|&b| char::from(b'0' + b)).collect();
+    Some((poly, seed))
+}
+
 /// e^{jπ/4}.
 const MID: Iq = Iq::new(
     std::f32::consts::FRAC_1_SQRT_2,
@@ -456,8 +657,23 @@ mod tests {
         let mut u = rng(42);
         let uw: Vec<Iq> = (0..18).map(|_| qpsk(u())).collect();
         let mut d = rng(7);
-        let mut fixed = rng(9);
-        let fixed_frame: Vec<Iq> = (0..324).map(|_| qpsk(fixed())).collect();
+        // The fixed frame as that carrier sends it: the LFSR
+        // s[n] = s[n−1] ⊕ s[n−5] ⊕ s[n−14] ⊕ s[n−16] from the register
+        // 0…01, two bits a symbol (low bit first), Gray-labelled.
+        let mut s: Vec<u8> = [0u8; 15].into_iter().chain([1]).collect();
+        while s.len() < 16 + 648 {
+            let n = s.len();
+            s.push(s[n - 1] ^ s[n - 5] ^ s[n - 14] ^ s[n - 16]);
+        }
+        let fixed_frame: Vec<Iq> = s[16..]
+            .chunks(2)
+            .map(|p| {
+                let g = p[0] | (p[1] << 1);
+                let q = GRAY.iter().position(|&x| x == g).unwrap() as f32;
+                let a = std::f32::consts::FRAC_PI_4 + q * std::f32::consts::FRAC_PI_2;
+                Iq::new(a.cos(), a.sin())
+            })
+            .collect();
         let mut x = Vec::new();
         let mut data = Vec::new();
         // A part frame before the first UW.
@@ -466,8 +682,13 @@ mod tests {
         }
         for f in 0..n_frames {
             x.extend_from_slice(&uw);
-            for &fixed in &fixed_frame {
-                let s = if f % 78 == 47 { fixed } else { qpsk(d()) };
+            for (k, &fixed) in fixed_frame.iter().enumerate() {
+                let mut s = if f % 78 == 47 { fixed } else { qpsk(d()) };
+                // One symbol a quarter turn off in the ninth copy: one bit
+                // error for the reference to count.
+                if f == 47 + 78 * 8 && k == 10 {
+                    s *= Iq::new(0.0, 1.0);
+                }
                 x.push(s);
                 data.push(s);
             }
@@ -513,6 +734,36 @@ mod tests {
             .find(|&k| data[k..k + 3240] == *tail)
             .expect("the output's tail is not the data");
         assert!(at > 0);
+    }
+
+    #[test]
+    fn measures_the_channel_on_the_reference_frame_and_names_its_lfsr() {
+        let (x, _) = carrier(78 * 9, 100, None);
+        let (st, _) = run(&x);
+        let r = st.stats.and_then(|s| s.reference).expect("no reference");
+        assert_eq!(r.bits_per_copy, 648);
+        assert_eq!(r.copies, 3, "{r:?}");
+        assert_eq!(r.bit_errors, 1, "{r:?}");
+        assert_eq!(r.lfsr.as_deref(), Some("1 + x + x^5 + x^14 + x^16"));
+        assert_eq!(r.seed.as_deref(), Some("0000000000000001"));
+        assert!(
+            r.describe().contains("channel BER 5.1e-4"),
+            "{}",
+            r.describe()
+        );
+    }
+
+    #[test]
+    fn berlekamp_massey_finds_a_short_register() {
+        // x^4 + x + 1's m-sequence, twice over: complexity 4.
+        let mut s = vec![0u8, 0, 0, 1];
+        while s.len() < 30 {
+            let n = s.len();
+            s.push(s[n - 3] ^ s[n - 4]);
+        }
+        let (l, c) = berlekamp_massey(&s);
+        assert_eq!(l, 4);
+        assert_eq!(c, [1, 0, 0, 1, 1]);
     }
 
     #[test]
