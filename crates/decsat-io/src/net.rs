@@ -272,6 +272,79 @@ struct Shared {
     center_bits: AtomicU64,
     /// Set by a tune; the source then drops what came before it.
     retuned: AtomicBool,
+    /// Byte counts at recent instants, for [`NetIqControl::measured_rate`].
+    rate: Mutex<RateWindow>,
+}
+
+/// (time, bytes so far) snapshots over the last [`RateWindow::SPAN`], taken
+/// when the rate is asked for. A rate averaged since the start reads low for
+/// as long as the source waited for its sender; a window does not, and it
+/// leaves out the burst a TCP stream starts with.
+#[derive(Default)]
+struct RateWindow {
+    /// When the first bytes were seen.
+    first: Option<Instant>,
+    points: std::collections::VecDeque<(Instant, u64)>,
+}
+
+impl RateWindow {
+    const SPAN: Duration = Duration::from_secs(10);
+    /// What arrives in the first seconds is whatever the sender had queued.
+    const SETTLE: Duration = Duration::from_secs(2);
+
+    /// Bytes per second over the window and how long the window is, s.
+    fn update(&mut self, now: Instant, bytes: u64) -> Option<(f64, f64)> {
+        if bytes == 0 {
+            return None;
+        }
+        let first = *self.first.get_or_insert(now);
+        if now.duration_since(first) < Self::SETTLE {
+            return None;
+        }
+        if self
+            .points
+            .back()
+            .is_none_or(|&(t, _)| now.duration_since(t) >= Duration::from_millis(250))
+        {
+            self.points.push_back((now, bytes));
+        }
+        while self
+            .points
+            .front()
+            .is_some_and(|&(t, _)| now.duration_since(t) > Self::SPAN)
+        {
+            self.points.pop_front();
+        }
+        let &(t0, b0) = self.points.front()?;
+        let dt = now.duration_since(t0).as_secs_f64();
+        (dt >= 1.0).then(|| ((bytes - b0) as f64 / dt, dt))
+    }
+}
+
+/// Rates SDRs and their programs commonly run at, MS/s. A measured rate near
+/// one of these is most likely that one.
+const COMMON_RATES_MSPS: &[f64] = &[
+    0.25, 0.3, 0.5, 0.6, 0.9, 0.96, 1.0, 1.024, 1.2, 1.4, 1.536, 1.8, 1.92, 2.0, 2.048, 2.4,
+    2.5, 2.56, 2.88, 3.0, 3.072, 3.2, 4.0, 5.0, 6.0, 6.144, 7.68, 8.0, 10.0, 12.0, 12.288, 15.36,
+    16.0, 20.0, 24.576, 30.72, 40.0, 56.0, 61.44,
+];
+
+/// When the rate measured (`measured`, S/s) is more than 1.5 % away from the
+/// rate set (`set`), the rate the sender most likely runs at: the nearest
+/// common rate within 0.5 % of the measurement, else the measurement to 3
+/// decimals of MS/s. `None` when they agree. A wrong rate scales every
+/// frequency and symbol rate DecSAT reads by `set / true rate`.
+pub fn rate_mismatch(set: f64, measured: f64) -> Option<f64> {
+    if set <= 0.0 || measured <= 0.0 || (measured / set - 1.0).abs() < 0.015 {
+        return None;
+    }
+    let m = measured / 1e6;
+    let near = COMMON_RATES_MSPS
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - m).abs().total_cmp(&(b - m).abs()))
+        .filter(|r| (r / m - 1.0).abs() < 0.005);
+    Some(near.unwrap_or((m * 1000.0).round() / 1000.0) * 1e6)
 }
 
 impl Shared {
@@ -491,7 +564,6 @@ fn rtl_tuner_name(t: u32) -> &'static str {
 #[derive(Clone)]
 pub struct NetIqControl {
     shared: Arc<Shared>,
-    started: Instant,
     bytes_per_sample: usize,
 }
 
@@ -534,12 +606,27 @@ impl NetIqControl {
         Ok(true)
     }
 
-    /// The rate the samples arrive at, averaged since the start; `None` in
-    /// the first two seconds (a TCP stream starts with a burst of whatever
-    /// was buffered).
+    /// The rate the samples arrive at, S/s, over the last 10 s; `None` until
+    /// a second has been measured after the first two seconds of data (a TCP
+    /// stream starts with a burst of whatever was buffered).
     pub fn measured_rate(&self) -> Option<f64> {
-        let t = self.started.elapsed().as_secs_f64();
-        (t >= 2.0).then(|| self.bytes() as f64 / self.bytes_per_sample as f64 / t)
+        self.measured().map(|(r, _)| r)
+    }
+
+    fn measured(&self) -> Option<(f64, f64)> {
+        let mut w = self.shared.rate.lock().unwrap();
+        w.update(Instant::now(), self.bytes())
+            .map(|(bps, span)| (bps / self.bytes_per_sample as f64, span))
+    }
+
+    /// The rate the sender most likely runs at, when what arrives is more
+    /// than 1.5 % away from `set` (S/s) over at least 5 s ([`rate_mismatch`]).
+    pub fn rate_warning(&self, set: f64) -> Option<f64> {
+        let (r, span) = self.measured()?;
+        if span < 5.0 {
+            return None;
+        }
+        rate_mismatch(set, r)
     }
 }
 
@@ -644,6 +731,7 @@ impl NetIqSource {
             center_bits: AtomicU64::new(settings.center_hz.to_bits()),
             rtl_tcp: Mutex::new(rtl_tcp),
             retuned: AtomicBool::new(false),
+            rate: Mutex::new(RateWindow::default()),
         });
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let (recycle, recycled) = mpsc::channel();
@@ -662,7 +750,6 @@ impl NetIqSource {
         Ok(NetIqSource {
             control: NetIqControl {
                 shared,
-                started: Instant::now(),
                 bytes_per_sample: bps,
             },
             settings,
@@ -788,6 +875,12 @@ impl IqSource for NetIqSource {
         if let Some(m) = self.control.measured_rate() {
             s += &format!(" (arriving at {:.3})", m / 1e6);
         }
+        if let Some(r) = self.control.rate_warning(self.settings.sample_rate) {
+            s += &format!(
+                " — rate set looks wrong: the sender is likely at {:.3} MS/s",
+                r / 1e6
+            );
+        }
         let o = self.control.overflows();
         if o > 0 {
             s += &format!(", {o} buffers dropped");
@@ -815,6 +908,39 @@ impl Drop for NetIqSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_mismatch_suggests_the_common_rate() {
+        // the BGAN case: set 2.00, an RTL-SDR at 2.048 arrives at ~2.046
+        assert_eq!(rate_mismatch(2.0e6, 2.046e6), Some(2.048e6));
+        assert_eq!(rate_mismatch(2.0e6, 2.4013e6), Some(2.4e6));
+        // within 1.5 %: fine (clock error, a UDP datagram lost)
+        assert_eq!(rate_mismatch(2.0e6, 2.02e6), None);
+        assert_eq!(rate_mismatch(8.0e6, 7.95e6), None);
+        // nothing common nearby: the measurement itself
+        assert_eq!(rate_mismatch(2.0e6, 2.7e6), Some(2.7e6));
+    }
+
+    #[test]
+    fn rate_window_ignores_waiting_and_the_first_burst() {
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut w = RateWindow::default();
+        // 30 s with no sender
+        assert_eq!(w.update(at(30.0), 0), None);
+        // first data: a 1 MB burst, then 1 MB/s
+        let bytes = |s: f64| 1_000_000 + ((s - 30.0) * 1e6) as u64;
+        assert_eq!(w.update(at(30.0), bytes(30.0)), None);
+        assert_eq!(w.update(at(31.0), bytes(31.0)), None);
+        assert_eq!(w.update(at(32.5), bytes(32.5)), None); // first point
+        let mut last = None;
+        for i in 1..=60 {
+            last = w.update(at(32.5 + i as f64 * 0.25), bytes(32.5 + i as f64 * 0.25));
+        }
+        let (rate, span) = last.unwrap();
+        assert!((rate - 1e6).abs() < 1e3, "{rate}");
+        assert!((span - 10.0).abs() < 0.3, "{span}");
+    }
 
     fn settings(mode: NetMode, addr: &str, sample: NetSample) -> NetIqSettings {
         NetIqSettings {

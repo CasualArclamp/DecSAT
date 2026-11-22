@@ -258,6 +258,8 @@ fn main() -> eframe::Result {
                     app.net_settings.center_hz = f * 1e6;
                 }
                 app.net_lo_hz = opts.lo_mhz.unwrap_or(0.0) * 1e6;
+                // show the Network IQ window, so a screenshot has its status
+                app.net_open = true;
                 app.start_net();
             }
             Ok(Box::new(app))
@@ -1633,6 +1635,8 @@ impl App {
                         self.rf_center_mhz = self.mix(self.net_lo_hz, self.net_settings.center_hz) / 1e6;
                     }
                 });
+                // set inside the borrow of `net_control`, acted on after it
+                let mut use_rate = None;
                 if let Some(c) = &self.net_control {
                     let rate = c
                         .measured_rate()
@@ -1643,11 +1647,31 @@ impl App {
                         n => format!(", {n} buffers dropped"),
                     };
                     ui.label(format!("{}{rate}{dropped}", c.state()));
+                    // A wrong rate scales every frequency and symbol rate read
+                    // from the stream, so fixed-rate decoders never lock.
+                    if let Some(r) = c.rate_warning(self.net_settings.sample_rate) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0xff, 0xb0, 0x40),
+                            format!(
+                                "The rate set ({:.3} MS/s) does not match what arrives: the sender is likely at {:.3} MS/s.                                  Frequencies and symbol rates read {:+.1} % off until it is set.",
+                                self.net_settings.sample_rate / 1e6,
+                                r / 1e6,
+                                (self.net_settings.sample_rate / r - 1.0) * 100.0,
+                            ),
+                        );
+                        if ui.button(format!("Use {:.3} MS/s (reconnect)", r / 1e6)).clicked() {
+                            use_rate = Some(r);
+                        }
+                    }
                     if c.is_rtl_tcp() {
                         ui.label("rtl_tcp server: the frequency is tuned from here.");
                     } else {
                         ui.label("Tune at the sender; the frequency here only labels the band.");
                     }
+                }
+                if let Some(r) = use_rate {
+                    self.net_settings.sample_rate = r;
+                    self.start_net();
                 }
                 ui.label("Main Start/Stop controls the stream. Address, type and rate changes need a restart.");
                 if self.net_running && ui.button("Apply settings (reconnect)").clicked() {
