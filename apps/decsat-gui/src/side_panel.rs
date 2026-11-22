@@ -3294,6 +3294,32 @@ fn code_row(ui: &mut Ui, f: Option<&FecStats>, good: Color32, wait: Color32) {
         (0, t) => format!(" · {t} turns followed"),
         (l, t) => format!(" · {l} relocks · {t} turns followed"),
     };
+    // A unique word found in the coded stream (and taken out before the
+    // code search).
+    if let Some(u) = f.and_then(|f| f.uw.as_ref()) {
+        ui.label("Framing");
+        let mut text = u.describe();
+        if u.misses > 0 || u.slips > 0 || u.losses > 0 {
+            text += &format!(
+                " · {} missed · {} slips · {} relocks",
+                u.misses, u.slips, u.losses
+            );
+        }
+        ui.colored_label(good, text).on_hover_text(format!(
+            "A fixed run of symbols at a fixed spacing: found by folding the \
+             symbols on their period, then dropped from every frame so the code \
+             search sees the data symbols alone.\n\nUW (quadrant steps from its \
+             first symbol): {}\n{} frames.{}",
+            u.uw,
+            u.frames,
+            if u.superframe.is_some() {
+                "\nSuperframe: one frame in each repeats exactly."
+            } else {
+                ""
+            }
+        ));
+        ui.end_row();
+    }
     ui.label("Code");
     let r = if let Some((v, r)) = k7.and_then(|v| v.rate.map(|r| (v, r))) {
         ui.colored_label(
