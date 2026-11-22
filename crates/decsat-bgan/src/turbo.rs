@@ -117,7 +117,6 @@ pub struct TurboDecoder {
     le2: Vec<f32>,
     la2: Vec<f32>,
     lsys_i: Vec<f32>,
-    prev: Vec<u8>,
 }
 
 impl TurboDecoder {
@@ -235,9 +234,15 @@ impl TurboDecoder {
     /// Iterative decoding. `lsys`, `lp`, `lq`: channel LLRs, length DF,
     /// punctured positions zero. `escale` scales extrinsics (max-log-MAP
     /// overestimates their reliability; ~0.75 recovers most of the 0.3-0.5 dB
-    /// it loses to true log-MAP). Stops early when the hard decisions are
-    /// unchanged after an iteration (never before the second). Returns the
-    /// number of iterations run; hard bits go to `bits`, posterior LLRs to `post`.
+    /// it loses to true log-MAP). Always runs all `niter` iterations and
+    /// returns that count; hard bits go to `bits`, posterior LLRs to `post`.
+    ///
+    /// There used to be an early stop when an iteration changed no hard
+    /// decision. Measured over 44000 accepted blocks on nine recordings, it
+    /// let three corrupt blocks through: their decisions held for one
+    /// iteration and then moved again, and the stopped decode (parity
+    /// agreement 0.73-0.84) passed both acceptance tests where the finished
+    /// one reached 0.96-0.98. It saved about a quarter of the turbo time.
     #[allow(clippy::too_many_arguments)]
     pub fn decode(
         &mut self,
@@ -257,16 +262,12 @@ impl TurboDecoder {
         }
         self.lsys_i.clear();
         self.lsys_i.extend(perm.iter().map(|&j| lsys[j as usize]));
-        self.prev.clear();
-        self.prev.resize(n, 2);
         bits.clear();
         bits.resize(n, 0);
         post.clear();
         post.resize(n, 0.0);
 
-        let mut ran = 0;
-        for it in 0..niter {
-            ran = it + 1;
+        for _ in 0..niter {
             let la1 = std::mem::take(&mut self.la1);
             let mut le1 = std::mem::take(&mut self.le1);
             self.bcjr(lsys, lp, &la1, true, &mut le1);
@@ -282,27 +283,18 @@ impl TurboDecoder {
                 la1[perm[j] as usize] = escale * le2[j];
             }
             // hard decisions on this iteration's posterior
-            let mut changed = false;
             for k in 0..n {
                 let pv = lsys[k] + la1[k] + le1[k];
                 post[k] = pv;
-                let b = u8::from(pv <= 0.0);
-                if b != self.prev[k] {
-                    changed = true;
-                }
-                self.prev[k] = b;
-                bits[k] = b;
+                bits[k] = u8::from(pv <= 0.0);
             }
             self.la1 = la1;
             self.le1 = le1;
             self.la2 = la2;
             self.lsys_i = lsys_i;
             self.le2 = le2;
-            if !changed && it >= 1 {
-                break;
-            }
         }
-        ran
+        niter
     }
 }
 
