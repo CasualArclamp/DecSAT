@@ -941,10 +941,18 @@ impl BganRx {
     }
 }
 
-/// Trial-decode `sym` at each level in `order` until one is accepted. The
-/// first attempt at a level uses a short run of iterations (a wrong level
-/// never converges); a near miss is rerun at full length. Early stopping is
-/// safe: over 22400 labelled tries no block passed at two levels (DecBGAN).
+/// Trial-decode `sym` at each level in `order` until one is accepted.
+/// Stopping at the first accepted level is safe: over 22400 labelled tries no
+/// block passed at two levels (DecBGAN).
+///
+/// Every decode that is accepted is a full 8-iteration one. A short run
+/// that passes the checks is not trusted on its own: a decode cut off before
+/// it settles can pass both tests with a corrupt payload (see
+/// `TurboDecoder::decode`). Only when behind real time (`tight`) are levels
+/// screened with 3 iterations, and a pass is then confirmed at 8. Screening
+/// with 6 iterations when not behind was dropped too: some correct blocks
+/// only converge at the 7th or 8th, and it lost 20 of 44000 blocks on nine
+/// recordings.
 fn try_levels(
     sc: &mut BlockScratch,
     sym: &[C32],
@@ -955,24 +963,12 @@ fn try_levels(
         let Ok(t) = tables::tables(LEVELS[lv]) else {
             continue;
         };
-        if rank == 0 {
-            // the expected level: decode it properly straight away
-            let d = fec::decode_block(sc, sym, &t, 8);
-            if d.accepted() {
-                return Some((lv, d));
-            }
+        if rank > 0 && tight && !fec::decode_block(sc, sym, &t, 3).accepted() {
             continue;
         }
-        let first = fec::decode_block(sc, sym, &t, if tight { 3 } else { 6 });
-        if first.accepted() {
-            let full = fec::decode_block(sc, sym, &t, 8);
-            return Some((lv, if full.accepted() { full } else { first }));
-        }
-        if first.agreement > 0.58 && !tight {
-            let full = fec::decode_block(sc, sym, &t, 8);
-            if full.accepted() {
-                return Some((lv, full));
-            }
+        let d = fec::decode_block(sc, sym, &t, 8);
+        if d.accepted() {
+            return Some((lv, d));
         }
     }
     None
