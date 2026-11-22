@@ -445,6 +445,18 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             Some(a) if !a.searching => format!("AERO {} · no lock", a.channel),
             _ => "AERO searching".into(),
         },
+        // "GMR2 901-11 54F5 · 12.0 dB": the network, location area and Eb/N0.
+        DecoderKind::Gmr2 => match &st.gmr2 {
+            Some(g) if g.locked => match &g.si3 {
+                Some(s) => format!(
+                    "GMR2 {}-{} {:04X} · {:.1} dB",
+                    s.mcc, s.mnc, s.lac, g.eb_n0_db
+                ),
+                None => format!("GMR2 · {:.1} dB", g.eb_n0_db),
+            },
+            Some(g) if !g.searching => "GMR2 · no lock".into(),
+            _ => "GMR2 searching".into(),
+        },
         // "BGAN 12.4 dB · 87 %": Es/N0 and the share of blocks that decoded.
         DecoderKind::Bgan => match &st.bgan {
             Some(b) if b.rx.locked && b.rx.blocks_total > 0 => format!(

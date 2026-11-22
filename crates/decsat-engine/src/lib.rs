@@ -15,6 +15,7 @@ pub mod estimate;
 pub mod fec;
 pub mod floor;
 pub mod frontend;
+pub mod gmr2;
 pub mod identify;
 pub mod period;
 pub mod plan_feed;

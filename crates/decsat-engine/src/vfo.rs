@@ -115,6 +115,11 @@ pub enum DecoderKind {
     /// bursts, C voice at 8400 or 21000 bit/s — then its signalling, ACARS
     /// and ADS-C read and its voice played.
     Aero,
+    /// Inmarsat GMR-2+ (IsatPhone) 50 kHz forward control carrier
+    /// ([`crate::gmr2`]): the S-SCH (spot-beam colour codes, frame number)
+    /// and the broadcast System Information (network, location area,
+    /// neighbours, timing). Measured, not in the GMR-2 specification.
+    Gmr2,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -147,7 +152,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 34] = [
+    pub const ALL: [DecoderKind; 35] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -168,6 +173,7 @@ impl DecoderKind {
         DecoderKind::BarkerTdm,
         DecoderKind::Bgan,
         DecoderKind::Aero,
+        DecoderKind::Gmr2,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::ReturnPool,
@@ -210,6 +216,9 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "Barker-11 spread BPSK (15.15 kBd TDM) → frames, data blocks",
             DecoderKind::Bgan => "Inmarsat BGAN forward (16-QAM turbo) → payload, IP, findings",
             DecoderKind::Aero => "Inmarsat Aero (P, R/T, C) → ACARS, ADS-C, voice",
+            DecoderKind::Gmr2 => {
+                "Inmarsat GMR-2+ (IsatPhone) 50 kHz carrier → sync, System Information"
+            }
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
@@ -251,6 +260,7 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "barker",
             DecoderKind::Bgan => "bgan",
             DecoderKind::Aero => "aero",
+            DecoderKind::Gmr2 => "gmr2",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::ReturnPool => "return-pool",
@@ -376,6 +386,7 @@ impl DecoderKind {
                 | DecoderKind::BarkerTdm
                 | DecoderKind::Bgan
                 | DecoderKind::Aero
+                | DecoderKind::Gmr2
         )
     }
 
@@ -401,6 +412,7 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "B11",
             DecoderKind::Bgan => "BGAN",
             DecoderKind::Aero => "AERO",
+            DecoderKind::Gmr2 => "GMR2",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::ReturnPool => "POOL",
@@ -787,6 +799,8 @@ pub struct VfoStatus {
     pub bgan: Option<decsat_bgan::session::BganView>,
     /// Inmarsat Classic Aero: the channel, its figures and what it carried.
     pub aero: Option<crate::aero::AeroView>,
+    /// Inmarsat GMR-2+: the beam, frame number and System Information.
+    pub gmr2: Option<crate::gmr2::Gmr2View>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -1178,6 +1192,8 @@ enum Decoder {
     Bgan(Box<decsat_bgan::session::BganSession>),
     /// Inmarsat Classic Aero: DecAero's channel worker on the baseband.
     Aero(Box<crate::aero::AeroSession>),
+    /// Inmarsat GMR-2+: the 50 kHz forward control carrier.
+    Gmr2(Box<crate::gmr2::Gmr2Session>),
     /// A satellite beacon: the receiver, and its files while recording.
     Beacon {
         rx: Box<crate::beacon::BeaconRx>,
@@ -1596,6 +1612,9 @@ impl Worker {
             DecoderKind::Bgan => Decoder::Bgan(Box::new(decsat_bgan::session::BganSession::new(
                 ddc.out_rate(),
             ))),
+            DecoderKind::Gmr2 => {
+                Decoder::Gmr2(Box::new(crate::gmr2::Gmr2Session::new(ddc.out_rate())))
+            }
             DecoderKind::Aero => Decoder::Aero(Box::new(crate::aero::AeroSession::new(
                 ddc.out_rate(),
                 s.bandwidth_hz,
@@ -2425,6 +2444,7 @@ impl Worker {
                     }
                 }
             }
+            Decoder::Gmr2(g) => g.push(&self.bb),
             Decoder::Aero(a) => {
                 let tag = format!(
                     "{}-{}",
@@ -2655,6 +2675,7 @@ impl Worker {
         st.beacon = None;
         st.bgan = None;
         st.aero = None;
+        st.gmr2 = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2897,6 +2918,13 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Gmr2(g) => {
+                let v = g.view();
+                st.message = v.message.clone();
+                st.scatter = v.scatter.clone();
+                st.symbol_rate = Some(crate::gmr2::BIT_RATE / 2.0);
+                st.gmr2 = Some(v);
+            }
             Decoder::Aero(a) => {
                 let mut v = a.view();
                 // Measured on a recording: a 2 kHz VFO (5 kS/s of IQ) names

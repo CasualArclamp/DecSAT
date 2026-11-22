@@ -85,6 +85,7 @@ for telling them apart from the outbound
 | **IS-19 DAMA outbound → packets and call signalling**: the 102.4 kBd QPSK outbounds of a DAMA telephony network on Intelsat 19 (vendor unknown — frame, pilots, scrambler and packet stream all measured from a recording): frames found and read the right way up, carrier slips put right from the pilots, the packet stream descrambled, and the **request acks** and **channel assignments** picked out — an assignment goes out ~0.4 s before a call's two carriers key up; every packet to a `.csv` on Record | ✅ on a live recording: every call set-up in it, to the millisecond |
 | **Satellite beacons**: the carrier tracked and measured — frequency (absolute, with the LO), drift, C/N0, level, charted — and any telemetry on it found blind: a data subcarrier phase-modulating the carrier (PCM/PSK/PM), data straight on its phase (PCM/PM) or a suppressed carrier (BPSK/QPSK); NRZ or bi-phase; minor frames on IRIG 106's sync words, CCSDS's marker or one found blind, in any polarity or differential coding; the minor-frame counter and the major frame as a map of which words change, any word plotted against time; CCSDS Reed–Solomon (dual basis, interleaved), randomiser, the K = 7 code and TM/AOS transfer frames; a pointing tone that rises with the level; frames and the carrier's log to files | ✅ on live beacons — Intelsat 19's: 4800 bit/s bi-phase on a 48 kHz subcarrier, IRIG frames; Eutelsat 172B's: 9600 symbol/s NRZ on a 76.8 kHz subcarrier, K = 7 coded CCSDS TM frames — every frame |
 | **Inmarsat Classic Aero → ACARS, ADS-C, voice**: the L-band aeronautical service on a VFO, the channel named from the signal: the P channel (ground to aircraft, 600, 1200 or 10500 bit/s), R and T channel bursts (aircraft to ground) and C channel telephone calls (8400 bit/s AMBE, 21000 bit/s 9.6 kbit/s MP-LPC). Signalling in words, ACARS messages with ADS-C positions read, voice played. [DecAero](https://github.com/CasualArclamp/DecAero)'s receiver, built in. | ✅ on recordings: P channels at 600, 1200 and 10500 bit/s with ACARS, and a 21000 bit/s call. Bursts and 8400 bit/s voice work in DecAero and are not yet tried here |
+| **Inmarsat GMR-2+ (IsatPhone) → sync, System Information**: the 50 kHz forward control carriers of Inmarsat's satellite phone network on a VFO: the sync channel (spot-beam colour codes, frame number) and the broadcast System Information (network, location area, neighbour beams, timing, the beam map). Its coding was worked out from recordings: it is not in the GMR-2 specification. | ✅ on a recording of channel 88: every sync and broadcast block but a few decodes |
 | **QO-100's PSK beacon** (AO-40's uncoded format, 400 bit/s): frames with CRC, the blocks as text, housekeeping values when sent; also from a sound card in the small `qo100-beacon` app | ✅ on WebSDR recordings of 10489.750 MHz, every frame's CRC good, and the FEC block after each decoded |
 | Narrow carriers: VFOs down to 500 Hz, ~10 kBd SCPC carriers lock; short bursts landing on a carrier (Bluetooth leaking into the HackRF) coasted through | ✅ |
 | IQ recorder and spectrum-only VFOs | ✅ |
@@ -904,6 +905,30 @@ BPSK bi-phase chips, and Identify says so rather than calling them a code.
 
 ```bash
 decsat decode beacon_533333Sps.cf32 --decoder beacon   # carrier, telemetry, frames, the last few in hex
+```
+
+### Inmarsat GMR-2+ (IsatPhone, L band)
+
+Decoder **Inmarsat GMR-2+** (`gmr2` on the command line): put a 60 kHz VFO
+on one of the 50 kHz forward carriers around 1525–1559 MHz that pulse four
+times a second (a control carrier: on for half of each 235 ms multiframe).
+It decodes:
+
+- the **sync channel**: the spot beam's colour codes (NCC, BCCC) and the
+  TDMA frame number (T1, T2);
+- the **broadcast System Information**: SI3 (network MCC-MNC, location
+  area, paging, access), SI2 (neighbour beams), SI9 (timing advance, epoch)
+  and the GMR-2+ messages not in the GMR-2 specification (a 22-part beam map
+  and two others, shown raw).
+
+The card gives the network and location area, the Eb/N0, the beam, the
+frame number, the blocks decoded and the messages seen; hover the last line
+for the messages themselves. The constellation shows the OQPSK carrier as
+four clusters. Traffic channels are encrypted (A5-GMR-2) and not touched;
+the 200 kHz full-rate carriers are not decoded.
+
+```bash
+decsat decode gmr2_ch88.cf32 --decoder gmr2 --offset=980 --bandwidth 60000 --fast
 ```
 
 ### Inmarsat Classic Aero (L band)

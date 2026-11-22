@@ -366,6 +366,7 @@ pub struct Views {
     pub barker: Option<decsat_modem::barker::BarkerView>,
     pub bgan: Option<decsat_bgan::session::BganView>,
     pub aero: Option<decsat_engine::aero::AeroView>,
+    pub gmr2: Option<decsat_engine::gmr2::Gmr2View>,
 }
 
 /// The views compare by their encoding (some of their types have no `==`):

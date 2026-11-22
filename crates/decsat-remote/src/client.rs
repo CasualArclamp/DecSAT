@@ -941,6 +941,7 @@ fn vfo_status(w: VfoWire, ts: Option<TsView>, v: &LocalVfo) -> VfoStatus {
         barker: views.barker,
         bgan: views.bgan,
         aero: views.aero,
+        gmr2: views.gmr2,
     }
 }
 
