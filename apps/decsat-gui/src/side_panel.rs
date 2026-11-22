@@ -6086,15 +6086,25 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
     let carrier = st.carrier;
     // Rust note: `filter` keeps the Option only while its closure is true.
     let carrier_lock = carrier.filter(|c| c.locked);
+    // The BGAN decoder has its own receiver and never fills `st.carrier`, so
+    // its lock comes from its own status; without this the card said
+    // "waiting for the carrier" in grey while it was locked and decoding.
+    let bgan = st.bgan.as_ref().map(|b| &b.rx);
+    let bgan_lock = bgan.filter(|r| r.locked);
     let colour = match carrier {
         _ if !v.settings.enabled || st.out_of_span => grey,
         Some(c) if c.locked => HEALTH_OK,
         Some(_) => HEALTH_OK.gamma_multiply(0.55),
+        None if bgan_lock.is_some() => HEALTH_OK,
         // Waiting for its carrier; a mode with no carrier loop just runs.
         None if demodulates => grey,
         None => HEALTH_OK,
     };
-    let space_hz = vfo_rf.map(|f| f + carrier_lock.map_or(0.0, |c| c.offset_hz));
+    let offset_hz = carrier_lock
+        .map(|c| c.offset_hz)
+        .or(bgan_lock.map(|r| r.carrier_hz))
+        .unwrap_or(0.0);
+    let space_hz = vfo_rf.map(|f| f + offset_hz);
     title_bar(
         ui,
         mode_title(decoder),
@@ -6102,7 +6112,7 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
         st.symbol_rate,
         Some(v.settings.bandwidth_hz),
         space_hz,
-        carrier_lock.is_some() || !demodulates,
+        carrier_lock.is_some() || bgan_lock.is_some() || !demodulates,
     );
 
     // The bar's fixed scale, its fill and the line under it. Rust note:
@@ -6167,6 +6177,22 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
             "not locked".to_string()
         };
         right = format!("{:+.0} Hz", c.offset_hz);
+    } else if let Some(r) = bgan.filter(|_| v.settings.enabled && !st.out_of_span) {
+        // Es/N0 on the same 0-20 dB scale as a carrier's.
+        (lo, hi) = (0.0, 20.0);
+        fill = r.locked.then_some(r.esn0_db);
+        left = if r.tables_missing {
+            "ETSI Annex C tables missing".to_string()
+        } else if r.locked {
+            format!("locked · Es/N0 {:.1} dB · UW {}", r.esn0_db, r.uw_level)
+        } else {
+            "searching for the frame sync…".to_string()
+        };
+        right = if r.locked {
+            format!("{:+.0} Hz", r.carrier_hz)
+        } else {
+            String::new()
+        };
     } else {
         (lo, hi) = (-70.0, 0.0);
         fill = (colour != grey).then_some(st.level_db);
