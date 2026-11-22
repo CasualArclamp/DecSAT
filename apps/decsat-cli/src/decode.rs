@@ -905,6 +905,17 @@ pub(crate) fn report(st: &VfoStatus) {
                 .map_or(String::new(), |o| format!(", overhead {o:06X}h"))
         );
     }
+    if let Some(u) = &f.uw {
+        println!(
+            "framing: {} · UW {} · {} frames, {} missed, {} slips, {} relocks",
+            u.describe(),
+            u.uw,
+            u.frames,
+            u.misses,
+            u.slips,
+            u.losses
+        );
+    }
     if let Some(v) = &f.viterbi {
         println!(
             "viterbi: rate {}, {}, channel BER {:.2e}, {} bits, {} searches, {} relocks, {} turns followed",

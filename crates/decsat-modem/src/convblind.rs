@@ -253,6 +253,12 @@ pub struct Found {
 /// holds in half; the best of thousands of chance vectors stays under
 /// ~0.56 on the windows judged).
 const FIT_MIN: f32 = 0.62;
+/// The most raw bit errors a found code may imply. A rate-½ Viterbi
+/// decoder stops working near 8 % (K = 7 at Eb/N0 ≈ 3 dB on QPSK); a
+/// check that fits only that badly is data structure (QPSK symbols that
+/// favour some points), not a code to decode. A 166 kBd Inmarsat L-band
+/// carrier fitted K = 3 and K = 4 checks at 0.17.
+const MAX_CHANNEL_BER: f32 = 0.1;
 /// Windows a check is judged on, and handfuls of windows tried per K.
 const JUDGE: usize = 6000;
 const TRIES: usize = 1500;
@@ -418,13 +424,25 @@ pub fn find_pieces(pieces: &[&[u8]]) -> Option<Found> {
                     if !(first && last && even && odd) || tried.contains(&h) {
                         continue;
                     }
+                    // The same taps on both outputs (g₁ = g₂) says only
+                    // that c₁ and c₂ tend to agree: data whose QPSK symbols
+                    // favour two points, not a code. (A 166 kBd Inmarsat
+                    // L-band carrier "locked" as K = 3 (5, 5) at a channel
+                    // BER of 0.17 this way, 2026-11-22.)
+                    let code = code_of(h, k);
+                    if code.g[0] == code.g[1] {
+                        continue;
+                    }
                     tried.push(h);
                     // Holding as 1 everywhere is as good: an inverted output.
                     let f0 = fit(&rows, h, 0);
                     let (f, value) = if f0 >= 0.5 { (f0, 0) } else { (1.0 - f0, 1) };
-                    if f >= FIT_MIN && best.is_none_or(|b| f > b.fit) {
+                    if f >= FIT_MIN
+                        && ber_from_fit(f, h.count_ones()) <= MAX_CHANNEL_BER
+                        && best.is_none_or(|b| f > b.fit)
+                    {
                         best = Some(Found {
-                            code: code_of(h, k),
+                            code,
                             phase,
                             fit: f,
                             check: h,
@@ -777,6 +795,11 @@ impl ConvRx {
                 self.stats.losses += 1;
                 self.held = std::mem::take(&mut lock.recent);
                 self.lock = None;
+                // No code until one is found again (else a code that held
+                // only for a stretch would stay on show after the search
+                // gives up).
+                self.stats.code = None;
+                self.stats.orientation = None;
             }
         }
     }

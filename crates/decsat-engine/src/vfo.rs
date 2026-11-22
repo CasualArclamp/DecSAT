@@ -3228,7 +3228,10 @@ fn offer_code_search(w: &FecWorker, modulation: decsat_core::Modulation, syms: &
 
 /// A Viterbi VFO's status line.
 fn viterbi_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
-    format!("{lock} · {}", code_text(f))
+    match f.and_then(|f| f.uw.as_ref()) {
+        Some(u) => format!("{lock} · {} · {}", u.describe(), code_text(f)),
+        None => format!("{lock} · {}", code_text(f)),
+    }
 }
 
 /// A payload label's format: up to its first comma outside brackets (the

@@ -28,6 +28,7 @@ pub mod streams;
 pub mod superframe;
 pub mod tdma;
 pub mod tx;
+pub mod uwstrip;
 pub mod vfo;
 pub mod wireshark;
 pub mod zoom;
