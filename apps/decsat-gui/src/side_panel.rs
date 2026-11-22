@@ -1088,6 +1088,46 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                     ui.label(note.small());
                 });
                 ui.end_row();
+
+                // A decoder slower than real time falls behind into a
+                // buffer (up to 60 s); pausing stops new input going in, so
+                // it catches up.
+                ui.label("Demod");
+                ui.horizontal(|ui| {
+                    let (label, tip) = if s.paused {
+                        ("▶ Resume", "Take the live input again")
+                    } else {
+                        (
+                            "⏸ Pause",
+                            "Stop taking new input, so the decoder works through what it has buffered (input meanwhile is not decoded)",
+                        )
+                    };
+                    if ui.add(egui::Button::new(label).selected(s.paused)).on_hover_text(tip).clicked() {
+                        s.paused = !s.paused;
+                    }
+                    if let Some(b) = bg {
+                        let mut note = if b.backlog_s >= 0.05 {
+                            format!("{:.1} s behind", b.backlog_s)
+                        } else if s.paused {
+                            "caught up".to_string()
+                        } else {
+                            "live".to_string()
+                        };
+                        if b.skipped_s >= 0.05 {
+                            note += &format!(" · {:.0} s skipped", b.skipped_s);
+                        }
+                        if b.overflow_s >= 0.05 {
+                            note += &format!(" · {:.0} s lost (buffer full)", b.overflow_s);
+                        }
+                        let text = RichText::new(note).small();
+                        ui.label(if b.backlog_s >= 2.0 || b.overflow_s > 0.0 {
+                            text.color(Color32::from_rgb(240, 200, 80))
+                        } else {
+                            text.weak()
+                        });
+                    }
+                });
+                ui.end_row();
             }
 
             ui.label("");

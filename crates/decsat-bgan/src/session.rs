@@ -39,6 +39,19 @@ pub struct BganView {
     /// (this crate only hands over the packets, see `take_live`).
     pub wireshark: Option<(u64, u64)>,
     pub wireshark_error: Option<String>,
+    /// Input buffered for the decoder, s: it falls behind there instead of
+    /// losing input. Filled in by the engine, which holds the buffer.
+    #[serde(default)]
+    pub backlog_s: f64,
+    /// New input is being thrown away so the decoder can catch up.
+    #[serde(default)]
+    pub paused: bool,
+    /// Input never decoded, s: thrown away while paused, and lost because
+    /// the buffer was full.
+    #[serde(default)]
+    pub skipped_s: f64,
+    #[serde(default)]
+    pub overflow_s: f64,
 }
 
 #[derive(Default)]
@@ -321,6 +334,10 @@ impl BganSession {
             recent: self.layers.recent.iter().rev().take(12).cloned().collect(),
             wireshark: None,
             wireshark_error: None,
+            backlog_s: 0.0,
+            paused: false,
+            skipped_s: 0.0,
+            overflow_s: 0.0,
         }
     }
 }

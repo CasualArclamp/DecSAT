@@ -258,6 +258,8 @@ fn main() -> eframe::Result {
                     app.net_settings.center_hz = f * 1e6;
                 }
                 app.net_lo_hz = opts.lo_mhz.unwrap_or(0.0) * 1e6;
+                // show the Network IQ window, so a screenshot has its status
+                app.net_open = true;
                 app.start_net();
             }
             Ok(Box::new(app))
@@ -384,6 +386,12 @@ struct App {
     net_settings: decsat_io::NetIqSettings,
     net_lo_hz: f64,
     net_open: bool,
+    /// Switch Network IQ to the rate that arrives when it is off by more
+    /// than 1.5 % (saved as `device.net.auto_rate`).
+    net_auto_rate: bool,
+    /// Rate switches made automatically since the user last started the
+    /// stream: capped, so a sender that keeps stalling cannot loop it.
+    net_auto_switches: u8,
     net_selected: bool,
     net_running: bool,
     /// A live radio's rate is divided by this before the engine (1 = none):
@@ -538,6 +546,8 @@ impl Default for App {
             },
             net_lo_hz: 0.0,
             net_open: false,
+            net_auto_rate: true,
+            net_auto_switches: 0,
             net_selected: false,
             net_running: false,
             decimation: 1,
@@ -713,6 +723,10 @@ impl App {
                 ("rate", u.sample_rate.to_string()),
                 ("center", u.center_hz.to_string()),
                 ("lo", self.net_lo_hz.to_string()),
+                (
+                    "auto_rate",
+                    if self.net_auto_rate { "1" } else { "0" }.into(),
+                ),
             ] {
                 p.push((format!("device.net.{k}"), v));
             }
@@ -1166,6 +1180,9 @@ impl App {
         if let Some(v) = get("device.net.lo").and_then(|s| s.parse().ok()) {
             self.net_lo_hz = v;
         }
+        if let Some(v) = get("device.net.auto_rate") {
+            self.net_auto_rate = v != "0";
+        }
         if let Some(v) = get("device.remote.addr") {
             self.remote.addr = v.to_string();
         }
@@ -1542,6 +1559,7 @@ impl App {
 
     /// Open the network stream with the panel's settings.
     fn start_net(&mut self) {
+        self.net_auto_switches = 0;
         self.stop_source();
         self.path = None;
         let mut s = self.net_settings.clone();
@@ -1566,6 +1584,32 @@ impl App {
                 self.start_engine(Box::new(src));
             }
             Err(e) => self.note = format!("Network IQ: {e}"),
+        }
+    }
+
+    /// Auto-detect: once the arrival rate has been off the rate set for 5 s
+    /// ([`decsat_io::NetIqControl::rate_warning`]), adopt it and reconnect.
+    /// Runs every frame, the window open or not.
+    fn net_auto_rate(&mut self) {
+        if !self.net_running || !self.net_auto_rate || self.net_auto_switches >= 2 {
+            return;
+        }
+        let Some(c) = &self.net_control else { return };
+        if c.is_rtl_tcp() {
+            return; // the rate is the one we asked the server for
+        }
+        if let Some(r) = c.rate_warning(self.net_settings.sample_rate) {
+            let was = self.net_settings.sample_rate;
+            self.net_settings.sample_rate = r;
+            let n = self.net_auto_switches + 1;
+            self.start_net();
+            self.net_auto_switches = n;
+            self.note = format!(
+                "Network IQ: rate auto-detected, {:.3} MS/s (was set to {:.3}); {}",
+                r / 1e6,
+                was / 1e6,
+                self.note.trim_start_matches("Network IQ: ")
+            );
         }
     }
 
@@ -1604,6 +1648,8 @@ impl App {
                     {
                         self.net_settings.sample_rate = f * 1e6;
                     }
+                    ui.checkbox(&mut self.net_auto_rate, "auto-detect")
+                        .on_hover_text("When what arrives is more than 1.5 % off the rate set (5 s measured), switch to it and reconnect");
                 });
                 decimation::row(
                     ui,
@@ -1633,6 +1679,8 @@ impl App {
                         self.rf_center_mhz = self.mix(self.net_lo_hz, self.net_settings.center_hz) / 1e6;
                     }
                 });
+                // set inside the borrow of `net_control`, acted on after it
+                let mut use_rate = None;
                 if let Some(c) = &self.net_control {
                     let rate = c
                         .measured_rate()
@@ -1643,11 +1691,31 @@ impl App {
                         n => format!(", {n} buffers dropped"),
                     };
                     ui.label(format!("{}{rate}{dropped}", c.state()));
+                    // A wrong rate scales every frequency and symbol rate read
+                    // from the stream, so fixed-rate decoders never lock.
+                    if let Some(r) = c.rate_warning(self.net_settings.sample_rate) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0xff, 0xb0, 0x40),
+                            format!(
+                                "The rate set ({:.3} MS/s) does not match what arrives: the sender is likely at {:.3} MS/s.                                  Frequencies and symbol rates read {:+.1} % off until it is set.",
+                                self.net_settings.sample_rate / 1e6,
+                                r / 1e6,
+                                (self.net_settings.sample_rate / r - 1.0) * 100.0,
+                            ),
+                        );
+                        if ui.button(format!("Use {:.3} MS/s (reconnect)", r / 1e6)).clicked() {
+                            use_rate = Some(r);
+                        }
+                    }
                     if c.is_rtl_tcp() {
                         ui.label("rtl_tcp server: the frequency is tuned from here.");
                     } else {
                         ui.label("Tune at the sender; the frequency here only labels the band.");
                     }
+                }
+                if let Some(r) = use_rate {
+                    self.net_settings.sample_rate = r;
+                    self.start_net();
                 }
                 ui.label("Main Start/Stop controls the stream. Address, type and rate changes need a restart.");
                 if self.net_running && ui.button("Apply settings (reconnect)").clicked() {
@@ -3456,6 +3524,7 @@ impl eframe::App for App {
         self.pluto_panel(ui.ctx());
         #[cfg(all(windows, feature = "rtl"))]
         self.rtl_panel(ui.ctx());
+        self.net_auto_rate();
         self.net_panel(ui.ctx());
         self.remote_window(ui.ctx());
         self.tick_remote();
