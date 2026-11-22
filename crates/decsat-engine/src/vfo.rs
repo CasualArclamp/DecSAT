@@ -636,6 +636,10 @@ pub struct VfoSettings {
     /// offset from the carrier, its data's reach, the bit rate), each
     /// found blind when `None`.
     pub beacon_tune: crate::beacon::Tune,
+    /// BGAN: stop taking new input, so the decoder works through what is
+    /// buffered (see `Worker::bgan_backlog`). Not saved.
+    #[serde(default)]
+    pub paused: bool,
     /// Where the IQ recorder and the symbol writer write.
     pub record_dir: PathBuf,
     /// DVB-S2: append every good BBFRAME to this file, for working out
@@ -694,6 +698,7 @@ impl VfoSettings {
             programme_record: false,
             voice_auto: true,
             pointing_tone: false,
+            paused: false,
             beacon_tune: crate::beacon::Tune::default(),
             record_dir: std::env::temp_dir(),
             bbframes: None,
@@ -982,6 +987,32 @@ impl VfoHandle {
         // Dropping the sender also wakes a worker blocked on an empty queue.
         drop(self.tx);
         self.join.take()
+    }
+}
+
+/// BGAN: the most baseband buffered for a decoder behind, s (about 120 MB
+/// at the ~250 kS/s a BGAN VFO runs at).
+const BGAN_BACKLOG_S: f64 = 60.0;
+/// BGAN: the longest one turn of the worker spends on the backlog. Blocks
+/// come every ~40 ms, so the worker is back for the next one in time and
+/// its input queue never fills.
+const BGAN_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Feed `b` from the front of `q`, 20 ms of signal at a time, for up to
+/// [`BGAN_SLICE`].
+fn drain_bgan(
+    b: &mut decsat_bgan::session::BganSession,
+    q: &mut std::collections::VecDeque<Iq>,
+    rate: f64,
+) {
+    let t0 = Instant::now();
+    let chunk = ((0.02 * rate) as usize).max(1);
+    while !q.is_empty() && t0.elapsed() < BGAN_SLICE {
+        // `as_slices`: a ring buffer holds its contents in up to two runs
+        let (front, _) = q.as_slices();
+        let n = chunk.min(front.len());
+        b.push(&front[..n]);
+        q.drain(..n);
     }
 }
 
@@ -1366,6 +1397,15 @@ struct Worker {
     bgan_wireshark: Option<crate::wireshark::Live>,
     bgan_wireshark_ask: Option<u32>,
     bgan_wireshark_error: Option<String>,
+    /// BGAN, live: baseband waiting for the decoder. A turbo decoder slower
+    /// than real time falls behind here (up to [`BGAN_BACKLOG_S`]) instead
+    /// of having whole input blocks dropped, and works through it a slice at
+    /// a time between blocks ([`Worker::bgan_catch_up`]).
+    bgan_backlog: std::collections::VecDeque<Iq>,
+    /// BGAN: input never decoded, s: thrown away while paused, and lost
+    /// with the backlog full.
+    bgan_skipped_s: f64,
+    bgan_overflow_s: f64,
     /// Wait for the FEC thread rather than dropping its input.
     lossless: bool,
     /// Input samples dropped before reaching this thread, and how many of
@@ -1469,6 +1509,9 @@ impl Worker {
             bgan_wireshark: None,
             bgan_wireshark_ask: None,
             bgan_wireshark_error: None,
+            bgan_backlog: std::collections::VecDeque::new(),
+            bgan_skipped_s: 0.0,
+            bgan_overflow_s: 0.0,
             lossless: false,
             followed: 0.0,
             follow_samples: 0,
@@ -1703,6 +1746,7 @@ impl Worker {
             return;
         }
         self.follow_samples = 0;
+        let bgan_current = (self.bgan_backlog.len() as f64) < 0.1 * self.ddc.out_rate();
         let (f, rs) = match &self.decoder {
             Decoder::Dvbs2 { demod: Some(d), .. } if d.carrier_locked() => {
                 (d.carrier_offset_hz(), d.symbol_rate())
@@ -1718,7 +1762,8 @@ impl Worker {
             // (the loop tracks the rest, and each move is a step it must
             // take).
             // A BGAN carrier: followed like a beacon's, once well off centre.
-            Decoder::Bgan(b) if b.locked() => match b.carrier_offset_hz() {
+            // Not while it is behind: the move would reach the decoder late.
+            Decoder::Bgan(b) if b.locked() && bgan_current => match b.carrier_offset_hz() {
                 f if f.abs() > 0.02 * self.ddc.bandwidth() => (f, 0.0),
                 _ => return,
             },
@@ -1749,6 +1794,16 @@ impl Worker {
         self.followed += f;
     }
 
+    /// Work on the BGAN backlog between blocks; a backlog left by a decoder
+    /// since changed is dropped.
+    fn bgan_catch_up(&mut self) {
+        let rate = self.ddc.out_rate();
+        match &mut self.decoder {
+            Decoder::Bgan(b) => drain_bgan(b, &mut self.bgan_backlog, rate),
+            _ => self.bgan_backlog.clear(),
+        }
+    }
+
     fn run(
         mut self,
         rx: Receiver<VfoMsg>,
@@ -1775,13 +1830,28 @@ impl Worker {
             // With no input for a while (a file that ended, a paused
             // source) publish anyway: the FEC and CID threads may still be
             // finishing, and their state should show.
-            let msg = match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            // A BGAN decoder behind: look for input without waiting, and
+            // work on the backlog while there is none.
+            let wait = if self.bgan_backlog.is_empty() {
+                std::time::Duration::from_millis(250)
+            } else {
+                std::time::Duration::ZERO
+            };
+            let msg = match rx.recv_timeout(wait) {
                 Ok(m) => m,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    self.publish(0);
+                    if self.bgan_backlog.is_empty() {
+                        self.publish(0);
+                    } else {
+                        self.bgan_catch_up();
+                        if self.last_status_refresh.elapsed() >= STATUS_EVERY {
+                            self.last_status_refresh = std::time::Instant::now();
+                            self.publish(0);
+                        }
+                    }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -2325,7 +2395,23 @@ impl Worker {
                     }
                 }
                 b.set_live(self.bgan_wireshark.is_some());
-                b.push(&self.bb);
+                if self.lossless {
+                    // a file played losslessly waits for the decoder anyway
+                    b.push(&self.bb);
+                } else {
+                    let rate = self.ddc.out_rate();
+                    let secs = self.bb.len() as f64 / rate;
+                    if self.settings.paused {
+                        self.bgan_skipped_s += secs;
+                    } else if self.bgan_backlog.len() + self.bb.len()
+                        > (BGAN_BACKLOG_S * rate) as usize
+                    {
+                        self.bgan_overflow_s += secs;
+                    } else {
+                        self.bgan_backlog.extend(self.bb.iter().copied());
+                    }
+                    drain_bgan(b, &mut self.bgan_backlog, rate);
+                }
                 if let Some(w) = &mut self.bgan_wireshark {
                     let now = std::time::SystemTime::now();
                     for p in b.take_live() {
@@ -2859,6 +2945,10 @@ impl Worker {
                     .as_ref()
                     .map(|w| (w.written(), w.dropped));
                 v.wireshark_error = self.bgan_wireshark_error.clone();
+                v.backlog_s = self.bgan_backlog.len() as f64 / self.ddc.out_rate();
+                v.paused = self.settings.paused;
+                v.skipped_s = self.bgan_skipped_s;
+                v.overflow_s = self.bgan_overflow_s;
                 st.bgan = Some(v);
             }
             Decoder::Beacon { rx, files } => {
