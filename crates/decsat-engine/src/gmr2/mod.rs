@@ -300,7 +300,12 @@ impl Gmr2Session {
         let mid = r
             .get(2 * EDGE..r.len().saturating_sub(2 * EDGE))
             .unwrap_or(&[]);
-        for p in mid.as_chunks::<2>().0.iter().step_by((mid.len() / 600).max(1)) {
+        for p in mid
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .step_by((mid.len() / 600).max(1))
+        {
             self.scatter.push_back(Iq::new(p[0], p[1]));
         }
         while self.scatter.len() > SCATTER {
