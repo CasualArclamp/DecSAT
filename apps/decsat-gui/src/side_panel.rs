@@ -100,6 +100,8 @@ pub struct SideInput<'a> {
     pub have_source: bool,
     /// What carriers are known to be (the modem's type), by RF.
     pub caps: &'a crate::carrier_caps::CarrierCaps,
+    /// "Auto play in DecSAT player" is ticked.
+    pub autoplay: bool,
 }
 
 pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<Action> {
@@ -931,6 +933,16 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                         .clicked()
                     {
                         actions.push(Action::Watch(v.id, None));
+                    }
+                    let mut auto = inp.autoplay;
+                    if ui
+                        .checkbox(&mut auto, "Auto play in DecSAT player")
+                        .on_hover_text(
+                            "When a VFO locks onto a TS carrier, play its first service with                              pictures here at once (when the player is not already open).                              For every VFO; remembered",
+                        )
+                        .changed()
+                    {
+                        actions.push(Action::AutoPlay(auto));
                     }
                     for p in [Player::Vlc, Player::PotPlayer] {
                         if ui

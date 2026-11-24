@@ -154,7 +154,12 @@ fn main() -> eframe::Result {
             app.lo_high_side |= opts.lo_high;
             app.flip_file = opts.flip;
             if let Some(p) = opts.file.clone() {
-                app.open_file(p);
+                // A recorded TS (`DecSAT file.ts`, or opened with it) plays.
+                if tv::is_ts_file(&p) {
+                    app.play_ts_file(p);
+                } else {
+                    app.open_file(p);
+                }
             }
             #[cfg(feature = "hackrf")]
             if let Some(mhz) = opts.hackrf_mhz {
@@ -325,6 +330,10 @@ struct App {
     dns_viewer: dns_viewer::DnsViewer,
     /// The in-app player.
     tv: tv::TvWindow,
+    /// "Auto play in DecSAT player": a VFO that locks is played at once.
+    tv_autoplay: bool,
+    /// Each VFO's TS as auto play last saw it.
+    lock_seen: BTreeMap<VfoId, LockSeen>,
     /// BISS keys kept by carrier, and given back.
     biss: biss_memory::BissMemory,
     radar_scope: radar_scope::RadarScope,
@@ -476,6 +485,8 @@ impl Default for App {
             ts_viewer: Default::default(),
             dns_viewer: Default::default(),
             tv: Default::default(),
+            tv_autoplay: prefs::tv_autoplay(),
+            lock_seen: BTreeMap::new(),
             biss: Default::default(),
             radar_scope: Default::default(),
             tx: Default::default(),
@@ -2149,6 +2160,10 @@ impl App {
             Action::OpenTsViewer(id) => self.ts_viewer.open(id),
             Action::OpenDnsViewer(id) => self.dns_viewer.open(id),
             Action::Watch(id, programme) => self.start_tv(id, programme, None),
+            Action::AutoPlay(on) => {
+                self.tv_autoplay = on;
+                prefs::set_tv_autoplay(on);
+            }
             Action::OpenRadarScope(id) => self.radar_scope.open(id),
             Action::PlayAudio(id, key, p) => {
                 if let Some(v) = self.vfos.iter().find(|v| v.id == id) {
@@ -2243,6 +2258,60 @@ impl App {
         s.ts_tap = Some(tap);
         self.apply(Action::Update(id, s));
         self.tv.start(id, &p, audio, rx);
+    }
+
+    /// Auto play: a VFO whose TS has started flowing with a service to show
+    /// (a lock) is played, once a lock, while the player is free.
+    fn auto_play(&mut self) {
+        let now = std::time::Instant::now();
+        let ids: std::collections::BTreeSet<VfoId> = self.vfos.iter().map(|v| v.id).collect();
+        self.lock_seen.retain(|id, _| ids.contains(id));
+        let mut start = None;
+        for v in &self.vfos {
+            let ts = self
+                .statuses
+                .get(&v.id)
+                .and_then(|st| st.fec.as_ref())
+                .and_then(|f| f.ts.as_ref());
+            let packets = ts.map_or(0, |t| t.packets);
+            let seen = self.lock_seen.entry(v.id).or_insert(LockSeen {
+                packets,
+                changed: now,
+                played: false,
+            });
+            if packets != seen.packets {
+                seen.packets = packets;
+                seen.changed = now;
+            }
+            // Packets that stopped coming for a while: the lock is gone, and
+            // the next one plays again.
+            if packets == 0 || now - seen.changed > LOCK_LOST {
+                seen.played = false;
+                continue;
+            }
+            let has_service = ts.is_some_and(|t| {
+                t.report
+                    .programmes
+                    .iter()
+                    .any(|p| p.streams.iter().any(|e| e.is_video() || e.is_audio()))
+            });
+            if self.tv_autoplay && !seen.played && has_service && start.is_none() {
+                seen.played = true;
+                if self.tv.is_idle() {
+                    start = Some(v.id);
+                }
+            }
+        }
+        if let Some(id) = start {
+            self.start_tv(id, None, None);
+        }
+    }
+
+    /// Play a recorded TS file in the player (the VFO playing, if any, gives
+    /// its tap up).
+    fn play_ts_file(&mut self, path: PathBuf) {
+        self.stop_tv();
+        self.tv.open_file(path);
     }
 
     /// Close the player and give its tap up.
@@ -3244,7 +3313,11 @@ impl eframe::App for App {
                 .filter(|p| !p.as_os_str().is_empty())
         });
         if let Some(p) = dropped {
-            self.open_file(p);
+            if tv::is_ts_file(&p) {
+                self.play_ts_file(p);
+            } else {
+                self.open_file(p);
+            }
         }
 
         if let Some(e) = &self.engine {
@@ -3498,6 +3571,7 @@ impl eframe::App for App {
             self.automation.watch_started = true;
             self.apply(Action::Watch(id, None));
         }
+        self.auto_play();
         self.remember_biss_keys();
         self.launch_pending_player();
         self.launch_pending_audio();
@@ -3574,6 +3648,7 @@ impl eframe::App for App {
                         next_name: self.next_name(),
                         have_source: self.engine.is_some(),
                         caps: &self.carrier_caps,
+                        autoplay: self.tv_autoplay,
                     };
                     actions.extend(side_panel::show(ui, &inp, &mut self.new_decoder));
                 });
@@ -3795,6 +3870,15 @@ impl eframe::App for App {
                 }
                 None => self.tv.close(), // the VFO was deleted
             }
+        } else if let Some(name) = self
+            .tv
+            .file
+            .as_ref()
+            .and_then(|f| f.path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            && let Some(tv::TvRequest::Close) = self.tv.show(ui.ctx(), &name, "", None)
+        {
+            self.tv.close();
         }
 
         for a in actions {
@@ -3802,3 +3886,15 @@ impl eframe::App for App {
         }
     }
 }
+
+/// Auto play's view of one VFO's TS.
+struct LockSeen {
+    /// TS packets so far, and when that last changed.
+    packets: u64,
+    changed: std::time::Instant,
+    /// Played (or passed over, the player being busy) this lock.
+    played: bool,
+}
+
+/// No TS packets for this long: the VFO has lost its lock.
+const LOCK_LOST: std::time::Duration = std::time::Duration::from_secs(3);
