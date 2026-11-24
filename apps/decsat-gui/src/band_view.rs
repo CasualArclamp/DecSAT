@@ -53,6 +53,8 @@ pub enum Action {
     /// Play a service of a VFO's TS in the app (its number; `None`: the
     /// first with pictures).
     Watch(VfoId, Option<u16>),
+    /// Play a VFO's TS in the app as soon as it locks (the tick box).
+    AutoPlay(bool),
     /// Open the radar scope on a VFO's radar feed.
     OpenRadarScope(VfoId),
     /// Play a VFO's multicast audio stream (group:port): in the app, or in

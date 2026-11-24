@@ -8,11 +8,13 @@
 //! its settings; the app makes the tap and starts the player
 //! ([`TvWindow::start`]), and gives the tap up when the window closes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use decsat_engine::{TsView, VfoId};
 use decsat_ts::{Programme, TS_LEN, Verdict};
+use decsat_video::file::FileFeed;
 use decsat_video::{Deinterlace, Selection, VideoPlayer};
 use eframe::egui::{
     self, Color32, ColorImage, Rect, RichText, Sense, TextureHandle, TextureOptions, pos2, vec2,
@@ -31,9 +33,34 @@ pub enum TvRequest {
     Key(String),
 }
 
+/// A recorded TS being played instead of a VFO's stream.
+pub struct PlayFile {
+    pub path: PathBuf,
+    programmes: Vec<Programme>,
+    feed: Option<FileFeed>,
+    /// When the whole file had been handed over.
+    ended: Option<Instant>,
+}
+
+/// After the file's last packet, this long for the player to finish what it
+/// holds (its sound runs about a second behind) before it is stopped.
+const FILE_TAIL: Duration = Duration::from_secs(3);
+
+/// File extensions played as a recorded transport stream.
+pub const TS_EXTENSIONS: [&str; 4] = ["ts", "m2ts", "mts", "trp"];
+
+/// `path` is a transport stream recording, by its extension.
+pub fn is_ts_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| TS_EXTENSIONS.iter().any(|t| t.eq_ignore_ascii_case(e)))
+}
+
 pub struct TvWindow {
-    /// The VFO playing (none: closed).
+    /// The VFO playing (none: closed, or a file).
     pub vfo: Option<VfoId>,
+    /// The recording playing, when not a VFO.
+    pub file: Option<PlayFile>,
     programme: Option<u16>,
     audio: Option<u16>,
     player: Option<VideoPlayer>,
@@ -57,6 +84,7 @@ impl Default for TvWindow {
     fn default() -> Self {
         TvWindow {
             vfo: None,
+            file: None,
             programme: None,
             audio: None,
             player: None,
@@ -127,7 +155,77 @@ impl TvWindow {
         rx: Receiver<Vec<[u8; TS_LEN]>>,
     ) {
         self.stop();
+        self.file = None;
         self.vfo = Some(vfo);
+        self.start_player(p, audio, rx);
+    }
+
+    /// Nothing is open in the window.
+    pub fn is_idle(&self) -> bool {
+        self.vfo.is_none() && self.file.is_none()
+    }
+
+    /// Play the recorded transport stream at `path`, its first service with
+    /// pictures (else its first), at the pace it was received.
+    pub fn open_file(&mut self, path: PathBuf) {
+        self.close();
+        let found = decsat_video::file::programmes(&path);
+        self.file = Some(PlayFile {
+            path,
+            programmes: found.clone().unwrap_or_default(),
+            feed: None,
+            ended: None,
+        });
+        match found {
+            Ok(_) => self.play_file(None, None),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// (Re)start the file from its beginning on service `programme`
+    /// (`None`: the first with pictures), sound `audio`.
+    fn play_file(&mut self, programme: Option<u16>, audio: Option<u16>) {
+        self.stop();
+        let Some(f) = &self.file else { return };
+        // Services with streams only: the SDT can name one the PAT does not.
+        let usable = |p: &&Programme| !p.streams.is_empty();
+        let p = programme
+            .and_then(|n| f.programmes.iter().find(|p| p.number == n))
+            .or_else(|| {
+                f.programmes
+                    .iter()
+                    .find(|p| p.streams.iter().any(|e| e.is_video()))
+            })
+            .or_else(|| f.programmes.iter().find(usable))
+            .cloned();
+        let Some(p) = p else {
+            if self.error.is_none() {
+                self.error = Some(format!("{}: no services to play", f.path.display()));
+            }
+            return;
+        };
+        let path = f.path.clone();
+        let (tap, rx) = decsat_ts::TsTap::new(2048);
+        self.start_player(&p, audio, rx);
+        if self.player.is_none() {
+            return;
+        }
+        match FileFeed::start(&path, p.pcr_pid, tap) {
+            Ok(feed) => {
+                if let Some(f) = &mut self.file {
+                    f.feed = Some(feed);
+                    f.ended = None;
+                }
+            }
+            Err(e) => {
+                self.player = None;
+                self.error = Some(e);
+            }
+        }
+    }
+
+    /// Start the player on service `p` from the packets on `rx`.
+    fn start_player(&mut self, p: &Programme, audio: Option<u16>, rx: Receiver<Vec<[u8; TS_LEN]>>) {
         self.programme = Some(p.number);
         let mut sel = selection(p, audio);
         sel.deint = if self.bob {
@@ -168,7 +266,12 @@ impl TvWindow {
 
     /// Stop playing (the window stays as it is).
     pub fn stop(&mut self) {
+        // The player first: the file's feed may be waiting on it.
         self.player = None;
+        if let Some(f) = &mut self.file {
+            f.feed = None;
+            f.ended = None;
+        }
         self.error = None;
     }
 
@@ -176,6 +279,7 @@ impl TvWindow {
     pub fn close(&mut self) {
         self.stop();
         self.vfo = None;
+        self.file = None;
         self.texture = None;
     }
 
@@ -188,8 +292,20 @@ impl TvWindow {
         key: &str,
         ts: Option<&TsView>,
     ) -> Option<TvRequest> {
-        self.vfo?;
+        if self.is_idle() {
+            return None;
+        }
         self.tap_dropped = ts.map_or(0, |t| t.tap_dropped);
+        // A file played to its end: stop once the player has shown it all.
+        if let Some(f) = &mut self.file
+            && f.feed.as_ref().is_some_and(|d| d.finished())
+        {
+            let at = *f.ended.get_or_insert_with(Instant::now);
+            if at.elapsed() >= FILE_TAIL {
+                self.player = None;
+                f.feed = None;
+            }
+        }
         // The picture due now.
         if let Some(f) = self.player.as_mut().and_then(|p| p.poll()) {
             let img =
@@ -202,7 +318,11 @@ impl TvWindow {
         if self.player.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(10));
         }
-        let programmes: &[Programme] = ts.map_or(&[], |t| &t.report.programmes);
+        let file_progs = self.file.as_ref().map(|f| f.programmes.clone());
+        let programmes: &[Programme] = match &file_progs {
+            Some(p) => p,
+            None => ts.map_or(&[], |t| &t.report.programmes),
+        };
         let current = programmes.iter().find(|p| Some(p.number) == self.programme);
         let title = current
             .and_then(|p| p.name.clone())
@@ -233,6 +353,13 @@ impl TvWindow {
         if !open {
             self.close();
             return Some(TvRequest::Close);
+        }
+        // A file's services are played here: nothing for the app to do.
+        if self.file.is_some()
+            && let Some(TvRequest::Play(p, a)) = req
+        {
+            self.play_file(p, a);
+            return None;
         }
         req
     }
@@ -353,6 +480,16 @@ impl TvWindow {
             }
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 prefs::set_tv_volume(self.volume);
+            }
+            if let Some(f) = &self.file {
+                // The title names the file; here only how far it has got.
+                let text = match &f.feed {
+                    Some(d) if self.player.is_some() => {
+                        format!("📼 {:.0} %", d.progress() * 100.0)
+                    }
+                    _ => "📼 end of file".to_string(),
+                };
+                ui.label(text).on_hover_text(f.path.display().to_string());
             }
             if let Some(p) = &self.player {
                 let st = p.status();

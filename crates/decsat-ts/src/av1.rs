@@ -827,7 +827,18 @@ impl Av1Extractor {
         };
         // A temporal delimiter first: the IVF and OBU readers expect one.
         let mut tu = vec![0x12, 0x00];
-        from_start_codes(&pes[hdr_end..end], &mut tu);
+        let es = &pes[hdr_end..end];
+        if es.starts_with(&[0, 0, 1]) {
+            from_start_codes(es, &mut tu);
+        } else {
+            // Bare OBUs, as ffmpeg's muxer writes them (no mapping): taken
+            // as they are, less a temporal delimiter of their own.
+            for (ty, obu) in obus(es) {
+                if ty != OBU_TEMPORAL_DELIMITER {
+                    tu.extend_from_slice(obu);
+                }
+            }
+        }
         self.units += 1;
         self.pes = pes;
         self.pes.clear();
@@ -859,6 +870,56 @@ pub fn ivf_frame(pts: u64, data: &[u8], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ffmpeg's muxer: AV1 as bare OBUs in one PES (no start codes, no
+    /// descriptor), a temporal delimiter first. The extractor takes them as
+    /// they are, and the analyser calls the PID AV1 video.
+    #[test]
+    fn bare_obus_in_a_pes_are_taken_as_they_are() {
+        let mut es = obu(OBU_TEMPORAL_DELIMITER, &[]);
+        let frame = obu(6, &[0x10, 0x00, 0x00, 0x01, 0x22]);
+        es.extend_from_slice(&frame);
+        // PES: video stream id, PTS 1000.
+        let mut pes = vec![0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5];
+        let pts: u64 = 1000;
+        pes.extend_from_slice(&[
+            0x21 | ((pts >> 29) & 0x0E) as u8,
+            (pts >> 22) as u8,
+            ((pts >> 14) as u8) | 1,
+            (pts >> 7) as u8,
+            ((pts << 1) as u8) | 1,
+        ]);
+        pes.extend_from_slice(&es);
+        // Stuffing after the PES would be read as OBUs: use the adaptation
+        // field instead, as a muxer does.
+        let mut q = [0xFFu8; TS_LEN];
+        let stuff = TS_LEN - 4 - pes.len();
+        q[..4].copy_from_slice(&[0x47, 0x41, 0x00, 0x30]);
+        q[4] = (stuff - 1) as u8;
+        if stuff > 1 {
+            q[5] = 0;
+        }
+        q[4 + stuff..].copy_from_slice(&pes);
+        let mut x = Av1Extractor::new();
+        assert!(x.push(&q).is_none());
+        let u = x.finish().unwrap();
+        assert_eq!(u.pts, Some(pts));
+        let mut want = vec![0x12, 0x00];
+        want.extend_from_slice(&frame);
+        assert_eq!(u.tu, want);
+
+        let mut a = crate::TsAnalyser::new();
+        let es = crate::EsInfo::new(0x100, STREAM_TYPE_PRIVATE_PES);
+        let tables = crate::psi::test_tables(1, 0x1000, es, "P", "S");
+        for (k, (pid, sec)) in tables.iter().enumerate() {
+            a.packet(&crate::psi::section_packet(*pid, k as u8, sec));
+        }
+        a.packet(&q);
+        let r = a.report();
+        let es = &r.programmes[0].streams[0];
+        assert_eq!(es.kind, Some("AV1 video"));
+        assert!(es.is_video());
+    }
 
     /// An OBU with a size field.
     fn obu(ty: u8, payload: &[u8]) -> Vec<u8> {
