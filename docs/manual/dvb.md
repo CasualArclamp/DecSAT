@@ -5,134 +5,222 @@ This page describes the DVB decoders and their outputs. [Back to the README](../
 
 ## DVB-S2 → GSE/IP → PCAP
 
-A **DVB-S2/S2X → GSE/IP** VFO demodulates, decodes LDPC and BCH, and reads
-the BBFRAMEs. Generic-stream frames go through GSE (ETSI TS 102 606) to IP,
-fragments reassembled and their CRC-32s checked. The side bar shows the
-stream, IP packet and byte counts, the IP rate, protocols and the busiest
-flows; press **● Record** next to *PCAP* to write the packets to a `.pcap`
-(raw IP, opens in Wireshark).
+A **DVB-S2/S2X → GSE/IP** VFO demodulates the carrier, decodes LDPC and
+BCH, and reads the BBFRAMEs. The generic-stream frames go through GSE
+(ETSI TS 102 606) to IP. The decoder assembles the fragments again and
+does a check of each CRC-32.
 
-**▶ Live** next to *Wireshark* opens Wireshark and feeds it the packets as
-they are decoded: it is started capturing from its standard input
-(`-k -i -`), which DecSAT writes as a PCAP stream, with its RTP heuristic on
-so ED-137 streams show their PTT and squelch without the SIP that set them
-up. **⏹ Stop**, or closing Wireshark, ends it; Wireshark keeps what it has.
-Every decoder that carries IP has both buttons (a TS decoder once IP turns
-up in it, by MPE); `decsat decode … --wireshark` does the same, and so does
-the GUI started on a carrier:
+The side bar shows these items:
+
+- the stream
+- the IP packet count and the byte count
+- the IP rate
+- the protocols
+- the flows that have the most traffic.
+
+Push **● Record** adjacent to *PCAP* to write the packets to a `.pcap`
+file. The file contains raw IP and opens in Wireshark.
+
+**▶ Live** adjacent to *Wireshark* opens Wireshark and sends it the packets
+as DecSAT decodes them. Wireshark starts a capture from its standard input
+(`-k -i -`). DecSAT writes a PCAP stream to that input. The RTP heuristic
+of Wireshark is on. Thus ED-137 streams show their PTT and squelch without
+the SIP that set them up. **⏹ Stop** stops the feed. The feed also stops
+when you close Wireshark. Wireshark keeps the packets that it has.
+
+Each decoder that carries IP has the two buttons. A TS decoder gets them
+when IP comes into view in the TS, by MPE. `decsat decode … --wireshark`
+does the same. The GUI also does the same when you start it on a carrier:
 
 ```bash
 decsat-gui --hackrf 1748 --rate 4 --lo 10600 --amp --vfo-at -422000:300000 --decoder tpc --wireshark
 ```
 
-(VFOs placed with `--vfo-at` make a one-off run: the session you had is
-neither restored nor overwritten.)
+VFOs that you make with `--vfo-at` give a one-off run. DecSAT does not
+restore your last session and does not write over it.
 
-Real links do not all follow the standard. As in
-[dontlookup](https://github.com/ucsdsysnet/dontlookup), DecSAT reads every
-data field four ways at once — GSE_LENGTH counting the 2-byte header or not,
-the fragment id as 8 bits or as 6 bits plus a 2-bit counter — and keeps
-whichever yields valid IP (checksums, lengths). The *GSE* setting can force
-one. If none yields IP, a blind IPv4 search over the data fields takes over.
+Not all real links obey the standard. As
+[dontlookup](https://github.com/ucsdsysnet/dontlookup) does, DecSAT reads
+each data field in four ways at the same time:
 
-A multistream carrier's streams are read apart, each its own GSE (or TS)
-state, and S2X's GSE-HEM — GSE packets sliced across BBFRAMEs like TS
-packets, SYNCD pointing at the first that starts — is put back together.
-The roll-off is read as S2X signals it: codes 00/01/10 sent alternately
-with 11 mean 0.15/0.10/0.05 (a 0.05 carrier is not shown as 0.20).
+- GSE_LENGTH includes the 2-byte header, or does not include it.
+- The fragment id is 8 bits, or it is 6 bits plus a 2-bit counter.
 
-**Terminals.** On a VSAT hub's outbound every GSE packet carries its
-terminal's MAC as a 6-byte label, and on an ACM outbound the hub sends each
-terminal's data in the MODCOD its reported reception allows. The IP card's
-*Terminals* table lists the labels by bytes, with the MODCODs each was sent
-in, the Es/N0 the main one needs and (hover) its IP addresses — a map of
-the network's terminals and their links as the hub sees them.
+DecSAT keeps the way that gives valid IP (checksums, lengths). The *GSE*
+setting can force one way. If no way gives IP, a blind IPv4 search through
+the data fields starts.
+
+DecSAT reads each stream of a multistream carrier separately. Each stream
+has its own GSE (or TS) state. S2X has GSE-HEM: the modulator cuts GSE
+packets across BBFRAMEs as it does TS packets, and SYNCD points at the
+first packet that starts. DecSAT assembles these packets again.
+
+DecSAT reads the roll-off as S2X signals it. The codes 00, 01 and 10, sent
+alternately with 11, mean 0.15, 0.10 and 0.05. DecSAT does not show a 0.05
+carrier as 0.20.
+
+**Terminals.** On the outbound of a VSAT hub, each GSE packet carries the
+MAC of its terminal as a 6-byte label. On an ACM outbound, the hub sends
+the data of each terminal in the MODCOD that the reported reception of the
+terminal permits. The *Terminals* table of the IP card lists the labels by
+bytes. For each label, the table shows:
+
+- the MODCODs that the hub used for it
+- the Es/N0 that the primary MODCOD must have
+- its IP addresses, when you hover.
+
+The table is a map of the terminals of the network and their links, as
+the hub sees them.
 
 ## Interactive networks (DVB-RCS) and return pools
 
-A hub's outbound tells its terminals how to transmit. With DVB-RCS
-(EN 301 790; EN 301 545-2 for RCS2) that is a programme of signalling
-tables in the transport stream — on a multistream outbound often its own
-input stream, transport packets in a generic stream. The TS card then gets
-an **Interactive network** card: the network's name, the forward and return
-links of its RCS map (satellite, beam, frequency, symbol rate, standard),
-the network clock reference (the 27 MHz count every terminal times its
-bursts by) and how often it comes, the terminal information's status
-flags, the superframe, frame and timeslot plans, the burst time plan and
-corrections when they are sent — and under *Signalling tables* every table
-id with its PID, count, period and size, a vendor's own included. Tables a
-PMT declares but never sends are listed too: a hub that runs its return
-with tables of its own still shows its timing in their rates.
+The outbound of a hub tells the terminals how to transmit. With DVB-RCS
+(EN 301 790; EN 301 545-2 for RCS2), a programme of signalling tables in
+the transport stream does this. On a multistream outbound, this programme
+is frequently a separate input stream: transport packets in a generic
+stream.
 
-The **Return pool** decoder (TDMA mode, beside the burst analyser) over
-the return shows the carriers now (a 200 ms average split at the guards
-between them), how often the layout changes (a hub resizing and moving
-its terminals' carriers, Mx-DMA style), and the grid —
-the slot, from the repeat of the bursts' guard times, and the frame, the
-multiple of it the envelope repeats over. Under the pool's own fast
-waterfall (an FFT about a millisecond, the latest three frames), its
-**burst lanes** — the TDMA decoder's burst map stood on end: a column a
-lane under its frequencies, a box a burst down it, newest at the bottom.
-The lanes are the bins that burst on and off together; bursts back to
-back are cut where the FFT straddling their guard dips. Once an
-outbound's burst plan is timed on the pool, the columns are the bands
-its bursts use and each box is a planned burst in its terminal's colour,
-as bright as its C/N — an outline where the plan gives a burst and
-nothing comes. When another VFO is decoding an
-outbound whose NCR or a signalling table keeps the same period, the card
-says so: the pool runs on that outbound's clock.
+The TS card then gets an **Interactive network** card. The card shows:
 
-On Eutelsat 172B a Newtec hub's 1.048 MS/s S2X ACM outbound (roll-off
-0.05) carries its signalling on ISI 0 at QPSK 1/3 — an RCS map, the NCR,
-and two private tables, one every 40.2 ms — and IP to its terminals on
-ISI 1; the 770 kHz pool beside it holds a ~190 kHz continuous carrier
-whose width the hub changes every few seconds and a block of bursts in
-5.025 ms slots of a 40.200 ms frame: the private table's period.
+- the name of the network
+- the forward and return links of its RCS map (satellite, beam, frequency,
+  symbol rate, standard)
+- the network clock reference and its interval (the reference is the
+  27 MHz count that each terminal uses to time its bursts)
+- the status flags of the terminal information
+- the superframe, frame and timeslot plans
+- the burst time plan and the corrections, when the hub sends them.
 
-That table, D1h, is the hub's **burst plan** — no public spec, so worked
-out from a minute of outbound and return received together (the plan's
-burst counts per slot follow the return's bursts eight frames later). Each
-section is one return frame: a counter, the frame's start on the NCR's
-clock, and a record per burst — the slot it starts in, the terminal, a
-code, and its frequency in 50 Hz steps from the plan's own zero. The
-code's range gives the length (one, two, four or eight slots of the
-frame); its bandwidth is learned from the plan itself — the hub packs
-bursts edge to edge, so the spacing between neighbours in a slot gives
-each code's extent below and above its frequency (130.6 kHz for 0104h,
-213.1 kHz for 02E8h, 157.1 kHz for the two-slot 2278h). The RCS card
-then shows a **Burst plan** section: the frame and slots, bursts a frame,
-a map of the latest frames (a row a slot, a box a burst in its terminal's
-colour), the terminals with their shares of the plan, and the codes
-learned. On the **Return pool** card the plan is slid across the pool's
-mean spectrum: where it fits (0.97 on 172B) the card gives the plan's zero
-as a frequency and draws the latest frame on the pool's band — which
-terminal is where. On 172B: 24 terminals, one (413) holding a whole-frame
-block at the bottom of the pool (a third of it), the rest one- and
-two-slot bursts of 123–400 kHz.
+Below *Signalling tables*, the card lists each table id with its PID,
+count, period and size. The list includes the private tables of a vendor.
+The list also includes tables that a PMT declares but the hub does not
+send. A hub that operates its return with private tables thus continues to
+show its timing in the rates of those tables.
+
+The **Return pool** decoder is in TDMA mode, adjacent to the burst
+analyser. Put it on the return. It shows:
+
+- the carriers at this time (a 200 ms average, divided at the guard bands
+  between the carriers)
+- how frequently the layout changes (a hub changes the size and the
+  position of the carriers of its terminals, Mx-DMA style)
+- the grid.
+
+The grid has two parts. The slot comes from the repeat of the guard times
+of the bursts. The frame is the multiple of the slot at which the envelope
+repeats.
+
+The pool has its own fast waterfall. One FFT is approximately one
+millisecond, and the waterfall shows the last three frames. Below it are
+the **burst lanes**. The burst lanes are the burst map of the TDMA
+decoder, turned 90°:
+
+- A column is a lane, below its frequencies.
+- A box is a burst in the lane.
+- The newest burst is at the bottom.
+
+The lanes are the bins that burst on and off together. Where two bursts
+have no interval between them, DecSAT cuts them where the FFT across their
+guard time has a dip.
+
+When DecSAT has timed the burst plan of an outbound on the pool, the
+display changes:
+
+- The columns are the bands that the bursts of the plan use.
+- Each box is a planned burst in the colour of its terminal.
+- The brightness of a box shows its C/N.
+- An outline shows a burst that the plan gives but that does not come.
+
+Sometimes a different VFO decodes an outbound whose NCR or signalling
+table has the same period. The card then tells you that the pool operates
+on the clock of that outbound.
+
+On Eutelsat 172B, a Newtec hub has a 1.048 MS/s S2X ACM outbound (roll-off
+0.05). The outbound carries its signalling on ISI 0 at QPSK 1/3: an RCS
+map, the NCR and two private tables, one of them each 40.2 ms. It carries
+IP to its terminals on ISI 1. The 770 kHz pool adjacent to it contains:
+
+- a continuous carrier of ~190 kHz, whose width the hub changes at
+  intervals of a few seconds
+- a block of bursts in 5.025 ms slots of a 40.200 ms frame. This is the
+  period of the private table.
+
+That table, D1h, is the **burst plan** of the hub. There is no public
+specification. The format was worked out from one minute of the outbound
+and the return, received together. The burst counts of the plan for each
+slot agree with the bursts of the return eight frames later.
+
+Each section is one return frame. It contains a counter, the start of the
+frame on the clock of the NCR, and one record for each burst. A record
+contains:
+
+- the slot in which the burst starts
+- the terminal
+- a code
+- the frequency, in 50 Hz steps from the zero of the plan.
+
+The range of the code gives the length: one, two, four or eight slots of
+the frame. DecSAT learns the bandwidth of the code from the plan. The hub
+puts the bursts edge to edge. Thus the distance between adjacent bursts in
+a slot gives the extent of each code below and above its frequency. The
+extents are 130.6 kHz for 0104h, 213.1 kHz for 02E8h, and 157.1 kHz for
+the two-slot 2278h.
+
+The RCS card then shows a **Burst plan** section:
+
+- the frame and the slots
+- the bursts in one frame
+- a map of the latest frames (a row is a slot, a box is a burst in the
+  colour of its terminal)
+- the terminals, with their shares of the plan
+- the codes that DecSAT learned.
+
+On the **Return pool** card, DecSAT moves the plan across the mean
+spectrum of the pool. Where the plan fits (0.97 on 172B), the card gives
+the zero of the plan as a frequency. The card also draws the latest frame
+on the band of the pool. This shows which terminal is where.
+
+On 172B there are 24 terminals. One terminal (413) has a full-frame block
+at the bottom of the pool (one third of the pool). The other terminals
+have one-slot and two-slot bursts of 123–400 kHz.
 
 ```bash
 decsat decode outbound_8Msps.cs8 --decoder ip --offset -881700 --bandwidth 1300000
 decsat decode outbound_8Msps.cs8 --decoder pool --offset 580000 --bandwidth 900000
 ```
 
-Another hub on 172B signals in GSE instead: a 2 MS/s DVB-S2 ACM outbound
-whose stream 0 carries, besides its terminals' IP, PDUs of the hub's own —
-a 46.08 MHz clock, an **inroute table** (each return carrier's uplink
-frequency, symbol rate, slot length in 27 MHz ticks and modulation) and a
-**burst time plan** for every inroute every 125 ms frame: a terminal and a
-kind for each slot. The IP card shows it as **Hub signalling**: the
-inroutes, plans a second, the terminals and their slots. A **Return pool**
-VFO over the inroutes takes the plans up by itself: it slides the
-inroutes' frequencies along its spectrum, finds the frames on the
-inroutes' guard silences (every carrier quiet ~3 ms at each frame's end)
-and how many frames after it arrives a plan applies (five — the count
-under which the plans' owners best explain the slots' powers), then cuts
-out and demodulates every slot's burst (8PSK, a 34-symbol preamble, four
-known symbols every 30): per terminal its slots, MER, carrier and timing
-offsets, its tag (three preamble symbols of its own) and C/N, and a
-constellation. On a 90 s capture: four 665.8 kBd inroutes, ~3300 bursts a
-second, 97 % demodulated at MER 8–11 dB. ● Record writes the bursts'
-symbols and soft bits to an `.ibursts` file.
+A different hub on 172B sends its signalling in GSE. It has a 2 MS/s
+DVB-S2 ACM outbound. Stream 0 carries the IP of its terminals and also
+private PDUs of the hub:
+
+- a 46.08 MHz clock
+- an **inroute table**: for each return carrier, the uplink frequency, the
+  symbol rate, the slot length in 27 MHz ticks and the modulation
+- a **burst time plan** for each inroute, for each 125 ms frame: a
+  terminal and a kind for each slot.
+
+The IP card shows this as **Hub signalling**: the inroutes, the number of
+plans in one second, the terminals and their slots.
+
+A **Return pool** VFO across the inroutes uses the plans automatically. It
+does these steps:
+
+1. It moves the frequencies of the inroutes along its spectrum.
+2. It finds the frames from the guard silences of the inroutes. Each
+   carrier is silent for ~3 ms at the end of each frame.
+3. It finds how many frames after its arrival a plan applies. The result
+   is five. With this count, the owners in the plans best agree with the
+   powers of the slots.
+4. It cuts out and demodulates the burst of each slot. A burst is 8PSK
+   with a 34-symbol preamble and four known symbols in each 30.
+
+For each terminal, the card shows its slots, MER, carrier offset, timing
+offset, tag (three preamble symbols of its own) and C/N. The card also
+shows a constellation.
+
+On a 90 s capture, DecSAT found four 665.8 kBd inroutes and ~3300 bursts
+in one second. It demodulated 97 % of the bursts at MER 8–11 dB. ● Record
+writes the symbols and the soft bits of the bursts to an `.ibursts` file.
 
 ```bash
 decsat decode cap_10Msps.cs8 --decoder pool --offset 1415000 --bandwidth 3194000 --plan-from=-1290000:2500000:ip
@@ -140,10 +228,11 @@ decsat decode cap_10Msps.cs8 --decoder pool --offset 1415000 --bandwidth 3194000
 
 ## DVB-S2 → MPEG-TS → VLC / PotPlayer
 
-A **DVB-S2/S2X → MPEG-TS** VFO rebuilds the transport stream from TS-mode
-BBFRAMEs (sync bytes restored from the CRC-8 chain, deleted null packets put
-back) and shows its services (from the PAT, PMT and SDT), PIDs, CRC and
-continuity errors. Send it on with any of:
+A **DVB-S2/S2X → MPEG-TS** VFO builds the transport stream again from
+TS-mode BBFRAMEs. It restores the sync bytes from the CRC-8 chain and puts
+back the deleted null packets. It shows the services (from the PAT, PMT
+and SDT), the PIDs, the CRC errors and the continuity errors. Use one of
+these outputs:
 
 | | |
 |---|---|
@@ -151,127 +240,197 @@ continuity errors. Send it on with any of:
 | **UDP** `127.0.0.1:1234` | VLC: `udp://@:1234` · PotPlayer: `udp://127.0.0.1:1234` |
 | **TCP / HTTP** `127.0.0.1:8001` | VLC or PotPlayer: `http://127.0.0.1:8001/` (VLC also `tcp://…`) |
 | **▶ VLC / ▶ PotPlayer** | starts the TCP server and opens the stream in the player |
-| **▶ In app** | plays a service in a window here (below) |
+| **▶ In app** | plays a service in a window of DecSAT (see below) |
 
-**🔍 TS analyser** opens a window in the spirit of EBSPro's: every PID with
-what it is (PAT, PMT, H.264 video, AC-3 audio, ECM/EMM with the CA system,
-unlisted PES…), the service it belongs to, its bitrate and share, continuity
-and error counts, scrambling and PCR; the service tree with what is on now and
-next (EIT); the network's transponders (NIT); and every table seen.
+**🔍 TS analyser** opens a window in the style of the EBSPro
+analyser. It shows:
 
-Both network outputs start on 127.0.0.1, this machine only; use 0.0.0.0 (TCP)
-or another host's address (UDP) to reach the network. Several players can
-connect to the TCP server at once; one that stalls loses data rather than
-holding up the receiver.
+- each PID with its type (PAT, PMT, H.264 video, AC-3 audio, ECM/EMM with
+  the CA system, unlisted PES…), its service, its bitrate and share, its
+  continuity and error counts, its scrambling and its PCR
+- the service tree, with the programme that is on now and the subsequent
+  programme (EIT)
+- the transponders of the network (NIT)
+- each table that DecSAT received.
 
-**BISS.** A stream scrambled with BISS (contribution feeds: the PIDs show
-*scrambled*, the services 🔒) takes its key in the analyser, above the
-tabs, or in the VFO panel's **BISS key** row: the 12 hex digits (the
-checksum bytes are added) or all 16. The key is checked against the
-stream — each PES packet must start `00 00 01` once descrambled — and the
-row says *the key fits*, or *not this stream's key*. With a key in, the
-analyser, the `.ts` recording, UDP, HTTP and the players all get the clear
-stream. A key that fits is remembered for its carrier (per satellite, by
-RF, in your settings only) and put back in when a VFO lands on that
-carrier again still scrambled. BISS mode 1 only (an already-decrypted
-BISS-E key in its 16-digit form works too); the descrambler is DVB-CSA,
-checked bit-exact against VLC's in both directions, and fast enough for a
-whole multiplex (~140 Mbit/s on one core). `decsat biss KEY in.ts out.ts`
-descrambles a recording (`--scramble` makes a scrambled test stream).
+The two network outputs start on 127.0.0.1, which is this computer only.
+To get access from the network, use 0.0.0.0 (TCP) or the address of a
+different host (UDP). More than one player can connect to the TCP server
+at the same time. A player that stops reading loses data. It does not
+delay the receiver.
 
-**▶ In app** (the VFO panel's Play row, or **▶ Play in the app** on a
-service in the analyser's Services tab) plays a service in a window:
-pictures deinterlaced (bob ×2 by default, a picture per field; a checkbox gives one per frame) and fitted 16:9 (anamorphic SD shown right), its
-sound through the app's audio (the volume and mute at the top right, the
-output device in the Audio menu) with a volume slider of its own, the pictures timed by the sound.
-The window picks the service
-and the sound track (language), and lists what ffmpeg says the streams are.
-It needs [ffmpeg](https://ffmpeg.org) (`winget install Gyan.FFmpeg`):
-found on the PATH, beside DecSAT, or where you point it; it runs as a
-child process, below normal priority, decoding whatever it can — H.264
-(interlaced and 4:2:2 too), MPEG-2, HEVC, MPEG audio, AAC, AC-3, SMPTE 302M.
-A stream still scrambled shows the key field in the player too.
+**BISS.** Contribution feeds use BISS scrambling. On such a stream, the
+PIDs show *scrambled* and the services show 🔒. Type the key in one of
+these places:
+
+- the analyser, above the tabs
+- the **BISS key** row of the VFO panel.
+
+Type the 12 hex digits (DecSAT adds the checksum bytes) or all 16 digits.
+DecSAT does a check of the key against the stream. Each PES packet must
+start with `00 00 01` after it is descrambled. The row then shows *the key
+fits* or *not this stream's key*.
+
+When a key is in, these outputs all get the clear stream: the analyser,
+the `.ts` recording, UDP, HTTP and the players. DecSAT keeps a correct key
+for its carrier (for each satellite, by RF, in your settings only). When a
+VFO comes on that carrier again and the stream is scrambled, DecSAT puts
+the key back in.
+
+DecSAT does BISS mode 1 only. A BISS-E key that is already decrypted, in
+its 16-digit form, is also satisfactory. The descrambler is DVB-CSA. It
+is bit-exact against that of VLC in the two directions. Its speed is
+sufficient for a full multiplex (~140 Mbit/s on one core).
+`decsat biss KEY in.ts out.ts` descrambles a recording. `--scramble` makes
+a scrambled test stream.
+
+**▶ In app** plays a service in a window. It is in the Play row of the VFO
+panel. It is also **▶ Play in the app** on a service in the Services tab
+of the analyser. The player does these things:
+
+- It deinterlaces the pictures. The default is bob ×2, one picture for
+  each field. A checkbox gives one picture for each frame.
+- It fits the pictures to 16:9 and shows anamorphic SD correctly.
+- It plays the sound through the audio of the app. The volume and the mute
+  are at the top right. The output device is in the Audio menu. The window
+  also has its own volume slider.
+- It times the pictures by the sound.
+
+In the window, you select the service and the sound track (language). The
+window lists what ffmpeg reports for the streams.
+
+The player must have [ffmpeg](https://ffmpeg.org)
+(`winget install Gyan.FFmpeg`). DecSAT finds ffmpeg on the PATH, adjacent
+to DecSAT, or where you tell it. ffmpeg runs as a child process, below
+normal priority. It decodes all that it can: H.264 (interlaced and 4:2:2
+also), MPEG-2, HEVC, MPEG audio, AAC, AC-3, SMPTE 302M. If a stream is
+scrambled, the player also shows the key field.
 
 **Television in IP.** A DVB-S2 → GSE/IP VFO looks for transport streams
-carried in UDP: datagrams that end in whole 188-byte packets, bare (as
-VLC or ffmpeg send `udp://`), behind RTP, or behind a header of the
-sender's own (Eutelsat 172B's BBC News multicast puts a sequence number
-ahead of its seven packets). The IP card lists them under **MPEG-TS in
-UDP**; the busiest (or the one you **Take**) becomes the VFO's MPEG-TS —
-services, the analyser, **▶ In app**, a BISS key — and is written to a
-`.ts` beside the PCAP while that records.
+that UDP carries. These are datagrams that end in complete 188-byte
+packets. The packets can be:
 
-The player starts at once even on a low-rate feed whose keyframes are ten
-seconds or more apart: every transport stream keeps the packets since each
-picture's last keyframe (marked by the encoder's random access indicator),
-and a player that opens is handed those first, with the latest PAT and
-PMT; it decodes them in a burst and shows the newest picture.
+- bare, as VLC or ffmpeg send `udp://`
+- after RTP
+- after a private header of the sender. The BBC News multicast of Eutelsat
+  172B puts a sequence number before its seven packets.
+
+The IP card lists them below **MPEG-TS in UDP**. The stream with the
+highest rate (or the one that you **Take**) becomes the MPEG-TS of the
+VFO. It then has services, the analyser, **▶ In app** and a BISS key.
+While the PCAP records, DecSAT also writes this stream to a `.ts`
+adjacent to the PCAP.
+
+The player starts immediately, also on a low-rate feed whose keyframes are
+ten seconds or more apart. Each transport stream keeps the packets since
+the last keyframe of each picture. The random access indicator of the
+encoder identifies the keyframe. A player that opens gets those packets
+first, with the latest PAT and PMT. The player decodes them quickly and
+shows the newest picture.
 
 ## Multicast audio
 
-Satellite links carry radio as IP multicast — in GSE, or in MPE inside a
-transport stream (both are read). Any DVB-S2 IP or TS VFO lists the audio
-streams it finds under **Multicast audio**: named from SAP/SDP announcements
-where there are any, with codec (AAC in ADTS, LATM/LOAS or RFC 3640, MPEG
-audio, PCM, Opus), bitrate and RTP payload type, listed by address.
+Satellite links carry radio as IP multicast. The multicast is in GSE, or
+in MPE in a transport stream. DecSAT reads the two types. A DVB-S2 IP VFO
+or TS VFO lists the audio streams that it finds below **Multicast audio**.
+The list gives:
 
-Streams with no announcement are described from their own packets: RFC 3640
-AAC by its RTP clock rate (from RTCP sender reports, else timed against the
-signal), the clock ticks an access unit spans (1024: AAC-LC; 2048: HE-AAC)
-and its first element (mono or stereo); Opus by packets that parse as Opus.
-IPv4 fragments are put back together first — a multiplex packing several
-AUs into a 2.3 kB RTP packet sends each as two. `<nowplaying>` messages
-(title, artist, station) are listed under **Now playing**.
+- the name from SAP/SDP announcements, where there are announcements
+- the codec (AAC in ADTS, LATM/LOAS or RFC 3640, MPEG audio, PCM, Opus)
+- the bitrate and the RTP payload type.
 
-- **▶ Play** decodes it in DecSAT: MPEG audio layers I–III, AAC-LC and
-  HE-AAC v1/v2 with SBR and PS (libxaac; from ADTS, LATM/LOAS or RFC 3640),
-  Opus (libopus) and PCM/G.711, with **⏸ Pause** (resumes live), **⏹ Stop**,
-  a level meter, and the volume slider and 🔊 mute at the top of the list
-  (app-wide, remembered).
-- **⏺ Record** saves the stream to the output folder as broadcast, with no
-  re-encoding: `.mp2`/`.mp3`, `.aac` (ADTS, any AAC carriage, HE-AAC intact),
-  `.wav` for PCM, `.ts` for TS in UDP, `.opus` (Ogg) for Opus.
-- **… → Open in VLC / PotPlayer**: an RTP stream with a description is
-  relayed to a local port and the player is given an SDP file (so it decodes
-  HE-AAC, LATM and the rest itself); a bare elementary stream is served at a
-  local HTTP address.
+The list is in the sequence of the addresses.
 
-After the
+DecSAT describes streams without an announcement from their own packets:
+
+- RFC 3640 AAC: by its RTP clock rate (from RTCP sender reports, or timed
+  against the signal), by the clock ticks of one access unit (1024:
+  AAC-LC; 2048: HE-AAC), and by its first element (mono or stereo).
+- Opus: by packets that parse as Opus.
+
+DecSAT first assembles IPv4 fragments again. A multiplex that puts some
+AUs into a 2.3 kB RTP packet sends each packet as two fragments.
+`<nowplaying>` messages (title, artist, station) are in the list below
+**Now playing**.
+
+- **▶ Play** decodes the stream in DecSAT. The codecs are MPEG audio
+  layers I–III, AAC-LC and HE-AAC v1/v2 with SBR and PS (libxaac; from
+  ADTS, LATM/LOAS or RFC 3640), Opus (libopus) and PCM/G.711. There are
+  **⏸ Pause** (the sound comes back live), **⏹ Stop** and a level meter.
+  The volume slider and the 🔊 mute are at the top of the list. They apply
+  to all of the app, and DecSAT keeps their settings.
+- **⏺ Record** saves the stream to the output folder as broadcast.
+  DecSAT does not encode it again. The files are `.mp2`/`.mp3`, `.aac`
+  (ADTS, for each AAC carriage, HE-AAC not changed), `.wav` for PCM, `.ts`
+  for TS in UDP, and `.opus` (Ogg) for Opus.
+- **… → Open in VLC / PotPlayer**: DecSAT sends an RTP stream that has a
+  description to a local port and gives the player an SDP file. The player
+  then decodes HE-AAC, LATM and the other codecs itself. DecSAT supplies a
+  bare elementary stream at a local HTTP address.
+
+This function follows the
 [VK2SWL DVB-S/S2 Multicast Audio Receiver](https://github.com/VK2SWL/DVB-S-S2-Multicast-Audio-Receiver).
 
 ## DVB-S → MPEG-TS
 
-The older standard, still the norm for amateur DATV (QO-100) and some feeds.
-The VFO finds the symbol rate as usual, locks the QPSK, then works out the
-rest itself: the code rate (1/2 … 7/8), the puncturing phase, and the
-carrier's 90° rotation and spectral inversion, by decoding a block under
-each hypothesis and keeping the one whose re-encoding matches what was
-received. Then Viterbi (K = 7, soft), the sync bytes, the convolutional
-deinterleaver, Reed–Solomon (204,188) and energy dispersal — and the stream
-goes to the same TS outputs and analyser as DVB-S2's.
+DVB-S is the older standard. It is still the usual standard for amateur
+DATV (QO-100) and some feeds. The VFO finds the symbol rate as usual and
+locks the QPSK. Then it finds these parameters itself:
+
+- the code rate (1/2 … 7/8)
+- the puncturing phase
+- the 90° rotation of the carrier
+- the spectral inversion.
+
+To do this, it decodes a block for each hypothesis. It keeps the
+hypothesis whose encoded result agrees with the received block.
+
+The subsequent stages are:
+
+1. Viterbi (K = 7, soft)
+2. the sync bytes
+3. the convolutional deinterleaver
+4. Reed–Solomon (204,188)
+5. energy dispersal.
+
+The stream then goes to the same TS outputs and analyser as that of
+DVB-S2.
 
 ## Carrier ID (DVB-CID)
 
-Modern uplink modulators hide a carrier identification signal under their
-carrier (ETSI TS 103 129): BPSK spread 4096 chips a bit, 27.5 dB below the
-carrier's spectral density, 220 Hz above its centre, saying who transmits —
-the modulator's 64-bit identifier (often its MAC address) and, if the
-operator entered them, its position, a telephone number and a short text.
-Put a **Carrier ID (DVB-CID)** VFO on a carrier (at least 1.35 × the chip
-rate wide: 151 kHz below 512 kBd, 302 kHz above): it measures the carrier,
-searches for the spreading code (a fraction of a second), then reads frames —
-one every 36 s (18 s on carriers of 512 kBd and up). Its card shows the
-tracking live — the despread bits and their differential products as
-constellations (with Es/N0), the early/prompt/late correlators on the code's
-correlation peak, SNR and frequency over the last few seconds, the soft bits
-and the frame sync filling copy by copy — and, under **Code search**, the
-acquisition itself: correlation over the 4096 code phases, and code phase ×
-frequency around the peak. Offline:
+Modern uplink modulators put a carrier identification signal below their
+carrier (ETSI TS 103 129). The signal is BPSK, spread with 4096 chips for
+each bit. It is 27.5 dB below the spectral density of the carrier and
+220 Hz above the centre of the carrier. It identifies the transmitter:
+
+- the 64-bit identifier of the modulator (frequently its MAC address)
+- the position, a telephone number and a short text, if the operator
+  entered them.
+
+Put a **Carrier ID (DVB-CID)** VFO on a carrier. The VFO must be a minimum
+of 1.35 × the chip rate wide: 151 kHz below 512 kBd, 302 kHz above. The
+VFO measures the carrier and searches for the spreading code (less than
+one second). Then it reads the frames. There is one frame each 36 s (18 s
+on carriers of 512 kBd and more).
+
+The card shows the tracking live:
+
+- the despread bits and their differential products as constellations
+  (with Es/N0)
+- the early, prompt and late correlators on the correlation peak of the
+  code
+- the SNR and the frequency during the last few seconds
+- the soft bits
+- the frame sync, which fills copy by copy.
+
+Below **Code search**, the card shows the acquisition: the correlation
+through the 4096 code phases, and code phase × frequency around the peak.
+Offline:
 
 ```bash
 decsat decode capture_1000000Sps.cf32 --decoder cid --fast
 ```
 
-No CID to hand? `decsat cid` writes one under a DVB-S2 carrier, with your
-choice of identifier, position, telephone and text (see
-[`tests/`](../../tests/README.md)).
+If you do not have a CID, `decsat cid` writes one below a DVB-S2 carrier.
+You select the identifier, the position, the telephone number and the
+text (see [`tests/`](../../tests/README.md)).
