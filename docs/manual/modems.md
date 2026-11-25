@@ -5,148 +5,248 @@ This page describes the modem decoders and the data that they find. [Back to the
 
 ## TPC 2964 → IP / MPEG-TS
 
-The rate-3/4 turbo product code of Intelsat IESS-315 VSAT carriers, as the
-CTCOM RCV-20x manual describes it: frames of 2964 bits, a 20-bit unique word
-F50B8h and a (64,57) × (46,39) extended-Hamming product codeword holding 2223
-data bits, with a (2, 3, 9, 12) / 475h scrambler — on BPSK, QPSK or 8PSK
-(Gray-labelled as the manual's Figure 3.1; on 8PSK a frame is 988 symbols
-and its UW need not start on a symbol's first bit). IESS-315 itself sets
-only performance and leaves the code to "compatible turbo modems", so the
-VFO finds the rest from the signal:
+TPC 2964 is the rate-3/4 turbo product code of Intelsat IESS-315 VSAT
+carriers. The CTCOM RCV-20x manual describes it:
 
-1. **Unique word** every 2964 bits, under each carrier phase ambiguity; a
-   carrier slip or a lost symbol is repaired at the next frame.
-2. **Frame structure**: row or column order, either way round, the Hamming
-   generator (all six degree-6 primitive polynomials), whether and how the
-   code bits are scrambled — 432 combinations, judged by how many rows *and*
-   columns are codewords as received (near all under the right one, 1 in
-   128 under any other); close calls are settled by decoding.
-3. **Decoding**: iterative Chase–Pyndiah soft decoding.
-4. **Payload**: HDLC (FCS-16/32) or MPEG-TS, under each candidate
-   descrambler — the (2, 3, 9, 12) polynomial self-synchronising or additive,
-   ITU-T V.35's and V.29's — whichever yields frames that check.
+- A frame has 2964 bits.
+- The unique word has 20 bits: F50B8h.
+- The codeword is a (64,57) × (46,39) extended-Hamming product codeword.
+  It contains 2223 data bits.
+- The scrambler is (2, 3, 9, 12) / 475h.
+- The modulation is BPSK, QPSK or 8PSK. The labels are Gray labels, as in
+  Figure 3.1 of the manual.
+- On 8PSK a frame is 988 symbols. Its unique word does not always start on
+  the first bit of a symbol.
 
-**Comtech TPC 7/8** goes through the same decoder, which takes whichever
-unique word it finds. Worked out from a live 171.43 kS/s QPSK carrier (no
-document): frames of 16 320 bits (8160 QPSK symbols) — a 32-bit unique word
-F8DD4258h and a (128,120) × (128,120) extended-Hamming product codeword
-(generator x⁷ + x³ + 1, sent row by row), its first row's first 96 bits
-shortened away; 14 304 data bits, of which the last 24 are overhead and the
-rest — exactly 7/8 of the frame — the user's (300 kbit/s at 171.43 kS/s).
-The data are scrambled by the same (2, 3, 9, 12) / 475h sequence, restarted
-every frame one bit earlier than on TPC 2964.
+IESS-315 sets only the performance. It leaves the code to "compatible turbo
+modems". Thus the VFO finds the other parameters from the signal:
 
-**Comtech 8QAM, rate 0.8** also goes through the TPC decoder (Identify names
-it and switches the demodulator to 8QAM). Worked out from a live, idle
-427.28 kS/s carrier (no document): frames of 2092 symbols — a 52-symbol
-BPSK unique word on two opposite corners of the 8QAM, then a systematic
-codeword of 1632 data symbols (4896 bits, three a symbol, least significant
-first) and 408 parity symbols; 1.000 Mbit/s at that rate. The data are
-V.35-scrambled ahead of the encoder (HDLC idle flags on the carrier seen).
-**The parity is not decoded**: on an idle carrier its code cannot be told
-from the data, so the data bits pass on with the channel's errors. A
-capture carrying traffic would let the code be found.
+1. **Unique word**: the VFO looks for it every 2964 bits, for each carrier
+   phase ambiguity. If the carrier slips or a symbol is lost, the VFO
+   repairs the error at the next frame.
+2. **Frame structure**: the VFO tries 432 combinations of these items:
+   - row order or column order, in each direction
+   - the Hamming generator (all six primitive polynomials of degree 6)
+   - if the code bits are scrambled, and how
+
+   The VFO counts how many rows *and* columns are codewords as received.
+   With the correct combination, almost all of them are codewords. With
+   each other combination, 1 in 128 is a codeword. If two results are
+   almost equal, the decoder makes the decision.
+3. **Decoder**: an iterative Chase–Pyndiah soft decoder.
+4. **Payload**: HDLC (FCS-16/32) or MPEG-TS. The VFO tries each candidate
+   descrambler. The candidates are the (2, 3, 9, 12) polynomial
+   (self-synchronising or additive), ITU-T V.35 and ITU-T V.29. The VFO
+   keeps the descrambler that gives frames with a correct check.
+
+**Comtech TPC 7/8** uses the same decoder. The decoder accepts each unique
+word that it finds. There is no document for this format. It was worked out
+from a live 171.43 kS/s QPSK carrier:
+
+- A frame has 16 320 bits (8160 QPSK symbols).
+- The unique word has 32 bits: F8DD4258h.
+- The codeword is a (128,120) × (128,120) extended-Hamming product
+  codeword. The generator is x⁷ + x³ + 1. The modem sends the codeword row
+  by row.
+- The code is shortened. The modem does not send the first 96 bits of the
+  first row.
+- A frame has 14 304 data bits. The last 24 bits are overhead. The other
+  bits are the data of the user. They are exactly 7/8 of the frame
+  (300 kbit/s at 171.43 kS/s).
+- The same (2, 3, 9, 12) / 475h sequence scrambles the data. The sequence
+  starts again each frame, one bit earlier than on TPC 2964.
+
+**Comtech 8QAM, rate 0.8** also uses the TPC decoder. Identify gives its
+name and sets the demodulator to 8QAM. There is no document for this
+format. It was worked out from a live, idle 427.28 kS/s carrier:
+
+- A frame has 2092 symbols.
+- The unique word is 52 BPSK symbols. They are on two opposite corners of
+  the 8QAM constellation.
+- A systematic codeword follows. It has 1632 data symbols and 408 parity
+  symbols.
+- The data symbols contain 4896 bits. Each symbol has three bits, least
+  significant bit first.
+- The data rate is 1.000 Mbit/s at that symbol rate.
+- The modem scrambles the data with V.35 before the encoder. The carrier
+  showed HDLC idle flags.
+
+**The parity is not decoded.** On an idle carrier, the data do not show
+which code the parity uses. Thus the data bits go to the output with the
+errors of the channel. A capture with traffic would let the code be found.
 
 ![A Comtech 8QAM rate 0.8 carrier under a VFO: 8QAM locked, the unique word found every 2092 symbols, and the frame structure listed in the card](../images/releases/v1.1.0/comtech-8qam.jpg)
 
-*Comtech 8QAM, rate 0.8, on a simulated carrier: locked, with the unique
-word and the frame's structure in the card.*
+*Comtech 8QAM, rate 0.8, on a simulated carrier. The carrier is locked.
+The card shows the unique word and the structure of the frame.*
 
-IP found in the HDLC frames (Cisco HDLC, PPP, Frame Relay as RFC 2427
-carries it, or anything with the packet after a short header) gets the same
-statistics, PCAP and multicast audio as GSE — a flow whose UDP checksums all
-fail while its headers check is marked **encrypted** in transit, and the
-audio sniffer leaves it alone; a transport stream gets the TS outputs.
-**● Record** writes the decoded data to a `.bin` (the IP has its own
-*PCAP* and *Wireshark* buttons), and `decsat pcap` reads a recorded PCAP
-back. Identify recognises the carrier by its unique
-word. What each search found is shown, so you can tell a finding from a
-default. It is confirmed on live Comtech CDM-600L and CDM-570L carriers.
+DecSAT finds IP in the HDLC frames in these forms:
 
-**Comtech EDMAC with bridged Ethernet** (worked out from a live 8PSK
-carrier; no specification was to hand): the data rate grown by 21/20 in
-1008-bit frames — a fixed header, five 192-bit data blocks and 9-bit
-overhead groups between them carrying the modems' M&C channel. Inside, the
-traffic is bridged Ethernet in 258-byte packet blocks: a 4-byte word with a
-pointer to where a packet ends, then packets, each with a length byte (or 0
-for "to the pointer") and a 6-byte header. A packet with whole headers sets
-up a header-compression context; the compressed packets that follow
-(SNMP, the RTP of a radio-over-IP link, the middle fragments of its SIP)
-are rebuilt from it — UDP checksums checked, fragments put back together by
-the IP stage. The Ethernet frames go to the IP stage — statistics, PCAP —
-like any other; the side panel's **Framing** and **Packets** rows say how it
-is going.
+- Cisco HDLC
+- PPP
+- Frame Relay, as RFC 2427 carries it
+- each frame that has the packet after a short header
 
-**ED-137 radio over IP** (air traffic control radio as VoIP, wherever it
-turns up in the IP): each RTP packet's header extension carries the radio's
-signalling — PTT and its type (normal, coupling, priority, emergency,
-test), squelch, the PTT's id, PTT mute and summation, simultaneous calls,
-and features such as signal quality and CLIMAX delay — in R2S keep-alives
-and voice packets alike. The IP card's **Radio over IP** section shows each
-stream's state live (PTT red, squelch green), how often and how long each
-was on, packets lost, and a log of the changes; the SIP dialogs that set the
-sessions up are read too — who calls whom, the SDP (radio type, Tx/Rx mode,
-keep-alive period, best-signal method) and whether the call was refused or
-accepted (one direction tells it by the ACK's transaction). The field
-layout follows Wireshark's ED-137 dissector, and agrees with tshark packet
-for packet on a live recording. `decsat pcap … --radio-csv` writes every
-packet's signalling. **The voice is heard**: the sound (G.711, A- or
-µ-law) of packets whose PTT or squelch is on plays in the **Radio voice**
-card as a call's does — by itself under the voice preset, one stream and
-one talker at a time across the app, ▶ to listen regardless, ● to record a
-`.wav` — with silence between transmissions.
+This IP gets the same statistics, PCAP and multicast audio as GSE. If all
+the UDP checksums of a flow fail but its headers are correct, the flow is
+marked **encrypted** in transit. The audio sniffer ignores such a flow. A
+transport stream gets the TS outputs.
+
+**● Record** writes the decoded data to a `.bin` file. The IP has its own
+*PCAP* and *Wireshark* buttons. `decsat pcap` reads a recorded PCAP again.
+Identify knows the carrier by its unique word. The card shows what each
+search found. Thus you can tell a result from a default. The decoder is
+confirmed on live Comtech CDM-600L and CDM-570L carriers.
+
+**Comtech EDMAC with bridged Ethernet** was worked out from a live 8PSK
+carrier. No specification was available.
+
+- EDMAC increases the data rate by 21/20.
+- A frame has 1008 bits. It has a fixed header, five 192-bit data blocks
+  and 9-bit overhead groups between the blocks.
+- The overhead groups carry the M&C channel of the modems.
+- The traffic is bridged Ethernet in 258-byte packet blocks.
+- A packet block starts with a 4-byte word. The word has a pointer to the
+  end of a packet.
+- The packets follow. Each packet has a length byte (or 0 for "to the
+  pointer") and a 6-byte header.
+
+A packet with full headers sets up a header-compression context. The
+decoder uses this context to build the compressed packets that follow.
+Examples are SNMP, the RTP of a radio-over-IP link and the middle fragments
+of its SIP. The decoder does a check of the UDP checksums. The IP stage
+puts the fragments together.
+
+The Ethernet frames go to the IP stage (statistics, PCAP), as all other
+frames do. The **Framing** and **Packets** rows in the side panel show the
+status.
+
+**ED-137 radio over IP** is air traffic control radio as VoIP. DecSAT reads
+it at each place where it finds it in the IP. The header extension of each
+RTP packet carries the signalling of the radio:
+
+- PTT and its type (normal, coupling, priority, emergency, test)
+- squelch
+- the id of the PTT
+- PTT mute and summation
+- simultaneous calls
+- features such as signal quality and CLIMAX delay
+
+R2S keep-alive packets and voice packets carry this signalling. The
+**Radio over IP** section of the IP card shows these items for each stream:
+
+- the state, live (PTT red, squelch green)
+- how often and for how long PTT and squelch were on
+- the packets lost
+- a log of the changes
+
+DecSAT also reads the SIP dialogs that set up the sessions:
+
+- who calls whom
+- the SDP (radio type, Tx/Rx mode, keep-alive period, best-signal method)
+- if the call was refused or accepted (with one direction only, the
+  transaction of the ACK shows this)
+
+The field layout follows the ED-137 dissector of Wireshark. On a live
+recording, the result agrees with tshark for each packet.
+`decsat pcap … --radio-csv` writes the signalling of each packet.
+
+**You can hear the voice.** The sound is G.711, A-law or µ-law. The **Radio
+voice** card plays the sound of the packets whose PTT or squelch is on. It
+plays this sound as it plays the sound of a call:
+
+- With the voice preset, the sound plays automatically.
+- One stream and one talker play at a time in the full app.
+- ▶ plays the stream without these conditions.
+- ● records a `.wav` file.
+- There is silence between transmissions.
 
 ## Voice over E1 (G.704, Comtech D&I++)
 
-Modems carrying telephony or radio links (airband voice, for one) send
-64 kbit/s G.711 channels: a whole E1, or — Comtech's **Drop & Insert++** —
-the chosen timeslots in blocks of 2944 bits (64 overhead, 2880 data; the
-layout is not published and was worked out from CDM-600L carriers: a 21-bit
-sync and three bits that say whether the block starts a frame, then five
-blocks of 72 bytes each after 10 bits of overhead — a block a timeslot
-every 45 ms, the timeslots' bytes taking turns). Behind the TPC 2964
-decoder the payload search finds either,
-under the V.35 descrambler or any other it tries, and the **Voice** card
-lists the channels with their levels: **▶** listens (the app's player and
-volume), **●** records a `.wav`. A timeslot whose sign bit never changes is
-not G.711 audio — sub-rate channels or compressed voice — and is marked
-**not G.711** with the bits that do change; it plays as silence (as A-law
-it would be loud digital noise), and so does any timeslot not yet judged.
+Some modems carry telephony or radio links (airband voice is an example).
+These modems send 64 kbit/s G.711 channels. They send a full E1, or they
+use Comtech **Drop & Insert++**. D&I++ sends the selected timeslots in
+blocks of 2944 bits (64 overhead bits, 2880 data bits). The layout is not
+published. It was worked out from CDM-600L carriers:
 
-When those bits carry **G.728** (LD-CELP, 16 kbit/s: a 10-bit codeword every
-five samples), the card says **G.728 speech** and ▶/● play and record it
-decoded; while someone speaks, the VFO lights up green with 🔊 in the
-waterfall and the VFO list. The voice equipment behind a CDM-600L seen on Horizons 3e sends it
-in bits 2–3 of its timeslot, framed G.728's own way (§3.11): the shape
-index's top bit carries a sync bit, once every 20 ms different, which the
-decoder locks to; its silence fill is muted, and recognised: a channel
-sending it reads **G.728, silent** before anyone has spoken. The decoder is
-written from the Recommendation and matches its Appendix I test vectors
-(112 dB SNR or better).
+- A block starts with a 21-bit sync and three bits. The three bits show if
+  the block starts a frame.
+- Five blocks of 72 bytes follow. There are 10 bits of overhead before
+  each of them.
+- This gives one block for each timeslot every 45 ms.
+- The bytes of the timeslots alternate.
 
-**Multi-radio sites** send their timeslots differently: as HDLC packets on an
-inverted line (idle flags read `00000011` repeated), each packet a sequence
-count, a channel byte (`08h`–`F8h`), a type byte `13h` and 44 octets — 5.5 ms
-— of one 64 kbit/s timeslot. Each channel's packets join into a continuous
-timeslot, and the **Voice** card lists them by that byte (ch 10h, 18h, …)
-and finds, plays and records the G.728 in each as above — a trunk's
-timeslot can hold up to three G.728 channels in different bit pairs, each
-decoded, and *one voice at a time* holds within the timeslot too. Packets
-of another type on such a trunk carry the site's IP, which goes to the IP
-stage (with the ADS-B in it: see below). A site with nothing to say sends
-only a status packet every two seconds.
+After the TPC 2964 decoder, the payload search finds E1 or D&I++. It finds
+them with the V.35 descrambler or with each other descrambler that it
+tries. The **Voice** card lists the channels with their levels. **▶** plays
+a channel with the player and the volume of the app. **●** records a `.wav`
+file.
 
-The **Comtech CDM modem** entry's voice models — CDM-600L voice, CDM-570L
-trunk, or *type found*, which picks the chain from the first look and the
-model from the data — play every channel with G.728 by itself.
-**One voice at a time** (the Audio menu, on by default) works like a scanner's
-hang time across all carriers and channels: whoever speaks first is heard,
-and the others wait until they have been quiet for the **hold** (3 s, set
-beside it); off, everyone is mixed. A channel played with ▶ is always heard.
-The volume slider and 🔊 mute at the top right are the master for
-everything played, and **Audio ▸ Output** picks the sound output (the system's default, or
-any device by name — a headset, a virtual cable into other software);
-players already running move to it at once, and the choice is remembered.
+If the sign bit of a timeslot does not change, the timeslot is not G.711
+audio. It contains sub-rate channels or compressed voice. The card marks
+it **not G.711** and shows the bits that change. Such a timeslot plays as
+silence, because as A-law it would be loud digital noise. A timeslot that
+has no decision yet also plays as silence.
+
+Those bits can carry **G.728** (LD-CELP, 16 kbit/s: a 10-bit codeword every
+five samples). Then the card shows **G.728 speech**, and ▶ and ● play and
+record the decoded voice. While a person speaks, the VFO becomes green with
+🔊 in the waterfall and in the VFO list.
+
+The voice equipment behind a CDM-600L on Horizons 3e sends G.728 in bits
+2–3 of its timeslot. It uses the frame format of G.728 (§3.11):
+
+- The top bit of the shape index carries a sync bit.
+- The sync bit is different one time every 20 ms. The decoder locks to it.
+- The decoder knows the silence fill of the equipment and mutes it.
+- A channel that sends silence fill shows **G.728, silent** before a
+  person has spoken.
+
+The decoder is written from the Recommendation. It agrees with the test
+vectors of Appendix I (112 dB SNR or better).
+
+**Multi-radio sites** send their timeslots differently. They send HDLC
+packets on an inverted line (the idle flags read `00000011` again and
+again). Each packet has these parts:
+
+- a sequence count
+- a channel byte (`08h`–`F8h`)
+- a type byte `13h`
+- 44 octets (5.5 ms) of one 64 kbit/s timeslot
+
+DecSAT joins the packets of each channel into a continuous timeslot. The
+**Voice** card lists the channels by the channel byte (ch 10h, 18h, …). It
+finds, plays and records the G.728 in each channel as given above.
+
+A timeslot of a trunk can contain a maximum of three G.728 channels in
+different bit pairs. DecSAT decodes each of them. *One voice at a time*
+also applies in the timeslot. Packets of a different type on such a trunk
+carry the IP of the site. This IP goes to the IP stage, with the ADS-B in
+it (see below). A site with no traffic sends only a status packet every
+two seconds.
+
+The **Comtech CDM modem** entry has these voice models:
+
+- CDM-600L voice
+- CDM-570L trunk
+- *type found*, which selects the chain from the first look and the model
+  from the data
+
+These models play each channel that has G.728 automatically.
+
+**One voice at a time** (in the Audio menu, on by default) operates as the
+hang time of a scanner does, for all carriers and channels. You hear the
+voice that speaks first. The other voices wait until that voice is quiet
+for the **hold** time (3 s, set adjacent to the switch). When the switch
+is off, DecSAT mixes all voices. You always hear a channel that you play
+with ▶.
+
+The volume slider and the 🔊 mute at the top right are the master controls
+for all sound. **Audio ▸ Output** selects the sound output. You can select
+the default of the system or a device by name (a headset, or a virtual
+cable into other software). Players that already run move to the new
+output immediately. DecSAT remembers the selection.
+
 Offline:
 
 ```bash
@@ -155,61 +255,99 @@ decsat decode capture_148148Sps.cf32 --decoder tpc --out dir --e1-record 1
 
 ## Radar feeds and the radar scope
 
-The same thin-route links carry air-traffic surveillance. Any VFO whose
-chain yields the frames reads it (the **Comtech CDM modem** entry with *type
-found* picks the chain itself; CDM-570L Viterbi and CDM-570L trunk are the
-usual ones), in three forms:
+The same thin-route links carry air-traffic surveillance data. Each VFO
+whose chain gives the frames reads the data. The **Comtech CDM modem**
+entry with *type found* selects the chain automatically. CDM-570L Viterbi
+and CDM-570L trunk are the usual chains. The data has three forms:
 
-- **Track reports in IBM bisync blocks** (SYN, an SOH heading, DLE STX … DLE
-  ETX, a BCC) on a 9.6 kbit/s link: one message a sector, 32 a scan, each
-  report a track's position, velocity, Mode A code, Mode C level and
-  ground speed. The format is nobody's standard; it was worked out from
-  the signal.
-- **ASTERIX** in HDLC UI frames on 64 kbit/s links: category 034 service
-  messages (sector crossings, the north marker with the radar's place and
-  scan time) and category 048 target reports (position, Mode 3/A, flight
-  level, Mode S address, track number, velocity, status), with the Mode S
-  registers the radar reads from each aircraft (BDS 4,0, 5,0 and 6,0:
-  selected altitude, altimeter setting, true track, heading, IAS, Mach,
-  vertical rates). A block counts only if its records parse to its exact
-  length under the standard UAPs.
-- **ADS-B** as ASTERIX category 021 (edition 0.23) in a trunk's IP: each
-  aircraft's own position, altitude, callsign, squawk and emitter class.
+- **Track reports in IBM bisync blocks** (SYN, an SOH heading, DLE STX …
+  DLE ETX, a BCC) on a 9.6 kbit/s link. There is one message for each
+  sector and there are 32 messages for each scan. Each report gives the
+  position, velocity, Mode A code, Mode C level and ground speed of a
+  track. The format is not a standard. It was worked out from the signal.
+- **ASTERIX** in HDLC UI frames on 64 kbit/s links:
+  - category 034 service messages (sector crossings, the north marker with
+    the position of the radar and the scan time)
+  - category 048 target reports (position, Mode 3/A, flight level, Mode S
+    address, track number, velocity, status)
+  - the Mode S registers that the radar reads from each aircraft (BDS 4,0,
+    5,0 and 6,0: selected altitude, altimeter setting, true track, heading,
+    IAS, Mach, vertical rates)
 
-The VFO's **Radar feed** card lists the tracks; **📡 Radar scope** opens a
-window with a PPI — the beam turning at the measured scan rate, range
-rings, trails, one-minute leaders, Mode A / level / speed labels, hover
-details, a track table, wheel zoom and drag pan. Click a track, or its row,
-for its details: Mode S/A/C, climb or descent, speed and heading, range
-and bearing from the radar and from the nearest airport, latitude and
-longitude when the radar's place is known, the status word said field by
-field, the raw octets. Coasted tracks are yellow; fast or high ones purple
-(650 kt or more, FL450 or above, or over 350 kt below FL100); and with an
-ADS-B feed in step with the radar's clock, the ADS-B aircraft are drawn over
-the radar's picture as magenta diamonds at the places they report, and the
-radar tracks no ADS-B aircraft matches turn red.
+  DecSAT accepts a block only if its records parse to its exact length
+  with the standard UAPs.
+- **ADS-B** as ASTERIX category 021 (edition 0.23) in the IP of a trunk.
+  Each aircraft reports its own position, altitude, callsign, squawk and
+  emitter class.
 
-Under the PPI, **Map** draws OpenStreetMap tiles (fetched with the system's
-`curl`, cached for good under `%APPDATA%\DecSAT`; **Light** or dark) and
-**Airports** the airports and runways of OurAirports' open data (fetched
-once, refreshed monthly). The radar's place comes from the feed when it
-gives it (ASTERIX's north marker), else **Site…** sets it; either is kept in
-your own settings, keyed by the radar, never in the project. Tracks the
-feed leaves unnamed take callsigns from an ADS-B feed decoded on another
-VFO (nothing asked of anyone) or, only with the **adsb.lol** switch on (off
-by default), from that site's live aircraft near the radar. The waterfall
-tags a carrier **ADS-B** or **RADAR** once a decoder has found either in it,
-and remembers the carrier. While a VFO records, its track reports go to a
-`.csv` beside the PCAP.
+The **Radar feed** card of the VFO lists the tracks. **📡 Radar scope**
+opens a window with a PPI. The PPI has these items:
 
-A CDM-570L trunk that carries a radar station's **monitoring and control**
-multicast (Frame Relay; a word-oriented format of typed points, the units
-named in the data) gets a **Radar station** card above the IP card, and
-its scope shows the station's units and the readings that move beside the
-PPI, with the targets of the radar feed another VFO decodes. What the
-points mean is not known yet.
+- the beam, which turns at the measured scan rate
+- range rings
+- trails
+- one-minute leaders
+- Mode A, level and speed labels
+- details when you hover
+- a track table
+- zoom with the wheel and pan with a drag
 
-Offline, and unattended:
+Click a track, or its row, to see its details:
+
+- Mode S/A/C
+- climb or descent
+- speed and heading
+- range and bearing from the radar and from the nearest airport
+- latitude and longitude, when the position of the radar is known
+- the status word, field by field
+- the raw octets
+
+The colours have these meanings:
+
+- Coasted tracks are yellow.
+- Fast or high tracks are purple (650 kt or more, FL450 or above, or more
+  than 350 kt below FL100).
+- When an ADS-B feed is in step with the clock of the radar, the ADS-B
+  aircraft are magenta diamonds. The scope draws them on the radar picture
+  at the positions that they report.
+- Then the radar tracks that agree with no ADS-B aircraft become red.
+
+Below the PPI are two switches:
+
+- **Map** draws OpenStreetMap tiles. DecSAT gets them with the `curl` of
+  the system and keeps them permanently in a cache in `%APPDATA%\DecSAT`.
+  You can select **Light** or dark.
+- **Airports** draws the airports and runways from the open data of
+  OurAirports. DecSAT gets the data one time and gets it again each month.
+
+The position of the radar comes from the feed when the feed gives it (the
+north marker of ASTERIX). If the feed does not give it, set it with
+**Site…**. DecSAT keeps the position in your own settings, with the radar
+as the key. It never keeps the position in the project.
+
+Some tracks have no name in the feed. They get callsigns from an ADS-B
+feed that a different VFO decodes. DecSAT sends no request to a third
+party for this. Only when the **adsb.lol** switch is on (it is off by
+default), they can also get callsigns from that site. The site gives its
+live aircraft near the radar.
+
+The waterfall tags a carrier **ADS-B** or **RADAR** after a decoder finds
+one of them in the carrier. DecSAT remembers the carrier. While a VFO
+records, its track reports go to a `.csv` file adjacent to the PCAP.
+
+A CDM-570L trunk can carry the **monitoring and control** multicast of a
+radar station. The multicast is in Frame Relay. Its format is
+word-oriented and has typed points. The data give the names of the units.
+Such a trunk gets a **Radar station** card above the IP card. Its scope
+shows these items adjacent to the PPI:
+
+- the units of the station
+- the readings that change
+- the targets of the radar feed that a different VFO decodes
+
+The meaning of the points is not known at this time.
+
+Offline, and with no operator:
 
 ```bash
 decsat decode radar_64000Sps.cf32 --decoder auto --fast      # a radar link: its reports
@@ -220,17 +358,26 @@ decsat-gui capture.cs8 --vfo-at 1461800:140000 --decoder trunk --radar-scope --r
 
 ## NovelSat NS4
 
-A NovelSat modem in NS4 mode sends DVB-S2's frame — the same SOF and PLS
-coding, slots, pilots, Gold-code scrambling, BBHEADER, baseband scrambling
-and BCH code — with two things of its own: the PLS code numbers its modes
-differently, and the LDPC codes are NovelSat's. Read as DVB-S2 such a
-carrier locks under the wrong MODCOD name (QPSK 1/2 shows as *QPSK 2/3*) or
-keeps losing lock, and every frame fails FEC. Nothing about NS4 is
-published; what is here was measured from a modem.
+A NovelSat modem in NS4 mode sends the frame of DVB-S2. These items are
+the same as in DVB-S2:
 
-Pick **NovelSat NS4 → GSE/IP (PCAP)** as the VFO's decoder (`--decoder ns4`
-on `decsat decode`): the DVB-S2 decoder with the header read as NS4 means
-it and NS4's LDPC codes, and everything after the BBFRAME as for DVB-S2.
+- the SOF and the PLS code
+- the slots and the pilots
+- the Gold-code scrambler
+- the BBHEADER and the baseband scrambler
+- the BCH code
+
+Two items are different. The PLS code gives different numbers to the
+modes, and the LDPC codes are NovelSat codes. If you read such a carrier
+as DVB-S2, one of two things occurs. The carrier locks with the incorrect
+MODCOD name (QPSK 1/2 shows as *QPSK 2/3*), or it loses lock again and
+again. In each case, the FEC of all frames fails. NovelSat publishes no
+data about NS4. The data on this page was measured from a modem.
+
+Select **NovelSat NS4 → GSE/IP (PCAP)** as the decoder of the VFO
+(`--decoder ns4` on `decsat decode`). This is the DVB-S2 decoder with two
+changes. It reads the header as NS4 defines it, and it uses the LDPC codes
+of NS4. After the BBFRAME, all steps are the same as for DVB-S2.
 
 ```
 decsat decode ns4_645161Sps.cf32 --decoder ns4 --symbol-rate 33000 --bandwidth 60000
@@ -247,58 +394,92 @@ decsat decode ns4_645161Sps.cf32 --decoder ns4 --symbol-rate 33000 --bandwidth 6
 | QPSK 1/5, short frame | 6 / 10 | ✅ |
 | QPSK 4/9, short frame | 23 / 27 | ✅ |
 
-A short frame's code is the normal one's plus 2 (the modem names short
-frames by their true rate: 1/5 is the short "1/4", 4/9 the short "1/2").
-The other QPSK rates a modem offers (normal 1/3, 2/5, 13/30, 7/15, 8/15,
-17/30, 19/30, 32/45, 4/5, 8/9, 9/10; fourteen more short ones) and the
-higher constellations are not decoded yet: their frames are skipped. The
-payload of the modem's Ethernet modes is NovelSat's own wrapping, not
-GSE, and is not unpacked: the BBFRAMEs are counted and their headers shown.
+The code of a short frame is the code of the normal frame plus 2. The
+modem gives short frames the name of their true rate. 1/5 is the short
+"1/4", and 4/9 is the short "1/2".
 
-The LDPC codes are quasi-cyclic like DVB-S2's, with their own address
-tables and a different parity part: the parity groups are sent whole (the
-order DVB-T2's parity interleaver gives), and the chain of parity bits
-closes on itself, with one parity group in three checks. Each table was
-worked out from the modem's PRBS test pattern and is tested against a
-frame as recorded.
+These modes are not decoded at this time, and DecSAT skips their frames:
+
+- the other QPSK rates of a modem with normal frames (1/3, 2/5, 13/30,
+  7/15, 8/15, 17/30, 19/30, 32/45, 4/5, 8/9, 9/10)
+- fourteen more QPSK rates with short frames
+- the higher constellations
+
+The payload of the Ethernet modes of the modem is not GSE. It has a
+NovelSat wrapper, and DecSAT does not unpack it. DecSAT counts the BBFRAMEs
+and shows their headers.
+
+The LDPC codes are quasi-cyclic, as the DVB-S2 codes are. They have their
+own address tables and a different parity part:
+
+- The modem sends each parity group as one unit. This is the order that
+  the parity interleaver of DVB-T2 gives.
+- The chain of parity bits closes on itself.
+- One parity group is in three checks.
+
+Each table was worked out from the PRBS test pattern of the modem. Each
+table has a test against a frame as recorded.
 
 ## Generic PSK → symbols
 
-For carriers that are not DVB-S2 — SCPC data, telemetry, DVB-S — a VFO locks
-the carrier and shows its constellation; press **● Record** and it writes the
-hard-decided symbols to
-`decsat-<VFO>-<RF>MHz-<rate>Bd-<modulation>-<time>.bin`, one byte per symbol:
-the symbol's bit label under the DVB-S2 mapping (BPSK: 0 = +1). The symbol rate
-and constellation come from Identify, or set them by hand. Without a preamble
-the carrier phase is ambiguous by the constellation's symmetry (90° for QPSK),
-so the labels may be a fixed rotation of the sent ones — a sync word found
-offline resolves it.
+This decoder is for carriers that are not DVB-S2: SCPC data, telemetry and
+DVB-S. The VFO locks the carrier and shows its constellation. Push
+**● Record** to write the hard-decided symbols to this file:
 
-**Text (live)**: the decided bits are also searched for readable strings,
-under every phase rotation and mirror image, both bit orders, all eight byte
-alignments, plain and differentially decoded — 256 readings at once for
-QPSK. The reading with far more text than the rest is shown, scrolling as
-the strings arrive (telemetry, beacons, NMEA, idle messages), with the
-longest strings from any reading as candidates. Untick *look for text* to
-save the CPU (about a quarter of a core at 1 MBd).
+`decsat-<VFO>-<RF>MHz-<rate>Bd-<modulation>-<time>.bin`
+
+The file has one byte for each symbol. The byte is the bit label of the
+symbol in the DVB-S2 mapping (BPSK: 0 = +1). The symbol rate and the
+constellation come from Identify, or you can set them manually.
+
+Without a preamble, the carrier phase is ambiguous by the symmetry of the
+constellation (90° for QPSK). Thus the labels can be a fixed rotation of
+the labels that were sent. A sync word that you find offline removes the
+ambiguity.
+
+**Text (live)**: the decoder also searches the decided bits for strings
+that you can read. It tries these alternatives:
+
+- each phase rotation and the mirror image
+- the two bit orders
+- all eight byte alignments
+- plain bits and differentially decoded bits
+
+For QPSK this gives 256 alternatives at the same time. The decoder shows
+the alternative that has much more text than the others. The text scrolls
+as the strings arrive (telemetry, beacons, NMEA, idle messages). The
+decoder also shows the longest strings from all alternatives as
+candidates. Clear *look for text* to decrease the CPU load (approximately
+a quarter of a core at 1 MBd).
 
 ## A Barker-11 spread carrier (C band, 4004 MHz)
 
-Decoder **Barker-11 spread BPSK** (`barker` on the command line): a VFO
-250 kHz or wider on a carrier whose BPSK symbols are each one period of the
-11-chip Barker code (166.667 kchip/s, 15 151.5 symbols/s). Two such carriers
-sit 250 kHz apart near 4004 MHz, each beside a comb of eight pilot tones. It
-despreads, follows the code and the carrier, cuts frames at the 255-symbol
-preamble, finds the 64-bit unique words and shows the data blocks in hex;
-the card draws the frames as a bitmap, a row a frame and a column a symbol
-(blue the preamble and unique words, grey the data that never changes).
-The format was measured from a recording — no specification is known, and
-neither is what the blocks carry (no text in them, in any reading tried).
+The decoder is **Barker-11 spread BPSK** (`barker` on the command line).
+Put a VFO of 250 kHz or wider on the carrier. Each BPSK symbol of the
+carrier is one period of the 11-chip Barker code (166.667 kchip/s,
+15 151.5 symbols/s). Two such carriers are 250 kHz apart near 4004 MHz.
+Each carrier is adjacent to a comb of eight pilot tones.
+
+The decoder does these steps:
+
+- It despreads the carrier.
+- It follows the code and the carrier.
+- It cuts the frames at the 255-symbol preamble.
+- It finds the 64-bit unique words.
+- It shows the data blocks in hex.
+
+The card draws the frames as a bitmap. A row is a frame and a column is a
+symbol. The preamble and the unique words are blue. The data that does not
+change is grey.
+
+The format was measured from a recording. No specification is known. The
+contents of the blocks are also not known. No interpretation that was
+tried gave text.
 
 ![The Barker-11 decoder on a carrier near 4004 MHz: the despread spectrum, the frame fields in hex, the frames drawn as a bitmap and the BPSK constellation](../images/releases/v1.8.0/barker-decoder.jpg)
 
-*The Barker-11 decoder: the frames in hex, and drawn as a bitmap, a row a
-frame.*
+*The Barker-11 decoder. It shows the frames in hex and as a bitmap. A row
+is a frame.*
 
 ```bash
 decsat decode capture_8000000Sps.cs8 --decoder barker --offset -813000 --bandwidth 300000 --fast
