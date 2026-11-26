@@ -2414,6 +2414,7 @@ impl Worker {
                     }
                 }
                 b.set_live(self.bgan_wireshark.is_some());
+                b.set_lossless(self.lossless);
                 if self.lossless {
                     // a file played losslessly waits for the decoder anyway
                     b.push(&self.bb);

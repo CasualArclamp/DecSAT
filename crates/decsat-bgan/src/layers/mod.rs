@@ -5,6 +5,7 @@ pub mod beams;
 pub mod bulletin;
 pub mod files;
 pub mod findings;
+pub mod hc;
 pub mod inflate;
 pub mod pcap;
 #[cfg(test)]

@@ -1,6 +1,7 @@
 // made by CasualArclamp
 //! Turbo codec for the TS 102 744-2-1 SRCC (clause 5.3.8): encoder (for the
-//! re-encode check and test signals) and a max-log-MAP iterative decoder.
+//! re-encode check and test signals) and an iterative log-MAP decoder
+//! (max-log-MAP when [`TurboDecoder::log_map`] is off).
 //! Ported from DecBGAN `bgan/turbo.py` and `bgan/decoder.py`.
 //!
 //! SRCC, 16 states: backward polynomial 1 + X^3 + X^4 (octal 23), forward
@@ -117,6 +118,21 @@ pub struct TurboDecoder {
     le2: Vec<f32>,
     la2: Vec<f32>,
     lsys_i: Vec<f32>,
+    /// Log-MAP (max* with a linear correction) instead of max-log-MAP.
+    pub log_map: bool,
+}
+
+/// max*(a, b) = ln(e^a + e^b), its correction ln(1 + e^-|a-b|) taken as the
+/// line ln 2 - |a-b|/4 clipped at zero; or plain max (max-log-MAP).
+#[inline(always)]
+fn mstar<const LOG: bool>(a: f32, b: f32) -> f32 {
+    let m = if a > b { a } else { b };
+    if LOG {
+        let c = core::f32::consts::LN_2 - 0.25 * (a - b).abs();
+        m + if c > 0.0 { c } else { 0.0 }
+    } else {
+        m
+    }
 }
 
 impl TurboDecoder {
@@ -135,7 +151,14 @@ impl TurboDecoder {
     /// large negative finite value rather than -inf, and each step is
     /// renormalised, so nothing overflows.
     #[allow(clippy::needless_range_loop)] // index arithmetic on the trellis states
-    fn bcjr(&mut self, lsys: &[f32], lpar: &[f32], la: &[f32], terminated: bool, lext: &mut [f32]) {
+    fn bcjr<const LOG: bool>(
+        &mut self,
+        lsys: &[f32],
+        lpar: &[f32],
+        la: &[f32],
+        terminated: bool,
+        lext: &mut [f32],
+    ) {
         let n = lsys.len();
         self.alpha.resize(n + 1, [NEG; 16]);
         self.beta.resize(n + 1, [NEG; 16]);
@@ -188,7 +211,7 @@ impl TurboDecoder {
                 let u1 = usize::from(NXT[s1][1] as usize == ns);
                 let v0 = a[s0] + gf[GI[s0][u0]];
                 let v1 = a[s1] + gf[GI[s1][u1]];
-                nx[ns] = if v0 > v1 { v0 } else { v1 };
+                nx[ns] = mstar::<LOG>(v0, v1);
             }
             let m = nx.iter().cloned().fold(f32::MIN, f32::max);
             for v in &mut nx {
@@ -212,15 +235,11 @@ impl TurboDecoder {
                 let g1 = gf[GI[s][1]];
                 let b0 = bn[n0] + g0;
                 let b1 = bn[n1] + g1;
-                b[s] = if b0 > b1 { b0 } else { b1 };
+                b[s] = mstar::<LOG>(b0, b1);
                 let v0 = a[s] + b0;
                 let v1 = a[s] + b1;
-                if v0 > m0 {
-                    m0 = v0;
-                }
-                if v1 > m1 {
-                    m1 = v1;
-                }
+                m0 = mstar::<LOG>(m0, v0);
+                m1 = mstar::<LOG>(m1, v1);
             }
             let m = b.iter().cloned().fold(f32::MIN, f32::max);
             for v in &mut b {
@@ -234,8 +253,10 @@ impl TurboDecoder {
     /// Iterative decoding. `lsys`, `lp`, `lq`: channel LLRs, length DF,
     /// punctured positions zero. `escale` scales extrinsics (max-log-MAP
     /// overestimates their reliability; ~0.75 recovers most of the 0.3-0.5 dB
-    /// it loses to true log-MAP). Always runs all `niter` iterations and
-    /// returns that count; hard bits go to `bits`, posterior LLRs to `post`.
+    /// it loses to true log-MAP; with [`Self::log_map`] 1.0 is best, and the
+    /// LLRs must then be true ones, at the channel's noise). Always runs all
+    /// `niter` iterations and returns that count; hard bits go to `bits`,
+    /// posterior LLRs to `post`.
     ///
     /// There used to be an early stop when an iteration changed no hard
     /// decision. Measured over 44000 accepted blocks on nine recordings, it
@@ -270,14 +291,22 @@ impl TurboDecoder {
         for _ in 0..niter {
             let la1 = std::mem::take(&mut self.la1);
             let mut le1 = std::mem::take(&mut self.le1);
-            self.bcjr(lsys, lp, &la1, true, &mut le1);
+            if self.log_map {
+                self.bcjr::<true>(lsys, lp, &la1, true, &mut le1);
+            } else {
+                self.bcjr::<false>(lsys, lp, &la1, true, &mut le1);
+            }
             let mut la2 = std::mem::take(&mut self.la2);
             for j in 0..n {
                 la2[j] = escale * le1[perm[j] as usize];
             }
             let lsys_i = std::mem::take(&mut self.lsys_i);
             let mut le2 = std::mem::take(&mut self.le2);
-            self.bcjr(&lsys_i, lq, &la2, false, &mut le2);
+            if self.log_map {
+                self.bcjr::<true>(&lsys_i, lq, &la2, false, &mut le2);
+            } else {
+                self.bcjr::<false>(&lsys_i, lq, &la2, false, &mut le2);
+            }
             let mut la1 = la1;
             for j in 0..n {
                 la1[perm[j] as usize] = escale * le2[j];
