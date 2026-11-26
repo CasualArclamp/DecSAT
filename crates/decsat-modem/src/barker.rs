@@ -99,7 +99,7 @@ const KEEP: usize = 4;
 const RASTER_ROWS: usize = 96;
 
 /// One frame, from the start of its preamble to the next.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BarkerFrame {
     /// Its length in symbols, preamble included.
     pub symbols: usize,
@@ -125,7 +125,7 @@ pub struct BarkerFrame {
 }
 
 /// The latest frames as a bitmap: a row a frame, a column a symbol.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Raster {
     /// Counts up as frames arrive (a display redraws when it moves).
     pub revision: u64,
@@ -173,7 +173,7 @@ impl Raster {
 }
 
 /// What the card shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BarkerView {
     /// The code is found and tracked.
     pub locked: bool,

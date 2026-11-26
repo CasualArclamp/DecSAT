@@ -39,7 +39,7 @@ fn pll_bandwidth(symbol_rate: f64) -> f64 {
 }
 
 /// How the symbols written to a .bin file are numbered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SymbolLabels {
     /// As the modulation's standard labels them (DVB-S2's mappings, the
     /// RCV-20x manual's for its QAMs): the hard index itself.

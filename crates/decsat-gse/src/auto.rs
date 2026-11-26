@@ -47,7 +47,7 @@ pub fn frame_trailer(bbframe: &[u8]) -> bool {
 pub const RANDOM_BITS_PER_BYTE: f64 = 7.95;
 
 /// Where an IP packet came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     Gse(Variant),
     Blind,
@@ -86,7 +86,7 @@ const MAX_KEPT: usize = 4096;
 
 /// What one GSE label — a terminal's address on an outbound: a MAC (6
 /// bytes), 3 bytes, or none for broadcast — has been sent.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LabelStats {
     pub pdus: u64,
     pub bytes: u64,
@@ -103,7 +103,7 @@ pub struct LabelStats {
 }
 
 /// Per-variant view, for display.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct VariantReport {
     pub variant: Variant,
     pub stats: GseStats,

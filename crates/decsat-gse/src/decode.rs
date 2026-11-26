@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use decsat_core::crc::crc32_mpeg2;
 
 /// What GSE_LENGTH counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LengthMode {
     /// The bytes after the 2-byte header (the standard).
     Standard,
@@ -41,7 +41,7 @@ pub enum LengthMode {
 }
 
 /// What the fragment-id byte holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FragMode {
     /// One 8-bit id (the standard).
     Plain,
@@ -50,7 +50,7 @@ pub enum FragMode {
 }
 
 /// One way to read GSE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Variant {
     pub length: LengthMode,
     pub frag: FragMode,
@@ -114,7 +114,9 @@ impl Variant {
 }
 
 /// A GSE label: the receiver address of a PDU.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum Label {
     /// Broadcast (label type 2), or none known.
     #[default]
@@ -156,7 +158,7 @@ pub struct Pdu {
 }
 
 /// Counts of what a decoder has seen.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GseStats {
     pub packets: u64,
     pub whole: u64,

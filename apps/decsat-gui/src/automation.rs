@@ -97,6 +97,8 @@ pub struct Options {
     pub tx_panel: bool,
     /// Open the live radio's window.
     pub radio_panel: bool,
+    /// Open the remote (client/server) window.
+    pub remote_panel: bool,
     /// Tick the radio's bias tee (antenna-port power) for this run.
     pub bias_tee: bool,
     /// Divide the live radio's rate by this for the run (2, 4 … 64).
@@ -247,6 +249,7 @@ impl Options {
                 }
                 Some("--tx-panel") => o.tx_panel = true,
                 Some("--radio-panel") => o.radio_panel = true,
+                Some("--remote-panel") => o.remote_panel = true,
                 Some("--bias-tee") => o.bias_tee = true,
                 Some("--decimate") => {
                     let v = args.next().ok_or("--decimate needs a factor")?;
@@ -340,6 +343,7 @@ fn decoder_by_name(name: &str) -> Option<decsat_engine::DecoderKind> {
         "is19" | "is19-outbound" | "i19" => Is19Outbound,
         "bgan" | "inmarsat" => Bgan,
         "aero" => Aero,
+        "gmr2" | "gmr2+" | "isatphone" => Gmr2,
         "beacon" | "tlm" | "telemetry" => Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => HsBeacon,

@@ -636,7 +636,7 @@ fn word_at(bits: &[u8], at: usize) -> u16 {
         .fold(0u16, |a, &b| (a << 1) | u16::from(b))
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AptxStats {
     pub locked: bool,
     /// Left and right codewords alternate (else one channel).

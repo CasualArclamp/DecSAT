@@ -22,6 +22,7 @@
 //! ([`VideoPlayer::start_aptx`]).
 
 pub mod ffmpeg;
+pub mod file;
 pub mod mkv;
 
 pub use ffmpeg::Deinterlace;

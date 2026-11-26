@@ -44,7 +44,7 @@ pub fn ts_offset(payload: &[u8]) -> Option<usize> {
 }
 
 /// What sits ahead of the packets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Header {
     /// Nothing: the datagram is packets.
     None,
@@ -85,7 +85,7 @@ impl Header {
 }
 
 /// One flow of transport packets in UDP, as found so far.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UdpTs {
     /// Where it goes (a multicast group, usually) and where from.
     pub dst: SocketAddr,

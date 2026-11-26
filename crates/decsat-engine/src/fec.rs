@@ -325,7 +325,7 @@ fn build_code(pls: PlsInfo) -> Option<Code> {
 }
 
 /// What a VFO's FEC has done, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FecStats {
     /// Data frames decoded (dummy frames excluded).
     pub frames: u64,
@@ -367,6 +367,8 @@ pub struct FecStats {
     /// What GSE and IP have made of the GS-mode frames.
     pub gse: Option<GseView>,
     /// The MPEG-TS from the TS-mode frames (MPEG-TS decoders).
+    /// Filled in at the receiving end in smart mode (what it counted itself).
+    #[serde(skip)]
     pub ts: Option<TsView>,
     /// DVB-S: the code rate found, Viterbi and Reed–Solomon.
     pub dvbs: Option<decsat_modem::dvbs::DvbsStats>,
@@ -384,6 +386,9 @@ pub struct FecStats {
     pub viterbi: Option<decsat_modem::dvbs::ViterbiStats>,
     /// Any other rate-½ convolutional code, found blind.
     pub conv: Option<decsat_modem::convblind::ConvStats>,
+    /// Unique-word framing taken out in front of the code search (see
+    /// [`crate::uwstrip`]), once found.
+    pub uw: Option<crate::uwstrip::UwStats>,
     /// A bounded K = 7 search ran out (see [`FecInput::Viterbi`]).
     pub k7_stopped: bool,
     /// What a modem's data carry (TPC 2964).
@@ -407,13 +412,14 @@ pub struct FecStats {
 }
 
 /// A call's voice out of the TDM multiplex, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CallVoiceView {
     pub playing: bool,
     /// Playing by itself (speech was found, `voice_auto`), not by ▶.
     pub auto: bool,
     /// Playing by itself and holding the voice floor: heard now.
     pub on_air: bool,
+    #[serde(skip)]
     pub audio: Option<AudioHandle>,
     pub recording: bool,
     /// The recording (current or last) and its bytes.
@@ -596,7 +602,7 @@ impl CallVoice {
 }
 
 /// An E1's state, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct E1View {
     /// How the channels are carried: "E1 (G.704)", "D&I++" or HDLC
     /// packets.
@@ -624,6 +630,7 @@ pub struct E1View {
     /// The timeslot playing ([`MIX`]: every G.728 channel, by itself),
     /// and its player.
     pub playing: Option<u8>,
+    #[serde(skip)]
     pub audio: Option<AudioHandle>,
     /// The channel of this carrier holding the voice floor (heard now,
     /// others waiting; see [`crate::floor`]).
@@ -1230,7 +1237,7 @@ pub struct TsView {
 }
 
 /// IP out of GSE, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GseView {
     /// Where packets come from: the GSE variant in use, or the blind search.
     pub source: Option<Source>,
@@ -1290,6 +1297,7 @@ pub struct GseView {
     pub audio_target: Option<PlayTarget>,
     pub audio_error: Option<String>,
     /// The in-app player, while one is playing: status, level, pause.
+    #[serde(skip)]
     pub audio_app: Option<AudioHandle>,
     /// The stream being recorded, and the file (current or last) with
     /// its bytes so far.
@@ -1329,7 +1337,7 @@ const TERMINALS_SHOWN: usize = 64;
 
 /// One GSE label's traffic: on a VSAT hub's ACM outbound, one terminal's,
 /// and the MODCODs the hub chose for it — its downlink as the hub sees it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalView {
     pub label: Label,
     /// The input stream it was seen on.
@@ -1516,9 +1524,18 @@ impl FecWorker {
             queued: queued.clone(),
             lossless: lossless_shared.clone(),
         };
+        // The VFO's sound route (a server's client) goes with it: the FEC
+        // thread is where the voice and programme players start.
+        // So does its Wireshark route: the IP feeds start there too.
+        let route = decsat_audio::route::current();
+        let packets = crate::wireshark::route();
         let join = std::thread::Builder::new()
             .name("decsat-fec".into())
-            .spawn(move || run(rx, s, o, g, q, p, backlog, symbol_rate))
+            .spawn(move || {
+                decsat_audio::route::set_current(route);
+                crate::wireshark::set_route(packets);
+                run(rx, s, o, g, q, p, backlog, symbol_rate)
+            })
             .expect("spawn FEC thread");
         FecWorker {
             tx: Some(tx),
@@ -3007,6 +3024,8 @@ fn run(
     let mut tdm_active_until = 0u64;
     let mut viterbi: Option<decsat_modem::dvbs::ViterbiRx> = None;
     let mut conv: Option<decsat_modem::convblind::ConvRx> = None;
+    let mut uw: Option<crate::uwstrip::UwStripper> = None;
+    let mut uw_out: Vec<Iq> = Vec::new();
     let mut k7_stopped = false;
     let mut tpc_frames = Vec::new();
     // Which TPC frames decoded (empty for the other chains: all count).
@@ -3146,23 +3165,44 @@ fn run(
                         // The K = 7 code at every rate (QPSK), and beside it
                         // any rate-½ code its parity checks show; the first
                         // to lock decodes, the other stops.
+                        // A UW in the coded stream comes out first: the code
+                        // runs over the data symbols alone.
+                        let strip = uw.get_or_insert_with(|| {
+                            crate::uwstrip::UwStripper::new(bpsk, symbol_rate)
+                        });
+                        // A code already locked on the symbols as they are
+                        // has no UW in its way: leave them be.
+                        let code_locked = viterbi.as_ref().is_some_and(|v| v.stats.rate.is_some())
+                            || conv.as_ref().is_some_and(|c| c.locked());
+                        if code_locked {
+                            strip.stand_down();
+                        }
+                        uw_out.clear();
+                        strip.push(&symbols, &mut uw_out);
+                        // (The time the input spans, and the share of it
+                        // that is data, before `symbols` names what is left.)
+                        let n_in = symbols.len();
+                        let data_share = strip.stats.as_ref().map_or(1.0, |u| {
+                            1.0 - (u.uw_len + u.other_known) as f64 / u.period as f64
+                        });
+                        let symbols = &uw_out;
                         let blind = conv.get_or_insert_with(|| ConvRx::new(bpsk));
                         if !bpsk && !blind.locked() && !k7_stopped {
                             let rx = viterbi.get_or_insert_with(ViterbiRx::new);
-                            rx.push(&symbols, &mut tpc_frames);
+                            rx.push(symbols, &mut tpc_frames);
                             k7_stopped = bounded
                                 && rx.stats.rate.is_none()
                                 && rx.stats.searches >= K7_SEARCHES;
                         }
                         let k7 = viterbi.as_ref().and_then(|v| v.stats.rate);
                         if k7.is_none() {
-                            blind.push(&symbols, &mut tpc_frames);
+                            blind.push(symbols, &mut tpc_frames);
                         }
                         // Data bits a symbol: one or two coded bits, at the
                         // code's rate.
                         let coded = if bpsk { 1.0 } else { 2.0 };
-                        let bps = coded * symbol_rate * k7.map_or(0.5, |r| r.value());
-                        let secs = symbols.len() as f64 / symbol_rate;
+                        let bps = coded * symbol_rate * data_share * k7.map_or(0.5, |r| r.value());
+                        let secs = n_in as f64 / symbol_rate;
                         match k7 {
                             Some(_) => (secs, VITERBI_BLOCK, bps, "viterbi"),
                             None => (secs, CONV_BLOCK, bps, "conv"),
@@ -3378,6 +3418,7 @@ fn run(
                 s.call_voice = call_voice.as_ref().map(|c| c.view());
                 s.viterbi = viterbi.as_ref().map(|r| r.stats.clone());
                 s.conv = conv.as_ref().map(|r| r.stats.clone());
+                s.uw = uw.as_ref().and_then(|r| r.stats.clone());
                 s.k7_stopped = k7_stopped;
                 s.payload = Some(pay.stats.clone());
                 s.text = tpc_text.as_ref().map(|t| t.view());

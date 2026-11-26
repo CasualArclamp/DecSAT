@@ -122,12 +122,13 @@ pub(crate) fn decoder_by_name(name: &str) -> Result<DecoderKind> {
         "is19" | "is19-outbound" | "i19" => DecoderKind::Is19Outbound,
         "bgan" | "inmarsat" => DecoderKind::Bgan,
         "aero" => DecoderKind::Aero,
+        "gmr2" | "gmr2+" | "isatphone" => DecoderKind::Gmr2,
         "beacon" | "tlm" | "telemetry" => DecoderKind::Beacon,
         "p3" | "p3-beacon" | "qo100" | "ao40" => DecoderKind::P3Beacon,
         "hs" | "hs-beacon" | "hsmodem" | "multimedia" => DecoderKind::HsBeacon,
         "barker" | "b11" | "barker-tdm" => DecoderKind::BarkerTdm,
         other => bail!(
-            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, beacon, p3, hs, barker)"
+            "unknown decoder `{other}` (id, ip, ts, dvbs, tpc, cdm600, cdm570, trunk, auto, fastlink, viterbi, cid, psk, tdma, is19, bgan, aero, gmr2, beacon, p3, hs, barker)"
         ),
     })
 }
@@ -697,6 +698,9 @@ pub(crate) fn report(st: &VfoStatus) {
     if let Some(v) = &st.beacon {
         print_beacon(v);
     }
+    if let Some(v) = &st.gmr2 {
+        print_gmr2(v);
+    }
     if let Some(v) = &st.p3 {
         print_p3(v);
     }
@@ -904,6 +908,25 @@ pub(crate) fn report(st: &VfoStatus) {
             t.overhead
                 .map_or(String::new(), |o| format!(", overhead {o:06X}h"))
         );
+    }
+    if let Some(u) = &f.uw {
+        println!(
+            "framing: {} · UW {} · {} frames, {} missed, {} slips, {} relocks",
+            u.describe(),
+            u.uw,
+            u.frames,
+            u.misses,
+            u.slips,
+            u.losses
+        );
+        if let Some(r) = &u.reference {
+            println!(
+                "reference: frame {} of the superframe · {} · {} unlike copies left out",
+                r.phase,
+                r.describe(),
+                r.unlike
+            );
+        }
     }
     if let Some(v) = &f.viterbi {
         println!(
@@ -2611,5 +2634,40 @@ fn print_programme(p: &decsat_engine::ProgrammeView) {
     }
     if let Some(e) = &p.error {
         println!("  error: {e}");
+    }
+}
+
+/// An Inmarsat GMR-2+ carrier's beam, frame number and System Information.
+fn print_gmr2(v: &decsat_engine::gmr2::Gmr2View) {
+    println!(
+        "GMR-2+: {} runs, carrier {:+.0} Hz, Eb/N0 {:.1} dB · sync {} good {} bad · BCCH {} good {} bad · m-sequence {} · HM sync {}",
+        v.runs,
+        v.carrier_hz,
+        v.eb_n0_db,
+        v.sch_good,
+        v.sch_bad,
+        v.bcch_good,
+        v.bcch_bad,
+        v.mseq_runs,
+        v.hms_runs
+    );
+    if let Some(s) = &v.sch {
+        println!(
+            "  beam NCC {} BCCC {} · FN {} (T1 {} T2 {} T3' {})",
+            s.ncc,
+            s.bccc,
+            v.frame_number.unwrap_or(0),
+            s.t1,
+            s.t2,
+            s.t3p
+        );
+    }
+    println!(
+        "  seen: {} · beam map {}/22",
+        v.seen.join(" "),
+        v.beam_map_segments
+    );
+    for l in &v.lines {
+        println!("  [{:7.2} s] {:5} {}", l.seconds, l.title, l.text);
     }
 }

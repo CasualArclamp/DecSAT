@@ -53,6 +53,8 @@ pub enum Action {
     /// Play a service of a VFO's TS in the app (its number; `None`: the
     /// first with pictures).
     Watch(VfoId, Option<u16>),
+    /// Play a VFO's TS in the app as soon as it locks (the tick box).
+    AutoPlay(bool),
     /// Open the radar scope on a VFO's radar feed.
     OpenRadarScope(VfoId),
     /// Play a VFO's multicast audio stream (group:port): in the app, or in
@@ -444,6 +446,18 @@ pub fn badge(s: &VfoSettings, st: Option<&VfoStatus>) -> String {
             ),
             Some(a) if !a.searching => format!("AERO {} · no lock", a.channel),
             _ => "AERO searching".into(),
+        },
+        // "GMR2 901-11 54F5 · 12.0 dB": the network, location area and Eb/N0.
+        DecoderKind::Gmr2 => match &st.gmr2 {
+            Some(g) if g.locked => match &g.si3 {
+                Some(s) => format!(
+                    "GMR2 {}-{} {:04X} · {:.1} dB",
+                    s.mcc, s.mnc, s.lac, g.eb_n0_db
+                ),
+                None => format!("GMR2 · {:.1} dB", g.eb_n0_db),
+            },
+            Some(g) if !g.searching => "GMR2 · no lock".into(),
+            _ => "GMR2 searching".into(),
         },
         // "BGAN 12.4 dB · 87 %": Es/N0 and the share of blocks that decoded.
         DecoderKind::Bgan => match &st.bgan {

@@ -296,7 +296,7 @@ pub fn rs_correct(cw: &mut [u8]) -> Option<usize> {
 
 /// Where a frame stands in what is being sent (`frame_packer.cpp`: the
 /// first/last bits of the status byte).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Place {
     /// The first frame of a file.
     First,
@@ -307,7 +307,7 @@ pub enum Place {
 }
 
 /// One frame, its Reed–Solomon code and CRC both good.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HsFrame {
     /// The 10-bit frame counter: a file's frames count from 0. Streamed
     /// frames carry whatever it last was.
@@ -664,7 +664,7 @@ pub fn decode(codeword: &[u8]) -> Option<HsFrame> {
 // Files
 
 /// A file being received, or received.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HsFile {
     pub name: String,
     /// The CRC-16 of the bytes sent: the file's identity.

@@ -87,7 +87,7 @@ fn stream(f: Fmt) -> AudioStream {
 }
 
 /// Programme audio, for display.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProgrammeView {
     /// The codec, as far as it is decoded.
     pub codec: String,
@@ -105,6 +105,7 @@ pub struct ProgrammeView {
     /// MPEG audio is decoded by the player alone).
     pub levels_db: Vec<f32>,
     pub playing: bool,
+    #[serde(skip)]
     pub audio: Option<AudioHandle>,
     pub recording: bool,
     /// The recording (current or last) and its bytes.

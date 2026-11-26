@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// What the UI shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BganView {
     pub rx: RxStatus,
     /// One-line summary for the VFO list.
@@ -39,6 +39,19 @@ pub struct BganView {
     /// (this crate only hands over the packets, see `take_live`).
     pub wireshark: Option<(u64, u64)>,
     pub wireshark_error: Option<String>,
+    /// Input buffered for the decoder, s: it falls behind there instead of
+    /// losing input. Filled in by the engine, which holds the buffer.
+    #[serde(default)]
+    pub backlog_s: f64,
+    /// New input is being thrown away so the decoder can catch up.
+    #[serde(default)]
+    pub paused: bool,
+    /// Input never decoded, s: thrown away while paused, and lost because
+    /// the buffer was full.
+    #[serde(default)]
+    pub skipped_s: f64,
+    #[serde(default)]
+    pub overflow_s: f64,
 }
 
 #[derive(Default)]
@@ -321,6 +334,10 @@ impl BganSession {
             recent: self.layers.recent.iter().rev().take(12).cloned().collect(),
             wireshark: None,
             wireshark_error: None,
+            backlog_s: 0.0,
+            paused: false,
+            skipped_s: 0.0,
+            overflow_s: 0.0,
         }
     }
 }
@@ -340,7 +357,7 @@ impl Drop for BganSession {
 mod tests {
     use super::*;
 
-    /// A 20-byte-header UDP packet with a valid header checksum.
+    /// A 20-byte-header UDP packet with valid header and UDP checksums.
     fn packet(n: usize) -> Vec<u8> {
         let mut h = vec![0u8; 20];
         h[0] = 0x45;
@@ -358,6 +375,7 @@ mod tests {
         }
         h[10..12].copy_from_slice(&(!(s as u16)).to_be_bytes());
         h.extend((0..n).map(|i| i as u8));
+        crate::layers::pcap::tests::seal(&mut h);
         h
     }
 
@@ -447,8 +465,11 @@ mod tests {
         let parts = split([0x57, 0xc7], 3, 1, &cut, &[10, 80]);
         let mut stream = vec![0u8; 11];
         stream.extend(&plain);
+        // what could open a 260-octet segment (length-present bit, length
+        // 255): the reassembler waits for it, so `cut`, after it, is held back
+        stream.extend([0x41, 0x00, 0xff]);
         stream.extend(parts.concat());
-        stream.extend([0u8; 9]); // too little look-ahead: `cut` is held back
+        stream.extend([0u8; 9]);
 
         let dir = std::env::temp_dir().join(format!("decsat-bgan-flush-{}", std::process::id()));
         let mut s = BganSession::new(192_000.0);

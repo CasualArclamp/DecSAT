@@ -100,6 +100,8 @@ pub struct SideInput<'a> {
     pub have_source: bool,
     /// What carriers are known to be (the modem's type), by RF.
     pub caps: &'a crate::carrier_caps::CarrierCaps,
+    /// "Auto play in DecSAT player" is ticked.
+    pub autoplay: bool,
 }
 
 pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<Action> {
@@ -285,6 +287,8 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
         ts_pick = dvb_card(ui, v.settings.decoder, &st, vfo_rf);
     } else if v.settings.decoder == DecoderKind::Aero {
         aero_card(ui, &st, vfo_rf, v.id);
+    } else if v.settings.decoder == DecoderKind::Gmr2 {
+        gmr2_card(ui, &st, vfo_rf);
     } else {
         // Every other mode: the same header, with what it has to show.
         mode_card(ui, v, &st, vfo_rf);
@@ -930,6 +934,16 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                     {
                         actions.push(Action::Watch(v.id, None));
                     }
+                    let mut auto = inp.autoplay;
+                    if ui
+                        .checkbox(&mut auto, "Auto play in DecSAT player")
+                        .on_hover_text(
+                            "When a VFO locks onto a TS carrier, play its first service with                              pictures here at once (when the player is not already open).                              For every VFO; remembered",
+                        )
+                        .changed()
+                    {
+                        actions.push(Action::AutoPlay(auto));
+                    }
                     for p in [Player::Vlc, Player::PotPlayer] {
                         if ui
                             .button(format!("▶ {}", p.name()))
@@ -1086,6 +1100,46 @@ pub fn show(ui: &mut Ui, inp: &SideInput, new_decoder: &mut DecoderKind) -> Vec<
                         RichText::new("")
                     };
                     ui.label(note.small());
+                });
+                ui.end_row();
+
+                // A decoder slower than real time falls behind into a
+                // buffer (up to 60 s); pausing stops new input going in, so
+                // it catches up.
+                ui.label("Demod");
+                ui.horizontal(|ui| {
+                    let (label, tip) = if s.paused {
+                        ("▶ Resume", "Take the live input again")
+                    } else {
+                        (
+                            "⏸ Pause",
+                            "Stop taking new input, so the decoder works through what it has buffered (input meanwhile is not decoded)",
+                        )
+                    };
+                    if ui.add(egui::Button::new(label).selected(s.paused)).on_hover_text(tip).clicked() {
+                        s.paused = !s.paused;
+                    }
+                    if let Some(b) = bg {
+                        let mut note = if b.backlog_s >= 0.05 {
+                            format!("{:.1} s behind", b.backlog_s)
+                        } else if s.paused {
+                            "caught up".to_string()
+                        } else {
+                            "live".to_string()
+                        };
+                        if b.skipped_s >= 0.05 {
+                            note += &format!(" · {:.0} s skipped", b.skipped_s);
+                        }
+                        if b.overflow_s >= 0.05 {
+                            note += &format!(" · {:.0} s lost (buffer full)", b.overflow_s);
+                        }
+                        let text = RichText::new(note).small();
+                        ui.label(if b.backlog_s >= 2.0 || b.overflow_s > 0.0 {
+                            text.color(Color32::from_rgb(240, 200, 80))
+                        } else {
+                            text.weak()
+                        });
+                    }
                 });
                 ui.end_row();
             }
@@ -3254,6 +3308,65 @@ fn code_row(ui: &mut Ui, f: Option<&FecStats>, good: Color32, wait: Color32) {
         (0, t) => format!(" · {t} turns followed"),
         (l, t) => format!(" · {l} relocks · {t} turns followed"),
     };
+    // A unique word found in the coded stream (and taken out before the
+    // code search).
+    if let Some(u) = f.and_then(|f| f.uw.as_ref()) {
+        ui.label("Framing");
+        let mut text = u.describe();
+        if u.misses > 0 || u.slips > 0 || u.losses > 0 {
+            text += &format!(
+                " · {} missed · {} slips · {} relocks",
+                u.misses, u.slips, u.losses
+            );
+        }
+        ui.colored_label(good, text).on_hover_text(format!(
+            "A fixed run of symbols at a fixed spacing: found by folding the \
+             symbols on their period, then dropped from every frame so the code \
+             search sees the data symbols alone.\n\nUW (quadrant steps from its \
+             first symbol): {}\n{} frames.{}",
+            u.uw,
+            u.frames,
+            if u.superframe.is_some() {
+                "\nSuperframe: one frame in each repeats exactly."
+            } else {
+                ""
+            }
+        ));
+        ui.end_row();
+        // The superframe's repeated frame, a known sequence: the raw
+        // channel measured on it.
+        if let Some(r) = &u.reference {
+            ui.label("Reference");
+            let colour = match r.ber() {
+                Some(b) if b < 1e-2 => good,
+                Some(_) => wait,
+                None => Color32::from_gray(170),
+            };
+            ui.colored_label(colour, r.describe())
+                .on_hover_text(format!(
+                    "The frame that repeats exactly once a superframe (frame {} of {}), \
+                 kept once two copies matched bit for bit. Each later copy is \
+                 compared with it: the bits that differ are raw channel errors, \
+                 before any FEC (Gray labels, so a neighbouring point is one bit).\
+                 \n\n{} bits a copy · {} copies compared · {} too unlike to count \
+                 (superframe phase lost) · last copy {} errors.{}",
+                    r.phase,
+                    u.superframe.unwrap_or(0),
+                    r.bits_per_copy,
+                    r.copies,
+                    r.unlike,
+                    r.last_errors,
+                    if r.lfsr.is_some() {
+                        "\n\nIts bits are a shift-register sequence (found with \
+                     Berlekamp–Massey): the connection polynomial and the register \
+                     before the frame's first bit, oldest bit first."
+                    } else {
+                        ""
+                    }
+                ));
+            ui.end_row();
+        }
+    }
     ui.label("Code");
     let r = if let Some((v, r)) = k7.and_then(|v| v.rate.map(|r| (v, r))) {
         ui.colored_label(
@@ -4816,10 +4929,7 @@ fn decoder_menu(ui: &mut Ui, id: &str, decoder: &mut DecoderKind, mode: SignalMo
     egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .show_ui(ui, |ui| {
-            for k in DecoderKind::ALL
-                .into_iter()
-                .filter(|k| k.fits(mode) && crate::decoder_filter::allowed(*k))
-            {
+            for k in DecoderKind::ALL.into_iter().filter(|k| k.fits(mode)) {
                 if !k.is_cdm() {
                     ui.selectable_value(decoder, k, k.label());
                 } else if k == DecoderKind::CDM[0] {
@@ -5959,6 +6069,7 @@ fn mode_title(decoder: DecoderKind) -> &'static str {
         DecoderKind::BarkerTdm => "Barker-11 TDM",
         DecoderKind::Bgan => "Inmarsat BGAN",
         DecoderKind::Aero => "Inmarsat Aero",
+        DecoderKind::Gmr2 => "Inmarsat GMR-2+",
         DecoderKind::PskSymbols => "PSK",
         DecoderKind::Tdma => "TDMA",
         DecoderKind::ReturnPool => "Return pool",
@@ -5990,15 +6101,25 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
     let carrier = st.carrier;
     // Rust note: `filter` keeps the Option only while its closure is true.
     let carrier_lock = carrier.filter(|c| c.locked);
+    // The BGAN decoder has its own receiver and never fills `st.carrier`, so
+    // its lock comes from its own status; without this the card said
+    // "waiting for the carrier" in grey while it was locked and decoding.
+    let bgan = st.bgan.as_ref().map(|b| &b.rx);
+    let bgan_lock = bgan.filter(|r| r.locked);
     let colour = match carrier {
         _ if !v.settings.enabled || st.out_of_span => grey,
         Some(c) if c.locked => HEALTH_OK,
         Some(_) => HEALTH_OK.gamma_multiply(0.55),
+        None if bgan_lock.is_some() => HEALTH_OK,
         // Waiting for its carrier; a mode with no carrier loop just runs.
         None if demodulates => grey,
         None => HEALTH_OK,
     };
-    let space_hz = vfo_rf.map(|f| f + carrier_lock.map_or(0.0, |c| c.offset_hz));
+    let offset_hz = carrier_lock
+        .map(|c| c.offset_hz)
+        .or(bgan_lock.map(|r| r.carrier_hz))
+        .unwrap_or(0.0);
+    let space_hz = vfo_rf.map(|f| f + offset_hz);
     title_bar(
         ui,
         mode_title(decoder),
@@ -6006,7 +6127,7 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
         st.symbol_rate,
         Some(v.settings.bandwidth_hz),
         space_hz,
-        carrier_lock.is_some() || !demodulates,
+        carrier_lock.is_some() || bgan_lock.is_some() || !demodulates,
     );
 
     // The bar's fixed scale, its fill and the line under it. Rust note:
@@ -6071,6 +6192,22 @@ fn mode_card(ui: &mut Ui, v: &UiVfo, st: &VfoStatus, vfo_rf: Option<f64>) {
             "not locked".to_string()
         };
         right = format!("{:+.0} Hz", c.offset_hz);
+    } else if let Some(r) = bgan.filter(|_| v.settings.enabled && !st.out_of_span) {
+        // Es/N0 on the same 0-20 dB scale as a carrier's.
+        (lo, hi) = (0.0, 20.0);
+        fill = r.locked.then_some(r.esn0_db);
+        left = if r.tables_missing {
+            "ETSI Annex C tables missing".to_string()
+        } else if r.locked {
+            format!("locked · Es/N0 {:.1} dB · UW {}", r.esn0_db, r.uw_level)
+        } else {
+            "searching for the frame sync…".to_string()
+        };
+        right = if r.locked {
+            format!("{:+.0} Hz", r.carrier_hz)
+        } else {
+            String::new()
+        };
     } else {
         (lo, hi) = (-70.0, 0.0);
         fill = (colour != grey).then_some(st.level_db);
@@ -6455,6 +6592,153 @@ fn nit_row_summary(t: &decsat_ts::psi::Transponder) -> String {
         parts.push(format!("{s:.3} M"));
     }
     parts.join(" · ")
+}
+
+/// Inmarsat GMR-2+'s colour (the title bar, the network's name).
+const GMR2: Color32 = Color32::from_rgb(127, 211, 192);
+
+/// An Inmarsat GMR-2+ VFO's card, compact in the Aero card's layout: the
+/// title bar, the network and location area big with the Eb/N0 beside it
+/// and its bar, then the beam's colour codes, the frame number, the blocks
+/// decoded and the System Information seen.
+fn gmr2_card(ui: &mut Ui, st: &VfoStatus, vfo_rf: Option<f64>) {
+    let grey = ui.visuals().weak_text_color();
+    let strong = ui.visuals().strong_text_color();
+    let Some(g) = &st.gmr2 else {
+        title_bar(ui, "INMARSAT GMR-2+", grey, None, None, vfo_rf, false);
+        ui.label(RichText::new("starting…").weak());
+        return;
+    };
+    let colour = match (g.searching, g.locked) {
+        (false, true) => GMR2,
+        (false, false) => GMR2.gamma_multiply(0.55),
+        _ => grey,
+    };
+    title_bar(
+        ui,
+        "INMARSAT GMR-2+ · 50 kHz",
+        colour,
+        st.symbol_rate,
+        None,
+        vfo_rf.map(|f| f + if g.searching { 0.0 } else { g.carrier_hz }),
+        !g.searching,
+    );
+
+    // ---- the network and the Eb/N0
+    let name = g
+        .si3
+        .as_ref()
+        .map(|s| format!("{}-{} · LAC {:04X}", s.mcc, s.mnc, s.lac));
+    let db = (!g.searching && g.locked).then_some(g.eb_n0_db);
+    let db_colour = margin_colour(db.map(|d| d - 6.0));
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(name.as_deref().unwrap_or("–"))
+                .monospace()
+                .size(22.0)
+                .color(if name.is_some() { colour } else { grey }),
+        );
+        if let Some(d) = db {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(format!("{d:+5.1} dB")).monospace().size(16.0).color(db_colour));
+            });
+        }
+    })
+    .response
+    .on_hover_text(
+        "The network (MCC-MNC) and location area from System Information 3, and the          Eb/N0 measured on the soft bits. GMR-2+ is Inmarsat's IsatPhone system:          this decodes its 50 kHz forward control carriers (sync and broadcast).",
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width() - RIGHT_PAD, 8.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(2), ui.visuals().extreme_bg_color);
+    if let Some(d) = db {
+        let x = rect.left() + rect.width() * (d / 20.0).clamp(0.0, 1.0);
+        p.rect_filled(
+            egui::Rect::from_min_max(rect.min, pos2(x, rect.max.y)),
+            CornerRadius::same(2),
+            db_colour,
+        );
+    }
+
+    // ---- beam, frame, blocks
+    let row = |ui: &mut Ui, key: &str, value: String| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(key).monospace().size(12.0).color(grey));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(RIGHT_PAD);
+                ui.label(RichText::new(value).monospace().size(12.0).color(strong));
+            });
+        });
+    };
+    ui.add_space(4.0);
+    if g.too_narrow || g.searching {
+        ui.label(RichText::new(&g.message).size(12.0).weak());
+        return;
+    }
+    row(
+        ui,
+        "beam",
+        g.sch
+            .map(|s| format!("NCC {} · BCCC {}", s.ncc, s.bccc))
+            .unwrap_or_else(|| "–".into()),
+    );
+    row(
+        ui,
+        "frame",
+        match (g.frame_number, g.sch) {
+            (Some(f), Some(s)) => format!("{f} · T1 {} T2 {}", s.t1, s.t2),
+            _ => "–".into(),
+        },
+    );
+    row(
+        ui,
+        "sync / BCCH",
+        format!(
+            "{}/{} ok · {}/{} ok",
+            g.sch_good,
+            g.sch_good + g.sch_bad,
+            g.bcch_good,
+            g.bcch_good + g.bcch_bad
+        ),
+    );
+    let seen: Vec<String> = g
+        .seen
+        .iter()
+        .map(|k| {
+            if k == "0x06" {
+                format!("beam map {}/22", g.beam_map_segments)
+            } else {
+                k.clone()
+            }
+        })
+        .collect();
+    ui.add_space(2.0);
+    ui.separator();
+    ui.label(
+        RichText::new(if seen.is_empty() {
+            "no System Information yet".into()
+        } else {
+            seen.join(" · ")
+        })
+        .monospace()
+        .size(12.0)
+        .color(if seen.is_empty() { grey } else { strong }),
+    )
+    .on_hover_text(
+        g.lines
+            .iter()
+            .rev()
+            .filter(|l| l.title != "SYNC")
+            .take(12)
+            .map(|l| format!("{} {}", l.title, l.text))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            ),
+    );
 }
 
 /// Inmarsat Aero's colour (the title bar, the channel's name).

@@ -413,6 +413,12 @@ impl TsTap {
         }
     }
 
+    /// Hand on `packets`, waiting while the taker is full (a file being
+    /// played, which can wait, unlike a carrier); false once it has gone.
+    pub fn send_blocking(&self, packets: &[[u8; TS_LEN]]) -> bool {
+        packets.is_empty() || self.tx.send(packets.to_vec()).is_ok()
+    }
+
     /// The taker decodes this video PID (its keyframes start the backlog
     /// it is handed).
     pub fn for_video(mut self, pid: Option<u16>) -> Self {

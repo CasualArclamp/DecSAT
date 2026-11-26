@@ -32,7 +32,7 @@ use crate::tpc::{ExtHamming, ProductCode};
 use crate::tpc78;
 
 /// The turbo product codes [`TpcRx`] receives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Code {
     /// IESS-315's rate 3/4: 2964-bit frames, structure found blind.
     Tpc2964,
@@ -612,7 +612,7 @@ pub fn modulate(bits: &[u8], m: Modulation, out: &mut Vec<Iq>) {
 }
 
 /// What the receiver has found and done.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TpcStats {
     /// The code whose unique word was found.
     pub code: Option<Code>,

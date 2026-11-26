@@ -27,8 +27,8 @@ VFO baseband (any rate >= ~215 kS/s)
   Locked:    per frame UW search in a +-320 symbol window (offsets step by
              tens of symbols on real recordings), pilot-slope carrier loop,
              per block pilot amplitude + linear phase fit (11 pilots),
-             level choice, max-log-MAP turbo decode (8 iterations, early
-             stop, rayon across blocks), acceptance
+             level choice, max-log-MAP turbo decode (8 iterations, no
+             early stop, rayon across blocks), acceptance
   Acceptance: parity agreement > 0.70 AND likelihood-ratio margin > 1200 nats
               (DecBGAN's calibrated pair: zero false accepts over 37281
               impossible tries)
@@ -37,20 +37,41 @@ VFO baseband (any rate >= ~215 kS/s)
 Levels: block 0 takes the UW's level; blocks 1-7 take the
 ForwardBearerCodeRateParam AVP from block 0's payload (byte 3, clause 5.7.16)
 when present, else the UW's level (the spec's default), then a learned trial
-order. A wrong-level trial runs 4 iterations, a near miss is finished.
+order. Every trial runs the full 8 iterations; only when behind real time
+are levels screened at 3 iterations first, and a pass is confirmed at 8.
+
+Why no shortcuts: measured over 44000 accepted blocks on nine real
+recordings, stopping once an iteration changed no hard decision let 3
+corrupt blocks through (stopped at parity agreement 0.73-0.84, where the
+finished decode reaches 0.96-0.98, and both acceptance tests passed), and
+screening other levels at 6 iterations lost 20 blocks that only converge at
+the 7th or 8th. Requiring two unchanged iterations in a row gave no corrupt
+blocks on the same set and most of the speed back, but was not adopted:
+none in 44000 is not the same as none.
 
 ## Payload to packets
 
 The session writes the accepted blocks' bytes (`…_payload.bin`) and a raw-IP
 pcap (`…_ipv4.pcap`). Packets come from two places: `layers/pcap.rs` carves
-any IPv4 packet whose header lies contiguous (header checksum must pass), and
-`layers/segments.rs` rebuilds packets the link layer cut into segments, whose
-header is broken up by other traffic. The segment format there (connection id,
-length, sequence number, first/middle/last flags, CRC-16/X.25 per segment) was
-worked out from a real recording, not the spec text; a packet is kept only if
-every segment's CRC passes, the sequence numbers run without a gap, and the
-result has the declared length and a valid IP header. On a 23-minute recording
-it added 157 packets to the 395 carved. To redo an old recording:
+any IPv4 packet whose header lies contiguous (header checksum must pass, and
+by default its TCP, UDP or ICMP checksum too), and `layers/segments.rs`
+rebuilds packets the link layer cut into segments, whose header is broken up
+by other traffic. The segment format there (connection id, length, sequence
+number, first/middle/last flags, CRC-16/X.25 per segment) was worked out from
+real recordings, not the spec text; a packet is kept only if every segment's
+CRC passes, the sequence numbers run without a gap, and the result has the
+declared length and valid IP and transport checksums. On a 23-minute
+recording it added 157 packets to the 395 carved.
+
+Two variants of the segment layout are handled. A segment whose first octet
+has bit 0x40 (length present, as in the BCtPDU header) clear has no length
+octet, and ends where its CRC checks; and some connections put a zero octet
+before the IPv4 packet in the SDU (counted in a first segment's SDU length).
+Missing either, the carver took a packet cut after its header with the
+segment's FCS and other traffic in it: on a 3.5-minute recording 3666 packets
+(27 % of the pcap) were corrupt that way. With both, that recording gives no
+corrupt packets and 4686 rebuilt ones instead of 1635. To redo an old
+recording:
 
 ```bash
 cargo run --release -p decsat-bgan --example bgan_pcap -- X_payload.bin X_full.pcap
@@ -58,8 +79,9 @@ cargo run --release -p decsat-bgan --example bgan_pcap -- X_payload.bin X_full.p
 
 ## Real time
 
-Decoding is about 15–20 % of one core's worth of real time at 12 dB Es/N0
-(measured through the VFO, `decsat decode … --decoder bgan`). If decoding ever
+On a 16-thread desktop, 60 s of a 192 kHz recording decodes in 14–34 s
+(about 0.25–0.55 of real time; the weakest recording is the slowest, as
+blocks that fail are tried at more levels). If decoding ever
 falls more than a second behind, frames are dropped and counted instead of
 queued, and level search is cut to two candidates when more than 0.3 s behind.
 
@@ -70,8 +92,8 @@ with the Rust transmitter (`tx.rs`, port of DecBGAN `tx.py`, never touches a
 radio), impairs them (noise to 6 dB Es/N0, 3 kHz carrier offset, 30–100 ppm
 clock error, fractional timing, resampling from 8 sps, dropped samples) and
 checks the decoded payloads **bit-exact**; it needs the Annex tables
-(`DECSAT_BGAN_ANNEX`) and skips without them. Not yet checked against a real
-BGAN recording in this repository (none is committed).
+(`DECSAT_BGAN_ANNEX`) and skips without them. Real recordings are not
+committed; the decoder has been run on nine of them (see Levels above).
 
 ```bash
 cargo run --release -p decsat-bgan --example bgan_tx -- out/bgan.cf32 20 12 2500

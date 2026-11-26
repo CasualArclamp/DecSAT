@@ -30,6 +30,9 @@ pub struct RadioInfo {
     /// Sample rates offered, Hz.
     pub rates: Vec<f64>,
     pub gains: Vec<Gain>,
+    /// The antenna-port power (bias tee) it can switch on, if any: its
+    /// voltage, for the client's checkbox label. `None` for no bias tee.
+    pub bias_tee: Option<String>,
 }
 
 /// What a client (or the shared-mode configuration) opens.
@@ -40,6 +43,9 @@ pub struct RadioRequest {
     pub sample_rate: f64,
     /// Stages left out keep the radio's defaults.
     pub gains: Vec<(String, f64)>,
+    /// Power the antenna port through the radio's bias tee while it is open.
+    /// Off unless asked for; refused by a radio that has none.
+    pub bias_tee: bool,
 }
 
 /// Live controls of an open radio.
@@ -128,6 +134,9 @@ pub struct Devices {
     pub net: Option<NetRadio>,
     /// When set, only these keys are offered.
     pub only: Option<Vec<String>>,
+    /// Never switch a bias tee on: the radios are offered without one, so a
+    /// client's checkbox is hidden and a request for it is refused.
+    pub no_bias_tee: bool,
 }
 
 impl Devices {
@@ -141,6 +150,7 @@ impl Devices {
                 max_hz: f.center_hz,
                 rates: vec![f.sample_rate],
                 gains: vec![],
+                bias_tee: None,
             });
         }
         if let Some(n) = &self.net {
@@ -151,6 +161,7 @@ impl Devices {
                 max_hz: n.center_hz,
                 rates: vec![n.sample_rate],
                 gains: vec![],
+                bias_tee: None,
             });
         }
         #[cfg(feature = "hackrf")]
@@ -161,6 +172,7 @@ impl Devices {
             max_hz: 6e9,
             rates: vec![2e6, 4e6, 8e6, 10e6, 12.5e6, 16e6, 20e6],
             gains: hackrf_gains(),
+            bias_tee: Some("3.3 V".into()),
         });
         #[cfg(feature = "airspy")]
         v.push(RadioInfo {
@@ -173,6 +185,7 @@ impl Devices {
                 .map(|r| f64::from(*r))
                 .collect(),
             gains: airspy_gains(),
+            bias_tee: Some("4.5 V".into()),
         });
         #[cfg(feature = "fobos")]
         v.push(RadioInfo {
@@ -185,6 +198,7 @@ impl Devices {
                 .map(|r| f64::from(*r))
                 .collect(),
             gains: fobos_gains(),
+            bias_tee: None,
         });
         #[cfg(feature = "sdrplay")]
         v.push(RadioInfo {
@@ -197,6 +211,7 @@ impl Devices {
                 .map(|r| f64::from(*r))
                 .collect(),
             gains: sdrplay_gains(),
+            bias_tee: Some("4.7 V".into()),
         });
         #[cfg(feature = "pluto")]
         v.push(RadioInfo {
@@ -206,9 +221,15 @@ impl Devices {
             max_hz: 6e9,
             rates: vec![2e6, 4e6, 64e6 / 7.0, 16e6, 20e6],
             gains: pluto_gains(),
+            bias_tee: None,
         });
         if let Some(only) = &self.only {
             v.retain(|r| only.contains(&r.key));
+        }
+        if self.no_bias_tee {
+            for r in &mut v {
+                r.bias_tee = None;
+            }
         }
         v
     }
@@ -360,6 +381,9 @@ impl RadioProvider for Devices {
             .find(|r| r.key == req.key)
             .ok_or_else(|| bad(format!("this server offers no radio called {}", req.key)))?;
         let gains = merged(info.gains, req)?;
+        if req.bias_tee && info.bias_tee.is_none() {
+            return Err(bad(format!("{}: this radio has no bias tee", req.key)));
+        }
         match req.key.as_str() {
             "file" => {
                 let f = self.file.as_ref().ok_or_else(|| bad("no capture"))?;
@@ -395,7 +419,7 @@ impl RadioProvider for Devices {
                     center_hz: req.center_hz as u64,
                     sample_rate: req.sample_rate as u32,
                     gains: hackrf_of(&gains),
-                    bias_tee: false,
+                    bias_tee: req.bias_tee,
                 })?;
                 let live = Live {
                     ctl: s.control(),
@@ -415,7 +439,7 @@ impl RadioProvider for Devices {
                     center_hz: req.center_hz as u64,
                     sample_rate: req.sample_rate as u32,
                     gains: airspy_of(&gains),
-                    bias_tee: false,
+                    bias_tee: req.bias_tee,
                 })?;
                 let live = Live {
                     ctl: s.control(),
@@ -456,7 +480,7 @@ impl RadioProvider for Devices {
                     sample_rate: req.sample_rate as u32,
                     gains: sdrplay_of(&gains),
                     tuner_b: value(&gains, "tuner_b") >= 0.5,
-                    bias_tee: false,
+                    bias_tee: req.bias_tee,
                 })?;
                 let live = Live {
                     ctl: s.control(),
@@ -492,5 +516,51 @@ impl RadioProvider for Devices {
             }
             other => Err(bad(format!("{other} is not built into this server"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture() -> Devices {
+        Devices {
+            file: Some(FileRadio {
+                path: "nothing.cf32".into(),
+                format: SampleFormat::Cf32,
+                sample_rate: 1e6,
+                center_hz: 0.0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bias_tee_refused_by_a_radio_without_one() {
+        let req = RadioRequest {
+            key: "file".into(),
+            center_hz: 0.0,
+            sample_rate: 1e6,
+            gains: vec![],
+            bias_tee: true,
+        };
+        let e = capture().open(&req).err().expect("refused");
+        assert!(e.to_string().contains("no bias tee"), "{e}");
+    }
+
+    #[test]
+    fn no_bias_tee_hides_every_radios_bias_tee() {
+        let d = Devices {
+            no_bias_tee: true,
+            ..capture()
+        };
+        assert!(d.list().iter().all(|r| r.bias_tee.is_none()));
+        #[cfg(feature = "hackrf")]
+        assert!(
+            Devices::default()
+                .list()
+                .iter()
+                .any(|r| r.key == "hackrf" && r.bias_tee.is_some())
+        );
     }
 }

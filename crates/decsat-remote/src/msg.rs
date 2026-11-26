@@ -15,7 +15,7 @@ use decsat_engine::frontend::SourceState;
 use decsat_engine::identify::Identification;
 use decsat_engine::streams::StreamView;
 use decsat_engine::superframe::SfView;
-use decsat_engine::vfo::CarrierState;
+use decsat_engine::vfo::{CarrierState, DecoderKind, VfoSettings};
 use decsat_frame::bbframe::BbHeader;
 use decsat_modem::dvbs::DvbsStats;
 use serde::{Deserialize, Serialize};
@@ -100,8 +100,10 @@ pub enum Mode {
     Smart(SmartParams),
 }
 
-/// The parts of a VFO's settings that the server acts on. Where its output
-/// goes (files, UDP, the player) stays on the client.
+/// A VFO's settings as the server takes them. The named fields are what
+/// the shared list shows; `full` is everything the decoder needs (its
+/// recording, playing and decoder options). The server points its files at
+/// a folder of its own and forwards them; TS outputs stay on the client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VfoRequest {
     pub name: String,
@@ -115,6 +117,9 @@ pub struct VfoRequest {
     pub follow_carrier: bool,
     pub ts_isi: Option<u8>,
     pub biss_key: String,
+    /// Boxed: the settings are large, and the messages carrying a request
+    /// should not all be that size.
+    pub full: Box<VfoSettings>,
 }
 
 /// Client to server.
@@ -326,6 +331,83 @@ pub struct VfoWire {
     pub gold_code: Option<u32>,
     pub superframes: Option<SfView>,
     pub fec: Option<FecWire>,
+}
+
+/// The parts of a decoder's card beyond [`VfoWire`]: sent when they change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ViewsWire {
+    /// The client's number for the VFO.
+    pub id: u32,
+    /// The VFO's folder on the server: paths in the views under it are
+    /// the client's files of the same names under its own folder.
+    pub server_dir: String,
+    pub views: Views,
+}
+
+/// What the decoders show, as the engine's `VfoStatus` has it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Views {
+    pub atv_frame: Vec<u8>,
+    pub chain: Option<DecoderKind>,
+    pub cdm_model: Option<DecoderKind>,
+    pub recording: Option<(std::path::PathBuf, u64)>,
+    pub recording_active: bool,
+    /// All of FEC's figures but the TS (counted by the client) and the
+    /// fast-changing counters [`FecWire`] carries.
+    pub fec: Option<decsat_engine::fec::FecStats>,
+    pub text: Option<decsat_modem::text::TextView>,
+    pub cid: Option<decsat_engine::cid::CidView>,
+    pub tdma: Option<decsat_engine::tdma::TdmaView>,
+    pub pool: Option<decsat_engine::tdma::pool::PoolView>,
+    pub is19: Option<decsat_modem::is19::OutboundView>,
+    pub beacon: Option<decsat_engine::beacon::BeaconView>,
+    pub p3: Option<decsat_engine::beacon::p3::P3View>,
+    pub hs: Option<decsat_engine::beacon::hs::HsView>,
+    pub barker: Option<decsat_modem::barker::BarkerView>,
+    pub bgan: Option<decsat_bgan::session::BganView>,
+    pub aero: Option<decsat_engine::aero::AeroView>,
+    pub gmr2: Option<decsat_engine::gmr2::Gmr2View>,
+}
+
+/// The views compare by their encoding (some of their types have no `==`):
+/// the server sends them again only when that changes.
+impl PartialEq for Views {
+    fn eq(&self, other: &Self) -> bool {
+        encode(self) == encode(other)
+    }
+}
+
+/// A decoder's sound: Opus packets (see `decsat_audio::route`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioWire {
+    pub id: u32,
+    /// The player on the server; a VFO may have more than one.
+    pub stream: u64,
+    pub label: String,
+    pub packets: Vec<Vec<u8>>,
+    /// The player has stopped.
+    pub end: bool,
+}
+
+/// Part of a file a decoder wrote on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWire {
+    pub id: u32,
+    /// Its path under the VFO's folder, `/`-separated.
+    pub name: String,
+    pub offset: u64,
+    pub data: Vec<u8>,
+}
+
+/// Packets a decoder would have shown in Wireshark.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PacketsWire {
+    pub id: u32,
+    pub stream: u64,
+    pub title: String,
+    /// Each packet's time (µs since the Unix epoch) and bytes.
+    pub packets: Vec<(u64, Vec<u8>)>,
+    pub end: bool,
 }
 
 /// Encode a message for the wire.

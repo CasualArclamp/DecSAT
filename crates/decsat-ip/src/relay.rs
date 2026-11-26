@@ -19,7 +19,7 @@ use crate::mcast::{AudioStream, Codec, rtp_payload};
 use crate::serve::StreamServer;
 
 /// What to open in the player.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlayTarget {
     /// An SDP file (RTP relayed to the port it names).
     Sdp(PathBuf),

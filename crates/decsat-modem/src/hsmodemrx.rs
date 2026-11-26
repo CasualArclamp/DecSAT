@@ -98,7 +98,7 @@ const WATERFALL_LINES: usize = 256;
 const TEXT_LINES: usize = 40;
 
 /// What a card shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HsView {
     /// The signal's centre from the input's (Hz), once found. Negative of
     /// the truth when [`HsView::mirrored`].

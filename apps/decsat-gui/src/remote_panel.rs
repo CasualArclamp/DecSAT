@@ -114,6 +114,9 @@ pub struct RemotePanel {
     pub center_hz: f64,
     pub rate: f64,
     pub lo_hz: f64,
+    /// Ask the server to power the remote radio's antenna port. Off unless
+    /// ticked, and never saved, as for a local radio.
+    pub bias_tee: bool,
     pub bits: u8,
     pub zstd: i32,
     pub slice_on: bool,
@@ -132,6 +135,7 @@ pub struct RemotePanel {
     serve_radio: String,
     serve_center_hz: f64,
     serve_rate: f64,
+    serve_bias_tee: bool,
     serve_each: usize,
     serve_total: usize,
 }
@@ -152,6 +156,7 @@ impl Default for RemotePanel {
             center_hz: 739.5e6,
             rate: 8e6,
             lo_hz: 9750e6,
+            bias_tee: false,
             bits: 8,
             zstd: 0,
             slice_on: false,
@@ -168,6 +173,7 @@ impl Default for RemotePanel {
             serve_radio: "hackrf".into(),
             serve_center_hz: 739.5e6,
             serve_rate: 8e6,
+            serve_bias_tee: false,
             serve_each: 2,
             serve_total: 8,
         }
@@ -194,6 +200,19 @@ impl RemotePanel {
         self.info.as_ref().map_or(&[], |i| &i.radios)
     }
 
+    /// The selected remote radio's bias-tee voltage, if the server says it
+    /// has one. Before the server has been asked, the tick is offered anyway
+    /// (`Some("")`): a server whose radio has none refuses the request.
+    fn remote_bias_tee(&self) -> Option<String> {
+        if self.info.is_none() {
+            return Some(String::new());
+        }
+        self.radios()
+            .iter()
+            .find(|r| r.key == self.radio_key)
+            .and_then(|r| r.bias_tee.clone())
+    }
+
     pub fn connecting(&self) -> bool {
         self.connecting.is_some()
     }
@@ -215,6 +234,7 @@ impl RemotePanel {
             center_hz: self.center_hz,
             sample_rate: self.rate,
             gains: Vec::new(),
+            bias_tee: self.bias_tee && self.remote_bias_tee().is_some(),
         };
         let (smart, shared) = (self.smart, self.is_shared());
         let params = IqParams {
@@ -453,6 +473,25 @@ impl RemotePanel {
                 self.lo_hz = f * 1e6;
             }
         });
+        // The remote radio's antenna-port power, like the local radio's
+        // checkbox: only offered for a radio that has one, and only changed
+        // while stopped (the server switches it as the radio opens).
+        if let Some(volts) = self.remote_bias_tee() {
+            let label = if volts.is_empty() {
+                "Bias tee".to_string()
+            } else {
+                format!("Bias tee ({volts})")
+            };
+            ui.checkbox(&mut self.bias_tee, label).on_hover_text(
+                "Powers the remote radio's antenna port while you hold it: for an LNA or active antenna, not an LNB.",
+            );
+            if self.bias_tee {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 190, 80),
+                    "⚡ Bias tee on: DC goes up the server's coax when the radio starts.",
+                );
+            }
+        }
     }
 
     fn iq_ui(&mut self, ui: &mut egui::Ui) {
@@ -582,6 +621,21 @@ impl RemotePanel {
                     self.serve_rate = r * 1e6;
                 }
             });
+            // The fixed radio's antenna-port power: the operator's choice in
+            // shared mode, since no client holds the radio.
+            let volts = {
+                use decsat_remote::radios::RadioProvider;
+                devices
+                    .list()
+                    .into_iter()
+                    .find(|r| r.key == self.serve_radio)
+                    .and_then(|r| r.bias_tee)
+            };
+            if let Some(volts) = volts {
+                ui.checkbox(&mut self.serve_bias_tee, format!("Bias tee ({volts})"));
+            } else {
+                self.serve_bias_tee = false;
+            }
             ui.horizontal(|ui| {
                 ui.label("Decoders each");
                 ui.add(egui::DragValue::new(&mut self.serve_each).range(1..=32));
@@ -600,6 +654,7 @@ impl RemotePanel {
                     center_hz: self.serve_center_hz,
                     sample_rate: self.serve_rate,
                     gains: Vec::new(),
+                    bias_tee: self.serve_bias_tee,
                 },
                 params: SmartParams::default(),
                 max_decoders_each: self.serve_each,

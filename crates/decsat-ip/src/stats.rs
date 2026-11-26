@@ -11,7 +11,7 @@ use crate::packet::IpInfo;
 const MAX_FLOWS: usize = 4096;
 
 /// One direction of traffic between two addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Flow {
     pub src: IpAddr,
     pub dst: IpAddr,

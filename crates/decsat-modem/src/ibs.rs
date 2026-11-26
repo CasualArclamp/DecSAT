@@ -27,7 +27,7 @@ const SEARCH: usize = 64;
 const BIT_SLACK: u32 = 2;
 const LOSE: u32 = 10;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IbsStats {
     pub locked: bool,
     pub frames: u64,

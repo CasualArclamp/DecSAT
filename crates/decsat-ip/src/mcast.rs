@@ -36,7 +36,7 @@ pub const SAP_PORT: u16 = 9875;
 const RTP_VOTES: u32 = 3;
 
 /// What a stream carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Codec {
     /// AAC in ADTS frames.
     AacAdts,
@@ -119,7 +119,7 @@ impl Codec {
 }
 
 /// A session as SDP describes it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SdpInfo {
     pub name: Option<String>,
     pub info: Option<String>,
@@ -385,7 +385,7 @@ struct SenderClock {
 
 /// What one now-playing message says (`<nowplaying><title>…</title>
 /// <artist>…</artist><station>…</station><media_type>…</media_type>`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NowPlaying {
     pub station: String,
     pub title: Option<String>,
@@ -566,7 +566,7 @@ fn xml_tag(x: &str, name: &str) -> Option<String> {
 }
 
 /// A stream for display and playback.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AudioStream {
     pub group: IpAddr,
     pub port: u16,

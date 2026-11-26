@@ -120,7 +120,7 @@ fn place(p: usize) -> usize {
 }
 
 /// A G.728 call found in the multiplex.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FastCall {
     /// Its 64 kbit/s timeslot: where its octets start in the superframe
     /// (bit 0 of each frame the alignment bit).
@@ -137,14 +137,14 @@ pub struct FastCall {
 
 /// Another HDLC timeslot: where its octets start in the superframe, and its
 /// frames whose FCS checked.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FastHdlc {
     pub runs: Vec<usize>,
     pub good: u64,
 }
 
 /// What the receiver has found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FastStats {
     /// Multiples of 128.5 kbit/s: frames come every 2/k ms.
     pub k: usize,

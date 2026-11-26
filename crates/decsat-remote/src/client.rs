@@ -4,10 +4,11 @@
 //! ([`RemoteEngine`] has the same methods as `decsat_engine::Engine`), so
 //! the GUI's waterfall and side panel need not know the difference.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::io::{self, Write};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -22,8 +23,8 @@ use decsat_ts::{TS_LEN, TcpSink, TsAnalyser, TsFile, UdpSink};
 
 use crate::display::TraceDecoder;
 use crate::msg::{
-    self, C2S, FecWire, FrontWire, Hello, IqParams, LinkStats, Mode, S2C, ServerMode, SharedVfo,
-    SmartParams, VfoRequest, VfoWire,
+    self, AudioWire, C2S, FecWire, FileWire, FrontWire, Hello, IqParams, LinkStats, Mode,
+    PacketsWire, S2C, ServerMode, SharedVfo, SmartParams, VfoRequest, VfoWire, Views, ViewsWire,
 };
 use crate::radios::{Gain, RadioInfo, RadioRequest};
 use crate::wire::{self, Kind, MAGIC, PROTO};
@@ -485,6 +486,206 @@ struct LocalVfo {
     status: VfoStatus,
     outputs: TsOutputs,
     camped: bool,
+    /// The card beyond the fast status, as last sent, its paths made this
+    /// machine's.
+    views: Option<Views>,
+    /// The decoder's sound, a player for each of its players on the server.
+    audio: HashMap<u64, RemoteSound>,
+    /// Files the decoder is writing, open here under the VFO's folder.
+    files: HashMap<String, std::fs::File>,
+    file_error: Option<String>,
+    /// Wireshark feeds, each its own Wireshark here.
+    wireshark: HashMap<u64, decsat_engine::wireshark::Live>,
+    /// Opus packets of the decoder's sound received.
+    sound_packets: u64,
+}
+
+impl LocalVfo {
+    fn new(settings: VfoSettings, camped: bool) -> LocalVfo {
+        let mut outputs = TsOutputs::default();
+        outputs.follow(&settings);
+        LocalVfo {
+            settings,
+            status: VfoStatus::default(),
+            outputs,
+            camped,
+            views: None,
+            audio: HashMap::new(),
+            files: HashMap::new(),
+            file_error: None,
+            wireshark: HashMap::new(),
+            sound_packets: 0,
+        }
+    }
+
+    /// Part of a file the decoder is writing on the server, written at the
+    /// same place in the file of the same name here.
+    fn file(&mut self, f: FileWire) {
+        // A name from the server stays under the VFO's folder: no root, no
+        // drive, no `..`.
+        let rel: PathBuf = f
+            .name
+            .split('/')
+            .filter(|c| !c.is_empty() && *c != "." && *c != ".." && !c.contains([':', '\\']))
+            .collect();
+        if rel.as_os_str().is_empty() {
+            return;
+        }
+        let path = self.settings.record_dir.join(&rel);
+        if !self.files.contains_key(&f.name) {
+            if let Some(d) = path.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(f.offset == 0)
+                .open(&path)
+            {
+                Ok(file) => {
+                    self.files.insert(f.name.clone(), file);
+                }
+                Err(e) => {
+                    self.file_error = Some(format!("{}: {e}", path.display()));
+                    return;
+                }
+            }
+        }
+        let file = self.files.get_mut(&f.name).unwrap();
+        let wrote = file
+            .seek(SeekFrom::Start(f.offset))
+            .and_then(|_| file.write_all(&f.data));
+        if let Err(e) = wrote {
+            self.file_error = Some(format!("{}: {e}", path.display()));
+            self.files.remove(&f.name);
+        }
+    }
+
+    fn sound(&mut self, a: AudioWire) {
+        if a.end {
+            self.audio.remove(&a.stream);
+            return;
+        }
+        // Rust note: `entry` looks the key up once; a vacant entry is
+        // filled only if the decoder could be made.
+        let s = match self.audio.entry(a.stream) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => {
+                let Ok(dec) = decsat_audio::route::LinkDecoder::new() else {
+                    return;
+                };
+                let player = decsat_audio::AudioPlayer::start_pcm(&a.label, AUDIO_OUTPUT).ok();
+                v.insert(RemoteSound { dec, player })
+            }
+        };
+        self.sound_packets += a.packets.len() as u64;
+        for p in &a.packets {
+            if let (Ok(pcm), Some(player)) = (s.dec.decode(p), &mut s.player) {
+                player.push_pcm(decsat_audio::route::LINK_RATE, pcm);
+            }
+        }
+    }
+
+    fn packets(&mut self, p: PacketsWire) {
+        if p.end {
+            self.wireshark.remove(&p.stream);
+            return;
+        }
+        let w = match self.wireshark.entry(p.stream) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => match decsat_engine::wireshark::Live::start(&p.title) {
+                Ok(w) => v.insert(w),
+                Err(e) => {
+                    self.file_error = Some(e);
+                    return;
+                }
+            },
+        };
+        for (us, data) in &p.packets {
+            let at = std::time::UNIX_EPOCH + Duration::from_micros(*us);
+            w.send(at, data);
+        }
+    }
+
+    /// The sound handle to show on the card: the newest player's.
+    fn audio_handle(&self) -> Option<decsat_audio::AudioHandle> {
+        self.audio
+            .iter()
+            .max_by_key(|(k, _)| **k)
+            .and_then(|(_, s)| s.player.as_ref().map(|p| p.handle()))
+    }
+}
+
+/// Where the sound from the server plays: the machine's sound card (none
+/// under test).
+const AUDIO_OUTPUT: decsat_audio::OutputKind = if cfg!(test) {
+    decsat_audio::OutputKind::Null
+} else {
+    decsat_audio::OutputKind::Device
+};
+
+/// One of a decoder's players on the server, playing here.
+struct RemoteSound {
+    dec: decsat_audio::route::LinkDecoder,
+    player: Option<decsat_audio::AudioPlayer>,
+}
+
+/// `p` on the server, under its VFO folder `server_dir`, as the same file
+/// under `local` here. Paths elsewhere are left as they are.
+fn local_path(p: &mut PathBuf, server_dir: &str, local: &Path) {
+    let s = p.to_string_lossy().into_owned();
+    let norm = |x: &str| x.replace('\\', "/");
+    let (s, dir) = (norm(&s), norm(server_dir));
+    if let Some(rest) = s.strip_prefix(dir.trim_end_matches('/')) {
+        let rel: PathBuf = rest.split('/').filter(|c| !c.is_empty()).collect();
+        *p = local.join(rel);
+    }
+}
+
+/// Every path in the views the decoders write to, made this machine's.
+fn localise(v: &mut Views, server_dir: &str, local: &Path) {
+    let m = |p: &mut PathBuf| local_path(p, server_dir, local);
+    let file = |f: &mut Option<(PathBuf, u64)>| {
+        if let Some((p, _)) = f {
+            m(p);
+        }
+    };
+    file(&mut v.recording);
+    if let Some(a) = &mut v.aero {
+        file(&mut a.recording);
+    }
+    if let Some(b) = &mut v.bgan {
+        file(&mut b.recording);
+    }
+    if let Some(f) = &mut v.fec {
+        file(&mut f.raw_file);
+        if let Some(e) = &mut f.e1 {
+            file(&mut e.record_file);
+        }
+        if let Some(c) = &mut f.call_voice {
+            file(&mut c.record_file);
+        }
+        if let Some(p) = &mut f.programme {
+            file(&mut p.record_file);
+        }
+        if let Some(g) = &mut f.gse {
+            file(&mut g.pcap);
+            file(&mut g.audio_record_file);
+            if let Some(c) = &mut g.radio_voice {
+                file(&mut c.record_file);
+            }
+        }
+    }
+    if let Some(pool) = &mut v.pool {
+        // Rust note: `Arc::make_mut` clones the shared value if anyone
+        // else holds it, so the change is this copy's alone.
+        if let Some(b) = &mut pool.bursts {
+            file(&mut std::sync::Arc::make_mut(b).recording);
+        }
+        if let Some(b) = &mut pool.inroutes {
+            file(&mut std::sync::Arc::make_mut(b).recording);
+        }
+    }
 }
 
 /// Where the received TS goes on this machine.
@@ -506,7 +707,7 @@ struct TsOutputs {
 
 impl TsOutputs {
     fn follow(&mut self, s: &VfoSettings) {
-        let record = s.record && s.decoder.outputs_ts();
+        let record = s.record && crate::hub::client_records_ts(s.decoder);
         match (record, self.file.is_some()) {
             (true, false) if self.file_path.is_none() || self.error.is_none() => {
                 let stamp = std::time::SystemTime::now()
@@ -638,10 +839,66 @@ fn fec_stats(f: &FecWire, ts: Option<TsView>) -> FecStats {
     }
 }
 
-fn vfo_status(w: VfoWire, ts: Option<TsView>) -> VfoStatus {
+/// The status the GUI is given: the fast part, the card as last sent, and
+/// what this end counted and plays itself.
+fn vfo_status(w: VfoWire, ts: Option<TsView>, v: &LocalVfo) -> VfoStatus {
     let mut identification = w.identification;
     if let Some(i) = &mut identification {
         i.symbols = w.id_symbols.expand();
+    }
+    let views = v.views.clone().unwrap_or_default();
+    // FEC's figures: the card's, with the counters as of now on top.
+    let fec = w.fec.as_ref().map(|f| {
+        let quick = fec_stats(f, ts.clone());
+        match views.fec.clone() {
+            Some(mut all) => {
+                all.frames = quick.frames;
+                all.ok = quick.ok;
+                all.bch_failed = quick.bch_failed;
+                all.crc_failed = quick.crc_failed;
+                all.ldpc_unconverged = quick.ldpc_unconverged;
+                all.dropped = quick.dropped;
+                all.iterations = quick.iterations;
+                all.bch_corrected = quick.bch_corrected;
+                all.es_n0_db = quick.es_n0_db;
+                all.last_header = quick.last_header;
+                all.roll_off = quick.roll_off;
+                all.streams = quick.streams;
+                all.ts_isi = quick.ts_isi;
+                all.per_modcod = quick.per_modcod;
+                all.payload_bps = quick.payload_bps;
+                all.load = quick.load;
+                all.ts_frames = quick.ts_frames;
+                all.ts = quick.ts;
+                all.dvbs = quick.dvbs;
+                all
+            }
+            None => quick,
+        }
+    });
+    let fec = fec.or_else(|| views.fec.clone()).map(|mut f| {
+        // The players are this end's: their handles are what the card's
+        // pause and level work on.
+        let h = v.audio_handle();
+        if let Some(e) = &mut f.e1 {
+            e.audio = h.clone();
+        }
+        if let Some(c) = &mut f.call_voice {
+            c.audio = h.clone();
+        }
+        if let Some(p) = &mut f.programme {
+            p.audio = h.clone();
+        }
+        if let Some(g) = &mut f.gse
+            && g.audio_playing.is_some()
+        {
+            g.audio_app = h.clone();
+        }
+        f
+    });
+    let mut message = w.message;
+    if let Some(e) = &v.file_error {
+        message = format!("{message} · {e}");
     }
     VfoStatus {
         out_rate: w.out_rate,
@@ -663,12 +920,28 @@ fn vfo_status(w: VfoWire, ts: Option<TsView>) -> VfoStatus {
         modcods: w.modcods,
         last_modcod: w.last_modcod,
         symbol_rate: w.symbol_rate,
-        message: w.message,
+        message,
         carrier: w.carrier,
         gold_code: w.gold_code,
         superframes: w.superframes,
-        fec: w.fec.as_ref().map(|f| fec_stats(f, ts)),
-        ..Default::default()
+        fec,
+        atv_frame: views.atv_frame,
+        chain: views.chain,
+        cdm_model: views.cdm_model,
+        recording: views.recording,
+        recording_active: views.recording_active,
+        text: views.text,
+        cid: views.cid,
+        tdma: views.tdma,
+        pool: views.pool,
+        is19: views.is19,
+        beacon: views.beacon,
+        p3: views.p3,
+        hs: views.hs,
+        barker: views.barker,
+        bgan: views.bgan,
+        aero: views.aero,
+        gmr2: views.gmr2,
     }
 }
 
@@ -685,7 +958,13 @@ struct Smart {
 }
 
 fn request_of(s: &VfoSettings) -> VfoRequest {
+    // The settings in full, less this machine's own handles (not sent).
+    let mut full = s.clone();
+    full.ts_tap = None;
+    full.audio_route = None;
+    full.packet_route = None;
     VfoRequest {
+        full: Box::new(full),
         name: s.name.clone(),
         offset_hz: s.offset_hz,
         bandwidth_hz: s.bandwidth_hz,
@@ -803,17 +1082,11 @@ impl RemoteEngine {
     }
 
     fn insert(&self, id: VfoId, settings: VfoSettings, camped: bool) {
-        let mut outputs = TsOutputs::default();
-        outputs.follow(&settings);
-        self.state.lock().unwrap().vfos.insert(
-            id,
-            LocalVfo {
-                settings,
-                status: VfoStatus::default(),
-                outputs,
-                camped,
-            },
-        );
+        self.state
+            .lock()
+            .unwrap()
+            .vfos
+            .insert(id, LocalVfo::new(settings, camped));
     }
 
     pub fn update_vfo(&self, id: VfoId, settings: VfoSettings) {
@@ -870,6 +1143,16 @@ impl RemoteEngine {
             .vfos
             .get(&id)
             .map(|v| v.status.clone())
+    }
+
+    /// Packets of a VFO's sound received from the server (20 ms each).
+    pub fn sound_packets(&self, id: VfoId) -> u64 {
+        self.state
+            .lock()
+            .unwrap()
+            .vfos
+            .get(&id)
+            .map_or(0, |v| v.sound_packets)
     }
 
     /// Restrict the TS the server sends for a VFO; empty for everything.
@@ -978,7 +1261,40 @@ fn smart_reader(s: &mut TcpStream, link: &Link, state: &Mutex<Smart>) {
                             .as_ref()
                             .and_then(|f| f.ts.as_ref())
                             .map(|t| v.outputs.view(t, &v.settings));
-                        v.status = vfo_status(w, ts);
+                        v.status = vfo_status(w, ts, v);
+                    }
+                }
+            }
+            Kind::Views => {
+                if let Some(mut w) = msg::decode::<ViewsWire>(&b) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(v) = st.vfos.get_mut(&w.id) {
+                        localise(&mut w.views, &w.server_dir, &v.settings.record_dir);
+                        v.views = Some(w.views);
+                    }
+                }
+            }
+            Kind::Audio => {
+                if let Some(a) = msg::decode::<AudioWire>(&b) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(v) = st.vfos.get_mut(&a.id) {
+                        v.sound(a);
+                    }
+                }
+            }
+            Kind::File => {
+                if let Some(f) = msg::decode::<FileWire>(&b) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(v) = st.vfos.get_mut(&f.id) {
+                        v.file(f);
+                    }
+                }
+            }
+            Kind::Packets => {
+                if let Some(p) = msg::decode::<PacketsWire>(&b) {
+                    let mut st = state.lock().unwrap();
+                    if let Some(v) = st.vfos.get_mut(&p.id) {
+                        v.packets(p);
                     }
                 }
             }
@@ -1010,8 +1326,13 @@ fn smart_reader(s: &mut TcpStream, link: &Link, state: &Mutex<Smart>) {
                         if let Some(v) = st.vfos.get_mut(&id) {
                             let kind = DecoderKind::from_key(&vfo.decoder)
                                 .unwrap_or(DecoderKind::Identify);
-                            let mut s =
-                                VfoSettings::new(vfo.name, vfo.offset_hz, vfo.bandwidth_hz, kind);
+                            // The owner's decoder settings; the outputs below
+                            // are this user's own.
+                            let mut s = *vfo.full;
+                            s.name = vfo.name;
+                            s.offset_hz = vfo.offset_hz;
+                            s.bandwidth_hz = vfo.bandwidth_hz;
+                            s.decoder = kind;
                             s.enabled = vfo.enabled;
                             s.symbol_rate = vfo.symbol_rate;
                             s.gold_code = vfo.gold_code;
@@ -1025,6 +1346,8 @@ fn smart_reader(s: &mut TcpStream, link: &Link, state: &Mutex<Smart>) {
                             s.ts_udp = v.settings.ts_udp.clone();
                             s.ts_tcp_on = v.settings.ts_tcp_on;
                             s.ts_tcp = v.settings.ts_tcp.clone();
+                            s.pcap = v.settings.pcap;
+                            s.wireshark = v.settings.wireshark;
                             v.settings = s;
                             st.camp_updates.push(id);
                         }

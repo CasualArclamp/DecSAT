@@ -763,6 +763,18 @@ pub fn set_tv_gpu(gpu: bool) {
     let _ = write_key("tv_gpu_decode", if gpu { "1" } else { "0" });
 }
 
+/// Play a VFO's TS in the app's player as soon as it locks.
+pub fn tv_autoplay() -> bool {
+    read_all()
+        .into_iter()
+        .find(|(k, _)| k == "tv_autoplay")
+        .is_some_and(|(_, v)| v == "1")
+}
+
+pub fn set_tv_autoplay(on: bool) {
+    let _ = write_key("tv_autoplay", if on { "1" } else { "0" });
+}
+
 pub fn set_ffmpeg_path(path: Option<&std::path::Path>) -> std::io::Result<()> {
     write_key(
         "ffmpeg",

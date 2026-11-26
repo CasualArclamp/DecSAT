@@ -373,7 +373,7 @@ pub fn detect(symbols: &[Iq]) -> bool {
 }
 
 /// What the receiver has found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FastLinkStats {
     /// The sync word is being found every 11 538 symbols.
     pub locked: bool,

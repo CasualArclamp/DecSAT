@@ -85,7 +85,7 @@ const SCATTER: usize = 512;
 const CARRY: usize = 16;
 
 /// What the card shows.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct P3View {
     /// The carrier's offset from the VFO centre (Hz), while it is seen.
     pub carrier_hz: Option<f64>,

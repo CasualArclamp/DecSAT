@@ -11,7 +11,7 @@
 //! Sections are reassembled per PID — several may start in one packet, one
 //! may span many — and kept only if their CRC-32 checks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use decsat_core::crc::crc32_mpeg2;
 
@@ -274,6 +274,9 @@ pub struct TsAnalyser {
     win_start: BTreeMap<u16, u64>,
     win_total: u64,
     rate_bps: f64,
+    /// PIDs whose PES carry bare AV1 OBUs (a temporal delimiter first):
+    /// ffmpeg's muxer writes AV1 so, as private PES with no descriptor.
+    bare_av1: BTreeSet<u16>,
 }
 
 impl TsAnalyser {
@@ -330,6 +333,12 @@ impl TsAnalyser {
         let payload = &p[at..];
         if pusi && payload.len() >= 4 && payload[..3] == [0, 0, 1] {
             st.pes_stream_id = Some(payload[3]);
+            // A temporal delimiter OBU (AV1 §5.3: type 2, has_size, size
+            // 0) straight after the PES header: AV1 without the mapping.
+            let es = payload.get(8).map(|&hl| 9 + hl as usize);
+            if es.and_then(|e| payload.get(e..e + 2)) == Some(&[0x12, 0x00][..]) {
+                self.bare_av1.insert(pid);
+            }
         }
         let is_si = matches!(
             pid,
@@ -471,6 +480,12 @@ impl TsAnalyser {
                     // `AV01` is AOM's AV1 mapping (crate::av1).
                     0x05 if d.len() >= 4 && d[..4] == crate::av1::FORMAT_ID => {
                         es.kind = Some("AV1 video");
+                    }
+                    // `Opus` is Xiph's "Encapsulation of Opus in MPEG-2
+                    // TS" (private PES with this registration), which
+                    // ffmpeg decodes.
+                    0x05 if d.len() >= 4 && &d[..4] == b"Opus" => {
+                        es.kind = Some("Opus audio");
                     }
                     // Private data indicator (ISO/IEC 13818-1 §2.6.28):
                     // `APTx` on a user-private stream type is Enhanced
@@ -725,7 +740,22 @@ impl TsAnalyser {
             ts_id: self.ts_id,
             packets: self.packets,
             rate_bps: self.rate_bps,
-            programmes: self.programmes.values().cloned().collect(),
+            programmes: self
+                .programmes
+                .values()
+                .cloned()
+                .map(|mut p| {
+                    for e in &mut p.streams {
+                        if e.kind.is_none()
+                            && e.stream_type == crate::av1::STREAM_TYPE_PRIVATE_PES
+                            && self.bare_av1.contains(&e.pid)
+                        {
+                            e.kind = Some("AV1 video");
+                        }
+                    }
+                    p
+                })
+                .collect(),
             pids,
             network: self.network.clone(),
             tables: self.tables.iter().map(|(&(p, t), &n)| (p, t, n)).collect(),

@@ -966,6 +966,23 @@ impl App {
             self.pick_iq_file();
         }
         if ui
+            .button("▶ Play TS file…")
+            .on_hover_text(
+                "Play a recorded transport stream (a VFO's .ts) in DecSAT's player, at the                  pace it was received. Dropping a .ts on the window does the same",
+            )
+            .clicked()
+        {
+            ui.close();
+            if let Some(p) = rfd::FileDialog::new()
+                .set_directory(prefs::output_dir())
+                .add_filter("MPEG-TS", &crate::tv::TS_EXTENSIONS)
+                .add_filter("All files", &["*"])
+                .pick_file()
+            {
+                self.play_ts_file(p);
+            }
+        }
+        if ui
             .button("📁 Output folder…")
             .on_hover_text(format!(
                 "Where recordings, symbol files, PCAP and TS files go:\n{}",

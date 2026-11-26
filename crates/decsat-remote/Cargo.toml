@@ -24,6 +24,8 @@ decsat-engine = { path = "../decsat-engine" }
 decsat-frame = { path = "../decsat-frame" }
 decsat-modem = { path = "../decsat-modem" }
 decsat-ts = { path = "../decsat-ts" }
+decsat-audio = { path = "../decsat-audio" }
+decsat-bgan = { path = "../decsat-bgan" }
 num-complex.workspace = true
 serde.workspace = true
 tracing.workspace = true

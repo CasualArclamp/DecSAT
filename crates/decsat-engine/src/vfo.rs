@@ -29,7 +29,7 @@ use crate::spectrum::Spectrum;
 pub type VfoId = u32;
 
 /// What a VFO does with its signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DecoderKind {
     /// "What is this?" — blind symbol rate, roll-off, constellation, standard.
     Identify,
@@ -115,6 +115,11 @@ pub enum DecoderKind {
     /// bursts, C voice at 8400 or 21000 bit/s — then its signalling, ACARS
     /// and ADS-C read and its voice played.
     Aero,
+    /// Inmarsat GMR-2+ (IsatPhone) 50 kHz forward control carrier
+    /// ([`crate::gmr2`]): the S-SCH (spot-beam colour codes, frame number)
+    /// and the broadcast System Information (network, location area,
+    /// neighbours, timing). Measured, not in the GMR-2 specification.
+    Gmr2,
     /// Generic PSK/APSK: lock any linearly modulated carrier and write its
     /// hard-decided symbols to a `.bin` file, one byte per symbol; on BPSK
     /// and QPSK look for a convolutional code meanwhile (the Viterbi
@@ -147,7 +152,7 @@ pub enum DecoderKind {
 }
 
 impl DecoderKind {
-    pub const ALL: [DecoderKind; 34] = [
+    pub const ALL: [DecoderKind; 35] = [
         DecoderKind::Identify,
         DecoderKind::Dvbs2Ip,
         DecoderKind::Dvbs2Ts,
@@ -168,6 +173,7 @@ impl DecoderKind {
         DecoderKind::BarkerTdm,
         DecoderKind::Bgan,
         DecoderKind::Aero,
+        DecoderKind::Gmr2,
         DecoderKind::PskSymbols,
         DecoderKind::Tdma,
         DecoderKind::ReturnPool,
@@ -210,6 +216,9 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "Barker-11 spread BPSK (15.15 kBd TDM) → frames, data blocks",
             DecoderKind::Bgan => "Inmarsat BGAN forward (16-QAM turbo) → payload, IP, findings",
             DecoderKind::Aero => "Inmarsat Aero (P, R/T, C) → ACARS, ADS-C, voice",
+            DecoderKind::Gmr2 => {
+                "Inmarsat GMR-2+ (IsatPhone) 50 kHz carrier → sync, System Information"
+            }
             DecoderKind::PskSymbols => "Generic PSK → symbols (.bin) + code search",
             DecoderKind::Tdma => "TDMA bursts (layout, slots, terminals)",
             DecoderKind::ReturnPool => "Return pool (Mx-DMA / MF-TDMA: layout, frame, outbound)",
@@ -251,6 +260,7 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "barker",
             DecoderKind::Bgan => "bgan",
             DecoderKind::Aero => "aero",
+            DecoderKind::Gmr2 => "gmr2",
             DecoderKind::PskSymbols => "psk",
             DecoderKind::Tdma => "tdma",
             DecoderKind::ReturnPool => "return-pool",
@@ -376,6 +386,7 @@ impl DecoderKind {
                 | DecoderKind::BarkerTdm
                 | DecoderKind::Bgan
                 | DecoderKind::Aero
+                | DecoderKind::Gmr2
         )
     }
 
@@ -401,6 +412,7 @@ impl DecoderKind {
             DecoderKind::BarkerTdm => "B11",
             DecoderKind::Bgan => "BGAN",
             DecoderKind::Aero => "AERO",
+            DecoderKind::Gmr2 => "GMR2",
             DecoderKind::PskSymbols => "PSK",
             DecoderKind::Tdma => "TDMA",
             DecoderKind::ReturnPool => "POOL",
@@ -424,7 +436,7 @@ impl DecoderKind {
 /// interference, coasted through) or a channel terminals take turns on
 /// (TDMA: the burst analyser). Which decoders a VFO offers follows it; the
 /// waterfall's brackets say which a band looks like.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SignalMode {
     #[default]
     Scpc,
@@ -510,8 +522,26 @@ impl DecoderKind {
     }
 }
 
-/// A VFO's user-facing settings.
-#[derive(Debug, Clone, PartialEq)]
+/// [`crate::wireshark::PacketRoute`] with what `VfoSettings` derives:
+/// the same route is equal to itself.
+#[derive(Clone)]
+pub struct PacketRouteHandle(pub crate::wireshark::PacketRoute);
+
+impl std::fmt::Debug for PacketRouteHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PacketRoute")
+    }
+}
+
+impl PartialEq for PacketRouteHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// A VFO's user-facing settings. Serialisable for smart mode, which sends
+/// them to the server (all but the local handles, which are skipped).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VfoSettings {
     pub name: String,
     /// Centre relative to the wideband centre, Hz.
@@ -575,7 +605,17 @@ pub struct VfoSettings {
     pub biss_key: String,
     /// DVB-S2 → MPEG-TS: a copy of the (descrambled) stream for the in-app
     /// player.
+    #[serde(skip)]
     pub ts_tap: Option<decsat_ts::TsTap>,
+    /// Where the VFO's sound goes instead of this machine's sound card: its
+    /// client's, when it runs on a server (see [`decsat_audio::route`]).
+    /// Taken when the VFO starts.
+    #[serde(skip)]
+    pub audio_route: Option<decsat_audio::AudioRoute>,
+    /// Where the VFO's Wireshark feeds go instead of a Wireshark here (see
+    /// [`crate::wireshark::set_route`]). Taken when the VFO starts.
+    #[serde(skip)]
+    pub packet_route: Option<PacketRouteHandle>,
     /// A multistream carrier: the input stream (ISI) whose transport stream
     /// is shown and output; `None` for the first that carries one.
     pub ts_isi: Option<u8>,
@@ -608,6 +648,10 @@ pub struct VfoSettings {
     /// offset from the carrier, its data's reach, the bit rate), each
     /// found blind when `None`.
     pub beacon_tune: crate::beacon::Tune,
+    /// BGAN: stop taking new input, so the decoder works through what is
+    /// buffered (see `Worker::bgan_backlog`). Not saved.
+    #[serde(default)]
+    pub paused: bool,
     /// Where the IQ recorder and the symbol writer write.
     pub record_dir: PathBuf,
     /// DVB-S2: append every good BBFRAME to this file, for working out
@@ -651,6 +695,8 @@ impl VfoSettings {
             ts_tcp: "127.0.0.1:8001".into(),
             biss_key: String::new(),
             ts_tap: None,
+            audio_route: None,
+            packet_route: None,
             ts_isi: None,
             udp_ts: None,
             audio_play: None,
@@ -664,6 +710,7 @@ impl VfoSettings {
             programme_record: false,
             voice_auto: true,
             pointing_tone: false,
+            paused: false,
             beacon_tune: crate::beacon::Tune::default(),
             record_dir: std::env::temp_dir(),
             bbframes: None,
@@ -752,6 +799,8 @@ pub struct VfoStatus {
     pub bgan: Option<decsat_bgan::session::BganView>,
     /// Inmarsat Classic Aero: the channel, its figures and what it carried.
     pub aero: Option<crate::aero::AeroView>,
+    /// Inmarsat GMR-2+: the beam, frame number and System Information.
+    pub gmr2: Option<crate::gmr2::Gmr2View>,
 }
 
 /// A running demodulator's carrier loop, for display.
@@ -955,6 +1004,32 @@ impl VfoHandle {
     }
 }
 
+/// BGAN: the most baseband buffered for a decoder behind, s (about 120 MB
+/// at the ~250 kS/s a BGAN VFO runs at).
+const BGAN_BACKLOG_S: f64 = 60.0;
+/// BGAN: the longest one turn of the worker spends on the backlog. Blocks
+/// come every ~40 ms, so the worker is back for the next one in time and
+/// its input queue never fills.
+const BGAN_SLICE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Feed `b` from the front of `q`, 20 ms of signal at a time, for up to
+/// [`BGAN_SLICE`].
+fn drain_bgan(
+    b: &mut decsat_bgan::session::BganSession,
+    q: &mut std::collections::VecDeque<Iq>,
+    rate: f64,
+) {
+    let t0 = Instant::now();
+    let chunk = ((0.02 * rate) as usize).max(1);
+    while !q.is_empty() && t0.elapsed() < BGAN_SLICE {
+        // `as_slices`: a ring buffer holds its contents in up to two runs
+        let (front, _) = q.as_slices();
+        let n = chunk.min(front.len());
+        b.push(&front[..n]);
+        q.drain(..n);
+    }
+}
+
 /// Blocks a worker may have queued before new ones are dropped.
 // 16 x ~40-ms live blocks provides ~640 ms of scheduling headroom.
 // Still bounded: sustained DSP overload will ultimately drop samples.
@@ -1002,6 +1077,11 @@ pub(crate) fn spawn(
                 // Prioritise real-time channel processing over display work.
                 // Windows remains free to schedule the thread across cores.
                 crate::thread_priority::set_dsp_priority();
+                // On a server, the VFO's sound goes to its client: players
+                // started on this thread (and threads it spawns, which pass
+                // the route on) take this up.
+                decsat_audio::route::set_current(settings.audio_route.clone());
+                crate::wireshark::set_route(settings.packet_route.clone().map(|r| r.0));
                 let mut w = Worker::new(in_rate, settings, status, dropped);
                 w.lossless = lossless;
                 w.plans = plans;
@@ -1112,6 +1192,8 @@ enum Decoder {
     Bgan(Box<decsat_bgan::session::BganSession>),
     /// Inmarsat Classic Aero: DecAero's channel worker on the baseband.
     Aero(Box<crate::aero::AeroSession>),
+    /// Inmarsat GMR-2+: the 50 kHz forward control carrier.
+    Gmr2(Box<crate::gmr2::Gmr2Session>),
     /// A satellite beacon: the receiver, and its files while recording.
     Beacon {
         rx: Box<crate::beacon::BeaconRx>,
@@ -1331,6 +1413,15 @@ struct Worker {
     bgan_wireshark: Option<crate::wireshark::Live>,
     bgan_wireshark_ask: Option<u32>,
     bgan_wireshark_error: Option<String>,
+    /// BGAN, live: baseband waiting for the decoder. A turbo decoder slower
+    /// than real time falls behind here (up to [`BGAN_BACKLOG_S`]) instead
+    /// of having whole input blocks dropped, and works through it a slice at
+    /// a time between blocks ([`Worker::bgan_catch_up`]).
+    bgan_backlog: std::collections::VecDeque<Iq>,
+    /// BGAN: input never decoded, s: thrown away while paused, and lost
+    /// with the backlog full.
+    bgan_skipped_s: f64,
+    bgan_overflow_s: f64,
     /// Wait for the FEC thread rather than dropping its input.
     lossless: bool,
     /// Input samples dropped before reaching this thread, and how many of
@@ -1434,6 +1525,9 @@ impl Worker {
             bgan_wireshark: None,
             bgan_wireshark_ask: None,
             bgan_wireshark_error: None,
+            bgan_backlog: std::collections::VecDeque::new(),
+            bgan_skipped_s: 0.0,
+            bgan_overflow_s: 0.0,
             lossless: false,
             followed: 0.0,
             follow_samples: 0,
@@ -1518,6 +1612,9 @@ impl Worker {
             DecoderKind::Bgan => Decoder::Bgan(Box::new(decsat_bgan::session::BganSession::new(
                 ddc.out_rate(),
             ))),
+            DecoderKind::Gmr2 => {
+                Decoder::Gmr2(Box::new(crate::gmr2::Gmr2Session::new(ddc.out_rate())))
+            }
             DecoderKind::Aero => Decoder::Aero(Box::new(crate::aero::AeroSession::new(
                 ddc.out_rate(),
                 s.bandwidth_hz,
@@ -1668,6 +1765,7 @@ impl Worker {
             return;
         }
         self.follow_samples = 0;
+        let bgan_current = (self.bgan_backlog.len() as f64) < 0.1 * self.ddc.out_rate();
         let (f, rs) = match &self.decoder {
             Decoder::Dvbs2 { demod: Some(d), .. } if d.carrier_locked() => {
                 (d.carrier_offset_hz(), d.symbol_rate())
@@ -1683,7 +1781,8 @@ impl Worker {
             // (the loop tracks the rest, and each move is a step it must
             // take).
             // A BGAN carrier: followed like a beacon's, once well off centre.
-            Decoder::Bgan(b) if b.locked() => match b.carrier_offset_hz() {
+            // Not while it is behind: the move would reach the decoder late.
+            Decoder::Bgan(b) if b.locked() && bgan_current => match b.carrier_offset_hz() {
                 f if f.abs() > 0.02 * self.ddc.bandwidth() => (f, 0.0),
                 _ => return,
             },
@@ -1714,6 +1813,16 @@ impl Worker {
         self.followed += f;
     }
 
+    /// Work on the BGAN backlog between blocks; a backlog left by a decoder
+    /// since changed is dropped.
+    fn bgan_catch_up(&mut self) {
+        let rate = self.ddc.out_rate();
+        match &mut self.decoder {
+            Decoder::Bgan(b) => drain_bgan(b, &mut self.bgan_backlog, rate),
+            _ => self.bgan_backlog.clear(),
+        }
+    }
+
     fn run(
         mut self,
         rx: Receiver<VfoMsg>,
@@ -1740,13 +1849,28 @@ impl Worker {
             // With no input for a while (a file that ended, a paused
             // source) publish anyway: the FEC and CID threads may still be
             // finishing, and their state should show.
-            let msg = match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            // A BGAN decoder behind: look for input without waiting, and
+            // work on the backlog while there is none.
+            let wait = if self.bgan_backlog.is_empty() {
+                std::time::Duration::from_millis(250)
+            } else {
+                std::time::Duration::ZERO
+            };
+            let msg = match rx.recv_timeout(wait) {
                 Ok(m) => m,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
-                    self.publish(0);
+                    if self.bgan_backlog.is_empty() {
+                        self.publish(0);
+                    } else {
+                        self.bgan_catch_up();
+                        if self.last_status_refresh.elapsed() >= STATUS_EVERY {
+                            self.last_status_refresh = std::time::Instant::now();
+                            self.publish(0);
+                        }
+                    }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -2290,7 +2414,23 @@ impl Worker {
                     }
                 }
                 b.set_live(self.bgan_wireshark.is_some());
-                b.push(&self.bb);
+                if self.lossless {
+                    // a file played losslessly waits for the decoder anyway
+                    b.push(&self.bb);
+                } else {
+                    let rate = self.ddc.out_rate();
+                    let secs = self.bb.len() as f64 / rate;
+                    if self.settings.paused {
+                        self.bgan_skipped_s += secs;
+                    } else if self.bgan_backlog.len() + self.bb.len()
+                        > (BGAN_BACKLOG_S * rate) as usize
+                    {
+                        self.bgan_overflow_s += secs;
+                    } else {
+                        self.bgan_backlog.extend(self.bb.iter().copied());
+                    }
+                    drain_bgan(b, &mut self.bgan_backlog, rate);
+                }
                 if let Some(w) = &mut self.bgan_wireshark {
                     let now = std::time::SystemTime::now();
                     for p in b.take_live() {
@@ -2304,6 +2444,7 @@ impl Worker {
                     }
                 }
             }
+            Decoder::Gmr2(g) => g.push(&self.bb),
             Decoder::Aero(a) => {
                 let tag = format!(
                     "{}-{}",
@@ -2534,6 +2675,7 @@ impl Worker {
         st.beacon = None;
         st.bgan = None;
         st.aero = None;
+        st.gmr2 = None;
 
         match &self.decoder {
             Decoder::Identify {
@@ -2776,6 +2918,13 @@ impl Worker {
                     st.cid = Some(v);
                 }
             },
+            Decoder::Gmr2(g) => {
+                let v = g.view();
+                st.message = v.message.clone();
+                st.scatter = v.scatter.clone();
+                st.symbol_rate = Some(crate::gmr2::BIT_RATE / 2.0);
+                st.gmr2 = Some(v);
+            }
             Decoder::Aero(a) => {
                 let mut v = a.view();
                 // Measured on a recording: a 2 kHz VFO (5 kS/s of IQ) names
@@ -2824,6 +2973,10 @@ impl Worker {
                     .as_ref()
                     .map(|w| (w.written(), w.dropped));
                 v.wireshark_error = self.bgan_wireshark_error.clone();
+                v.backlog_s = self.bgan_backlog.len() as f64 / self.ddc.out_rate();
+                v.paused = self.settings.paused;
+                v.skipped_s = self.bgan_skipped_s;
+                v.overflow_s = self.bgan_overflow_s;
                 st.bgan = Some(v);
             }
             Decoder::Beacon { rx, files } => {
@@ -3103,7 +3256,20 @@ fn offer_code_search(w: &FecWorker, modulation: decsat_core::Modulation, syms: &
 
 /// A Viterbi VFO's status line.
 fn viterbi_message(lock: &str, f: Option<&crate::fec::FecStats>) -> String {
-    format!("{lock} · {}", code_text(f))
+    match f.and_then(|f| f.uw.as_ref()) {
+        Some(u) => {
+            // The raw channel off the reference frame, when there is one.
+            let channel = u
+                .reference
+                .as_ref()
+                .and_then(|r| r.ber())
+                .map_or(String::new(), |b| {
+                    format!(" · channel BER {b:.1e} (reference frame)")
+                });
+            format!("{lock} · {}{channel} · {}", u.describe(), code_text(f))
+        }
+        None => format!("{lock} · {}", code_text(f)),
+    }
 }
 
 /// A payload label's format: up to its first comma outside brackets (the

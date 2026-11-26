@@ -444,7 +444,7 @@ fn fundamental(found: &[(usize, f64, f64)]) -> Option<(f64, f64)> {
 }
 
 /// How a bit is sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Coding {
     /// NRZ (-L, or -M/S: told apart by the framer).
     Nrz,

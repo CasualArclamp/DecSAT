@@ -23,6 +23,7 @@ pub mod es;
 pub mod player;
 pub mod record;
 pub mod resample;
+pub mod route;
 pub mod tone;
 pub mod xaac;
 
@@ -31,3 +32,4 @@ pub use player::{
     output_devices, set_muted, set_output_device, set_volume, volume,
 };
 pub use record::AudioRecorder;
+pub use route::{AudioRoute, AudioSink};

@@ -44,11 +44,12 @@ const ACQ_PSR: f64 = 7.0;
 const LOSS_FRAMES: u32 = 25;
 
 /// One accepted FEC block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlockOut {
     /// Block index in the frame, 0..8.
     pub block: u8,
-    pub level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub level: decsat_core::static_str::Str,
     /// Parity agreement of the re-encode check (0.70 is the acceptance line).
     pub agreement: f32,
     /// Descrambled information bytes (D/8).
@@ -56,12 +57,13 @@ pub struct BlockOut {
 }
 
 /// One 80 ms frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrameOut {
     /// Frames since lock.
     pub index: u64,
+    #[serde(with = "decsat_core::static_str")]
     /// UW level (the level of block 0).
-    pub uw_level: &'static str,
+    pub uw_level: decsat_core::static_str::Str,
     /// UW correlation against the noise floor measured half a frame away.
     pub uw_ratio: f32,
     pub esn0_db: f32,
@@ -71,13 +73,15 @@ pub struct FrameOut {
 
 /// A block that failed, with the best any level could do (see
 /// [`BganRx::set_diag`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiagBlock {
     pub frame: u64,
     pub block: u8,
-    pub uw_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub uw_level: decsat_core::static_str::Str,
     pub esn0_db: f32,
-    pub best_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub best_level: decsat_core::static_str::Str,
     pub best_agreement: f32,
     pub lr_ok: bool,
     /// Agreement at the best level after 1, 2, 3, 4, 6 iterations.
@@ -87,7 +91,7 @@ pub struct DiagBlock {
 }
 
 /// Receiver state for the UI.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RxStatus {
     pub locked: bool,
     pub frames: u64,
@@ -95,7 +99,8 @@ pub struct RxStatus {
     pub blocks_total: u64,
     pub payload_bytes: u64,
     pub esn0_db: f32,
-    pub uw_level: &'static str,
+    #[serde(with = "decsat_core::static_str")]
+    pub uw_level: decsat_core::static_str::Str,
     pub uw_ratio: f32,
     pub carrier_hz: f64,
     pub clock_ppm: f64,
@@ -1036,10 +1041,18 @@ impl BganRx {
     }
 }
 
-/// Trial-decode `sym` at each level in `order` until one is accepted. The
-/// first attempt at a level uses a short run of iterations (a wrong level
-/// never converges); a near miss is rerun at full length. Early stopping is
-/// safe: over 22400 labelled tries no block passed at two levels (DecBGAN).
+/// Trial-decode `sym` at each level in `order` until one is accepted.
+/// Stopping at the first accepted level is safe: over 22400 labelled tries no
+/// block passed at two levels (DecBGAN).
+///
+/// Every decode that is accepted is a full 8-iteration one. A short run
+/// that passes the checks is not trusted on its own: a decode cut off before
+/// it settles can pass both tests with a corrupt payload (see
+/// `TurboDecoder::decode`). Only when behind real time (`tight`) are levels
+/// screened with 3 iterations, and a pass is then confirmed at 8. Screening
+/// with 6 iterations when not behind was dropped too: some correct blocks
+/// only converge at the 7th or 8th, and it lost 20 of 44000 blocks on nine
+/// recordings.
 fn try_levels(
     sc: &mut BlockScratch,
     sym: &[C32],
@@ -1050,24 +1063,12 @@ fn try_levels(
         let Ok(t) = tables::tables(LEVELS[lv]) else {
             continue;
         };
-        if rank == 0 {
-            // the expected level: decode it properly straight away
-            let d = fec::decode_block(sc, sym, &t, 8);
-            if d.accepted() {
-                return Some((lv, d));
-            }
+        if rank > 0 && tight && !fec::decode_block(sc, sym, &t, 3).accepted() {
             continue;
         }
-        let first = fec::decode_block(sc, sym, &t, if tight { 3 } else { 6 });
-        if first.accepted() {
-            let full = fec::decode_block(sc, sym, &t, 8);
-            return Some((lv, if full.accepted() { full } else { first }));
-        }
-        if first.agreement > 0.58 && !tight {
-            let full = fec::decode_block(sc, sym, &t, 8);
-            if full.accepted() {
-                return Some((lv, full));
-            }
+        let d = fec::decode_block(sc, sym, &t, 8);
+        if d.accepted() {
+            return Some((lv, d));
         }
     }
     None

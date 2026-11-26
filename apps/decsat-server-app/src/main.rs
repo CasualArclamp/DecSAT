@@ -115,6 +115,7 @@ impl App {
             file: file.clone(),
             net: None,
             only: None,
+            no_bias_tee: false,
         }
         .list();
         if !radios.iter().any(|r| r.key == s.shared_radio)
@@ -153,6 +154,7 @@ impl App {
             file: self.file.clone(),
             net: None,
             only: Some(offered.map(|r| r.key.clone()).collect()),
+            no_bias_tee: !self.s.shared && !self.s.client_bias_tee,
         }
     }
 
@@ -187,6 +189,11 @@ impl App {
                     .filter(|(k, _, _)| *k == s.shared_radio)
                     .map(|(_, n, v)| (n.clone(), *v))
                     .collect(),
+                bias_tee: s.shared_bias_tee
+                    && self
+                        .radios
+                        .iter()
+                        .any(|r| r.key == s.shared_radio && r.bias_tee.is_some()),
             },
             params: SmartParams::default(),
             max_decoders_each: s.max_each,
@@ -311,6 +318,13 @@ impl App {
                     }
                 }
             });
+            ui.checkbox(
+                &mut s.client_bias_tee,
+                "A client may power the antenna port (bias tee)",
+            )
+            .on_hover_text(
+                "Untick if DC on the coax could harm what is connected: an LNB fed from an inserter, a splitter, a filter.",
+            );
         }
     }
 
@@ -378,6 +392,14 @@ impl App {
                             None => s.gains.push((radio.key.clone(), g.name.clone(), v)),
                         }
                     }
+                    ui.end_row();
+                }
+                if let Some(volts) = &radio.bias_tee {
+                    ui.label("Bias tee");
+                    ui.checkbox(
+                        &mut s.shared_bias_tee,
+                        format!("Power the antenna port ({volts})"),
+                    );
                     ui.end_row();
                 }
                 ui.label("Decoders");

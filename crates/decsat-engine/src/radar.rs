@@ -27,7 +27,7 @@ pub use decsat_modem::mode_s;
 use crate::fec::FecOutput;
 
 /// The radar feed as the GUI and CLI see it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RadarStageView {
     pub radar: RadarView,
     /// The CSV log (current or last) and its lines.
