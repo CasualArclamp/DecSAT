@@ -709,6 +709,7 @@ mod tests {
         h[10] = (ck >> 8) as u8;
         h[11] = ck as u8;
         h.extend(body);
+        crate::layers::pcap::tests::seal(&mut h);
         h
     }
 

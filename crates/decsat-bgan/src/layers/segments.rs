@@ -14,8 +14,11 @@
 //! by a CRC, a sequence number and the IP header before a packet is accepted.
 //!
 //! ```text
-//! segment = cid(2) | len(1) | b3 | b4 | body(len - 2) | FCS(2)    total len + 5
-//!   cid    connection identifier (the same for every segment of a flow)
+//! segment = cid(2) | [len(1)] | b3 | b4 | body | FCS(2)
+//!   cid    connection identifier (the same for every segment of a flow),
+//!          except bit 0x40 of its first octet: length present
+//!   len    only with the length-present bit: the segment is len + 5 octets.
+//!          Without it the segment's end is where its FCS checks
 //!   seq    ((b3 & 0x0F) << 4) | (b4 >> 4): +1 per segment on a connection
 //!   FCS    CRC-16/X.25 over the whole segment, low octet first: the same
 //!          CRC as the BCtPDU (clause 5.1.7), so it is checked with
@@ -23,10 +26,17 @@
 //! body[0] = sdu(6) | flags(2)
 //!   flags  11 whole SDU, 01 first segment, 00 middle, 10 last
 //!   sdu    the same in every segment of one SDU
-//! whole:  body = ctr | 0x00 | packet                 (left to the carver)
-//! first:  body = ctr | total length(2, big endian) | packet bytes
-//! middle, last: body = ctr | packet bytes
+//! whole:  body = ctr | 0x00 | SDU                    (left to the carver)
+//! first:  body = ctr | SDU length(2, big endian) | SDU bytes
+//! middle, last: body = ctr | SDU bytes
+//! SDU = [0x00] | IPv4 packet: some connections put one zero octet first
+//!       (counted in the SDU length)
 //! ```
+//!
+//! The length-present bit is the one the BCtPDU header has (clause 5.1.4).
+//! Segments without a length were seen to fill the rest of their FEC block;
+//! here their end is simply the first place the FCS checks, within the
+//! lengths the SDU leaves possible.
 //!
 //! A 7-octet segment (len = 2) has no body: an acknowledgement.
 //!
@@ -39,19 +49,45 @@
 
 use std::collections::HashMap;
 
-use super::bctpdu::crc_ok;
-use super::pcap::{CarveOpts, CarvedPacket, ipv4_checksum_ok};
+use super::bctpdu::{crc_ok, try_pdu};
+use super::pcap::{CarveOpts, CarvedPacket, ipv4_checksum_ok, transport_checksum_ok};
 use super::stream::Rolling;
 
-/// A segment is `len + SEG_OVERHEAD` octets long. Measured, not derived: the
-/// body plus FCS is `len` octets, and the 5 header octets come on top.
+/// Bit of a segment's first octet that says a length octet follows the
+/// connection identifier.
+pub const LENGTH_PRESENT: u8 = 0x40;
+/// A segment with a length octet is `len + SEG_OVERHEAD` octets long.
+/// Measured, not derived: the body plus FCS is `len` octets, and the 5
+/// header octets come on top.
 pub const SEG_OVERHEAD: usize = 5;
+/// Header octets with a length octet: cid, len, b3, b4.
+const LEN_HEADER: usize = 5;
+/// Header octets without one: cid, b3, b4.
+const NO_LEN_HEADER: usize = 4;
 /// An acknowledgement: header and FCS only.
 const ACK_LEN: usize = 7;
+/// The FCS.
+const FCS: usize = 2;
 
-/// Octets before the packet in a first segment: the 5-octet header, the
-/// control octet and the 2-octet total length.
-pub const FIRST_PREFIX: usize = SEG_OVERHEAD + 3;
+/// The most octets a first segment puts before the IPv4 packet: the 5-octet
+/// header, the control octet, the 2-octet SDU length and the zero octet some
+/// connections start their SDU with.
+pub const MAX_FIRST_PREFIX: usize = LEN_HEADER + 3 + 1;
+
+/// A connection's key: the identifier without its length-present bit, which
+/// changes from segment to segment.
+fn conn_key(b0: u8, b1: u8) -> [u8; 2] {
+    [b0 | LENGTH_PRESENT, b1]
+}
+
+/// Header octets of a segment starting with `b0`.
+fn header_len(b0: u8) -> usize {
+    if b0 & LENGTH_PRESENT != 0 {
+        LEN_HEADER
+    } else {
+        NO_LEN_HEADER
+    }
+}
 
 /// Does the IPv4 packet of `total` octets that seems to start at `b[i]` in
 /// fact start a first segment that ends inside it? Then the bytes after that
@@ -60,38 +96,63 @@ pub const FIRST_PREFIX: usize = SEG_OVERHEAD + 3;
 /// It happens when the cut falls after the IP header, so the header checksum
 /// holds (an SMTP reply cut after 56 octets, its next segment straight after,
 /// was carved with the segment's FCS and the next one's header in it).
+/// `b` must hold the whole packet (`i + total <= b.len()`).
 pub(crate) fn starts_split_packet(b: &[u8], i: usize, total: usize) -> bool {
-    let Some(s) = i.checked_sub(FIRST_PREFIX) else {
-        return false;
-    };
-    let seg_len = b[s + 2] as usize + SEG_OVERHEAD;
-    let ctr = b[s + SEG_OVERHEAD];
-    b[s] != 0
-        && ctr & 3 == 0b01
-        && u16::from_be_bytes([b[s + 6], b[s + 7]]) as usize == total
-        // the segment ends before the packet does (and so lies within `b`)
-        && s + seg_len < i + total
-        && i + total <= b.len()
-        && crc_ok(&b[s..s + seg_len])
+    let end = i + total;
+    // with or without the SDU's zero octet before the packet
+    for pad in [0, 1] {
+        if pad == 1 && (i == 0 || b[i - 1] != 0) {
+            continue;
+        }
+        for hdr in [LEN_HEADER, NO_LEN_HEADER] {
+            // header | ctr | SDU length(2) | [0x00] | packet
+            let Some(s) = i.checked_sub(hdr + 3 + pad) else {
+                continue;
+            };
+            let ctr = b[s + hdr];
+            let sdu_len = u16::from_be_bytes([b[s + hdr + 1], b[s + hdr + 2]]) as usize;
+            if b[s] == 0 || header_len(b[s]) != hdr || ctr & 3 != 0b01 || sdu_len != total + pad {
+                continue;
+            }
+            let split = if hdr == LEN_HEADER {
+                // the segment ends before the packet does
+                let n = b[s + 2] as usize + SEG_OVERHEAD;
+                s + n <= end && crc_ok(&b[s..s + n])
+            } else {
+                // the FCS checks somewhere before the packet's end, after at
+                // least one of its octets
+                matches!(
+                    try_pdu(&b[s..end], i - s + 1 + FCS, end - s, true),
+                    Ok(Some(_))
+                )
+            };
+            if split {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One CRC-valid segment, by its parts.
 #[derive(Debug, Clone, Copy)]
 struct Segment<'a> {
     offset: usize,
+    /// The connection, from [`conn_key`].
     cid: [u8; 2],
     seq: u8,
-    /// Between the 5 header octets and the FCS.
+    /// Between the header and the FCS.
     body: &'a [u8],
 }
 
 impl<'a> Segment<'a> {
     fn parse(offset: usize, seg: &'a [u8]) -> Self {
+        let hdr = header_len(seg[0]);
         Segment {
             offset,
-            cid: [seg[0], seg[1]],
-            seq: ((seg[3] & 0x0F) << 4) | (seg[4] >> 4),
-            body: &seg[5..seg.len() - 2],
+            cid: conn_key(seg[0], seg[1]),
+            seq: ((seg[hdr - 2] & 0x0F) << 4) | (seg[hdr - 1] >> 4),
+            body: &seg[hdr..seg.len() - FCS],
         }
     }
 }
@@ -104,7 +165,7 @@ struct Partial {
     /// Sequence number of the latest segment taken.
     seq: u8,
     sdu: u8,
-    /// Total length from the first segment.
+    /// SDU length from the first segment.
     want: usize,
     buf: Vec<u8>,
 }
@@ -112,6 +173,7 @@ struct Partial {
 /// Verdict at one position, as in the carver.
 enum Cand {
     No,
+    /// A segment of this many octets.
     Yes(usize),
     /// The bytes that decide it have not all arrived.
     Wait,
@@ -119,9 +181,18 @@ enum Cand {
 
 /// Is there a CRC-valid segment at `b[i]`? Zero is never a first octet: it
 /// keeps the scan out of the zero padding that fills most blocks.
-fn candidate(b: &[u8], i: usize, fin: bool) -> Cand {
+fn candidate(
+    b: &[u8],
+    i: usize,
+    fin: bool,
+    open: &HashMap<[u8; 2], Partial>,
+    opts: &CarveOpts,
+) -> Cand {
     if b[i] == 0 {
         return Cand::No;
+    }
+    if b[i] & LENGTH_PRESENT == 0 {
+        return candidate_no_len(b, i, fin, open, opts);
     }
     let Some(&len) = b.get(i + 2) else {
         return if fin { Cand::No } else { Cand::Wait };
@@ -137,6 +208,67 @@ fn candidate(b: &[u8], i: usize, fin: bool) -> Cand {
         Cand::Yes(total)
     } else {
         Cand::No
+    }
+}
+
+/// [`candidate`] for a segment without a length octet. Its end is the first
+/// place the FCS checks, so a CRC is run only where the header fits an SDU
+/// this scan can use: a first segment of a plausible IPv4 SDU, or the next
+/// segment of an SDU open on its connection. Whole SDUs are the carver's.
+fn candidate_no_len(
+    b: &[u8],
+    i: usize,
+    fin: bool,
+    open: &HashMap<[u8; 2], Partial>,
+    opts: &CarveOpts,
+) -> Cand {
+    let short = if fin { Cand::No } else { Cand::Wait };
+    // cid(2) b3 b4 ctr
+    let Some(h) = b.get(i..i + NO_LEN_HEADER + 1) else {
+        return short;
+    };
+    let seq = ((h[2] & 0x0F) << 4) | (h[3] >> 4);
+    let (sdu, flags) = (h[4] >> 2, h[4] & 3);
+    // the fewest and most body octets the segment can have
+    let (lo, hi) = match flags {
+        0b01 => {
+            // ctr | SDU length(2) | SDU, which opens with IPv4 or 0x00 IPv4
+            let Some(f) = b.get(i + NO_LEN_HEADER + 1..i + NO_LEN_HEADER + 5) else {
+                return short;
+            };
+            let want = u16::from_be_bytes([f[0], f[1]]) as usize;
+            let ipv4 = f[2] >> 4 == 4 || (f[2] == 0 && f[3] >> 4 == 4);
+            if !ipv4 || want < 20 || want > opts.max_len + 1 {
+                return Cand::No;
+            }
+            // some of the SDU, never all of it
+            (3 + 1, 3 + want - 1)
+        }
+        0b00 | 0b10 => {
+            let Some(p) = open.get(&conn_key(h[0], h[1])) else {
+                return Cand::No;
+            };
+            let left = p.want.saturating_sub(p.buf.len());
+            if seq != p.seq.wrapping_add(1) || sdu != p.sdu || left == 0 {
+                return Cand::No;
+            }
+            if flags == 0b10 {
+                // a last segment carries exactly what is left
+                (1 + left, 1 + left)
+            } else if left >= 2 {
+                // a middle one some of it, never all
+                (1 + 1, 1 + left - 1)
+            } else {
+                return Cand::No;
+            }
+        }
+        _ => return Cand::No,
+    };
+    let o = NO_LEN_HEADER + FCS;
+    match try_pdu(&b[i..], o + lo, o + hi, fin) {
+        Ok(Some(n)) => Cand::Yes(n),
+        Ok(None) => Cand::No,
+        Err(()) => Cand::Wait,
     }
 }
 
@@ -162,7 +294,7 @@ impl Default for SegmentReassembler {
 
 impl SegmentReassembler {
     /// `opts` filters the rebuilt packets the same way it filters carved ones
-    /// (length limit and protocol list).
+    /// (length limit, protocol list and transport checksum).
     pub fn new(opts: CarveOpts) -> Self {
         SegmentReassembler {
             opts,
@@ -199,7 +331,7 @@ impl SegmentReassembler {
         let mut out = Vec::new();
         let mut i = self.cur - base;
         while i < b.len() {
-            match candidate(b, i, self.fin) {
+            match candidate(b, i, self.fin, &open, &self.opts) {
                 Cand::No => i += 1,
                 Cand::Wait => break,
                 Cand::Yes(n) => {
@@ -238,13 +370,14 @@ fn take_segment(
             None
         }
         0b01 => {
-            // `rest` is [total length hi, lo, packet bytes...]
+            // `rest` is [SDU length hi, lo, SDU bytes...]
             if rest.len() < 2 {
                 open.remove(&s.cid);
                 return None;
             }
             let want = u16::from_be_bytes([rest[0], rest[1]]) as usize;
-            if want < 20 || want > opts.max_len || rest.len() - 2 > want {
+            // the SDU may hold a zero octet before the packet
+            if want < 20 || want > opts.max_len + 1 || rest.len() - 2 > want {
                 open.remove(&s.cid);
                 return None;
             }
@@ -278,14 +411,17 @@ fn take_segment(
                 open.insert(s.cid, p);
                 return None;
             }
-            if p.buf.len() == p.want && ipv4_ok(&p.buf, opts) {
-                Some(CarvedPacket {
-                    offset: p.start,
-                    data: p.buf,
-                })
-            } else {
-                None
+            if p.buf.len() != p.want {
+                return None;
             }
+            // the zero octet some connections put first is not the packet's
+            if p.buf[0] == 0 {
+                p.buf.remove(0);
+            }
+            ipv4_ok(&p.buf, opts).then_some(CarvedPacket {
+                offset: p.start,
+                data: p.buf,
+            })
         }
     }
 }
@@ -301,8 +437,10 @@ fn ipv4_ok(p: &[u8], o: &CarveOpts) -> bool {
     ihl >= 20
         && ihl <= p.len()
         && total == p.len()
+        && total <= o.max_len
         && o.accepts(p[9])
         && ipv4_checksum_ok(&p[..ihl])
+        && (!o.check_transport || transport_checksum_ok(p))
 }
 
 /// [`SegmentReassembler`] over a finished payload: the packets rebuilt from
@@ -323,7 +461,7 @@ pub fn reassemble(payload: &[u8]) -> Vec<CarvedPacket> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::bctpdu::crc_append;
-    use super::super::pcap::carve_ipv4;
+    use super::super::pcap::{carve_ipv4, carve_ipv4_with};
     use super::*;
 
     /// A valid IPv4 packet (header checksum filled in).
@@ -354,6 +492,7 @@ pub(crate) mod tests {
         let ck = !(s as u16);
         h[10..12].copy_from_slice(&ck.to_be_bytes());
         h.extend_from_slice(body);
+        super::super::pcap::tests::seal(&mut h);
         h
     }
 
@@ -497,6 +636,131 @@ pub(crate) mod tests {
         assert!(reassemble(&blob).is_empty());
         // and intact, it comes back
         assert_eq!(reassemble(&p.concat())[0].data, a);
+    }
+
+    /// A segment without a length octet: the length-present bit of the
+    /// identifier cleared, then b3, b4, `body` and the FCS.
+    pub(crate) fn seg_no_len(cid: [u8; 2], seq: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![
+            cid[0] & !LENGTH_PRESENT,
+            cid[1],
+            0x10 | (seq >> 4),
+            (seq << 4) | 6,
+        ];
+        v.extend_from_slice(body);
+        let c = crc_append(&v);
+        v.extend_from_slice(&c);
+        v
+    }
+
+    /// Like [`split`], with the two layouts real recordings add: `pad` puts
+    /// the zero octet some connections send before the packet (counted in the
+    /// SDU length), and `no_len[k]` sends segment `k` without a length octet.
+    fn split_as(
+        cid: [u8; 2],
+        sdu: u8,
+        pkt: &[u8],
+        cuts: &[usize],
+        pad: bool,
+        no_len: &[bool],
+    ) -> Vec<Vec<u8>> {
+        let mut s = Vec::new();
+        if pad {
+            s.push(0);
+        }
+        s.extend_from_slice(pkt);
+        let shift = usize::from(pad);
+        let mut edges = vec![0];
+        edges.extend(cuts.iter().map(|c| c + shift));
+        edges.push(s.len());
+        let n = edges.len() - 1;
+        (0..n)
+            .map(|k| {
+                let flags = match (k == 0, k == n - 1) {
+                    (true, _) => 0b01,
+                    (_, true) => 0b10,
+                    _ => 0b00,
+                };
+                let mut body = vec![ctr(sdu, flags)];
+                if k == 0 {
+                    body.extend_from_slice(&(s.len() as u16).to_be_bytes());
+                }
+                body.extend_from_slice(&s[edges[k]..edges[k + 1]]);
+                if no_len[k] {
+                    seg_no_len(cid, 40 + k as u8, &body)
+                } else {
+                    seg(cid, 40 + k as u8, &body)
+                }
+            })
+            .collect()
+    }
+
+    /// The layouts a 3.5-minute real recording showed, each cut after the IP
+    /// and transport headers so that the header checksum holds. Before they
+    /// were known the carver took each packet's length from the first
+    /// segment on, with the FCS and other segments in it (3666 corrupt
+    /// packets), and the reassembler never rebuilt them.
+    #[test]
+    fn segment_layouts_from_a_real_recording() {
+        let other = seg([0x5e, 0x46], 116, &[ctr(1, 0b00), 9, 9, 9, 9]);
+        type Layout = (&'static str, bool, [bool; 3]);
+        let layouts: [Layout; 5] = [
+            ("length octets", false, [false; 3]),
+            ("first without a length octet", false, [true, false, false]),
+            ("zero octet before the packet", true, [false; 3]),
+            ("both", true, [true, false, false]),
+            ("no length octets at all", true, [true; 3]),
+        ];
+        for (name, pad, no_len) in layouts {
+            let p = ipv4(6, &[b'x'; 300]);
+            let parts = split_as([0x5e, 0xc7], 14, &p, &[56, 200], pad, &no_len);
+            let mut blob = vec![0u8; 20];
+            blob.extend(&parts[0]);
+            blob.extend(&other);
+            blob.extend(&parts[1]);
+            blob.extend([0u8; 17]);
+            blob.extend(&parts[2]);
+            blob.extend([0u8; 300]);
+            let mut no_check = CarveOpts::default();
+            no_check.check_transport = false;
+            assert!(
+                carve_ipv4_with(&blob, &no_check).is_empty(),
+                "{name}: carved"
+            );
+            let got = reassemble(&blob);
+            assert_eq!(got.len(), 1, "{name}: rebuilt");
+            assert_eq!(got[0].data, p, "{name}");
+            assert_eq!(got[0].offset, 20, "{name}");
+            for chunk in [1usize, 7, 64, blob.len()] {
+                let mut r = SegmentReassembler::default();
+                let mut cv = super::super::pcap::Ipv4Carver::new(no_check.clone());
+                let mut got = Vec::new();
+                let mut carved = Vec::new();
+                for c in blob.chunks(chunk) {
+                    got.extend(r.push(c));
+                    carved.extend(cv.push(c));
+                }
+                got.extend(r.finish());
+                carved.extend(cv.finish());
+                assert_eq!(got.len(), 1, "{name}: chunk {chunk}");
+                assert_eq!(got[0].data, p, "{name}: chunk {chunk}");
+                assert!(carved.is_empty(), "{name}: chunk {chunk} carved");
+            }
+        }
+    }
+
+    /// A whole SDU with the zero octet before its packet is still the
+    /// carver's, and the reassembler leaves it alone.
+    #[test]
+    fn whole_sdu_with_zero_octet_is_carved() {
+        let p = ipv4(17, &[3; 60]);
+        let mut body = vec![ctr(14, 0b11), 0, 0];
+        body.extend_from_slice(&p);
+        let blob = seg([0x5e, 0xc7], 11, &body);
+        let carved = carve_ipv4(&blob);
+        assert_eq!(carved.len(), 1);
+        assert_eq!(carved[0].1, p.as_slice());
+        assert!(reassemble(&blob).is_empty());
     }
 
     #[test]
