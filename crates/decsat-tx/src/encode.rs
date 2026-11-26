@@ -599,6 +599,12 @@ fn video_options(codec: VideoCodec, engine: Engine, bps: u32, gop: u32) -> Vec<S
 /// `preview` (a URL ffmpeg writes to): the camera's picture small (320×180,
 /// 10 fps, RGBA) and its sound (8 kHz mono float) in Matroska, for the
 /// window.
+/// The SDT service provider name: the program name and its version, so a
+/// receiver shows which DecSAT made the stream.
+pub fn provider_name() -> String {
+    format!("DecSAT v{}", env!("CARGO_PKG_VERSION"))
+}
+
 pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> Vec<String> {
     let video_bps = video_rate(ts_rate, settings.audio, settings.audio_bps);
     let pic = settings
@@ -813,7 +819,7 @@ pub fn args(settings: &EncodeSettings, ts_rate: f64, preview: Option<&str>) -> V
         s("-metadata"),
         format!("service_name={}", settings.service_name),
         s("-metadata"),
-        s("service_provider=DecSAT"),
+        format!("service_provider={}", provider_name()),
         s("-flush_packets"),
         s("1"),
         s("pipe:1"),
@@ -1022,6 +1028,14 @@ pub fn pick_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sdt_names_the_decsat_version() {
+        let name = provider_name();
+        assert_eq!(name, format!("DecSAT v{}", env!("CARGO_PKG_VERSION")));
+        let a = args(&EncodeSettings::default(), 430_000.0, None);
+        assert!(a.contains(&format!("service_provider={name}")));
+    }
 
     #[test]
     fn reads_dshow_devices() {
