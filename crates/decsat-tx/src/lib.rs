@@ -37,6 +37,7 @@ pub mod live;
 pub mod qo100;
 pub mod radio;
 pub mod session;
+pub mod watermark;
 
 pub use arm::{LICENCE_WARNING, LicenceAck};
 pub use encode::{AudioCodec, EncodeSettings, Engine, Input, Picture, VideoCodec};

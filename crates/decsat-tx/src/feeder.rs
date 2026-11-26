@@ -5,7 +5,8 @@
 //!   (through [`Av1TsFixer`] for AV1). For a live source (a camera) null
 //!   packets are dropped while the ring holds more than `live_keep`, so the
 //!   delay stays near the prefill: the camera's start-up burst and a radio
-//!   a few ppm slower than the PC's clock do not let it grow.
+//!   a few ppm slower than the PC's clock do not let it grow. One null in
+//!   256 carries the [`crate::watermark`] text instead.
 //! - `tx-ff-log`: its stderr, the `-progress` lines (speed, frames) and
 //!   whatever it warns of (the last few kept for the window).
 //! - `tx-preview`: the camera's small picture and sound (Matroska over a
@@ -346,6 +347,7 @@ fn read_ts(
     let mut batch: Vec<[u8; TS_LEN]> = Vec::with_capacity(512);
     let mut fixed: Vec<[u8; TS_LEN]> = Vec::with_capacity(512);
     let (mut packets, mut nulls, mut dropped) = (0u64, 0u64, 0u64);
+    let mut mark = crate::watermark::Watermark::new();
     loop {
         let n = match out.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -380,6 +382,9 @@ fn read_ts(
         packets += batch.len() as u64;
         let is_null = |p: &[u8; TS_LEN]| p[1] & 0x1F == 0x1F && p[2] == 0xFF;
         nulls += batch.iter().filter(|p| is_null(p)).count() as u64;
+        // The "DecSAT vX.Y.Z" text in place of a null now and then (before
+        // the nulls are dropped, so a live source keeps it too).
+        mark.apply(&mut batch);
         if live_keep.is_some_and(|k| ring.len() > k) {
             let before = batch.len();
             batch.retain(|p| !is_null(p));
