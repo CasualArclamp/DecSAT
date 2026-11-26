@@ -125,7 +125,8 @@ once*). For each carrier, the survey does these steps:
 
 1. It gives the carrier its own VFO for Identify.
 2. It starts the decoder for the signal type. A DVB-S2 carrier gets the
-   GSE/IP decoder. A modem carrier (TPC 2964, the K = 7 code, a FastLink)
+   GSE/IP decoder. A BGAN forward carrier gets the BGAN decoder. A modem
+   carrier (TPC 2964, the K = 7 code, a FastLink)
    gets the *type found* model of the Comtech entry. Bursts, and signals
    that Identify cannot name, have no decoder at this time.
 3. It gives the decoder a time to lock (*give up after*, 40 s by default).
@@ -274,6 +275,12 @@ Identify also names the signals of the **Intelsat 19 DAMA network**:
 Call channels are 6.16 kHz apart, so carrier detection sees the band as one
 carrier. To get the name of one channel, put a VFO (about 6.5 kHz wide) on
 it.
+
+Identify names an **Inmarsat BGAN forward** carrier (16QAM, 151.2 kBd) by
+the unique word of its bearer, which occurs every 12 096 symbols. This is
+the acquisition test of the BGAN receiver. A claim of the carrier, the
+survey, or `scan --decode` runs the BGAN decoder on it (see
+[`docs/BGAN.md`](../BGAN.md)).
 
 For the other signals, Identify looks for fingerprints of proprietary
 waveforms:

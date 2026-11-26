@@ -59,6 +59,12 @@ pub const F80T45X8B: Bearer = Bearer {
 
 pub const FRAME_MS: f64 = 80.0;
 
+/// The width of a VFO for a BGAN forward carrier, Hz: the signal's 189 kHz
+/// with room for the receiver's front end (it wants at least ~215 kHz in)
+/// and for the carrier being off-centre. The width a manual
+/// `decsat decode --decoder bgan` locks with on real captures.
+pub const BGAN_VFO_BW: f64 = 240_000.0;
+
 /// The ten coding levels F80T4.5X-8B defines (Annex B.1), in UW-search order.
 /// `R` is spelled `RE` in the Annex C file names.
 pub const LEVELS: [&str; 10] = ["L3", "L2", "L1", "R", "H1", "H2", "H3", "H4", "H5", "H6"];

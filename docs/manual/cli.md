@@ -6,6 +6,7 @@ This page gives examples of the `decsat` command line. [Back to the README](../.
 ```bash
 decsat scan capture_8Msps.cs8     # find each carrier and identify it
 decsat scan capture_8Msps.cs8 --decode   # then also run the decoder of each carrier on the capture and give a report
+decsat scan capture.wav --decode --only bgan --out dir   # decode only the Inmarsat BGAN carriers, all at the same time, and write the IP of each one to a PCAP (without --out, the command keeps no files)
 decsat record --hackrf 1720:1780:14 --rate 20 --seconds 2 --out caps   # record raw IQ from the HackRF: one slice or a sweep (receive only)
 decsat scene                      # write the 8 MS/s test scene (the picture in the README shows it)
 decsat cid                        # write a DVB-S2 carrier with a DVB-CID below it

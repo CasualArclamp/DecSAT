@@ -101,7 +101,7 @@ pub struct DecodeArgs {
     pub plan_from: Option<String>,
 }
 
-fn decoder_by_name(name: &str) -> Result<DecoderKind> {
+pub(crate) fn decoder_by_name(name: &str) -> Result<DecoderKind> {
     Ok(match name {
         "id" | "identify" => DecoderKind::Identify,
         "ip" | "gse" => DecoderKind::Dvbs2Ip,
